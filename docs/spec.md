@@ -24,6 +24,7 @@ Status tags: **[M0]** checked today · **[Mn]** planned for milestone n.
 | `f64` (alias `number`), `f32` | IEEE floats |
 | `i8 i16 i32 u8 u16 u32 u64` | sized integers |
 | `bool` (alias `boolean`), `string` | UTF-8 immutable string |
+| `bigint` | arbitrary-precision integer, as in TS (`123n`) |
 | `undefined`, `void`, `never`, `unknown` | as TS |
 | `T[]` / `Array<T>` | growable array (value) |
 | `Map<K, V>`, `Set<T>` | hash map/set (value) |
@@ -33,7 +34,7 @@ Status tags: **[M0]** checked today · **[Mn]** planned for milestone n.
 | `Record<string, V>` | string-keyed map built with an object literal: `{ "Content-Type": "text/plain" }`; read with `.get(k)` (it is a `Map<string, V>`) |
 | `Promise<T>`, `Promise<T, E>` | a promise of a `T` that never rejects, or can reject with `E` (an `Error` class); see §7b |
 
-- Removed: `any`, `null` (use `undefined`), `object`, `symbol`, `bigint`, tuples [later], intersection `&`, conditional/mapped/indexed-access types, `keyof`, `typeof` in types, enums (use literal unions), namespaces, decorators.
+- Removed: `any`, `null` (use `undefined`), `object`, `symbol`, tuples [later], intersection `&`, conditional/mapped/indexed-access types, `keyof`, `typeof` in types, enums (use literal unions), namespaces, decorators.
 - `number` is exactly `f64`; `boolean` is exactly `bool`.
 
 ### Numbers
@@ -41,6 +42,11 @@ Status tags: **[M0]** checked today · **[Mn]** planned for milestone n.
 - `int` widens implicitly to `f64` (in arithmetic and assignment). `f64` → `int` is never implicit: use `Math.trunc/floor/ceil/round(x)`, which return `int` (trap on NaN/overflow).
 - Float arithmetic is IEEE 754 with every operation rounded separately, exactly as in JavaScript: `a * b + c` is never fused into one multiply-add.
 - `/` always produces `f64` (as in TS). `%`, `+ - *` on two ints produce `int`. Sized integers don't mix implicitly; convert with `u8(x)`, `i32(x)` etc. (trap if out of range).
+
+### bigint
+- `bigint` is JavaScript's BigInt: `123n`, `0xffn`, `+ - * / % **` (`/` truncates), `& | ^ ~ << >>` (two's complement), `===`, `<` and friends, `++`/`--`, `typeof x === "bigint"`. `BigInt(x)` converts an integer (exactly), a string (`try`: `SyntaxError` unless it's one) or a number (`try`: `RangeError` unless it's an integer); `Number(x)` is the nearest number; `int(x)`, `u64(x)`, `i32(x)`... trap if it doesn't fit. `x.toString(radix?)`, `BigInt.asIntN(bits, x)`, `BigInt.asUintN(bits, x)`.
+- A `bigint` never mixes with numbers: `x + 1` is an error with the fix `x + 1n` (JavaScript throws a TypeError); comparing with `<` against an integer works, as in JS. `>>>` is an error (a bigint has no width). Dividing by `0n` and a negative `**` exponent trap. `JSON.stringify` rejects bigints, as JavaScript does.
+- Values below 2^62 in magnitude live in one word (no allocation); larger ones are reference-counted, and `x += y`, `x *= y`, `x = (x + a * b) * c` update `x` in place when nothing else holds it.
 
 ### Records
 - `type P = { x: f64, y: f64 }` declares an exact record. Two record types with the same fields are the same type.

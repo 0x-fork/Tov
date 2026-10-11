@@ -461,11 +461,22 @@ impl<'c, 'a> Gen<'c, 'a> {
         self.bodies.last().is_some_and(|b| b.async_fn.is_some()) && has_await(self.ast(self.cur_m()), e)
     }
 
-    /// Evaluates `e`; if one of `later` awaits, reads its value now (JavaScript evaluates operands
-    /// left to right, so another task can't change what was already read).
+    /// Can evaluating `e` change what an earlier operand read: does it await (another task may
+    /// run), or assign (`x += 1`, `i++`)?
+    pub(crate) fn changes_in(&self, e: ExprId) -> bool {
+        self.awaits_in(e) || has_assign(self.ast(self.cur_m()), e)
+    }
+
+    /// Evaluates `e`; if one of `later` awaits or assigns, reads its value now (JavaScript
+    /// evaluates operands left to right: `f(i, i++)` passes the old `i` first).
     pub(crate) fn expr_before(&mut self, e: ExprId, later: &[ExprId]) -> Val {
         let v = self.expr(e);
-        if later.iter().any(|&l| self.awaits_in(l)) { self.snapshot(v) } else { v }
+        if later.iter().any(|&l| self.changes_in(l)) { self.snapshot(v) } else { v }
+    }
+
+    /// Evaluates operands left to right (see `expr_before`).
+    pub(crate) fn exprs_in_order(&mut self, es: &[ExprId]) -> Vec<Val> {
+        (0..es.len()).map(|i| self.expr_before(es[i], &es[i + 1..])).collect()
     }
 
     /// The value now, in a temporary of its own.
@@ -483,6 +494,23 @@ impl<'c, 'a> Gen<'c, 'a> {
     }
 }
 
+/// Does `e` assign to anything (`=`, `op=`, `++`, `--`) outside nested functions?
+pub(crate) fn has_assign(ast: &ast::Ast, e: ExprId) -> bool {
+    let any = |xs: &[ExprId]| xs.iter().any(|&x| has_assign(ast, x));
+    match &ast.expr(e).kind {
+        ExprKind::Assign(..) | ExprKind::Update { .. } => true,
+        ExprKind::Arrow(_) => false,
+        ExprKind::Unary(_, x) | ExprKind::Paren(x) | ExprKind::NonNull(x) | ExprKind::Typeof(x) | ExprKind::As(x, _) | ExprKind::Try(x) | ExprKind::Await(x) => has_assign(ast, *x),
+        ExprKind::Binary(_, a, b) | ExprKind::Index { obj: a, index: b, .. } => has_assign(ast, *a) || has_assign(ast, *b),
+        ExprKind::Cond(a, b, c) => has_assign(ast, *a) || has_assign(ast, *b) || has_assign(ast, *c),
+        ExprKind::Call { callee, args, .. } | ExprKind::New { callee, args, .. } => has_assign(ast, *callee) || args.iter().any(|a| has_assign(ast, a.expr)),
+        ExprKind::Member { obj, .. } => has_assign(ast, *obj),
+        ExprKind::Template(_, xs) | ExprKind::Array(xs) => any(xs),
+        ExprKind::Object(fs) => fs.iter().any(|f| has_assign(ast, f.value)),
+        _ => false,
+    }
+}
+
 /// Does `e` contain an `await` outside nested functions?
 pub(crate) fn has_await(ast: &ast::Ast, e: ExprId) -> bool {
     let any = |xs: &[ExprId]| xs.iter().any(|&x| has_await(ast, x));
@@ -497,6 +525,6 @@ pub(crate) fn has_await(ast: &ast::Ast, e: ExprId) -> bool {
         ExprKind::Member { obj, .. } => has_await(ast, *obj),
         ExprKind::Template(_, xs) | ExprKind::Array(xs) => any(xs),
         ExprKind::Object(fs) => fs.iter().any(|f| has_await(ast, f.value)),
-        ExprKind::Int(_) | ExprKind::Float(_) | ExprKind::Str(_) | ExprKind::Bool(_) | ExprKind::Undefined | ExprKind::Null | ExprKind::Ident(_) | ExprKind::This | ExprKind::Super | ExprKind::Error => false,
+        ExprKind::Int(_) | ExprKind::Float(_) | ExprKind::BigInt(_) | ExprKind::Str(_) | ExprKind::Bool(_) | ExprKind::Undefined | ExprKind::Null | ExprKind::Ident(_) | ExprKind::This | ExprKind::Super | ExprKind::Error => false,
     }
 }

@@ -1616,6 +1616,7 @@ impl<'a> Checker<'a> {
             "u16" => Some(U16),
             "u32" => Some(U32),
             "u64" => Some(U64),
+            "bigint" => Some(BIGINT),
             "bool" | "boolean" => Some(BOOL),
             "string" => Some(STR),
             "never" => Some(NEVER),
@@ -1852,7 +1853,14 @@ impl<'a> Checker<'a> {
         }
         let text = self.src(span).to_string();
         let exp_no_undef = self.types.without_undefined(expected);
-        if self.types.is_float(found) && self.types.is_int(exp_no_undef) {
+        if found == BIGINT && self.types.is_numeric(exp_no_undef) {
+            let conv = if self.types.is_float(exp_no_undef) { "Number".to_string() } else { self.show(exp_no_undef) };
+            let how = if self.types.is_float(exp_no_undef) { "the nearest number" } else { "traps if out of range" };
+            d = d.note("why", "a `bigint` never converts to a number implicitly").fix(Applicability::Maybe, format!("convert ({how}): `{conv}({text})`"), span, format!("{conv}({text})"));
+        } else if exp_no_undef == BIGINT && self.types.is_int(found) {
+            let lit = !text.is_empty() && text.bytes().all(|b| b.is_ascii_digit() || b == b'_') || text.starts_with("0x");
+            d = if lit { d.fix(Applicability::Safe, format!("make it a bigint literal: `{text}n`"), span, format!("{text}n")) } else { d.fix(Applicability::Maybe, format!("convert: `BigInt({text})`"), span, format!("BigInt({text})")) };
+        } else if self.types.is_float(found) && self.types.is_int(exp_no_undef) {
             d = d
                 .note("why", "floats never convert to integers implicitly")
                 .fix(Applicability::Maybe, format!("round toward zero: `Math.trunc({text})`"), span, format!("Math.trunc({text})"))

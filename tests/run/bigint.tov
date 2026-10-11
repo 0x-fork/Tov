@@ -1,0 +1,97 @@
+const a = 12345678901234567890n
+const b: bigint = 2n ** 100n
+console.log(a, b)
+console.log(`${a * b}`)
+let f = 1n
+for (let i = 1; i <= 30; i++) {
+  f *= BigInt(i)
+}
+console.log(f, f.toString(16), typeof f)
+console.log(f / 7n, f % 7n, -f / 7n, -f % 7n)
+console.log(f > a, a < 5n, a === 12345678901234567890n, 3 < 5n)
+console.log(Number(b), Number(5n + 1n), BigInt.asUintN(64, -1n), BigInt.asIntN(8, 255n))
+const m = new Map<bigint, string>()
+m.set(b, "two to the hundred")
+console.log(m.get(2n ** 100n))
+let x = 0n
+x++
+x += 10n
+x -= 3n
+x <<= 70n
+console.log(x, x >> 3n, ~x, x & 0xffn, -x | 1n)
+console.log(String(-7n), try BigInt("  -123  "), BigInt(true))
+try {
+  console.log(BigInt("12x"))
+} catch (e) {
+  console.log(e.name, e.message)
+}
+try {
+  console.log(BigInt(1.5))
+} catch (e) {
+  console.log(e.name, e.message)
+}
+console.log(try BigInt(1e21), [1n, 2n, 3n])
+type Acct = { id: string, balance: bigint }
+class Counter {
+  n: bigint = 0n
+  bump(by: bigint): bigint {
+    this.n += by
+    return this.n
+  }
+}
+function fact(n: bigint): bigint {
+  return n <= 1n ? 1n : n * fact(n - 1n)
+}
+async function slowDouble(x: bigint): Promise<bigint> {
+  await Promise.resolve(0)
+  return x * 2n
+}
+function kind(x: bigint): string {
+  switch (x) {
+    case 0n:
+      return "zero"
+    case 1n:
+      return "one"
+    default:
+      return "many"
+  }
+}
+async function demo() {
+  const accts: Acct[] = [{ id: "a", balance: 10n ** 30n }, { id: "b", balance: -5n }]
+  let total = 0n
+  for (const a of accts) {
+    total += a.balance
+  }
+  console.log(accts, total)
+  const c = new Counter()
+  c.bump(2n ** 64n)
+  console.log(c.bump(1n), c)
+  console.log(fact(25n))
+  console.log(await slowDouble(2n ** 70n))
+  console.log(kind(0n), kind(1n), kind(fact(30n)))
+  const xs = [5n, -3n, 2n ** 80n, 0n, -(2n ** 80n)]
+  xs.sort((a, b) => a < b ? -1 : a > b ? 1 : 0)
+  console.log(xs, xs.includes(2n ** 80n), xs.indexOf(0n))
+  const maybe: bigint | undefined = xs.length > 3 ? xs[2] : undefined
+  if (maybe !== undefined) {
+    console.log(maybe + 1n)
+  }
+  const add = (k: bigint) => (v: bigint) => v + k
+  const plus = add(2n ** 65n)
+  console.log(plus(1n), [1n, 2n].map((v) => v * 3n))
+  let i = 2n ** 63n
+  const old = i++
+  console.log(old, i, --i)
+  const s = new Set<bigint>([1n, 1n, 2n ** 70n, 2n ** 70n])
+  console.log(s.size, s)
+  console.log((-(2n ** 62n)) / -1n, -(2n ** 62n) * -1n, 4611686018427387903n + 1n)
+  console.log((123n).toString(2), (-255n).toString(16), (2n ** 64n).toString(36))
+}
+
+// operands are read left to right, before a later one changes them
+let j = 7n
+console.log(j, j++, j, (j += 10n), j)
+let w = 3n ** 50n
+w = (w + w * 3n) * 2n - 1n
+console.log(w, w * w / 7n % 1000003n, -(w >> 40n), BigInt.asIntN(64, w))
+await demo()

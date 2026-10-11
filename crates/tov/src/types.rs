@@ -48,6 +48,8 @@ pub enum Ty {
     U16,
     U32,
     U64,
+    /// `bigint`: an arbitrary-precision integer (runtime/big.c).
+    BigInt,
     Str,
     StrLit(Sym),
     Array(TyId),
@@ -152,6 +154,7 @@ prims! {
     U64 = 15 => Ty::U64,
     STR = 16 => Ty::Str,
     JS = 17 => Ty::Js,
+    BIGINT = 18 => Ty::BigInt,
 }
 
 impl Default for Types {
@@ -461,7 +464,11 @@ impl Types {
 
     /// Primitive = compared and tested by value, never "present/absent" by truthiness.
     pub fn is_primitive(&self, ty: TyId) -> bool {
-        self.is_numeric(ty) || self.is_string(ty) || ty == BOOL
+        self.is_numeric(ty) || self.is_string(ty) || ty == BOOL || ty == BIGINT
+    }
+
+    pub fn is_bigint(&self, ty: TyId) -> bool {
+        ty == BIGINT
     }
 
     pub fn is_error(&self, ty: TyId) -> bool {
@@ -601,6 +608,7 @@ impl Display<'_> {
             Ty::U16 => out.push_str("u16"),
             Ty::U32 => out.push_str("u32"),
             Ty::U64 => out.push_str("u64"),
+            Ty::BigInt => out.push_str("bigint"),
             Ty::Str => out.push_str("string"),
             Ty::StrLit(s) => {
                 out.push('"');

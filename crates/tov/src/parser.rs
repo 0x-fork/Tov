@@ -1039,7 +1039,7 @@ impl<'a> Parser<'a> {
                 let s = self.interner.intern(&self.strings[t.val as usize]);
                 self.mk_ty(TypeExprKind::StrLit(s), start)
             }
-            Tok::Int | Tok::Float | Tok::True | Tok::False => {
+            Tok::Int | Tok::Float | Tok::BigInt | Tok::True | Tok::False => {
                 self.bump();
                 self.err("U0007", start, "numeric and boolean literal types are not supported yet; use `int`, `f64` or `bool`");
                 self.mk_ty(TypeExprKind::Error, start)
@@ -1968,6 +1968,12 @@ impl<'a> Parser<'a> {
                 let v = self.int_value(t);
                 self.mk_expr(ExprKind::Int(v), start)
             }
+            Tok::BigInt => {
+                let t = self.bump();
+                let text: String = self.text(t).chars().filter(|&c| c != '_' && c != 'n').collect();
+                let s = self.interner.intern(&text);
+                self.mk_expr(ExprKind::BigInt(s), start)
+            }
             Tok::Float => {
                 let t = self.bump();
                 let text: String = self.text(t).chars().filter(|&c| c != '_').collect();
@@ -2274,7 +2280,7 @@ fn top_level_await(ast: &Ast, s: StmtId) -> bool {
             ExprKind::Member { obj, .. } => expr(ast, *obj),
             ExprKind::Template(_, xs) | ExprKind::Array(xs) => xs.iter().any(|&x| expr(ast, x)),
             ExprKind::Object(fs) => fs.iter().any(|f| expr(ast, f.value)),
-            ExprKind::Int(_) | ExprKind::Float(_) | ExprKind::Str(_) | ExprKind::Bool(_) | ExprKind::Undefined | ExprKind::Null | ExprKind::Ident(_) | ExprKind::This | ExprKind::Super | ExprKind::Error => false,
+            ExprKind::Int(_) | ExprKind::Float(_) | ExprKind::BigInt(_) | ExprKind::Str(_) | ExprKind::Bool(_) | ExprKind::Undefined | ExprKind::Null | ExprKind::Ident(_) | ExprKind::This | ExprKind::Super | ExprKind::Error => false,
         }
     }
     let opt = |e: &Option<ExprId>| e.is_some_and(|e| expr(ast, e));

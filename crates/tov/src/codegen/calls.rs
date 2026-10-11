@@ -228,8 +228,8 @@ impl<'c, 'a> Gen<'c, 'a> {
                 out.push(format!("&{}", pl.lv));
             } else {
                 let v = self.expr(a.expr);
-                // An argument before one that awaits is read before the call suspends.
-                let v = if args[i + 1..].iter().any(|later| self.awaits_in(later.expr)) { self.snapshot(v) } else { v };
+                // An argument before one that awaits (or assigns) is read first, as in JavaScript.
+                let v = if args[i + 1..].iter().any(|later| self.changes_in(later.expr)) { self.snapshot(v) } else { v };
                 // A value reached through a class instance (or a closure's cell) could be released by
                 // the callee through another reference: keep it alive for the call.
                 let v = if !v.owned && self.is_rc(v.ty) && (self.heap_rooted(a.expr) || (has_inout && self.is_place_expr(a.expr))) { self.own(v) } else { v };
@@ -578,6 +578,19 @@ impl<'c, 'a> Gen<'c, 'a> {
                 let t = self.lit(b"true");
                 let f = self.lit(b"false");
                 Val::plain(format!("(({}) ? {t} : {f})", rv.code), STR)
+            }
+            Ty::BigInt => {
+                let radix = match args.first() {
+                    Some(a) => {
+                        let r = self.expr(a.expr);
+                        let present = self.truthy_val(r.clone());
+                        let r = self.project(r, INT);
+                        if present == "true" { r.code } else { format!("({present} ? {} : 10)", r.code) }
+                    }
+                    None => "10".into(),
+                };
+                let loc = self.loc(span);
+                self.tmp(STR, &format!("tv_big_to_string({}, {radix}, {loc})", rv.code), true)
             }
             _ if self.c.types.is_numeric(recv) => match name {
                 "toFixed" => {
@@ -1137,8 +1150,9 @@ impl<'c, 'a> Gen<'c, 'a> {
                     },
                     _ => None,
                 };
-                let parts_vals = template.map(|(parts, exprs)| (parts, exprs.iter().map(|&x| self.expr(x)).collect::<Vec<Val>>()));
-                let vals: Vec<Val> = if parts_vals.is_some() { Vec::new() } else { args.iter().map(|a| self.expr(a.expr)).collect() };
+                let parts_vals = template.map(|(parts, exprs)| (parts, self.exprs_in_order(exprs)));
+                let arg_exprs: Vec<ExprId> = args.iter().map(|a| a.expr).collect();
+                let vals: Vec<Val> = if parts_vals.is_some() { Vec::new() } else { self.exprs_in_order(&arg_exprs) };
                 let sbv = self.fresh("sb");
                 self.line(format!("tv_sb {sbv} = {{0}};"));
                 self.line("{");
@@ -1272,6 +1286,21 @@ impl<'c, 'a> Gen<'c, 'a> {
                 self.line("}");
                 self.tmp(STR, &format!("tv_str_from_sb(&{sbv})"), true)
             }
+            (None, "Number") if self.ty(args[0].expr) == BIGINT => {
+                let v = self.expr(args[0].expr);
+                Val::plain(format!("tv_big_to_f64({})", v.code), F64)
+            }
+            (None, "BigInt") => {
+                let v = self.expr(args[0].expr);
+                self.to_bigint(v)
+            }
+            (Some("BigInt"), "asIntN" | "asUintN") => {
+                let bits = self.expr(args[0].expr);
+                let bits = self.int_code(bits);
+                let x = self.expr(args[1].expr);
+                let loc = self.loc(span);
+                self.tmp(BIGINT, &format!("tv_big_as_n({bits}, {}, {}, {loc})", x.code, name == "asIntN"), true)
+            }
             (None, "Number") if !{
                 let at = self.ty(args[0].expr);
                 self.c.types.is_string(at)
@@ -1373,7 +1402,83 @@ impl<'c, 'a> Gen<'c, 'a> {
         }
     }
 
+    /// `BigInt(x)`: a bigint from an integer, a bool, a string (a SyntaxError unless it's one)
+    /// or a number (a RangeError unless it's an integer), or a union of these.
+    fn to_bigint(&mut self, v: Val) -> Val {
+        match self.tget(v.ty) {
+            Ty::BigInt => v,
+            Ty::Bool => Val::plain(format!("(({}) ? ((tv_big){{3}}) : ((tv_big){{1}}))", v.code), BIGINT),
+            Ty::U64 => self.tmp(BIGINT, &format!("tv_big_from_u64_({})", v.code), true),
+            Ty::Int | Ty::I8 | Ty::I16 | Ty::I32 | Ty::U8 | Ty::U16 | Ty::U32 => {
+                let x = self.int_code(v);
+                self.tmp(BIGINT, &format!("tv_big_from_i64({x})"), true)
+            }
+            Ty::Str | Ty::StrLit(_) => {
+                let s = self.coerce(v, STR);
+                let out = self.tmp(BIGINT, "((tv_big){1})", true);
+                self.open(&format!("if (!tv_big_parse({}, &{})) {{", s.code, out.code));
+                let err = self.c.builtin_error_class("SyntaxError");
+                if err != ERROR {
+                    let msg = format!("({{ tv_sb sb_ = {{0}}; tv_sb_push_cstr(&sb_, \"Cannot convert \"); tv_sb_push_str(&sb_, {}); tv_sb_push_cstr(&sb_, \" to a BigInt\"); tv_str_from_sb(&sb_); }})", s.code);
+                    let obj = self.error_object(err, &msg);
+                    self.line(format!("tvg_err = (void *)({obj});"));
+                }
+                self.close("}");
+                out
+            }
+            Ty::F64 | Ty::F32 => {
+                let d = self.coerce(v, F64);
+                let dv = self.fresh("d");
+                self.line(format!("double {dv} = {};", d.code));
+                let out = self.tmp(BIGINT, "((tv_big){1})", true);
+                self.open(&format!("if (!tv_big_from_f64({dv}, &{})) {{", out.code));
+                let err = self.c.builtin_error_class("RangeError");
+                if err != ERROR {
+                    let msg = format!("({{ tv_sb sb_ = {{0}}; tv_sb_push_cstr(&sb_, \"The number \"); tv_sb_push_f64(&sb_, {dv}); tv_sb_push_cstr(&sb_, \" cannot be converted to a BigInt because it is not an integer\"); tv_str_from_sb(&sb_); }})");
+                    let obj = self.error_object(err, &msg);
+                    self.line(format!("tvg_err = (void *)({obj});"));
+                }
+                self.close("}");
+                out
+            }
+            Ty::Union(ms) => {
+                let ms = self.c.types.tys(ms).to_vec();
+                let out = self.tmp(BIGINT, "((tv_big){1})", true);
+                let tag = self.u_tag(&v.code, v.ty);
+                self.open(&format!("switch ({tag}) {{"));
+                for (i, &mt) in ms.iter().enumerate() {
+                    self.open(&format!("case {i}: {{"));
+                    self.push_temps_pub();
+                    let payload = Val::plain(self.u_payload(&v.code, v.ty, i), mt);
+                    let r = self.to_bigint(payload);
+                    let code = self.consume(r);
+                    self.line(format!("{} = {code};", out.code));
+                    self.pop_temps_pub();
+                    self.line("break;");
+                    self.close("}");
+                }
+                self.close("}");
+                out
+            }
+            _ => Val::plain("((tv_big){1})", BIGINT),
+        }
+    }
+
     fn convert(&mut self, v: Val, conv: &str, ty: TyId, span: Span) -> Val {
+        if v.ty == BIGINT {
+            let loc = self.loc(span);
+            if self.c.types.is_float(ty) {
+                return self.coerce(Val::plain(format!("tv_big_to_f64({})", v.code), F64), ty);
+            }
+            if ty == U64 {
+                return Val::plain(format!("tv_big_to_u64({}, {loc})", v.code), ty);
+            }
+            let x = format!("tv_big_to_int({}, {loc})", v.code);
+            if ty == INT {
+                return Val::plain(x, ty);
+            }
+            return self.convert(Val::plain(x, INT), conv, ty, span);
+        }
         if self.c.types.is_float(ty) {
             return self.coerce(v, ty);
         }

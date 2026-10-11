@@ -6,6 +6,8 @@ pub enum Tok {
     Ident,
     Int,
     Float,
+    /// `123n`: a bigint literal.
+    BigInt,
     Str,
     /// `` `text` `` with no substitutions.
     TemplateFull,
@@ -131,6 +133,7 @@ impl Tok {
         match self {
             Ident => "identifier",
             Int | Float => "number",
+            BigInt => "bigint",
             Str => "string",
             TemplateFull | TemplateHead | TemplateMiddle | TemplateTail => "template literal",
             Eof => "end of file",
@@ -365,7 +368,11 @@ impl Lexer<'_> {
         }
         if self.peek(0) == b'n' {
             self.pos += 1;
-            self.err("X0020", start, self.pos, "BigInt literals are not supported; `int` is already 64-bit");
+            if float {
+                self.err("L0006", start, self.pos, "a bigint literal must be an integer");
+            }
+            self.push(Tok::BigInt, start, nl, 0);
+            return;
         }
         self.push(if float { Tok::Float } else { Tok::Int }, start, nl, 0);
     }

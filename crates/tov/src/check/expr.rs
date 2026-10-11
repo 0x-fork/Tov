@@ -78,6 +78,7 @@ impl<'a> Checker<'a> {
                     }
                 t
             }
+            ExprKind::BigInt(_) => BIGINT,
             ExprKind::Float(_) => match self.numeric_hint(exp) {
                 Some(F32) => F32,
                 _ => F64,
@@ -111,7 +112,7 @@ impl<'a> Checker<'a> {
             ExprKind::Assign(op, t, v) => self.assign(*op, *t, *v, span),
             ExprKind::Update { target, .. } => {
                 let Some(place) = self.place(*target, false) else { return ERROR };
-                if !self.types.is_numeric(place.ty) && place.ty != ERROR {
+                if !self.types.is_numeric(place.ty) && place.ty != ERROR && place.ty != BIGINT {
                     let msg = format!("`++`/`--` need a number, found `{}`", self.show(place.ty));
                     self.report(Diagnostic::new("T0501", span, msg));
                 }
@@ -172,7 +173,12 @@ impl<'a> Checker<'a> {
                 let text = self.src(self.ast().expr(*x).span).to_string();
                 let mut d = Diagnostic::new("T0601", span, format!("can't cast `{ss}` to `{ts}`"))
                     .note("why", "`as` only narrows (e.g. from `unknown` or a union); it never converts values");
-                if self.types.is_numeric(src) && self.types.is_numeric(target) {
+                if target == BIGINT && (self.types.is_numeric(src) || self.types.is_string(src)) {
+                    d = d.fix(Applicability::Maybe, format!("convert: `BigInt({text})`"), span, format!("BigInt({text})"));
+                } else if src == BIGINT && self.types.is_numeric(target) {
+                    let conv = if target == F64 { "Number".to_string() } else { ts.clone() };
+                    d = d.fix(Applicability::Maybe, format!("convert: `{conv}({text})`"), span, format!("{conv}({text})"));
+                } else if self.types.is_numeric(src) && self.types.is_numeric(target) {
                     if self.types.is_int(target) && self.types.is_float(src) {
                         d = d.fix(Applicability::Maybe, format!("convert: `Math.trunc({text})`"), span, format!("Math.trunc({text})"));
                     } else {
@@ -314,7 +320,7 @@ impl<'a> Checker<'a> {
         match op {
             UnOp::Neg => {
                 let t = self.expr(x, exp);
-                if t != ERROR && !self.types.is_numeric(t) {
+                if t != ERROR && !self.types.is_numeric(t) && t != BIGINT {
                     let msg = format!("unary `-` needs a number, found `{}`", self.show(t));
                     self.report(Diagnostic::new("T0501", span, msg));
                     return ERROR;
@@ -344,7 +350,7 @@ impl<'a> Checker<'a> {
             }
             UnOp::BitNot => {
                 let t = self.expr(x, exp);
-                if t != ERROR && !self.types.is_int(t) {
+                if t != ERROR && !self.types.is_int(t) && t != BIGINT {
                     let msg = format!("`~` needs an integer, found `{}`", self.show(t));
                     self.report(Diagnostic::new("T0501", span, msg));
                     return ERROR;
@@ -414,6 +420,14 @@ impl<'a> Checker<'a> {
             Eq | Ne => self.equality(l, r, span),
             Lt | Gt | Le | Ge => {
                 let (tl, tr) = self.numeric_pair(l, r, None);
+                if tl == BIGINT || tr == BIGINT {
+                    // bigint with bigint, or with an integer (compared exactly, as in JavaScript)
+                    let ok = |t: TyId| t == BIGINT || t == ERROR || self.types.is_int(t);
+                    if !ok(tl) || !ok(tr) {
+                        self.bigint_mix(op, l, r, tl, tr, span);
+                    }
+                    return BOOL;
+                }
                 let ok = (self.types.is_numeric(tl) && self.types.is_numeric(tr)) || (self.types.is_string(tl) && self.types.is_string(tr));
                 if !ok && tl != ERROR && tr != ERROR {
                     let msg = format!("can't compare `{}` with `{}` using `{}`", self.show(tl), self.show(tr), op.as_str());
@@ -439,14 +453,23 @@ impl<'a> Checker<'a> {
                     }
                     return STR;
                 }
+                if tl == BIGINT || tr == BIGINT {
+                    return self.bigint_arith(op, l, r, tl, tr, span);
+                }
                 self.arith(op, tl, tr, span)
             }
             Sub | Mul | Rem | Pow => {
                 let (tl, tr) = self.numeric_pair(l, r, exp);
+                if tl == BIGINT || tr == BIGINT {
+                    return self.bigint_arith(op, l, r, tl, tr, span);
+                }
                 self.arith(op, tl, tr, span)
             }
             Div => {
                 let (tl, tr) = self.numeric_pair(l, r, None);
+                if tl == BIGINT || tr == BIGINT {
+                    return self.bigint_arith(op, l, r, tl, tr, span);
+                }
                 let t = self.arith(op, tl, tr, span);
                 if t == ERROR {
                     ERROR
@@ -460,6 +483,13 @@ impl<'a> Checker<'a> {
                 let (tl, tr) = self.numeric_pair(l, r, exp);
                 if tl == ERROR || tr == ERROR {
                     return ERROR;
+                }
+                if tl == BIGINT || tr == BIGINT {
+                    if op == UShr {
+                        self.report(Diagnostic::new("T0501", span, "`>>>` doesn't apply to `bigint`: a bigint has no fixed width").note("instead", "`>>` (it rounds toward negative infinity), or `BigInt.asUintN(bits, x) >> n`"));
+                        return ERROR;
+                    }
+                    return self.bigint_arith(op, l, r, tl, tr, span);
                 }
                 if !self.types.is_int(tl) || !self.types.is_int(tr) {
                     let msg = format!("`{}` needs integers, found `{}` and `{}`", op.as_str(), self.show(tl), self.show(tr));
@@ -658,6 +688,40 @@ impl<'a> Checker<'a> {
         self.report(Diagnostic::new("T0504", span, msg).note("instead", "convert one side explicitly, e.g. `int(x)`"));
     }
 
+    /// An arithmetic or bitwise operator with a `bigint` operand: both must be `bigint`, as in
+    /// JavaScript (where mixing throws a TypeError).
+    fn bigint_arith(&mut self, op: BinOp, l: ExprId, r: ExprId, tl: TyId, tr: TyId, span: Span) -> TyId {
+        if tl == ERROR || tr == ERROR {
+            return ERROR;
+        }
+        if tl == BIGINT && tr == BIGINT {
+            return BIGINT;
+        }
+        self.bigint_mix(op, l, r, tl, tr, span);
+        ERROR
+    }
+
+    /// `bigint` mixed with another type: the fix converts the other side (an integer literal
+    /// gets its `n`).
+    fn bigint_mix(&mut self, op: BinOp, l: ExprId, r: ExprId, tl: TyId, tr: TyId, span: Span) {
+        let (ls, rs) = (self.show(tl), self.show(tr));
+        let mut d = Diagnostic::new("T0504", span, format!("can't mix `{ls}` and `{rs}` with `{}`", op.as_str()))
+            .note("why", "a `bigint` only combines with another `bigint` (JavaScript throws a TypeError)");
+        let (other, ot) = if tl == BIGINT { (r, tr) } else { (l, tl) };
+        let os = self.ast().expr(other).span;
+        let text = self.src(os).to_string();
+        if self.is_int_literal(other) && !text.contains('.') {
+            d = d.fix(Applicability::Safe, format!("make it a bigint literal: `{text}n`"), os, format!("{text}n"));
+        } else if self.types.is_int(ot) || self.types.is_string(ot) {
+            d = d.fix(Applicability::Maybe, format!("convert: `BigInt({text})`"), os, format!("BigInt({text})"));
+        } else if self.types.is_float(ot) {
+            let bs = self.ast().expr(if tl == BIGINT { l } else { r }).span;
+            let btext = self.src(bs).to_string();
+            d = d.fix(Applicability::Maybe, format!("convert the bigint: `Number({btext})`"), bs, format!("Number({btext})"));
+        }
+        self.report(d);
+    }
+
     fn arith(&mut self, op: BinOp, tl: TyId, tr: TyId, span: Span) -> TyId {
         if tl == ERROR || tr == ERROR {
             return ERROR;
@@ -705,6 +769,15 @@ impl<'a> Checker<'a> {
         if !undefined_literal && !self.comparable(tl, tr) {
             let (ls, rs) = (self.show(tl), self.show(tr));
             let mut d = Diagnostic::new("T0502", span, format!("this comparison is always false: `{ls}` and `{rs}` have no values in common"));
+            // `x === 0` on a bigint: the literal wants its `n`
+            if tl == BIGINT || tr == BIGINT {
+                let other = if tl == BIGINT { r } else { l };
+                let os = self.ast().expr(other).span;
+                let text = self.src(os).to_string();
+                if self.is_int_literal(other) && !text.contains('.') {
+                    d = d.fix(Applicability::Safe, format!("make it a bigint literal: `{text}n`"), os, format!("{text}n"));
+                }
+            }
             // `s.kind === "circel"` → suggest the literal that exists.
             let (lit, other, lit_span) = match (*self.types.get(tl), *self.types.get(tr)) {
                 (_, Ty::StrLit(s)) => (Some(s), tl, self.ast().expr(r).span),
@@ -796,7 +869,14 @@ impl<'a> Checker<'a> {
             AssignOp::Op(bop) => {
                 let hint = if self.types.is_numeric(place.ty) { Some(place.ty) } else { None };
                 let tv = self.expr(value, hint);
-                let result = if bop == BinOp::Add && self.types.is_string(place.ty) {
+                let result = if place.ty == BIGINT || (tv == BIGINT && !self.types.is_string(place.ty)) {
+                    if bop == BinOp::UShr {
+                        self.report(Diagnostic::new("T0501", span, "`>>>=` doesn't apply to `bigint`: a bigint has no fixed width"));
+                        ERROR
+                    } else {
+                        self.bigint_arith(bop, target, value, place.ty, tv, span)
+                    }
+                } else if bop == BinOp::Add && self.types.is_string(place.ty) {
                     if !self.printable(tv) {
                         let msg = format!("can't concatenate `{}` to a string", self.show(tv));
                         self.report(Diagnostic::new("T0501", vspan, msg));
@@ -2689,6 +2769,8 @@ impl<'a> Checker<'a> {
             d = d.fix(Applicability::Maybe, format!("test for presence: `{text} !== undefined`"), span, format!("{text} !== undefined"));
         } else if self.types.is_numeric(inner) {
             d = d.fix(Applicability::Maybe, format!("`{text} !== 0`"), span, format!("{text} !== 0"));
+        } else if inner == BIGINT {
+            d = d.fix(Applicability::Maybe, format!("`{text} !== 0n`"), span, format!("{text} !== 0n"));
         } else if self.types.is_string(inner) {
             d = d.fix(Applicability::Maybe, format!("`{text} !== \"\"`"), span, format!("{text} !== \"\""));
         } else if matches!(self.types.get(inner), Ty::Array(_)) {
@@ -2913,6 +2995,8 @@ pub(super) enum Narrowing {
 fn typeof_name(types: &Types, t: TyId) -> Option<&'static str> {
     if types.is_numeric(t) {
         Some("number")
+    } else if t == BIGINT {
+        Some("bigint")
     } else if types.is_string(t) {
         Some("string")
     } else if t == BOOL {

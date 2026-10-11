@@ -21,6 +21,9 @@ Languages: `c`, `rust`, `node` and `bun` (both run `main.ts` directly), `scriptc
 | `json` | 200k records × 5 | `JSON.stringify` an array of records, then parse it back typed (Tov validates the shape; Rust uses serde and serde_json). |
 | `async_calls` | 30M awaits | `total = await step(total, i)`: calling an async function and awaiting its result. Rust uses tokio's current-thread runtime. |
 | `async_tasks` | 1,000 × 10,000 | 1,000 async tasks each yielding to the event loop 10,000 times (`await Promise.resolve(0)`; Rust: `tokio::task::yield_now()` on the current-thread runtime), then `Promise.all`. |
+| `bigint_pidigits` | 10,000 digits | Benchmarks Game pidigits: a spigot over bigints that grow to ~7,500 limbs (multiply by a small number, add, divide with a one-digit quotient, compare). Rust uses num-bigint, the most used Rust bigint crate (`bigint` below compares others). |
+| `bigint_fib` | fib(300,000) | Repeated bigint addition up to 62,700 digits, then the decimal string. |
+| `bigint_factorial` | 40,000! | `f *= BigInt(i)` up to 166,714 digits, then the decimal string, its digit sum and trailing zeros. |
 
 Each `bench/micro/<name>/` holds `main.c`, `main.rs`, `main.ts`, `main.tov` and `expected.txt` (C's output, used as the reference when C isn't among the selected languages). Where idiomatic Rust needs crates (tokio, serde), the Rust is a Cargo project in `rust/` instead of `main.rs`, and there's no C. Sizes are chosen so the C version takes roughly 0.2–1.5 s on an Apple M-series machine. The exception is `array_push`, where C takes about 55 ms. The work is memory-bound, and reaching 200 ms would need about 1 GB of array in C and about 3 GB of heap in Node/Bun.
 
@@ -77,6 +80,20 @@ Load average about 3. Apple clang 17, Rust 1.98, Node 26.3, Bun 1.4.0.
 | points | 288 ms · 1.9 MB | 299 ms · 2.0 MB | 1891 ms · 86.7 MB | 815 ms · 32.0 MB | **288 ms** · 1.8 MB |
 | sort | 268 ms · 25.9 MB | 73 ms · 40.3 MB | 1185 ms · 279 MB | 711 ms · 121 MB | **47 ms** · 26.2 MB |
 | strings | 254 ms · 216 MB | 230 ms · 263 MB | 517 ms · 701 MB | 208 ms · 592 MB | **155 ms** · 192 MB |
+
+### bigint (macOS, Apple M4 Max)
+
+`python3 bench/run.py --only bigint_pidigits,bigint_fib,bigint_factorial --langs rust,node,bun,tov`, 5 runs ([results/20261011-221701.json](results/20261011-221701.json)):
+
+| benchmark | Rust (num-bigint) | Node | Bun | **Tov** |
+|---|---:|---:|---:|---:|
+| bigint_pidigits | 3117 ms · 6.6 MB | 5442 ms · 140 MB | 747 ms · 100 MB | **289 ms · 4.4 MB** |
+| bigint_fib | 501 ms · 4.5 MB | 456 ms · 105 MB | 366 ms · 102 MB | **168 ms · 3.1 MB** |
+| bigint_factorial | 94 ms · 5.0 MB | 224 ms · 90 MB | 544 ms · 96 MB | **64 ms · 4.4 MB** |
+
+pidigits against Rust's other bigint crates, the same program on each (best of 15 interleaved runs, a loaded machine): GMP through `rug` 284 ms, Tov 289, malachite 707, dashu 760, ibig 1,129, num-bigint 3,117. GMP is hand-written assembly; Tov's limb loops are C.
+
+What makes them fast: a bigint below 2^62 is one tagged word (no allocation); larger ones are reference-counted buffers that `x op= y` (and `x = (x + a * b) * c`) update in place when nothing else holds them; `z + x * y` is one pass; the limb loops take eight limbs a step along one add-with-carry chain; division estimates each quotient digit from a precomputed reciprocal (and skips the check pass when the estimate can't be off); decimal output divides and conquers.
 
 ### Linux, x86-64 (AMD Ryzen 9 9950X, 8 vCPUs, a cloud VM)
 

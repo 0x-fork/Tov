@@ -1,0 +1,5 @@
+let d = 10n
+for (let i = 0; i < 3; i++) {
+  d -= 5n
+  console.log(100n / d)
+}

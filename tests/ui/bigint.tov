@@ -1,0 +1,16 @@
+function f(x: bigint, n: int, d: f64, s: string) {
+  const a = x + 1
+  const b = x * n
+  const c = x + d
+  const e = x >>> 2n
+  if (x) {
+    console.log(a, b, c, e)
+  }
+  const g = x === 0
+  const h = Math.max(x, 1n)
+  const j = JSON.stringify({ x })
+  const k: int = x
+  const l = n as bigint
+  const m = BigInt(s)
+  const o = 1.5n
+}

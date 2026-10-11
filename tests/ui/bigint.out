@@ -1,0 +1,55 @@
+error[T0504] bigint.tov:2:13: can't mix `bigint` and `int` with `+`
+    2 |   const a = x + 1
+  why: a `bigint` only combines with another `bigint` (JavaScript throws a TypeError)
+  fix[safe]: make it a bigint literal: `1n`
+
+error[T0504] bigint.tov:3:13: can't mix `bigint` and `int` with `*`
+    3 |   const b = x * n
+  why: a `bigint` only combines with another `bigint` (JavaScript throws a TypeError)
+  fix[maybe]: convert: `BigInt(n)`
+
+error[T0504] bigint.tov:4:13: can't mix `bigint` and `f64` with `+`
+    4 |   const c = x + d
+  why: a `bigint` only combines with another `bigint` (JavaScript throws a TypeError)
+  fix[maybe]: convert the bigint: `Number(x)`
+
+error[T0501] bigint.tov:5:13: `>>>` doesn't apply to `bigint`: a bigint has no fixed width
+    5 |   const e = x >>> 2n
+  instead: `>>` (it rounds toward negative infinity), or `BigInt.asUintN(bits, x) >> n`
+
+error[T0401] bigint.tov:6:7: condition must be `bool`, found `bigint`
+    6 |   if (x) {
+  why: no implicit truthiness: `0`, `""` and `undefined` are not `false`
+  fix[maybe]: `x !== 0n`
+
+error[T0502] bigint.tov:9:13: this comparison is always false: `bigint` and `int` have no values in common
+    9 |   const g = x === 0
+  fix[safe]: make it a bigint literal: `0n`
+
+error[T0001] bigint.tov:10:22: `Math.max` needs numbers, found `bigint`
+   10 |   const h = Math.max(x, 1n)
+
+error[T0840] bigint.tov:11:28: `{ x: bigint }` can't be converted to JSON
+   11 |   const j = JSON.stringify({ x })
+  supported: numbers, strings, booleans, arrays, records, unions of these, `Map<string, T>` and class instances
+
+error[T0001] bigint.tov:12:18: expected `int`, found `bigint`
+   12 |   const k: int = x
+  why: a `bigint` never converts to a number implicitly
+  fix[maybe]: convert (traps if out of range): `int(x)`
+
+error[T0601] bigint.tov:13:13: can't cast `int` to `bigint`
+   13 |   const l = n as bigint
+  why: `as` only narrows (e.g. from `unknown` or a union); it never converts values
+  fix[maybe]: convert: `BigInt(n)`
+
+error[T0831] bigint.tov:14:13: `BigInt` can throw `SyntaxError`; mark the call `try` to pass the error on, or catch it
+   14 |   const m = BigInt(s)
+  why: errors are values in Tov: every call that can fail is marked, so control flow is visible
+  or: wrap it in `try { ... } catch (e) { ... }`
+  fix[safe]: pass it on: `try BigInt(s)`
+
+error[L0006] bigint.tov:15:13: a bigint literal must be an integer
+   15 |   const o = 1.5n
+
+12 error(s)

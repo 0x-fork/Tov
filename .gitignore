@@ -13,3 +13,4 @@ docs/research.md
 site/dist/
 .vercel
 .env*
+bench/micro/*/rust/target/

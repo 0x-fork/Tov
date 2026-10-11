@@ -292,6 +292,114 @@ void tv_out_sb_line(tv_sb *sb);          /* writes sb + "\n" to stdout, then res
 void tv_err_sb_line(tv_sb *sb);          /* same to stderr (unbuffered) */
 void tv_out_flush(void);
 
+/* ------------------------------------------------------------------ bigint (runtime/big.c) */
+
+/* One word: odd is a small integer (word >> 1, -2^62 .. 2^62-1), even points to a buffer (sign
+ * and magnitude, 64-bit limbs, least significant first). A value has one form: one that fits a
+ * small integer is always small, so `==` on two small words is equality. */
+typedef struct { int64_t v; } tv_big;
+typedef struct tv_bigbuf {
+    int64_t rc;
+    uint32_t len, cap;     /* limbs in use (no leading zero limb), limbs allocated */
+    uint32_t neg, pad_;
+    uint64_t d[];
+} tv_bigbuf;
+#define TV_BIG_SMALL_MIN (-(INT64_C(1) << 62))
+#define TV_BIG_SMALL_MAX ((INT64_C(1) << 62) - 1)
+#define TV_BIG_UNLIKELY(x) __builtin_expect(!!(x), 0)
+extern const tv_type tv_type_big;
+
+static inline bool tv_big_is_small(tv_big a) { return (a.v & 1) != 0; }
+static inline tv_big tv_big_small(int64_t x) { return (tv_big){ (int64_t)((uint64_t)x << 1) | 1 }; }
+tv_big tv_big_from_i64_slow(int64_t x);
+static inline tv_big tv_big_from_i64(int64_t x) {
+    return (x >= TV_BIG_SMALL_MIN && x <= TV_BIG_SMALL_MAX) ? tv_big_small(x) : tv_big_from_i64_slow(x);
+}
+void tv_big_free(tv_big a);
+static inline void tv_big_retain(tv_big a) { if (!(a.v & 1)) ((tv_bigbuf *)(intptr_t)a.v)->rc++; }
+static inline void tv_big_release(tv_big a) {
+    if (!(a.v & 1) && --((tv_bigbuf *)(intptr_t)a.v)->rc == 0) tv_big_free(a);
+}
+
+tv_big tv_big_add_slow(tv_big a, tv_big b);
+tv_big tv_big_sub_slow(tv_big a, tv_big b);
+tv_big tv_big_mul_slow(tv_big a, tv_big b);
+static inline tv_big tv_big_add(tv_big a, tv_big b) {
+    int64_t r;
+    if (__builtin_expect(a.v & b.v & 1, 1) && !__builtin_add_overflow(a.v, b.v - 1, &r)) return (tv_big){r};
+    return tv_big_add_slow(a, b);
+}
+static inline tv_big tv_big_sub(tv_big a, tv_big b) {
+    int64_t r;
+    if (__builtin_expect(a.v & b.v & 1, 1) && !__builtin_sub_overflow(a.v, b.v - 1, &r)) return (tv_big){r};
+    return tv_big_sub_slow(a, b);
+}
+static inline tv_big tv_big_mul(tv_big a, tv_big b) {
+    int64_t r;
+    if (__builtin_expect(a.v & b.v & 1, 1) && !__builtin_mul_overflow(a.v >> 1, b.v - 1, &r)) return (tv_big){r | 1};
+    return tv_big_mul_slow(a, b);
+}
+tv_big tv_big_div(tv_big a, tv_big b, const char *loc);   /* truncates; traps on 0n */
+tv_big tv_big_rem(tv_big a, tv_big b, const char *loc);   /* the dividend's sign */
+tv_big tv_big_pow(tv_big a, tv_big b, const char *loc);   /* traps on a negative exponent */
+tv_big tv_big_neg(tv_big a);
+tv_big tv_big_not(tv_big a);
+tv_big tv_big_bitop(tv_big a, tv_big b, int op);           /* 0 &, 1 |, 2 ^ (two's complement) */
+tv_big tv_big_shift(tv_big a, tv_big b, bool left, const char *loc);
+tv_big tv_big_as_n(tv_int bits, tv_big a, bool is_signed, const char *loc);
+
+/* x op= y: in place when x holds its buffer alone. */
+void tv_big_add_to_slow(tv_big *x, tv_big y, bool sub);
+void tv_big_mul_to_slow(tv_big *x, tv_big y);
+static inline void tv_big_add_to(tv_big *x, tv_big y) {
+    int64_t r;
+    if (__builtin_expect(x->v & y.v & 1, 1) && !__builtin_add_overflow(x->v, y.v - 1, &r)) { x->v = r; return; }
+    tv_big_add_to_slow(x, y, false);
+}
+static inline void tv_big_sub_to(tv_big *x, tv_big y) {
+    int64_t r;
+    if (__builtin_expect(x->v & y.v & 1, 1) && !__builtin_sub_overflow(x->v, y.v - 1, &r)) { x->v = r; return; }
+    tv_big_add_to_slow(x, y, true);
+}
+static inline void tv_big_mul_to(tv_big *x, tv_big y) {
+    int64_t r;
+    if (__builtin_expect(x->v & y.v & 1, 1) && !__builtin_mul_overflow(x->v >> 1, y.v - 1, &r)) { x->v = r | 1; return; }
+    tv_big_mul_to_slow(x, y);
+}
+/* a op b where a is owned and consumed (its buffer is reused when it's the only reference). */
+static inline tv_big tv_big_add_take(tv_big a, tv_big b) { tv_big_add_to(&a, b); return a; }
+static inline tv_big tv_big_sub_take(tv_big a, tv_big b) { tv_big_sub_to(&a, b); return a; }
+static inline tv_big tv_big_mul_take(tv_big a, tv_big b) { tv_big_mul_to(&a, b); return a; }
+tv_big tv_big_neg_take(tv_big a);
+/* z + sign * x * y (sign ±1) in one pass when a factor fits a limb; _to updates z in place. */
+tv_big tv_big_muladd(tv_big x, tv_big y, tv_big z, int sign);
+void tv_big_muladd_to(tv_big *z, tv_big x, tv_big y, int sign);
+tv_big tv_big_from_i128_(__int128 x);
+/* a - b where b is owned and consumed: -(b - a). */
+static inline tv_big tv_big_rsub_take(tv_big b, tv_big a) { tv_big_sub_to(&b, a); return tv_big_neg_take(b); }
+
+int tv_big_cmp_slow(tv_big a, tv_big b);
+bool tv_big_eq_slow(tv_big a, tv_big b);
+static inline int tv_big_cmp(tv_big a, tv_big b) {
+    if (__builtin_expect(a.v & b.v & 1, 1)) return (a.v > b.v) - (a.v < b.v);
+    return tv_big_cmp_slow(a, b);
+}
+static inline bool tv_big_eq(tv_big a, tv_big b) { return a.v == b.v || (!((a.v | b.v) & 1) && tv_big_eq_slow(a, b)); }
+int tv_big_cmp_int(tv_big a, int64_t b);
+uint64_t tv_big_hash(tv_big a);
+
+tv_big tv_big_lit(const char *text);                       /* a literal's value (immortal) */
+bool tv_big_parse(tv_str s, tv_big *out);                   /* BigInt(string); false: SyntaxError */
+bool tv_big_from_f64(double x, tv_big *out);                /* BigInt(number); false: not an integer */
+double tv_big_to_f64(tv_big a);                             /* Number(x): nearest, ties to even */
+bool tv_big_fits_int(tv_big a);
+tv_big tv_big_from_u64_(uint64_t m);
+uint64_t tv_big_to_u64(tv_big a, const char *loc);          /* traps outside 0 .. 2^64-1 */
+tv_int tv_big_to_int(tv_big a, const char *loc);            /* traps beyond 64 bits */
+void tv_sb_push_big(tv_sb *sb, tv_big a);
+void tv_sb_push_big_radix(tv_sb *sb, tv_big a, int radix);
+tv_str tv_big_to_string(tv_big a, tv_int radix, const char *loc);
+
 /* ------------------------------------------------------------------ math */
 
 double tv_math_round(double x);           /* JS Math.round: half toward +infinity */

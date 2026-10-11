@@ -1,0 +1,15 @@
+// The 300,000th Fibonacci number by repeated addition: bigint + bigint on numbers that grow to
+// 62,700 digits. Prints how many digits it has and its first and last 20.
+const N = 300000
+
+let a = 0n
+let b = 1n
+for (let i = 0; i < N; i++) {
+  const t = a + b
+  a = b
+  b = t
+}
+const s = a.toString()
+console.log(`fib(${N}) has ${s.byteLength} digits`)
+console.log(`first 20: ${s.slice(0, 20)}`)
+console.log(`last 20: ${s.slice(s.byteLength - 20)}`)

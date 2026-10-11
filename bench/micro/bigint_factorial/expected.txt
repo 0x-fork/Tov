@@ -1,0 +1,2 @@
+40000! has 166714 digits
+digit sum 704115, trailing zeros 9998

@@ -1,0 +1,5 @@
+// Tov's conversions between bigint and its sized numbers (they trap when the value doesn't fit).
+const big = 2n ** 63n - 1n
+console.log(int(big), u64(2n ** 64n - 1n), i32(-5n), u8(255n), f64(2n ** 70n))
+console.log(BigInt(u64(18446744073709551615n)), BigInt(i8(-127)), Number(-(2n ** 1100n)))
+console.log(typeof big, `${big}`, String(-big))

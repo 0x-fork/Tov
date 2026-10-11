@@ -1799,10 +1799,14 @@ impl<'c, 'a> Gen<'c, 'a> {
                 }
                 Val::plain(if ty == F32 { format!("{s}f") } else { s }, ty)
             }
+            ExprKind::BigInt(s) => {
+                let text = self.sym(*s).to_string();
+                Val::plain(self.big_lit(&text), BIGINT)
+            }
             ExprKind::Str(_) | ExprKind::Undefined | ExprKind::Null => Val::plain("0", ty),
             ExprKind::Bool(b) => Val::plain(if *b { "true" } else { "false" }, BOOL),
             ExprKind::Template(parts, exprs) => {
-                let vals: Vec<Val> = exprs.iter().map(|&x| self.expr(x)).collect();
+                let vals: Vec<Val> = self.exprs_in_order(exprs);
                 let sbv = self.fresh("sb");
                 self.line(format!("tv_sb {sbv} = {{0}};"));
                 self.open("{");
@@ -1821,6 +1825,19 @@ impl<'c, 'a> Gen<'c, 'a> {
                 let ct = self.ctype(p.ty);
                 let loc = self.loc(span);
                 let lv = self.place_lvalue(&p);
+                if p.ty == BIGINT {
+                    let f = if *inc { "tv_big_add_to" } else { "tv_big_sub_to" };
+                    if *prefix {
+                        self.line(format!("{f}(&{lv}, ((tv_big){{3}}));"));
+                        return Val::plain(lv, BIGINT);
+                    }
+                    let old = self.tmp(BIGINT, &lv, false);
+                    self.line(format!("tv_big_retain({});", old.code));
+                    let old = Val { owned: true, ..old };
+                    self.b().temps.last_mut().unwrap().push((old.code.clone(), BIGINT));
+                    self.line(format!("{f}(&{lv}, ((tv_big){{3}}));"));
+                    return old;
+                }
                 let old = self.fresh("o");
                 self.line(format!("{ct} {old} = {lv};"));
                 let new = if self.c.types.is_float(p.ty) {
@@ -2454,6 +2471,8 @@ impl<'c, 'a> Gen<'c, 'a> {
         let name = |types: &Types, t: TyId| -> &'static str {
             if types.is_numeric(t) {
                 "number"
+            } else if t == BIGINT {
+                "bigint"
             } else if types.is_string(t) {
                 "string"
             } else if t == BOOL {
@@ -2519,6 +2538,23 @@ impl<'c, 'a> Gen<'c, 'a> {
             UnOp::Not => {
                 let c = self.cond(x);
                 Val::plain(format!("(!{c})"), BOOL)
+            }
+            UnOp::Neg if ty == BIGINT => {
+                let v = self.expr(x);
+                // (a literal folds: `-5n` is one constant)
+                if let ExprKind::BigInt(s) = self.ast(self.cur_m()).expr(x).kind {
+                    let text = format!("-{}", self.sym(s));
+                    if let Ok(n) = text.parse::<i128>()
+                        && n >= -(1i128 << 62)
+                    {
+                        return Val::plain(format!("((tv_big){{INT64_C({})}})", 2 * n + 1), BIGINT);
+                    }
+                }
+                self.tmp(BIGINT, &format!("tv_big_neg({})", v.code), true)
+            }
+            UnOp::BitNot if ty == BIGINT => {
+                let v = self.expr(x);
+                self.tmp(BIGINT, &format!("tv_big_not({})", v.code), true)
             }
             UnOp::Neg => {
                 let v = self.expr(x);
@@ -2608,6 +2644,20 @@ impl<'c, 'a> Gen<'c, 'a> {
                     let (a, b) = (self.coerce(lv, STR), self.coerce(rv, STR));
                     return Val::plain(format!("(tv_str_cmp({}, {}) {o} 0)", a.code, b.code), BOOL);
                 }
+                if lv.ty == BIGINT || rv.ty == BIGINT {
+                    // (an integer side is compared exactly, as in JavaScript)
+                    return Val::plain(match (lv.ty == BIGINT, rv.ty == BIGINT) {
+                        (true, true) => format!("(tv_big_cmp({}, {}) {o} 0)", lv.code, rv.code),
+                        (true, false) => {
+                            let b = self.int_code(rv);
+                            format!("(tv_big_cmp_int({}, {b}) {o} 0)", lv.code)
+                        }
+                        _ => {
+                            let a = self.int_code(lv);
+                            format!("(0 {o} tv_big_cmp_int({}, {a}))", rv.code)
+                        }
+                    }, BOOL);
+                }
                 let (a, b) = self.numeric_operands(lv, rv);
                 Val::plain(format!("({} {o} {})", a, b), BOOL)
             }
@@ -2627,6 +2677,33 @@ impl<'c, 'a> Gen<'c, 'a> {
                 }
                 self.close("}");
                 self.tmp(STR, &format!("tv_str_from_sb(&{sbv})"), true)
+            }
+            Add | Sub if ty == BIGINT && (self.big_mul_parts(r).is_some() || (op == Add && self.big_mul_parts(l).is_some())) => {
+                // `z + x * y`, `x * y + z`, `z - x * y`: one pass (see tv_big_muladd)
+                let sign = if op == Add { 1 } else { -1 };
+                let (z, x, y) = if let Some((a, b)) = self.big_mul_parts(r) {
+                    let z = self.expr_before(l, &[a, b]);
+                    let x = self.expr_before(a, &[b]);
+                    (z, x, self.expr(b))
+                } else {
+                    let (a, b) = self.big_mul_parts(l).unwrap();
+                    let x = self.expr_before(a, &[b, r]);
+                    let y = self.expr_before(b, &[r]);
+                    (self.expr(r), x, y)
+                };
+                if z.owned {
+                    let zc = self.consume(z);
+                    let t = self.fresh("t");
+                    self.line(format!("tv_big {t} = {zc}; tv_big_muladd_to(&{t}, {}, {}, {sign});", x.code, y.code));
+                    let v = self.tmp(BIGINT, &t, true);
+                    return v;
+                }
+                self.tmp(BIGINT, &format!("tv_big_muladd({}, {}, {}, {sign})", x.code, y.code, z.code), true)
+            }
+            Add | Sub | Mul | Div | Rem | Pow | BitAnd | BitOr | BitXor | Shl | Shr if ty == BIGINT => {
+                let lv = self.expr_before(l, &[r]);
+                let rv = self.expr(r);
+                self.big_op(op, lv, rv, span)
             }
             Add | Sub | Mul | Div | Rem | Pow => {
                 let lv = self.expr_before(l, &[r]);
@@ -2661,6 +2738,56 @@ impl<'c, 'a> Gen<'c, 'a> {
             }
             In => Val::plain("false", BOOL),
         }
+    }
+
+    /// `x * y` of bigints (through parentheses): its operands.
+    fn big_mul_parts(&mut self, e: ExprId) -> Option<(ExprId, ExprId)> {
+        let m = self.cur_m();
+        let mut e = e;
+        while let ExprKind::Paren(x) = self.ast(m).expr(e).kind {
+            e = x;
+        }
+        match self.ast(m).expr(e).kind {
+            ExprKind::Binary(BinOp::Mul, a, b) if self.ty(e) == BIGINT => Some((a, b)),
+            _ => None,
+        }
+    }
+
+    /// A bigint operator. An owned left operand is consumed by `+`, `-` and `*`, whose result
+    /// reuses its buffer when nothing else holds it (`(a * b + c) * d` allocates once).
+    fn big_op(&mut self, op: BinOp, lv: Val, rv: Val, span: Span) -> Val {
+        use BinOp::*;
+        let (a, b) = (lv.code.clone(), rv.code.clone());
+        let code = match op {
+            Add | Sub | Mul if lv.owned => {
+                let a = self.consume(lv);
+                let f = match op { Add => "add", Sub => "sub", _ => "mul" };
+                format!("tv_big_{f}_take({a}, {b})")
+            }
+            // (the right operand's buffer, when it's a temporary: `+` and `*` commute, and
+            // `a - b` is `-(b - a)`)
+            Add | Sub | Mul if rv.owned => {
+                let b = self.consume(rv);
+                let f = match op { Add => "add_take", Sub => "rsub_take", _ => "mul_take" };
+                format!("tv_big_{f}({b}, {a})")
+            }
+            Add => format!("tv_big_add({a}, {b})"),
+            Sub => format!("tv_big_sub({a}, {b})"),
+            Mul => format!("tv_big_mul({a}, {b})"),
+            Div | Rem | Pow => {
+                let loc = self.loc(span);
+                let f = match op { Div => "div", Rem => "rem", _ => "pow" };
+                format!("tv_big_{f}({a}, {b}, {loc})")
+            }
+            BitAnd => format!("tv_big_bitop({a}, {b}, 0)"),
+            BitOr => format!("tv_big_bitop({a}, {b}, 1)"),
+            BitXor => format!("tv_big_bitop({a}, {b}, 2)"),
+            _ => {
+                let loc = self.loc(span);
+                format!("tv_big_shift({a}, {b}, {}, {loc})", op == Shl)
+            }
+        };
+        self.tmp(BIGINT, &code, true)
     }
 
     fn numeric_operands(&mut self, a: Val, b: Val) -> (String, String) {
@@ -3115,6 +3242,60 @@ impl<'c, 'a> Gen<'c, 'a> {
         format!("(*{pv})")
     }
 
+    /// `x = x op a op b ...` for a bigint variable `x` (`op` one of `+ - *`, any parentheses):
+    /// the operations in order, when none of the other operands can read or change `x`.
+    fn big_chain(&mut self, target: ExprId, value: ExprId) -> Option<Vec<(BinOp, ExprId)>> {
+        use crate::check::IdentFact::{Const, Local};
+        let m = self.cur_m();
+        if self.ty(target) != BIGINT || !matches!(self.ast(m).expr(target).kind, ExprKind::Ident(_)) {
+            return None;
+        }
+        let key = match self.ident_fact(m, target) {
+            Some(f @ (Local(_) | Const(..))) => f,
+            _ => return None,
+        };
+        let mut chain = Vec::new();
+        let mut e = value;
+        loop {
+            while let ExprKind::Paren(x) = self.ast(m).expr(e).kind {
+                e = x;
+            }
+            match self.ast(m).expr(e).kind {
+                ExprKind::Binary(op @ (BinOp::Add | BinOp::Sub | BinOp::Mul), l, r) if self.ty(e) == BIGINT => {
+                    if !self.pure_without(r, key) {
+                        return None;
+                    }
+                    chain.push((op, r));
+                    e = l;
+                }
+                ExprKind::Ident(_) if !chain.is_empty() && self.ident_fact(m, e) == Some(key) => break,
+                _ => return None,
+            }
+        }
+        chain.reverse();
+        Some(chain)
+    }
+
+    /// Reading `e` has no effects and doesn't read the variable `key` (identifiers, literals,
+    /// arithmetic, fields, `BigInt(...)`).
+    fn pure_without(&mut self, e: ExprId, key: crate::check::IdentFact) -> bool {
+        let m = self.cur_m();
+        match &self.ast(m).expr(e).kind {
+            ExprKind::Ident(_) => self.ident_fact(m, e) != Some(key),
+            ExprKind::Int(_) | ExprKind::BigInt(_) | ExprKind::Float(_) | ExprKind::Str(_) | ExprKind::Bool(_) => true,
+            &ExprKind::Paren(x) | &ExprKind::Unary(_, x) => self.pure_without(x, key),
+            &ExprKind::Binary(op, l, r) => !matches!(op, BinOp::Div | BinOp::Rem | BinOp::Pow | BinOp::Shl) && self.pure_without(l, key) && self.pure_without(r, key),
+            &ExprKind::Member { obj, optional: false, .. } => self.pure_without(obj, key),
+            ExprKind::Call { callee, args, .. } if args.len() == 1 && matches!(self.ast(m).expr(*callee).kind, ExprKind::Ident(_)) && self.ident_fact(m, *callee) == Some(crate::check::IdentFact::Builtin) => {
+                let (callee, arg) = (*callee, args[0].expr);
+                let ExprKind::Ident(s) = self.ast(m).expr(callee).kind else { return false };
+                let at = self.ty(arg);
+                self.sym(s) == "BigInt" && matches!(self.tget(at), Ty::Int | Ty::BigInt | Ty::I32 | Ty::U32 | Ty::I16 | Ty::U16 | Ty::I8 | Ty::U8) && self.pure_without(arg, key)
+            }
+            _ => false,
+        }
+    }
+
     fn assign(&mut self, op: AssignOp, target: ExprId, value: ExprId, span: Span) -> Val {
         // a JavaScript property: assigned in JavaScript
         let m = self.cur_m();
@@ -3130,6 +3311,15 @@ impl<'c, 'a> Gen<'c, 'a> {
             }
         }
         match op {
+            AssignOp::Assign if let Some(chain) = self.big_chain(target, value) => {
+                // `x = (x + a * b) * c`: as `x += a * b; x *= c` (x's old value goes either way, and
+                // nothing else reads x), each in place when it can be
+                let mut v = Val::plain("0", BIGINT);
+                for (bop, r) in chain {
+                    v = self.assign(AssignOp::Op(bop), target, r, span);
+                }
+                v
+            }
             AssignOp::Assign => {
                 let v = self.expr(value);
                 let p = self.place(target);
@@ -3157,7 +3347,31 @@ impl<'c, 'a> Gen<'c, 'a> {
                 let cur = Val::plain(lv.clone(), p.ty);
                 // `x += await f()` reads `x` before it waits, as JavaScript does.
                 let cur = if self.awaits_in(value) { self.snapshot(cur) } else { cur };
+                if p.ty == BIGINT && matches!(bop, BinOp::Add | BinOp::Sub)
+                    && let Some((a, b)) = self.big_mul_parts(value)
+                {
+                    // `x += a * b`: one pass, in place
+                    let av = self.expr_before(a, &[b]);
+                    let bv = self.expr(b);
+                    let sign = if bop == BinOp::Add { 1 } else { -1 };
+                    self.line(format!("tv_big_muladd_to(&{lv}, {}, {}, {sign});", av.code, bv.code));
+                    return cur;
+                }
                 let rhs = self.expr(value);
+                if p.ty == BIGINT {
+                    // in place: the variable's buffer is reused when it's the only reference
+                    match bop {
+                        BinOp::Add => self.line(format!("tv_big_add_to(&{lv}, {});", rhs.code)),
+                        BinOp::Sub => self.line(format!("tv_big_sub_to(&{lv}, {});", rhs.code)),
+                        BinOp::Mul => self.line(format!("tv_big_mul_to(&{lv}, {});", rhs.code)),
+                        _ => {
+                            let r = self.big_op(bop, cur.clone(), rhs, span);
+                            let code = self.consume(r);
+                            self.line(format!("tv_big_release({lv}); {lv} = {code};"));
+                        }
+                    }
+                    return cur;
+                }
                 let result = match bop {
                     BinOp::Nullish => {
                         let present = self.truthy(cur.clone());

@@ -6,12 +6,12 @@ use crate::ast::Arg;
 
 pub(super) const BUILTIN_TYPES: &[&str] = &[
     "int", "i64", "f64", "number", "f32", "i8", "i16", "i32", "u8", "u16", "u32", "u64", "bool", "boolean", "string", "never", "unknown", "Js", "undefined", "void", "Array", "Map",
-    "Set", "Promise", "Record",
+    "Set", "Promise", "Record", "bigint",
 ];
 
 pub(super) const GLOBAL_NAMES: &[&str] = &[
     "Math", "console", "expect", "String", "Number", "parseInt", "parseFloat", "isNaN", "int", "f64", "f32", "i8", "i16", "i32", "u8", "u16", "u32", "u64", "process", "Date",
-    "performance", "JSON", "Promise",
+    "performance", "JSON", "Promise", "BigInt",
 ];
 
 /// Runtime calls available to standard-library modules (`__native.name(...)`): parameters, result.
@@ -89,11 +89,11 @@ pub(super) fn is_builtin_type(name: &str) -> bool {
 }
 
 pub(super) fn is_builtin_ns(name: &str) -> bool {
-    matches!(name, "Math" | "console" | "JSON" | "process" | "Date" | "performance" | "Promise")
+    matches!(name, "Math" | "console" | "JSON" | "process" | "Date" | "performance" | "Promise" | "BigInt")
 }
 
 pub(super) fn is_builtin_fn(name: &str) -> bool {
-    matches!(name, "expect" | "String" | "Number" | "parseInt" | "parseFloat" | "isNaN" | "test")
+    matches!(name, "expect" | "String" | "Number" | "BigInt" | "parseInt" | "parseFloat" | "isNaN" | "test")
         || CONVERSIONS.contains(&name)
         || TIMER_FNS.contains(&name)
 }
@@ -107,7 +107,7 @@ pub(super) fn removed_global(name: &str) -> Option<String> {
         "eval" | "Function" => format!("`{name}` is not supported: there is no runtime code evaluation"),
         "globalThis" | "window" | "document" | "global" => format!("`{name}` is not available; Tov compiles to native programs"),
         "require" | "module" | "exports" => "CommonJS is not supported; use `import { name } from \"./file\"`".to_string(),
-        "Symbol" | "Proxy" | "Reflect" | "WeakMap" | "WeakSet" | "BigInt" => format!("`{name}` is not supported"),
+        "Symbol" | "Proxy" | "Reflect" | "WeakMap" | "WeakSet" => format!("`{name}` is not supported"),
         "Object" => "`Object` is not supported: records have fixed fields; use `Map` for dynamic keys".to_string(),
         "Array" => "`Array.from`/`Array.isArray` are not supported; use array literals and `map`".to_string(),
         _ => return None,
@@ -178,7 +178,7 @@ fn methods_of(types: &Types, ty: TyId) -> &'static [&'static str] {
         Ty::Map(..) => MAP_METHODS,
         Ty::Set(_) => SET_METHODS,
         _ if types.is_numeric(ty) => NUMBER_METHODS,
-        Ty::Bool => &["toString"],
+        Ty::Bool | Ty::BigInt => &["toString"],
         _ => &[],
     }
 }
@@ -207,6 +207,7 @@ pub(super) fn type_label(types: &Types, ty: TyId) -> &'static str {
         Ty::Map(..) => "Map",
         Ty::Set(_) => "Set",
         Ty::Bool => "bool",
+        Ty::BigInt => "bigint",
         _ => "number",
     }
 }
@@ -350,6 +351,10 @@ pub(super) fn method(c: &mut Checker, base: TyId, name: &str) -> Option<MethodSi
             _ => None,
         },
         Ty::Bool if name == "toString" => mk(sig(vec![], STR), false),
+        Ty::BigInt if name == "toString" => {
+            let radix = opt(c, INT);
+            mk(sig(vec![(radix, "radix")], STR), false)
+        }
         _ if c.types.is_numeric(ty) => match name {
             "toFixed" => mk(sig(vec![(p(INT), "digits")], STR), false),
             "toString" => mk(sig(vec![], STR), false),
@@ -413,6 +418,7 @@ impl<'a> Checker<'a> {
             "Date" | "performance" => vec!["now"],
             "JSON" => vec!["stringify", "parse"],
             "Promise" => vec!["resolve", "reject", "all", "race"],
+            "BigInt" => vec!["asIntN", "asUintN"],
             _ => vec!["log", "error", "warn", "info"],
         };
         if known.contains(&n.as_str()) {
@@ -554,6 +560,15 @@ impl<'a> Checker<'a> {
             }
             "JSON" => self.json_call(name, name_span, args, exp, span),
             "Promise" => self.promise_call(name, name_span, args, exp, span),
+            "BigInt" => {
+                if !matches!(name, "asIntN" | "asUintN") {
+                    self.check_args_loose(args);
+                    self.unknown_ns_member(ns, name, &["asIntN", "asUintN"], name_span);
+                    return ERROR;
+                }
+                let cs = CallSig { tparams: Vec::new(), params: vec![p(INT), p(BIGINT)], names: vec!["bits".into(), "bigint".into()], rest: None, ret: BIGINT, throws: NEVER };
+                self.call_sig(&cs, &format!("BigInt.{name}"), &[], args, exp, span)
+            }
             "process" => {
                 let (params, ret): (Vec<FnParam>, TyId) = match name {
                     "exit" => (vec![opt(self, INT)], NEVER),
@@ -804,6 +819,39 @@ impl<'a> Checker<'a> {
                     }
                 STR
             }
+            // `BigInt(x)`: from an integer (exact), a string (SyntaxError if it isn't one) or a
+            // number (RangeError unless it's an integer), as in JavaScript.
+            "BigInt" => {
+                let call = self.pending_call.take();
+                if let Some(t) = one(self) {
+                    let mut throws = Vec::new();
+                    for m in self.flat_members(t) {
+                        if m == ERROR || m == BIGINT || m == BOOL || self.types.is_int(m) {
+                            continue;
+                        }
+                        if self.types.is_string(m) {
+                            throws.push("SyntaxError");
+                        } else if self.types.is_float(m) {
+                            throws.push("RangeError");
+                        } else {
+                            let s = self.ast().expr(args[0].expr).span;
+                            let msg = format!("`BigInt` converts integers, numbers and strings, found `{}`", self.show(t));
+                            self.report(Diagnostic::new("T0001", s, msg));
+                            throws.clear();
+                            break;
+                        }
+                    }
+                    throws.sort();
+                    throws.dedup();
+                    for cls in throws {
+                        let c = self.builtin_class(cls);
+                        if c != ERROR {
+                            self.on_throw(c, span, Some("BigInt"), call);
+                        }
+                    }
+                }
+                BIGINT
+            }
             "Number" | "parseFloat" | "parseInt" => {
                 let ret = if name == "parseInt" { INT } else { F64 };
                 if args.is_empty() || args.len() > 1 + usize::from(name == "parseInt") {
@@ -811,6 +859,10 @@ impl<'a> Checker<'a> {
                     self.check_args_loose(args);
                 } else {
                     let t = self.expr(args[0].expr, Some(STR));
+                    // `Number(x)` of a bigint: the nearest number (never fails)
+                    if name == "Number" && t == BIGINT {
+                        return Some(F64);
+                    }
                     // `Number(x)` also takes numbers (and `number | string`), as in JavaScript.
                     let number_ok = name == "Number" && self.flat_members(t).iter().all(|&m| self.types.is_string(m) || self.types.is_numeric(m));
                     if t != ERROR && !self.types.is_string(t) && !number_ok {
@@ -902,7 +954,7 @@ impl<'a> Checker<'a> {
                     return Some(target);
                 }
                 let t = self.expr(args[0].expr, Some(target));
-                if t != ERROR && !self.types.is_numeric(t) {
+                if t != ERROR && !self.types.is_numeric(t) && t != BIGINT {
                     let s = self.ast().expr(args[0].expr).span;
                     let mut d = Diagnostic::new("T0001", s, format!("`{name}(...)` converts numbers, found `{}`", self.show(t)));
                     if self.types.is_string(t) {
