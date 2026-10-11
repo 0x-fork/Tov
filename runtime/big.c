@@ -23,6 +23,25 @@
 typedef uint64_t tv_limb;
 typedef unsigned __int128 tv_dlimb;
 
+#ifndef __has_builtin
+#define __has_builtin(x) 0
+#endif
+#if !__has_builtin(__builtin_addcll)
+/* (GCC before 14) */
+static inline unsigned long long tv_addc(unsigned long long a, unsigned long long b, unsigned long long c, unsigned long long *out) {
+    tv_dlimb s = (tv_dlimb)a + b + c;
+    *out = (unsigned long long)(s >> 64);
+    return (unsigned long long)s;
+}
+static inline unsigned long long tv_subc(unsigned long long a, unsigned long long b, unsigned long long c, unsigned long long *out) {
+    unsigned long long d = a - b - c;
+    *out = (a < b) | ((a == b) & c);
+    return d;
+}
+#define __builtin_addcll tv_addc
+#define __builtin_subcll tv_subc
+#endif
+
 #define TV_BIG_KARATSUBA 32
 
 static inline tv_bigbuf *tv_bb(tv_big a) { return (tv_bigbuf *)(intptr_t)a.v; }
