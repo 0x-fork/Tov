@@ -2756,6 +2756,34 @@ bool tv_process_env(tv_str name, tv_str *out) {
     return true;
 }
 
+tv_int tv_process_pid(void) {
+#if defined(_WIN32)
+    return (tv_int)_getpid();
+#else
+    return (tv_int)getpid();
+#endif
+}
+
+/* statSync's payload: "size;mtimeMs;isdir" — parsed by std/fs. */
+tv_str tv_native_statInfo(tv_str path) {
+    struct stat st;
+    if (stat(path.p->data, &st) != 0) { tv_native_fail(errno, "stat", path); return TV_EMPTY_STR; }
+#if defined(__APPLE__)
+    double ms = (double)st.st_mtimespec.tv_sec * 1000.0 + (double)st.st_mtimespec.tv_nsec / 1e6;
+#elif defined(_WIN32)
+    double ms = (double)st.st_mtime * 1000.0;
+#else
+    double ms = (double)st.st_mtim.tv_sec * 1000.0 + (double)st.st_mtim.tv_nsec / 1e6;
+#endif
+    char buf[96];
+    int n = snprintf(buf, sizeof buf, "%lld;%.0f;%d", (long long)st.st_size, ms, S_ISDIR(st.st_mode) ? 1 : 0);
+    return tv_str_from(buf, (size_t)n);
+}
+
+void tv_native_access(tv_str path, tv_int mode) {
+    if (access(path.p->data, (int)mode) != 0) tv_native_fail(errno, "access", path);
+}
+
 _Noreturn void tv_process_exit(tv_int code) {
     tv_out_flush();
     exit((int)code);

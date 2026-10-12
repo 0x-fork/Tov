@@ -1,0 +1,8 @@
+import { accessSync, statSync } from "node:fs"
+
+console.log(`arch: ${process.arch !== ""}`)
+console.log(`pid: ${process.pid > 0}`)
+const st = try statSync(process.argv[0]!)
+console.log(`file: ${st.isFile()} dir: ${st.isDirectory()} size: ${st.size > 0} mtime: ${st.mtimeMs > 0}`)
+try accessSync(process.argv[0]!, 4)
+console.log("access: ok")

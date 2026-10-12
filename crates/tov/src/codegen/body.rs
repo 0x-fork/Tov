@@ -2943,6 +2943,8 @@ impl<'c, 'a> Gen<'c, 'a> {
                 return match self.sym(name) {
                     "argv" => self.tmp(ty, "tv_process_argv()", true),
                     "platform" => self.tmp(STR, "tv_str_from(TVG_PLATFORM, sizeof(TVG_PLATFORM) - 1)", true),
+                    "arch" => self.tmp(STR, "tv_str_from(TVG_ARCH, sizeof(TVG_ARCH) - 1)", true),
+                    "pid" => self.tmp(INT, "tv_process_pid()", false),
                     _ => Val::plain("0", ty),
                 };
             }

@@ -1658,6 +1658,13 @@ static tv_str tvg_js_spaces(tv_int n) {
 #else
 #define TVG_PLATFORM "linux"
 #endif
+#if defined(__aarch64__) || defined(_M_ARM64)
+#define TVG_ARCH "arm64"
+#elif defined(__x86_64__) || defined(_M_X64)
+#define TVG_ARCH "x64"
+#else
+#define TVG_ARCH "unknown"
+#endif
 /* The error being thrown (a class instance extending Error), or NULL. Calls that can throw are
  * followed by a check; `try` blocks jump to their handler, other code returns early. */
 static void *tvg_err;

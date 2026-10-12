@@ -51,3 +51,35 @@ export function rmSync(path: string, options?: { recursive?: bool, force?: bool 
   __native.rm(path, recursive, force)
   try check()
 }
+
+// fs.statSync — a Node-style Stats with the fields callers actually use.
+export class Stats {
+  // Bytes, and last-modified time in milliseconds since the epoch.
+  size: int
+  mtimeMs: f64
+  private dir: bool
+
+  constructor(size: int, mtimeMs: f64, dir: bool) {
+    this.size = size
+    this.mtimeMs = mtimeMs
+    this.dir = dir
+  }
+
+  isFile(): bool { return !this.dir }
+  isDirectory(): bool { return this.dir }
+}
+
+export function statSync(path: string): Stats throws Error {
+  const info = __native.statInfo(path)
+  try check()
+  const p = info.split(";")
+  return new Stats(parseInt(p[0]!) ?? 0, parseFloat(p[1]!) ?? 0, p[2] === "1")
+}
+
+// fs.accessSync — throws when `path` isn't accessible as `mode` asks.
+// Modes as in Node's fs.constants: 0 exists (F_OK), 4 read (R_OK),
+// 2 write (W_OK), 1 execute (X_OK); they add, so 6 is readable+writable.
+export function accessSync(path: string, mode?: int): void throws Error {
+  __native.access(path, mode ?? 0)
+  try check()
+}
