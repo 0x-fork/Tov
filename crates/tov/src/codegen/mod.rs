@@ -381,7 +381,10 @@ impl<'c, 'a> Gen<'c, 'a> {
                 let (m, i) = script.unwrap();
                 self.script_module = Some(m);
                 let cname = self.instance(m, i, FxMap::default());
-                let throws = self.c.sigs[&(m, i)].throws != NEVER;
+                // A module-level `const x = try …` initializer can also stop the script with
+                // `tvg_err` set (consts evaluate out of the script body, so its `throws` sig
+                // doesn't cover them).
+                let throws = self.c.sigs[&(m, i)].throws != NEVER || !self.c.const_throws.is_empty();
                 self.needs_uncaught |= throws;
                 let uncaught = if throws { "    if (tvg_err) { tvg_uncaught(); return 1; }\n" } else { "" };
                 let _ = writeln!(main_body, "    {cname}();\n{uncaught}{async_run}    tv_out_flush();\n    return 0;");
@@ -398,7 +401,7 @@ impl<'c, 'a> Gen<'c, 'a> {
                     self.async_main(&mut main_body, &cname, value);
                     return self.finish_program(main_body);
                 }
-                let throws = self.c.sigs[&(m, i)].throws != NEVER;
+                let throws = self.c.sigs[&(m, i)].throws != NEVER || !self.c.const_throws.is_empty();
                 self.needs_uncaught |= throws;
                 let uncaught = if throws { "    if (tvg_err) { tvg_uncaught(); return 1; }\n" } else { "" };
                 if ret == INT {

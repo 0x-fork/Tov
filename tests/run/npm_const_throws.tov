@@ -1,0 +1,5 @@
+// Same for a JsError thrown by an npm-module call inside a const initializer.
+import { generateKeyPairSync } from "node:crypto"
+
+const keys = try generateKeyPairSync("ed25519", {})
+console.log("never reached")
