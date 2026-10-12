@@ -128,17 +128,6 @@ pub fn load(paths: &[PathBuf], base: &Path) -> Result<Loaded, String> {
     if std::env::var("TOV_TRACE").is_ok() {
         eprintln!("walk {:?}, parse {:?}, merge {:?}", tw - t0, tp - tw, tp.elapsed());
     }
-    // The web globals (`Bun`, `Request`, `Response`, ...) live in std/http: load it when a
-    // program mentions one of them.
-    if WEB_GLOBALS.iter().any(|n| interner.lookup(n).is_some()) {
-        let target = PathBuf::from("<std>/http");
-        let src = STD_MODULES.iter().find(|m| m.0 == "http").unwrap().1;
-        let file = sm.add(SourceFile::new(target.clone(), "std/http".into(), src.to_string()));
-        let (ast, pd) = parser::parse(&sm.get(file).text, file, &mut interner);
-        diags.extend(pd);
-        by_path.insert(target.clone(), modules.len() as u32);
-        modules.push(Module { file, path: target, name: "std/http".into(), ast, imports: HashMap::default(), builtin: false, std: true, entry: false, npm: None });
-    }
     // Follow imports (files outside the roots are parsed here, sequentially).
     let mut mi = 0;
     let npm = crate::npm::resolve::Resolver::default();
@@ -186,6 +175,17 @@ pub fn load(paths: &[PathBuf], base: &Path) -> Result<Loaded, String> {
                 }
             };
             modules[mi].imports.insert(ii, t);
+        }
+        // The web globals (`Bun`, `Request`, `Response`, ...) live in std/http: load it when
+        // any module — entry or imported — mentions one of them.
+        if !by_path.contains_key(Path::new("<std>/http")) && WEB_GLOBALS.iter().any(|n| interner.lookup(n).is_some()) {
+            let target = PathBuf::from("<std>/http");
+            let src = STD_MODULES.iter().find(|m| m.0 == "http").unwrap().1;
+            let file = sm.add(SourceFile::new(target.clone(), "std/http".into(), src.to_string()));
+            let (ast, pd) = parser::parse(&sm.get(file).text, file, &mut interner);
+            diags.extend(pd);
+            by_path.insert(target.clone(), modules.len() as u32);
+            modules.push(Module { file, path: target, name: "std/http".into(), ast, imports: HashMap::default(), builtin: false, std: true, entry: false, npm: None });
         }
         mi += 1;
     }
