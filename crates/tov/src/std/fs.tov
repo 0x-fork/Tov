@@ -14,13 +14,30 @@ export function readFileSync(path: string, encoding?: "utf8" | "utf-8"): string 
   return text
 }
 
-export function writeFileSync(path: string, data: string): void throws Error {
-  __native.writeFile(path, data, false)
+// The bytes of the file, as Node's `readFileSync(path)` gives them (its Buffer).
+// A separate name, not a `string | u8[]` union on readFileSync: Tov has no
+// overloads, so a union would send every text caller through a checked cast.
+export function readFileBytesSync(path: string): u8[] throws Error {
+  const data = __native.readFile(path)
+  try check()
+  return __native.stringToBytes(data)
+}
+
+export function writeFileSync(path: string, data: string | u8[]): void throws Error {
+  if (typeof data === "string") {
+    __native.writeFile(path, data, false)
+  } else {
+    __native.writeFile(path, __native.bytesToString(data), false)
+  }
   try check()
 }
 
-export function appendFileSync(path: string, data: string): void throws Error {
-  __native.writeFile(path, data, true)
+export function appendFileSync(path: string, data: string | u8[]): void throws Error {
+  if (typeof data === "string") {
+    __native.writeFile(path, data, true)
+  } else {
+    __native.writeFile(path, __native.bytesToString(data), true)
+  }
   try check()
 }
 
