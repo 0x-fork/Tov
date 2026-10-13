@@ -155,7 +155,7 @@ try {
 
 ## 7a. Standard library **[M3]**
 Node's names, so existing habits work:
-- `import { readFileSync, writeFileSync, appendFileSync, existsSync, readdirSync, mkdirSync, rmSync, unlinkSync, statSync, accessSync } from "node:fs"` (also `"fs"`, `"std/fs"`): the synchronous API; failures throw `Error` with Node's messages (`ENOENT: no such file or directory, open 'x'`). `readdirSync` returns sorted names. `statSync` returns a `Stats` (`size`, `mtimeMs`, `isFile()`, `isDirectory()`); `accessSync(path, mode?)` takes Node's mode flags (0 exists, 4 read, 2 write, 1 execute).
+- `import { readFileSync, readFileBytesSync, writeFileSync, appendFileSync, existsSync, readdirSync, mkdirSync, rmSync, unlinkSync, statSync, accessSync } from "node:fs"` (also `"fs"`, `"std/fs"`): the synchronous API; failures throw `Error` with Node's messages (`ENOENT: no such file or directory, open 'x'`). `readdirSync` returns sorted names. `readFileBytesSync` returns the file's `u8[]` (what Node's `readFileSync` gives as a Buffer), and `writeFileSync`/`appendFileSync` take `string | u8[]`. `statSync` returns a `Stats` (`size`, `mtimeMs`, `isFile()`, `isDirectory()`); `accessSync(path, mode?)` takes Node's mode flags (0 exists, 4 read, 2 write, 1 execute).
 - `import * as path from "node:path"`: `join`, `resolve`, `normalize`, `basename`, `dirname`, `extname`, `isAbsolute`, `sep` (POSIX).
 - `process.argv` (`[binary, binary, ...args]`, so `process.argv.slice(2)` are the arguments), `process.env.NAME` (`string | undefined`), `process.exit(code?)`, `process.cwd()`, `process.platform`, `process.arch`, `process.pid`, `process.stdout.write(s)`, `process.stderr.write(s)`; `console.error` / `console.warn` write to stderr.
 - `Date.now()` and `performance.now()` (milliseconds).

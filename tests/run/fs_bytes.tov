@@ -1,0 +1,21 @@
+// Binary file I/O: readFileBytesSync returns the raw bytes and writeFileSync /
+// appendFileSync take them, so a byte pattern survives the round trip.
+import { readFileSync, readFileBytesSync, writeFileSync, appendFileSync } from "node:fs"
+
+function main() {
+  const bin = "/tmp/tov-fs-bytes.bin"
+  // 0x00 and bytes past UTF-8's range: nothing text-shaped may alter them.
+  const raw: u8[] = [0, 1, 2, 250, 251, 252, 255]
+  try writeFileSync(bin, raw)
+  const bytes = try readFileBytesSync(bin)
+  console.log(bytes.length, bytes[0], bytes[2], bytes[6])
+  const tail: u8[] = [9, 8]
+  try appendFileSync(bin, tail)
+  const more = try readFileBytesSync(bin)
+  console.log(more.length, more[7], more[8])
+  // strings still work, and readFileSync stays text
+  try writeFileSync(bin, "hi\n")
+  console.log(try readFileSync(bin, "utf8"))
+  const text = try readFileBytesSync(bin)
+  console.log(text.length, text[0], text[1], text[2])
+}
