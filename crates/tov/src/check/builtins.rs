@@ -84,7 +84,7 @@ pub(super) fn native_sig(types: &mut Types, name: &str) -> Option<(Vec<TyId>, Ty
         "netBind" => {
             let p = |ty| FnParam { ty, inout: false, optional: false };
             let bytes = types.array(U8);
-            let events = types.func(vec![p(INT), p(bytes), p(STR)], VOID);
+            let events = types.func(vec![p(INT), p(bytes), p(STR), p(INT)], VOID);
             (vec![INT, events, STR, STR], VOID)
         }
         "netWrite" => {
@@ -98,6 +98,24 @@ pub(super) fn native_sig(types: &mut Types, name: &str) -> Option<(Vec<TyId>, Ty
         "netAddress" => (vec![INT, INT], STR),
         "netBuffered" | "netListenPort" => (vec![INT], INT),
         "netError" => (vec![], STR),
+        "wsUpgrade" => (vec![STR, STR, INT], INT),
+        "wsConnect" => (vec![STR, INT, STR, BOOL, BOOL, STR, STR, STR, INT], INT),
+        "wsSendText" => (vec![INT, STR, INT], INT),
+        "wsSendBytes" => {
+            let bytes = types.array(U8);
+            (vec![INT, bytes, INT], INT)
+        }
+        "wsClose" => (vec![INT, INT, STR, BOOL], VOID),
+        "wsSubscribe" => (vec![INT, STR, BOOL], VOID),
+        "wsSubscribed" => (vec![INT, STR], BOOL),
+        "wsTopics" => (vec![INT], str_arr),
+        "wsPublishText" => (vec![STR, STR, INT], INT),
+        "wsPublishBytes" => {
+            let bytes = types.array(U8);
+            (vec![STR, bytes, INT], INT)
+        }
+        "wsSubscribers" => (vec![STR], INT),
+        "wsProtocol" => (vec![INT], STR),
         "netListen" => {
             let p = |ty| FnParam { ty, inout: false, optional: false };
             let on_accept = types.func(vec![p(INT)], VOID);
@@ -115,7 +133,7 @@ pub(super) fn is_builtin_type(name: &str) -> bool {
 }
 
 pub(super) fn is_builtin_ns(name: &str) -> bool {
-    matches!(name, "Math" | "console" | "JSON" | "process" | "Date" | "performance" | "Promise" | "BigInt")
+    matches!(name, "Math" | "console" | "JSON" | "process" | "Date" | "performance" | "Promise" | "BigInt" | "Array")
 }
 
 pub(super) fn is_builtin_fn(name: &str) -> bool {
@@ -135,7 +153,7 @@ pub(super) fn removed_global(name: &str) -> Option<String> {
         "require" | "module" | "exports" => "CommonJS is not supported; use `import { name } from \"./file\"`".to_string(),
         "Symbol" | "Proxy" | "Reflect" | "WeakMap" | "WeakSet" => format!("`{name}` is not supported"),
         "Object" => "`Object` is not supported: records have fixed fields; use `Map` for dynamic keys".to_string(),
-        "Array" => "`Array.from`/`Array.isArray` are not supported; use array literals and `map`".to_string(),
+        "Array" => "`Array` is not a value: `Array.isArray(x)` tests a value, and arrays are made with literals and `map`".to_string(),
         _ => return None,
     })
 }
@@ -606,6 +624,18 @@ impl<'a> Checker<'a> {
             }
             "JSON" => self.json_call(name, name_span, args, exp, span),
             "Promise" => self.promise_call(name, name_span, args, exp, span),
+            "Array" => {
+                if name != "isArray" {
+                    self.check_args_loose(args);
+                    self.report(Diagnostic::new("U0017", name_span, format!("`Array.{name}` is not supported; use array literals and `map`")));
+                    return ERROR;
+                }
+                if args.len() != 1 {
+                    self.report(Diagnostic::new("T0201", span, format!("`Array.isArray` takes 1 argument, found {}", args.len())));
+                }
+                self.check_args_loose(args);
+                BOOL
+            }
             "BigInt" => {
                 if !matches!(name, "asIntN" | "asUintN") {
                     self.check_args_loose(args);

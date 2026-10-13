@@ -1,0 +1,39 @@
+// Narrowing inside closures, Array.isArray, and a constant a closure in its own initializer uses.
+type Ev = { data: string | number[] }
+let handler: ((e: Ev) => void) | undefined = undefined
+handler = (e) => {
+  const d = e.data
+  console.log(typeof d === "string" ? `text ${d}` : `numbers ${d.join("+")}`)
+}
+const h = handler
+if (h !== undefined) {
+  h({ data: "hi" })
+  h({ data: [1, 2, 3] })
+}
+
+function describe(x: string | string[] | { name: string }): string {
+  if (typeof x === "string") {
+    return `one: ${x}`
+  }
+  if (Array.isArray(x)) {
+    return `many: ${x.join(", ")}`
+  }
+  return `named: ${x.name}`
+}
+console.log(describe("a"), describe(["b", "c"]), describe({ name: "d" }))
+
+class Counter {
+  count = 0
+  constructor(readonly onTick: () => void) {}
+  tick(): void {
+    this.count++
+    this.onTick()
+  }
+}
+function makeCounter(onTick: () => void): Counter {
+  return new Counter(onTick)
+}
+// the closure reads `counter` (it runs later, once `counter` is set)
+const counter = makeCounter(() => console.log(`ticked ${counter.count}`))
+counter.tick()
+counter.tick()

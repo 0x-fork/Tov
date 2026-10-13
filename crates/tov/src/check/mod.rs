@@ -181,6 +181,9 @@ struct FnCtx {
     /// Narrowings of field paths (`t.left`): (local, path, narrowed type or `None` = invalidated).
     /// Scope entries named `PATH_SYM` point into this table, so they follow scope lifetimes.
     path_table: Vec<(LocalId, Vec<Sym>, Option<TyId>)>,
+    /// Narrowings of module constants (`const port = process.env.PORT; if (port !== undefined)`);
+    /// scope entries named `GLOBAL_SYM` point into it.
+    global_table: Vec<((u32, u32), TyId)>,
     /// For the copy-then-mutate check: `let b = a` bindings (copy, source, position),
     /// in-place mutations (local, span) and reads (local, position) of locals.
     aliases: Vec<(LocalId, LocalId, u32)>,
@@ -214,6 +217,8 @@ struct FnCtx {
 pub(crate) const PATH_SYM: Sym = Sym(u32::MAX);
 /// The name `this` is declared under inside class methods.
 pub(crate) const THIS_SYM: Sym = Sym(u32::MAX - 1);
+/// Marks a scope entry that refers to `FnCtx::global_table`.
+pub(crate) const GLOBAL_SYM: Sym = Sym(u32::MAX - 2);
 
 #[derive(Clone, Copy)]
 struct Syms {
@@ -269,6 +274,11 @@ pub struct Checker<'a> {
     /// Module variables of a script whose initializer can throw (the script checks after it).
     pub(crate) const_throws: Arc<HashSet<(u32, u32)>>,
     const_in_progress: HashSet<(u32, u32)>,
+    /// A constant's type while its initializer is checked, when it's known before (annotated, or
+    /// a call whose signature fixes it): a closure in the initializer can use the constant.
+    const_provisional: HashMap<(u32, u32), TyId>,
+    /// Constants whose provisional type a closure in their initializer used.
+    const_provisional_used: HashSet<(u32, u32)>,
     exhaustive: HashSet<(u32, StmtId)>,
     fcx: Vec<FnCtx>,
     cur: u32,
@@ -317,6 +327,8 @@ fn new_checker<'a>(modules: &'a [Module], interner: &'a mut Interner, sm: &'a So
         consts: Arc::default(),
         const_throws: Arc::default(),
         const_in_progress: HashSet::default(),
+        const_provisional: HashMap::default(),
+        const_provisional_used: HashSet::default(),
         exhaustive: HashSet::default(),
         fcx: Vec::new(),
         cur: 0,
@@ -468,6 +480,8 @@ impl<'a> Checker<'a> {
             consts: self.consts.clone(),
             const_throws: self.const_throws.clone(),
             const_in_progress: HashSet::default(),
+            const_provisional: HashMap::default(),
+            const_provisional_used: HashSet::default(),
             exhaustive: HashSet::default(),
             fcx: Vec::new(),
             cur: 0,
@@ -919,11 +933,26 @@ impl<'a> Checker<'a> {
         // In a script, initializers run in the script body, so they can throw like its statements.
         let script = self.modules[m as usize].ast.script.is_some() && self.modules[m as usize].entry;
         if !self.const_in_progress.insert((m, ii)) {
+            // (a closure in the initializer: `const server = Bun.serve({ ... server.publish(...) })`)
+            if let Some(&t) = self.const_provisional.get(&(m, ii)) {
+                self.const_provisional_used.insert((m, ii));
+                return t;
+            }
             let n = self.name(*name).to_string();
-            self.done.push(Diagnostic::new("T0308", *name_span, format!("constant `{n}` depends on itself")));
+            self.done.push(
+                Diagnostic::new("T0308", *name_span, format!("constant `{n}` depends on itself"))
+                    .note("instead", "annotate its type, or call with explicit type arguments, so a closure in its initializer can use it"),
+            );
             return ERROR;
         }
         let (ty, init) = (*ty, *init);
+        let provisional = match ty {
+            Some(te) => Some(self.with_module(m, |c| c.resolve_type(te, &[]))),
+            None => self.with_module(m, |c| c.peek_call_type(init)),
+        };
+        if let Some(p) = provisional {
+            self.const_provisional.insert((m, ii), p);
+        }
         let (t, throws) = self.committed(|c| {
             c.with_module(m, |c| {
                 c.fcx.push(FnCtx::default());
@@ -955,8 +984,80 @@ impl<'a> Checker<'a> {
             Arc::make_mut(&mut self.const_throws).insert((m, ii));
         }
         self.const_in_progress.remove(&(m, ii));
+        let used = self.const_provisional_used.remove(&(m, ii));
+        if let Some(p) = self.const_provisional.remove(&(m, ii))
+            && used
+            && p != t
+            && t != ERROR
+            && !self.assignable(t, p)
+        {
+            let n = self.name(*name).to_string();
+            let (ps, ts) = (self.show(p), self.show(t));
+            self.done.push(
+                Diagnostic::new("T0308", *name_span, format!("constant `{n}` is used in its own initializer as `{ps}`, but it's a `{ts}`"))
+                    .note("instead", "annotate its type"),
+            );
+        }
         Arc::make_mut(&mut self.consts).insert((m, ii), t);
         t
+    }
+
+    /// The type a call or `new` produces as its callee's signature says, when its type parameters
+    /// are fixed without looking at the arguments (given explicitly, or defaulted).
+    fn peek_call_type(&mut self, init: ExprId) -> Option<TyId> {
+        use crate::ast::ExprKind;
+        let (mut e, mut awaited) = (init, false);
+        loop {
+            match &self.ast().expr(e).kind {
+                ExprKind::Paren(x) | ExprKind::Try(x) => e = *x,
+                ExprKind::Await(x) => {
+                    awaited = true;
+                    e = *x;
+                }
+                _ => break,
+            }
+        }
+        let (tparams, ret, targs) = match &self.ast().expr(e).kind {
+            ExprKind::Call { callee, type_args, .. } => {
+                let targs = type_args.clone();
+                match &self.ast().expr(*callee).kind {
+                    ExprKind::Ident(s) => match self.scopes[self.cur as usize].values.get(s).map(|d| d.0) {
+                        Some(Decl::Fn(fm, fi)) => {
+                            let sig = self.fn_sig(fm, fi)?;
+                            (sig.tparams, sig.ret, targs)
+                        }
+                        _ => return None,
+                    },
+                    ExprKind::Member { obj, name, .. } => {
+                        let ExprKind::Ident(s) = self.ast().expr(*obj).kind else { return None };
+                        let Some(Decl::Class(c)) = self.scopes[self.cur as usize].values.get(&s).map(|d| d.0) else { return None };
+                        self.resolve_class(c);
+                        let mm = self.classes[c as usize].statics.iter().find(|x| x.name == *name).cloned()?;
+                        let ret = self.method_ret(&mm);
+                        (mm.tparams.clone(), ret, targs)
+                    }
+                    _ => return None,
+                }
+            }
+            _ => return None,
+        };
+        let mut map: HashMap<u32, TyId> = HashMap::default();
+        let tscope = self.tscope();
+        for (i, &p) in tparams.iter().enumerate() {
+            let t = match targs.get(i) {
+                Some(&ta) => self.resolve_type(ta, &tscope),
+                None => self.gparam(p).default?,
+            };
+            map.insert(p, t);
+        }
+        let t = self.types.subst(ret, &map);
+        if awaited {
+            return match *self.types.get(t) {
+                Ty::Promise(v, _) => Some(v),
+                _ => Some(t),
+            };
+        }
+        Some(t)
     }
 
     /// Validates the type of an unannotated binding.
@@ -2032,6 +2133,27 @@ impl<'a> Checker<'a> {
     /// point to never changes which of them a value is.
     fn references_only(&mut self, ty: TyId) -> bool {
         self.flat_members(ty).iter().all(|&m| matches!(self.types.get(m), Ty::Class(..) | Ty::Promise(..) | Ty::Func(..) | Ty::Undefined))
+    }
+
+    /// Narrows a module constant (it can't be rebound, so what a test learns holds).
+    fn narrow_global(&mut self, key: (u32, u32), ty: TyId) {
+        let fcx = self.fcx.last_mut().unwrap();
+        fcx.global_table.push((key, ty));
+        let idx = fcx.global_table.len() - 1;
+        fcx.scopes.last_mut().unwrap().push((GLOBAL_SYM, idx, None));
+    }
+
+    /// A module constant's narrowed type here, if a test narrowed it.
+    pub(super) fn lookup_global(&self, key: (u32, u32)) -> Option<TyId> {
+        let fcx = self.fcx.last()?;
+        for scope in fcx.scopes.iter().rev() {
+            for &(s, idx, _) in scope.iter().rev() {
+                if s == GLOBAL_SYM && fcx.global_table[idx].0 == key {
+                    return Some(fcx.global_table[idx].1);
+                }
+            }
+        }
+        None
     }
 
     /// Narrows (or with `None`, forgets narrowings under) a field path of a local.

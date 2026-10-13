@@ -1,0 +1,9 @@
+ada's protocol: chat.v2
+ada got bob joined
+ada got [97,98,99]
+ada got bob: hello everyone
+ada got eve joined
+ada got eve: early bird
+ada got eve left (1009)
+ada got bob left (4000)
+eve closed: 1009 true

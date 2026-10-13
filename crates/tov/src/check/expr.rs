@@ -300,7 +300,12 @@ impl<'a> Checker<'a> {
                 }
                 return self.types.func(sig.params, sig.ret);
             }
-            Some(Decl::Const(m, i)) => return self.const_type(m, i),
+            Some(Decl::Const(m, i)) => {
+                if let Some(t) = self.lookup_global((m, i)) {
+                    return t;
+                }
+                return self.const_type(m, i);
+            }
             Some(Decl::Ns(m)) => return self.types.intern(Ty::Namespace(m)),
             Some(Decl::Class(_)) => {
                 let n = self.name(sym).to_string();
@@ -331,7 +336,7 @@ impl<'a> Checker<'a> {
         let mut candidates: Vec<String> = Vec::new();
         if let Some(fcx) = self.fcx.last() {
             for scope in &fcx.scopes {
-                candidates.extend(scope.iter().filter(|(s, _, _)| *s != super::PATH_SYM && *s != super::THIS_SYM).map(|(s, _, _)| self.name(*s).to_string()));
+                candidates.extend(scope.iter().filter(|(s, _, _)| *s != super::PATH_SYM && *s != super::THIS_SYM && *s != super::GLOBAL_SYM).map(|(s, _, _)| self.name(*s).to_string()));
             }
         }
         candidates.extend(self.scopes[self.cur as usize].values.keys().map(|&s| self.name(s).to_string()));
@@ -1469,6 +1474,7 @@ impl<'a> Checker<'a> {
         let Some(ft) = self.member_of(base, name, name_span, span, obj) else { return ERROR };
         if !optional
             && let Some((target, _)) = self.target_of(obj)
+            && target.global.is_none()
         {
             let mut path = target.path.clone();
             path.push(name);
@@ -2935,6 +2941,7 @@ impl<'a> Checker<'a> {
         for n in ns {
             match n {
                 Narrowing::Local(l, t) => self.narrow(*l, *t),
+                Narrowing::Global(key, t) => self.narrow_global(*key, *t),
                 Narrowing::Path(l, p, t, heap) => {
                     self.narrow_path(*l, p.clone(), Some(*t));
                     if *heap {
@@ -3049,6 +3056,12 @@ impl<'a> Checker<'a> {
                 }
                 vec![target.with(self.types.union(&keep))]
             }
+            // `Array.isArray(x)`: the array members of x's union, or the others
+            ExprKind::Call { callee, args, .. } if args.len() == 1 && self.is_array_is_array(*callee) => {
+                let Some((target, ty)) = self.target_of(args[0].expr) else { return Vec::new() };
+                let keep: Vec<TyId> = self.flat_members(ty).into_iter().filter(|&m| matches!(self.types.get(m), Ty::Array(_)) == positive).collect();
+                vec![target.with(self.types.union(&keep))]
+            }
             ExprKind::Ident(_) | ExprKind::Member { optional: false, .. } => {
                 let Some((target, ty)) = self.target_of(e) else { return Vec::new() };
                 if !self.types.has_undefined(ty) {
@@ -3061,14 +3074,39 @@ impl<'a> Checker<'a> {
         }
     }
 
+    /// Is this callee the built-in `Array.isArray`?
+    fn is_array_is_array(&self, callee: ExprId) -> bool {
+        let ExprKind::Member { obj, name, .. } = &self.ast().expr(callee).kind else { return false };
+        let ExprKind::Ident(s) = self.ast().expr(*obj).kind else { return false };
+        self.name(s) == "Array" && self.name(*name) == "isArray" && self.lookup(s).is_none() && !self.scopes[self.cur as usize].values.contains_key(&s)
+    }
+
     /// A narrowable reference: a local, or a field path of a local (`t.left.value`), with its current type.
     fn target_of(&mut self, e: ExprId) -> Option<(Target, TyId)> {
         match &self.ast().expr(e).kind {
-            ExprKind::Ident(s) => self.lookup(*s).map(|(id, ty)| (Target { local: id, path: Vec::new(), heap: false }, ty)),
-            ExprKind::This => self.lookup(super::THIS_SYM).map(|(id, ty)| (Target { local: id, path: Vec::new(), heap: false }, ty)),
+            ExprKind::Ident(s) => {
+                if let Some((id, ty)) = self.lookup(*s) {
+                    return Some((Target { local: id, path: Vec::new(), heap: false, global: None }, ty));
+                }
+                // a module constant (not a `let`: a function could reassign that)
+                let Some(Decl::Const(m, i)) = self.scopes[self.cur as usize].values.get(s).map(|d| d.0) else { return None };
+                if !matches!(self.modules[m as usize].ast.items[i as usize].kind, ItemKind::Const { mutable: false, .. }) {
+                    return None;
+                }
+                let ty = match self.lookup_global((m, i)) {
+                    Some(t) => t,
+                    None => self.const_type(m, i),
+                };
+                Some((Target { local: 0, path: Vec::new(), heap: false, global: Some((m, i)) }, ty))
+            }
+            ExprKind::This => self.lookup(super::THIS_SYM).map(|(id, ty)| (Target { local: id, path: Vec::new(), heap: false, global: None }, ty)),
             ExprKind::Paren(x) => self.target_of(*x),
             ExprKind::Member { obj, name, optional: false, .. } => {
                 let (mut target, base) = self.target_of(*obj)?;
+                // (a module constant's contents can change under it: only its own value narrows)
+                if target.global.is_some() {
+                    return None;
+                }
                 target.path.push(*name);
                 let base = self.types.without_undefined(base);
                 let members = self.flat_members(base);
@@ -3131,10 +3169,15 @@ pub(super) struct Target {
     path: Vec<Sym>,
     /// The path goes through a class instance.
     heap: bool,
+    /// A module constant (module, item), not a local.
+    global: Option<(u32, u32)>,
 }
 
 impl Target {
     fn with(self, ty: TyId) -> Narrowing {
+        if let Some(key) = self.global {
+            return Narrowing::Global(key, ty);
+        }
         if self.path.is_empty() { Narrowing::Local(self.local, ty) } else { Narrowing::Path(self.local, self.path, ty, self.heap) }
     }
 }
@@ -3142,6 +3185,7 @@ impl Target {
 pub(super) enum Narrowing {
     Local(LocalId, TyId),
     Path(LocalId, Vec<Sym>, TyId, bool),
+    Global((u32, u32), TyId),
 }
 
 fn typeof_name(types: &Types, t: TyId) -> Option<&'static str> {

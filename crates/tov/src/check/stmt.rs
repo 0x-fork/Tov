@@ -935,6 +935,48 @@ fn effects_into(ast: &Ast, e: ExprId, fx: &mut Effects) {
 }
 
 /// The expressions a statement evaluates directly or in nested statements (not inside arrows).
+/// The names a block declares (`let`, `const`, `for (const x of ...)`, `catch (e)`), at any depth
+/// of its statements (not inside nested closures, whose names are their own).
+fn declared_in(ast: &Ast, s: StmtId, out: &mut HashSet<Sym>) {
+    match &ast.stmt(s).kind {
+        StmtKind::Let { name, .. } => {
+            out.insert(*name);
+        }
+        StmtKind::ForOf { name, body, .. } => {
+            out.insert(*name);
+            declared_in(ast, *body, out);
+        }
+        StmtKind::Block(b) => b.iter().for_each(|&x| declared_in(ast, x, out)),
+        StmtKind::If(_, t, e) => {
+            declared_in(ast, *t, out);
+            if let Some(e) = e {
+                declared_in(ast, *e, out);
+            }
+        }
+        StmtKind::While(_, b) | StmtKind::DoWhile(b, _) => declared_in(ast, *b, out),
+        StmtKind::For { init, body, .. } => {
+            if let Some(i) = init {
+                declared_in(ast, *i, out);
+            }
+            declared_in(ast, *body, out);
+        }
+        StmtKind::Switch(_, cases) => cases.iter().for_each(|c| c.body.iter().for_each(|&x| declared_in(ast, x, out))),
+        StmtKind::Try { body, catch, finally } => {
+            declared_in(ast, *body, out);
+            if let Some(c) = catch {
+                if let Some((n, _, _)) = c.param {
+                    out.insert(n);
+                }
+                declared_in(ast, c.body, out);
+            }
+            if let Some(f) = finally {
+                declared_in(ast, *f, out);
+            }
+        }
+        _ => {}
+    }
+}
+
 fn stmt_exprs(ast: &Ast, s: StmtId, out: &mut Vec<ExprId>) {
     match &ast.stmt(s).kind {
         StmtKind::Expr(e) | StmtKind::Return(Some(e)) | StmtKind::Throw(e) => out.push(*e),
@@ -1011,9 +1053,22 @@ fn closure_mutated_into(ast: &Ast, e: ExprId, inside: bool, out: &mut (HashSet<S
                 ArrowBody::Expr(x) => exprs.push(*x),
                 ArrowBody::Block(b) => stmt_exprs(ast, *b, &mut exprs),
             }
-            for x in exprs {
-                closure_mutated_into(ast, x, true, out);
+            let mut inner = (HashSet::default(), HashSet::default());
+            let mut nested = (HashSet::default(), HashSet::default());
+            for &x in &exprs {
+                closure_mutated_into(ast, x, true, &mut inner);
+                closure_mutated_into(ast, x, false, &mut nested);
             }
+            // The closure's own parameters and variables aren't the enclosing function's: what
+            // the closure itself does to them doesn't count, what a closure inside it does does.
+            let mut own: HashSet<Sym> = f.params.iter().map(|p| p.name).collect();
+            if let ArrowBody::Block(b) = &f.body {
+                declared_in(ast, *b, &mut own);
+            }
+            out.0.extend(inner.0.into_iter().filter(|n| !own.contains(n)));
+            out.1.extend(inner.1.into_iter().filter(|n| !own.contains(n)));
+            out.0.extend(nested.0);
+            out.1.extend(nested.1);
             return;
         }
         _ if inside => {

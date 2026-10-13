@@ -1378,6 +1378,19 @@ impl<'c, 'a> Gen<'c, 'a> {
                 let v = self.expr(args[0].expr);
                 self.to_bigint(v)
             }
+            (Some("Array"), "isArray") => {
+                let v = self.expr(args[0].expr);
+                match self.tget(v.ty) {
+                    Ty::Array(_) => Val::plain("true", BOOL),
+                    Ty::Union(ms) => {
+                        let ms = self.c.types.tys(ms).to_vec();
+                        let tag = self.u_tag(&v.code, v.ty);
+                        let arrays: Vec<String> = ms.iter().enumerate().filter(|(_, m)| matches!(self.tget(**m), Ty::Array(_))).map(|(i, _)| format!("{tag} == {i}")).collect();
+                        Val::plain(if arrays.is_empty() { "false".to_string() } else { format!("({})", arrays.join(" || ")) }, BOOL)
+                    }
+                    _ => Val::plain("false", BOOL),
+                }
+            }
             (Some("BigInt"), "asIntN" | "asUintN") => {
                 let bits = self.expr(args[0].expr);
                 let bits = self.int_code(bits);

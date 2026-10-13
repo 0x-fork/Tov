@@ -1,0 +1,85 @@
+// Bun.serve's websocket and the WebSocket client in one program.
+type User = { name: string }
+
+const server = Bun.serve<User>({
+  port: 0,
+  fetch(req, server) {
+    const url = try new URL(req.url)
+    const name = url.searchParams.get("name") ?? "anon"
+    const protocol = req.headers.get("sec-websocket-protocol")
+    const headers: Record<string, string> = {}
+    if (protocol !== undefined) {
+      headers.set("Sec-WebSocket-Protocol", protocol.split(",")[0]!.trim())
+    }
+    if (server.upgrade(req, { data: { name }, headers })) {
+      return
+    }
+    return new Response("not a websocket", { status: 400 })
+  },
+  websocket: {
+    maxPayloadLength: 1024,
+    open(ws) {
+      ws.subscribe("room")
+      server.publish("room", `${ws.data!.name} joined`)
+    },
+    message(ws, message) {
+      if (typeof message === "string") {
+        if (message === "ping me") {
+          ws.ping("hi")
+          return
+        }
+        ws.publish("room", `${ws.data!.name}: ${message}`)
+      } else {
+        ws.send(message)
+      }
+    },
+    pong(ws, data) {
+      ws.send(`pong ${data.length} bytes`)
+    },
+    close(ws, code, reason) {
+      server.publish("room", `${ws.data!.name} left (${code})`)
+    },
+  },
+})
+
+function connect(name: string, protocols: string[]): Promise<WebSocket, Error> {
+  return new Promise<WebSocket, Error>((resolve, reject) => {
+    try {
+      const ws = try new WebSocket(`ws://localhost:${server.port}/?name=${name}`, protocols)
+      ws.onopen = (e) => resolve(ws)
+    } catch (e) {
+      reject(e)
+    }
+  })
+}
+
+const log: string[] = []
+const ada = try await connect("ada", ["chat.v2", "chat.v1"])
+console.log("ada's protocol:", ada.protocol)
+ada.onmessage = (e) => {
+  const d = e.data
+  log.push(`ada got ${typeof d === "string" ? d : `[${d.join(",")}]`}`)
+}
+const bob = try await connect("bob", [])
+bob.send("hello everyone")
+bob.send("ping me")
+ada.send(new TextEncoder().encode("abc"))
+// sent before it opens: goes out once it does
+const eve = try new WebSocket(`ws://localhost:${server.port}/?name=eve`)
+eve.send("early bird")
+let eveClosed = ""
+eve.onclose = (e) => {
+  eveClosed = `${e.code} ${e.wasClean}`
+}
+await new Promise<int>((resolve) => setTimeout(() => resolve(0), 200))
+// too big for maxPayloadLength: the server closes with 1009
+eve.send("x".repeat(2000))
+await new Promise<int>((resolve) => setTimeout(() => resolve(0), 200))
+bob.close(4000, "bye")
+await new Promise<int>((resolve) => setTimeout(() => resolve(0), 200))
+for (const line of log) {
+  console.log(line)
+}
+console.log("eve closed:", eveClosed)
+ada.close()
+server.stop()

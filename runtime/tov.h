@@ -881,6 +881,19 @@ tv_int tv_native_netListen(tv_str host, tv_int port, tv_str cert, tv_str key, tv
 tv_int tv_native_netListenPort(tv_int id);
 void tv_native_netStop(tv_int id);
 void tv_native_netListenRef(tv_int id, bool ref);
-tv_str tv_native_netError(void);          /* WHATWG UTF-8 decode (BOM dropped, U+FFFD for bad bytes) */
+tv_str tv_native_netError(void);
+/* WebSockets (runtime/ws.c): Bun.serve's websocket and the WebSocket client */
+tv_int tv_native_wsUpgrade(tv_str key, tv_str headers, tv_int max_payload);
+tv_int tv_native_wsConnect(tv_str host, tv_int port, tv_str path, bool tls, bool verify, tv_str ca, tv_str headers, tv_str protocols, tv_int max_payload);
+tv_int tv_native_wsSendText(tv_int id, tv_str text, tv_int op);
+tv_int tv_native_wsSendBytes(tv_int id, tv_arr bytes, tv_int op);
+void tv_native_wsClose(tv_int id, tv_int code, tv_str reason, bool now);
+void tv_native_wsSubscribe(tv_int id, tv_str topic, bool on);
+bool tv_native_wsSubscribed(tv_int id, tv_str topic);
+tv_arr tv_native_wsTopics(tv_int id);
+tv_int tv_native_wsPublishText(tv_str topic, tv_str text, tv_int except);
+tv_int tv_native_wsPublishBytes(tv_str topic, tv_arr bytes, tv_int except);
+tv_int tv_native_wsSubscribers(tv_str topic);
+tv_str tv_native_wsProtocol(tv_int id);          /* WHATWG UTF-8 decode (BOM dropped, U+FFFD for bad bytes) */
 
 #endif /* TOV_H */

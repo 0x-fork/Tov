@@ -331,7 +331,7 @@ pub fn build(paths: &[PathBuf], base: &Path, opts: &Options) -> Result<Built, Bu
     }
     flags.extend(extra.split_whitespace());
     let flag_text = flags.join(" ");
-    let rt_key = hash_hex(&[codegen::RUNTIME_H.as_bytes(), codegen::RUNTIME_C.as_bytes(), codegen::RUNTIME_BIG.as_bytes(), codegen::RUNTIME_DEC.as_bytes(), codegen::RUNTIME_NET.as_bytes(), cc.as_bytes(), flag_text.as_bytes(), env!("CARGO_PKG_VERSION").as_bytes()]);
+    let rt_key = hash_hex(&[codegen::RUNTIME_H.as_bytes(), codegen::RUNTIME_C.as_bytes(), codegen::RUNTIME_BIG.as_bytes(), codegen::RUNTIME_DEC.as_bytes(), codegen::RUNTIME_NET.as_bytes(), codegen::RUNTIME_WS.as_bytes(), cc.as_bytes(), flag_text.as_bytes(), env!("CARGO_PKG_VERSION").as_bytes()]);
     // A program that fetches links TLS (its code calls tv_tls_install).
     let tls = uses_tls.then(|| TlsArchive::new(&cc, sysroot.as_deref(), &extra));
     // A program importing npm packages links the JavaScript bridge (compiled once per compiler).

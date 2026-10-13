@@ -48,7 +48,15 @@ typedef struct tv_ns {
     size_t out_len, out_cap, out_off;
     uint64_t timeout_ms, last_active;
     struct tv_ns *dns_next, *dirty_next;
+    struct tv_ws *ws;        /* a WebSocket's framing (runtime/ws.c), or NULL */
 } tv_ns;
+
+/* (runtime/ws.c, later in the translation unit) */
+static void tv_ws_input(tv_ns *s, const uint8_t *data, size_t n);
+static bool tv_ws_socket_opened(tv_ns *s);
+static void tv_ws_socket_closed(tv_ns *s, const char *err);
+static void tv_ws_free(tv_ns *s);
+static size_t tv_ws_pending_input(tv_ns *s);
 
 typedef struct tv_nl {
     tv_io io;
@@ -92,6 +100,7 @@ static tv_ns *tv_ns_new(void) {
 }
 
 static void tv_ns_free(tv_ns *s) {
+    if (s->ws) tv_ws_free(s);
     if (s->bound) tv_env_release(s->cb.env);
     free(s->out);
     free(s->host);
@@ -115,7 +124,7 @@ static void tv_ns_emit(tv_ns *s, int kind, const void *data, size_t n, const cha
     }
     tv_str t = text ? tv_str_from(text, strlen(text)) : TV_EMPTY_STR;
     s->busy++;
-    ((void (*)(void *, tv_int, tv_arr, tv_str))s->cb.fn)(s->cb.env, kind, bytes, t);
+    ((void (*)(void *, tv_int, tv_arr, tv_str, tv_int))s->cb.fn)(s->cb.env, kind, bytes, t, 0);
     s->busy--;
     tv_arr_release(bytes, &tv_type_u8);
     tv_str_release(t);
@@ -266,7 +275,8 @@ static void tv_ns_close(tv_ns *s, const char *err) {
         s->refd = false;
         tv_io_refs--;
     }
-    if (connecting && err) tv_ns_emit(s, TV_NE_CONNECT_ERROR, NULL, 0, err);
+    if (s->ws) tv_ws_socket_closed(s, err);
+    else if (connecting && err) tv_ns_emit(s, TV_NE_CONNECT_ERROR, NULL, 0, err);
     else if (was_open || err) tv_ns_emit(s, TV_NE_CLOSE, NULL, 0, err);
     if (!s->busy && !s->dirty) tv_ns_free(s);
 }
@@ -306,6 +316,10 @@ static void tv_ns_read(tv_ns *s) {
                 return;
             }
         }
+        if (r == 0 && s->ws) {
+            tv_ns_close(s, NULL);
+            return;
+        }
         if (r == 0) {
             s->peer_ended = true;
             tv_ns_emit(s, TV_NE_END, NULL, 0, NULL);
@@ -318,7 +332,8 @@ static void tv_ns_read(tv_ns *s) {
             return;
         }
         s->last_active = tv_loop_ms;
-        tv_ns_emit(s, TV_NE_DATA, tv_net_buf, (size_t)r, NULL);
+        if (s->ws) tv_ws_input(s, tv_net_buf, (size_t)r);
+        else tv_ns_emit(s, TV_NE_DATA, tv_net_buf, (size_t)r, NULL);
         if ((size_t)r < sizeof tv_net_buf && !(s->tls && tv_tls_impl->pending(s->tls))) return;
     }
 }
@@ -326,11 +341,15 @@ static void tv_ns_read(tv_ns *s) {
 /* ---- connecting */
 
 static void tv_ns_opened(tv_ns *s) {
+    /* a WebSocket client sends its upgrade request and opens on the 101 */
+    if (s->ws && tv_ws_socket_opened(s)) return;
     s->state = TV_NS_OPEN;
     s->last_active = tv_loop_update();
     tv_ns_watch(s, true, s->out_len > s->out_off);
     tv_ns_emit(s, TV_NE_OPEN, NULL, 0, NULL);
     if (s->state == TV_NS_OPEN && s->out_len > s->out_off) tv_ns_mark(s);
+    /* a WebSocket upgraded with frames right behind its request */
+    if (s->state == TV_NS_OPEN && s->ws && tv_ws_pending_input(s)) tv_ws_input(s, NULL, 0);
 }
 
 static void tv_ns_handshake(tv_ns *s) {
