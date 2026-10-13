@@ -663,6 +663,8 @@ extern char **tv_argv;
  * "ENOENT: no such file or directory, open 'x'"). */
 tv_str tv_native_takeError(void);
 tv_str tv_native_readFile(tv_str path);
+tv_str tv_native_statInfo(tv_str path);
+void tv_native_access(tv_str path, tv_int mode);
 void tv_native_writeFile(tv_str path, tv_str data, bool append);
 bool tv_native_exists(tv_str path);
 struct tv_arr tv_native_readDir(tv_str path);          /* names, sorted */
@@ -672,6 +674,7 @@ void tv_native_rm(tv_str path, bool recursive, bool force);
 tv_str tv_native_cwd(void);
 struct tv_arr tv_process_argv(void);                   /* ["tov-binary-path", "program", args...] like Node's */
 bool tv_process_env(tv_str name, tv_str *out);
+tv_int tv_process_pid(void);
 _Noreturn void tv_process_exit(tv_int code);
 double tv_date_now(void);                              /* ms since the epoch */
 double tv_performance_now(void);                       /* ms since the program started */

@@ -19,6 +19,8 @@ pub(super) fn native_sig(types: &mut Types, name: &str) -> Option<(Vec<TyId>, Ty
     let str_arr = types.array(STR);
     Some(match name {
         "takeError" | "cwd" => (vec![], STR),
+        "statInfo" => (vec![STR], STR),
+        "access" => (vec![STR, INT], VOID),
         "readFile" => (vec![STR], STR),
         "writeFile" => (vec![STR, STR, BOOL], VOID),
         "exists" => (vec![STR], BOOL),
@@ -425,7 +427,8 @@ impl<'a> Checker<'a> {
         if ns == "process" {
             match n.as_str() {
                 "argv" => return self.types.array(STR),
-                "platform" => return STR,
+                "platform" | "arch" => return STR,
+                "pid" => return INT,
                 // `process.env.NAME`, `process.stdout.write(s)`: namespaces of their own.
                 "env" | "stdout" | "stderr" => return self.types.intern(Ty::BuiltinNs(name)),
                 _ => {}
@@ -433,7 +436,7 @@ impl<'a> Checker<'a> {
         }
         let known: Vec<&str> = match ns {
             "Math" => MATH_CONSTS.iter().copied().chain(MATH_F64_FNS.iter().map(|f| f.0)).chain(MATH_INT_FNS.iter().copied()).chain(["abs", "min", "max"]).collect(),
-            "process" => vec!["argv", "env", "exit", "cwd", "platform", "stdout", "stderr"],
+            "process" => vec!["argv", "env", "exit", "cwd", "platform", "arch", "pid", "stdout", "stderr"],
             "Date" | "performance" => vec!["now"],
             "JSON" => vec!["stringify", "parse"],
             "Promise" => vec!["resolve", "reject", "all", "race"],
@@ -594,7 +597,7 @@ impl<'a> Checker<'a> {
                     "cwd" => (vec![], STR),
                     _ => {
                         self.check_args_loose(args);
-                        self.unknown_ns_member(ns, name, &["argv", "env", "exit", "cwd", "platform", "stdout", "stderr"], name_span);
+                        self.unknown_ns_member(ns, name, &["argv", "env", "exit", "cwd", "platform", "arch", "pid", "stdout", "stderr"], name_span);
                         return ERROR;
                     }
                 };

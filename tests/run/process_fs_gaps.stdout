@@ -1,0 +1,4 @@
+arch: true
+pid: true
+file: true dir: false size: true mtime: true
+access: ok
