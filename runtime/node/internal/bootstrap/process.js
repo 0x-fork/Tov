@@ -255,6 +255,16 @@ native.setFatalHandler?.((err) => {
   return true;
 });
 
+// a rejection nobody handled: to 'unhandledRejection' listeners if there are any, else an uncaught
+// exception (Node.js's default, --unhandled-rejections=throw)
+native.setRejectionHandler?.((promise, reason) => {
+  if (emitter && process.listenerCount('unhandledRejection') > 0) {
+    process.emit('unhandledRejection', reason, promise);
+    return;
+  }
+  native.fatal(reason);
+});
+
 // for the host: whether anything can be listening (to 'exit' and 'beforeExit')
 Object.defineProperty(process, '_tovEmitter', { __proto__: null, get: () => emitter, enumerable: false, configurable: true });
 

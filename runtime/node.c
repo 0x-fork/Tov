@@ -481,6 +481,18 @@ NATIVE(n_set_fatal_handler) {
     return undef(ctx);
 }
 
+/* (JavaScriptCore's private API, exported by both its builds Tov links: fn(promise, reason) runs
+ * for a rejection still unhandled once the microtasks have run) */
+JS_EXPORT void JSGlobalContextSetUnhandledRejectionCallback(JSGlobalContextRef ctx, JSObjectRef function, JSValueRef *exception);
+
+/* setRejectionHandler(fn): fn(promise, reason) for each rejection nobody handled */
+NATIVE(n_set_rejection_handler) {
+    UNUSED;
+    if (n < 1 || !JSValueIsObject(ctx, a[0])) return undef(ctx);
+    JSGlobalContextSetUnhandledRejectionCallback(JSContextGetGlobalContext(ctx), (JSObjectRef)a[0], exc);
+    return undef(ctx);
+}
+
 static void tv_node_report(JSValueRef exc);
 
 NATIVE(n_fatal) {
@@ -4008,6 +4020,7 @@ void tv_node_install(JSContextRef ctx, JSObjectRef native) {
     tv_node_vm_install(ctx, native);
     tv_js_def(ctx, native, "spawnSync", n_spawn_sync);
     tv_js_def(ctx, native, "setFatalHandler", n_set_fatal_handler);
+    tv_js_def(ctx, native, "setRejectionHandler", n_set_rejection_handler);
     tv_js_def(ctx, native, "fatal", n_fatal);
     tv_node_streams_install(ctx, native);
     tv_node_fetch_install(ctx, native);
