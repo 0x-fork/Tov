@@ -5,6 +5,9 @@
  *
  * Errors: a failing call throws what Node.js throws, an Error with errno (negative), code,
  * syscall and path, and the message libuv gives ("ENOENT: no such file or directory, open 'x'"). */
+#ifndef _GNU_SOURCE
+#define _GNU_SOURCE 1   /* (glibc's POSIX_SPAWN_SETSID, for spawn's detached: without it a detached child stays in our process group) */
+#endif
 
 #include "js.h"
 

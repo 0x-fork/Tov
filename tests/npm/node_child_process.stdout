@@ -19,3 +19,4 @@ spawn error ENOENT spawn does-not-exist-tov does-not-exist-tov
 big output 300000
 big input 500000
 inherit 0
+detached group null SIGTERM
