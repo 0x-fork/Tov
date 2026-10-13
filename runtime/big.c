@@ -565,9 +565,7 @@ static void tv_mag_divrem(tv_limb *q, tv_limb *r, const tv_limb *a, uint32_t n, 
 #define TV_UN(u, k) (s ? (((u)[k] << s) | ((k) > 0 ? (u)[(k) - 1] >> (64 - s) : 0)) : (u)[k])
     if (!r && n == m) {
         /* the quotient is one limb: estimate it, then check it against a without changing a */
-        tv_limb top[3] = { a[n - 1] >> (s ? 64 - s : 64) , 0, 0 };
-        if (!s) top[0] = 0;
-        tv_limb u2 = top[0];
+        tv_limb u2 = s ? a[n - 1] >> (64 - s) : 0;
         tv_limb u1 = s ? (a[n - 1] << s) | (a[n - 2] >> (64 - s)) : a[n - 1];
         tv_limb u0 = s ? (a[n - 2] << s) | (n >= 3 ? a[n - 3] >> (64 - s) : 0) : a[n - 2];
         tv_limb qhat, rhat;
