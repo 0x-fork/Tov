@@ -71,7 +71,7 @@ Status tags: **[M0]** checked today · **[Mn]** planned for milestone n.
 - Methods in interfaces (`area(): f64`) are function-typed members: a class satisfies them with methods, a record with fields holding functions.
 
 ### Generics
-- `function f<T>(x: T): T`, `function g<T extends I>(...)`, `type Box<T> = { value: T }`, generic classes, and generic methods (`static of<T>(x: T)`, `json<T>(): Promise<T, SyntaxError>`; a generic method can't be overridden yet). Type arguments are inferred from arguments and from the expected type (`const t: Todo = try await req.json()`). Bodies are checked once, at definition: a `T` can only be used through its bound.
+- `function f<T>(x: T): T`, `function g<T extends I>(...)`, `type Box<T> = { value: T }`, defaults (`<T = undefined>`: the type when nothing fixes it, and what `Box` means without arguments), generic classes, and generic methods (`static of<T>(x: T)`, `json<T>(): Promise<T, SyntaxError>`; a generic method can't be overridden yet). Type arguments are inferred from arguments and from the expected type (`const t: Todo = try await req.json()`); closures are checked after everything else, so `connect({ data: { n: 1 }, open: (s) => s.data.n })` infers `T` from `data` and then types `s`. Bodies are checked once, at definition: a `T` can only be used through its bound.
 
 ## 4. Declarations and statements **[M0]**
 - `function`, `const`, `let`, `type`, `interface`, arrow functions `(x: T) => expr` / `=> { ... }`, and methods in object literals (`{ fetch(req) { ... } }`, a field holding an arrow function).

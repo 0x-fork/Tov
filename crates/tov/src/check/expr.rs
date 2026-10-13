@@ -2627,10 +2627,30 @@ impl<'a> Checker<'a> {
         self.infer_free = cs.tparams.iter().copied().filter(|p| !map.contains_key(p)).collect();
         let param_for = |i: usize| -> Option<FnParam> { cs.params.get(i).cloned().or_else(|| cs.rest.map(|ty| FnParam { ty, inout: false, optional: false })) };
         let mut arg_tys: Vec<Option<TyId>> = vec![None; args.len()];
-        // Pass 1: non-closure arguments drive inference; pass 2: closures get the inferred parameter types.
+        // Pass 1: non-closure arguments drive inference; pass 2: closures get the inferred parameter
+        // types. An object literal holding closures (`{ port, data, socket: { open(s) {...} } }`)
+        // is both: its other fields infer in pass 1, the whole object is checked in pass 2.
         for pass in 0..2 {
+            if pass == 1 {
+                // what the arguments left open takes its default (`<T = undefined>`)
+                for &p in &cs.tparams {
+                    if !map.contains_key(&p)
+                        && let Some(d) = self.gparam(p).default
+                    {
+                        map.insert(p, d);
+                    }
+                }
+            }
             for (i, a) in args.iter().enumerate() {
-                let is_arrow = matches!(self.ast().expr(a.expr).kind, ExprKind::Arrow(_));
+                let with_closures = matches!(self.ast().expr(a.expr).kind, ExprKind::Object(_)) && self.has_closure(a.expr) && !self.infer_free.is_empty();
+                let is_arrow = matches!(self.ast().expr(a.expr).kind, ExprKind::Arrow(_)) || with_closures;
+                if pass == 0 && with_closures {
+                    if let Some(p) = param_for(i) {
+                        let free = self.infer_free.clone();
+                        self.infer_from_object(a.expr, p.ty, &free, &mut map);
+                    }
+                    continue;
+                }
                 if (pass == 0) == is_arrow {
                     continue;
                 }
@@ -2731,6 +2751,39 @@ impl<'a> Checker<'a> {
             }
         }
         ret
+    }
+
+    /// Does an object literal hold a closure (at any depth of object literals)?
+    fn has_closure(&self, e: ExprId) -> bool {
+        match &self.ast().expr(e).kind {
+            ExprKind::Arrow(_) => true,
+            ExprKind::Object(fs) => fs.iter().any(|f| self.has_closure(f.value)),
+            _ => false,
+        }
+    }
+
+    /// Infers type parameters from an object literal's fields that aren't closures, against the
+    /// record type the parameter expects (closures are checked later, with what this finds).
+    fn infer_from_object(&mut self, e: ExprId, pattern: TyId, free: &[u32], map: &mut HashMap<u32, TyId>) {
+        let ExprKind::Object(fields) = &self.ast().expr(e).kind else { return };
+        let pat = self.types.without_undefined(pattern);
+        let pat = self.unfold(pat);
+        let Ty::Record(fs) = *self.types.get(pat) else { return };
+        let fs = self.types.fields(fs).to_vec();
+        for f in fields {
+            let Some(ft) = fs.iter().find(|x| x.name == f.name).map(|x| x.ty) else { continue };
+            match self.ast().expr(f.value).kind {
+                ExprKind::Arrow(_) => {}
+                ExprKind::Object(_) if self.has_closure(f.value) => self.infer_from_object(f.value, ft, free, map),
+                _ => {
+                    let open: Vec<u32> = free.iter().copied().filter(|p| !map.contains_key(p)).collect();
+                    let pty = self.types.subst(ft, map);
+                    let hint = if self.types.mentions(pty, &open) { None } else { Some(pty) };
+                    let t = self.expr(f.value, hint);
+                    self.unify(ft, t, free, map);
+                }
+            }
+        }
     }
 
     pub(super) fn unify(&mut self, pattern: TyId, actual: TyId, free: &[u32], map: &mut HashMap<u32, TyId>) {

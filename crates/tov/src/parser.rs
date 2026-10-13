@@ -725,13 +725,8 @@ impl<'a> Parser<'a> {
         while !self.at(Tok::Gt) && !self.at(Tok::Eof) {
             let Some((name, span)) = self.ident("a type parameter name") else { break };
             let bound = if self.eat(Tok::Extends) { Some(self.ty()) } else { None };
-            if self.at(Tok::Eq) {
-                let s = self.cur_span();
-                self.err("U0005", s, "default type arguments are not supported yet");
-                self.bump();
-                self.ty();
-            }
-            out.push(TypeParam { name, span, bound });
+            let default = if self.eat(Tok::Eq) { Some(self.ty()) } else { None };
+            out.push(TypeParam { name, span, bound, default });
             if !self.eat(Tok::Comma) {
                 break;
             }

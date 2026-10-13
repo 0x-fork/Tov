@@ -1,0 +1,18 @@
+type Opts<T> = { port: int, data?: T, on?: (s: Sock<T>) => void }
+class Sock<T = undefined> {
+  data: T | undefined
+  constructor(d: T | undefined) { this.data = d }
+}
+function connect<T = undefined>(o: Opts<T>): Sock<T> {
+  const s = new Sock<T>(o.data)
+  const f = o.on
+  if (f !== undefined) f(s)
+  return s
+}
+const a = connect({ port: 1, data: { n: 5 }, on: (s) => console.log(s.data) })
+const b = connect({ port: 2, on: (s) => console.log("no data", s.data) })
+console.log(a.data, b.data)
+function show(s: Sock) {
+  console.log(s.data)
+}
+show(b)

@@ -84,6 +84,8 @@ struct IfaceInfo {
 pub(crate) struct GParam {
     pub(crate) name: Sym,
     pub(crate) bound: Option<TyId>,
+    /// `<T = undefined>`: used when inference leaves it open.
+    pub(crate) default: Option<TyId>,
 }
 
 #[derive(Clone)]
@@ -554,7 +556,7 @@ impl<'a> Checker<'a> {
     }
 
     fn new_gparam(&mut self, name: Sym, bound: Option<TyId>) -> u32 {
-        self.gparams.push(GParam { name, bound });
+        self.gparams.push(GParam { name, bound, default: None });
         self.param_names.push(name);
         (self.gparams_base.len() + self.gparams.len() - 1) as u32
     }
@@ -1006,6 +1008,11 @@ impl<'a> Checker<'a> {
                         let bound = c.resolve_type(b, &tscope);
                         let base = c.gparams_base.len();
                         c.gparams[id as usize - base].bound = Some(bound);
+                    }
+                    if let Some(d) = tp.default {
+                        let default = c.resolve_type(d, &tscope);
+                        let base = c.gparams_base.len();
+                        c.gparams[id as usize - base].default = Some(default);
                     }
                 }
                 let mut params = Vec::new();
@@ -1533,6 +1540,17 @@ impl<'a> Checker<'a> {
                     ItemKind::TypeAlias { tparams, .. } => tparams.len(),
                     _ => 0,
                 };
+                let mut targs = targs;
+                if targs.len() < arity {
+                    let ItemKind::TypeAlias { tparams, .. } = &self.modules[am as usize].ast.items[ai as usize].kind else { unreachable!() };
+                    let defaults: Vec<Option<crate::ast::TypeId>> = tparams[targs.len()..].iter().map(|tp| tp.default).collect();
+                    if defaults.iter().all(|d| d.is_some()) {
+                        for d in defaults.into_iter().flatten() {
+                            let t = self.with_module(am, |c| c.resolve_type(d, &[]));
+                            targs.push(t);
+                        }
+                    }
+                }
                 if arity != targs.len() {
                     self.report(Diagnostic::new(
                         "T0010",
@@ -1571,6 +1589,17 @@ impl<'a> Checker<'a> {
             }
             Some(Decl::Class(c)) => {
                 let arity = self.class_decl(c).tparams.len();
+                let mut targs = targs;
+                if targs.len() < arity {
+                    let cm = self.classes[c as usize].module;
+                    let defaults: Vec<Option<crate::ast::TypeId>> = self.class_decl(c).tparams[targs.len()..].iter().map(|tp| tp.default).collect();
+                    if defaults.iter().all(|d| d.is_some()) {
+                        for d in defaults.into_iter().flatten() {
+                            let t = self.with_module(cm, |c| c.resolve_type(d, &[]));
+                            targs.push(t);
+                        }
+                    }
+                }
                 if arity != targs.len() {
                     self.report(Diagnostic::new("T0010", span, format!("`{text}` takes {arity} type argument{}, found {}", if arity == 1 { "" } else { "s" }, targs.len())));
                     return ERROR;

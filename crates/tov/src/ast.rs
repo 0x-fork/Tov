@@ -264,6 +264,8 @@ pub struct TypeParam {
     pub name: Sym,
     pub span: Span,
     pub bound: Option<TypeId>,
+    /// `<T = undefined>`: the type when nothing else fixes it.
+    pub default: Option<TypeId>,
 }
 
 pub struct FnDecl {
