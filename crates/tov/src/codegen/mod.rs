@@ -515,11 +515,18 @@ impl<'c, 'a> Gen<'c, 'a> {
         } else {
             main_body = main_body.replace(ASYNC_RUN, "");
         }
+        // An npm program's end goes through Node.js's: 'exit' listeners, and process.exitCode
+        // (runtime/node.c's tv_node_exit_code), with the status `main` left as the default.
+        let (body_name, exit_hook) = if self.js.used {
+            ("tvg_program_body", "static int tvg_program_body(void);\nstatic int tvg_program(void) { return tv_node_exit_code(tvg_program_body()); }\n")
+        } else {
+            ("tvg_program", "")
+        };
         // The program runs on a thread with a 1 GiB stack (reserved, committed as used): deep
         // recursion — including freeing long linked structures — has room without per-call checks.
         let _ = writeln!(
             self.funcs,
-            "static int tvg_argc; static char **tvg_argv; static int tvg_exit;\nstatic int tvg_program(void) {{\n    tv_init(tvg_argc, tvg_argv);\n{init}{main_body}}}\nstatic void *tvg_thread(void *arg) {{ (void)arg; tvg_exit = tvg_program(); return NULL; }}\nint main(int argc, char **argv) {{\n    tvg_argc = argc; tvg_argv = argv;\n#if defined(__APPLE__) && defined(TVG_MAIN_STACK)\n    /* Linked with a 512 MiB main stack (build.rs): run right here. */\n    return tvg_program();\n#elif defined(__APPLE__)\n    if (pthread_get_stacksize_np(pthread_self()) >= ((size_t)256 << 20)) return tvg_program();\n#endif\n    pthread_attr_t attr; pthread_t th;\n    if (pthread_attr_init(&attr) == 0 && pthread_attr_setstacksize(&attr, (size_t)1 << 30) == 0 && TVG_THREAD_QOS(&attr) && pthread_create(&th, &attr, tvg_thread, NULL) == 0) {{\n        pthread_join(th, NULL);\n        return tvg_exit;\n    }}\n    return tvg_program();\n}}"
+            "static int tvg_argc; static char **tvg_argv; static int tvg_exit;\n{exit_hook}static int {body_name}(void) {{\n    tv_init(tvg_argc, tvg_argv);\n{init}{main_body}}}\nstatic void *tvg_thread(void *arg) {{ (void)arg; tvg_exit = tvg_program(); return NULL; }}\nint main(int argc, char **argv) {{\n    tvg_argc = argc; tvg_argv = argv;\n#if defined(__APPLE__) && defined(TVG_MAIN_STACK)\n    /* Linked with a 512 MiB main stack (build.rs): run right here. */\n    return tvg_program();\n#elif defined(__APPLE__)\n    if (pthread_get_stacksize_np(pthread_self()) >= ((size_t)256 << 20)) return tvg_program();\n#endif\n    pthread_attr_t attr; pthread_t th;\n    if (pthread_attr_init(&attr) == 0 && pthread_attr_setstacksize(&attr, (size_t)1 << 30) == 0 && TVG_THREAD_QOS(&attr) && pthread_create(&th, &attr, tvg_thread, NULL) == 0) {{\n        pthread_join(th, NULL);\n        return tvg_exit;\n    }}\n    return tvg_program();\n}}"
         );
     }
 
