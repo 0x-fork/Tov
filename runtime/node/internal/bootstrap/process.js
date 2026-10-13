@@ -255,6 +255,21 @@ native.setFatalHandler?.((err) => {
   return true;
 });
 
+// the program's natural end: process.exitCode sets the status unless main returned one, and
+// 'exit' listeners run (and may still change process.exitCode), as in Node.js
+native.setExitHandler?.((code) => {
+  if (code === 0 && process.exitCode !== undefined) code = process.exitCode;
+  if (!process._exiting) {
+    process._exiting = true;
+    if (emitter) {
+      process.exitCode = code;
+      process.emit('exit', code);
+      code = process.exitCode;
+    }
+  }
+  return Number(code) | 0;
+});
+
 // for the host: whether anything can be listening (to 'exit' and 'beforeExit')
 Object.defineProperty(process, '_tovEmitter', { __proto__: null, get: () => emitter, enumerable: false, configurable: true });
 

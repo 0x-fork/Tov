@@ -484,7 +484,28 @@ NATIVE(n_set_fatal_handler) {
     return undef(ctx);
 }
 
+/* setExitHandler(fn): fn(code) -> the status, at the program's natural end */
+static JSObjectRef tv_node_exit_handler;
+
+NATIVE(n_set_exit_handler) {
+    UNUSED;
+    if (tv_node_exit_handler) JSValueUnprotect(ctx, tv_node_exit_handler);
+    tv_node_exit_handler = n > 0 && JSValueIsObject(ctx, a[0]) ? (JSObjectRef)a[0] : NULL;
+    if (tv_node_exit_handler) JSValueProtect(ctx, tv_node_exit_handler);
+    return undef(ctx);
+}
+
 static void tv_node_report(JSValueRef exc);
+
+int tv_node_exit_code(int code) {
+    if (!tv_js_ctx || !tv_node_exit_handler) return code;
+    JSValueRef arg = JSValueMakeNumber(tv_js_ctx, code), exc = NULL;
+    JSValueRef r = JSObjectCallAsFunction(tv_js_ctx, tv_node_exit_handler, NULL, 1, &arg, &exc);
+    if (exc) tv_node_report(exc); /* (a throwing 'exit' listener: printed, status 1, as in Node.js) */
+    tv_out_flush();
+    double d = r ? JSValueToNumber(tv_js_ctx, r, NULL) : code;
+    return d == d ? (int)d : code;
+}
 
 NATIVE(n_fatal) {
     UNUSED;
@@ -4011,6 +4032,7 @@ void tv_node_install(JSContextRef ctx, JSObjectRef native) {
     tv_node_vm_install(ctx, native);
     tv_js_def(ctx, native, "spawnSync", n_spawn_sync);
     tv_js_def(ctx, native, "setFatalHandler", n_set_fatal_handler);
+    tv_js_def(ctx, native, "setExitHandler", n_set_exit_handler);
     tv_js_def(ctx, native, "fatal", n_fatal);
     tv_node_streams_install(ctx, native);
     tv_node_fetch_install(ctx, native);

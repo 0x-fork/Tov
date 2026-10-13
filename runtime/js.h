@@ -50,6 +50,9 @@ static inline JSContextRef tv_js(void) { return tv_js_ctx ? tv_js_ctx : tv_js_st
 /* Filled by runtime/node.c: the natives Node.js's built-ins run on (process, timers, fs, ...),
  * as functions on `native` (globalThis.__tov_native). */
 void tv_node_install(JSContextRef ctx, JSObjectRef native);
+/* the program's status at its natural end: Node.js's process.exitCode and 'exit' listeners have
+ * their say (runtime/node.c) */
+int tv_node_exit_code(int code);
 /* obj[name] = a function calling fn. */
 void tv_js_def(JSContextRef ctx, JSObjectRef obj, const char *name, JSObjectCallAsFunctionCallback fn);
 
