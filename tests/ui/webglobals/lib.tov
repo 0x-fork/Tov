@@ -1,0 +1,10 @@
+// Web globals (fetch, URL, ...) bind in imported modules too, not only files
+// that mention them in the program's entry roots.
+export function host(): string throws TypeError {
+  const u = try new URL("https://example.com")
+  return u.host
+}
+export async function get(): Promise<string> throws Error {
+  const res = try await fetch("https://example.com")
+  return try await res.text()
+}

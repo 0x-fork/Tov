@@ -1,0 +1,3 @@
+import { host } from "./lib"
+
+console.log(try host())
