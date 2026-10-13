@@ -25,6 +25,7 @@ Status tags: **[M0]** checked today · **[Mn]** planned for milestone n.
 | `i8 i16 i32 u8 u16 u32 u64` | sized integers |
 | `bool` (alias `boolean`), `string` | UTF-8 immutable string |
 | `bigint` | arbitrary-precision integer, as in TS (`123n`) |
+| `decimal` | exact base-10 number, 34 significant digits (Tov's own: `19.99m`, or `19.99` where a `decimal` is expected) |
 | `undefined`, `void`, `never`, `unknown` | as TS |
 | `T[]` / `Array<T>` | growable array (value) |
 | `Map<K, V>`, `Set<T>` | hash map/set (value) |
@@ -47,6 +48,12 @@ Status tags: **[M0]** checked today · **[Mn]** planned for milestone n.
 - `bigint` is JavaScript's BigInt: `123n`, `0xffn`, `+ - * / % **` (`/` truncates), `& | ^ ~ << >>` (two's complement), `===`, `<` and friends, `++`/`--`, `typeof x === "bigint"`. `BigInt(x)` converts an integer (exactly), a string (`try`: `SyntaxError` unless it's one) or a number (`try`: `RangeError` unless it's an integer); `Number(x)` is the nearest number; `int(x)`, `u64(x)`, `i32(x)`... trap if it doesn't fit. `x.toString(radix?)`, `BigInt.asIntN(bits, x)`, `BigInt.asUintN(bits, x)`.
 - A `bigint` never mixes with numbers: `x + 1` is an error with the fix `x + 1n` (JavaScript throws a TypeError); comparing with `<` against an integer works, as in JS. `>>>` is an error (a bigint has no width). Dividing by `0n` and a negative `**` exponent trap. `JSON.stringify` rejects bigints, as JavaScript does.
 - Values below 2^62 in magnitude live in one word (no allocation); larger ones are reference-counted, and `x += y`, `x *= y`, `x = (x + a * b) * c` update `x` in place when nothing else holds it.
+
+### decimal
+- `decimal` holds money and other base-10 quantities exactly: `0.1m + 0.2m === 0.3m`. A literal is a decimal with an `m` suffix, or wherever a `decimal` is expected (`const price: decimal = 19.99`, `total * 0.0825`); an `int` converts to one implicitly (exactly), a float never does (`decimal(x)` converts a number through its shortest form, so `decimal(0.1)` is `0.1`; NaN and the infinities trap). `decimal("12.50")` parses (`try`: `SyntaxError`, or `RangeError` past 34 digits before the point); `Number(d)` is the nearest number, `int(d)` traps unless it's a whole number that fits.
+- `+ - *` are exact and keep every digit: the scale of a sum is the larger of the two (`1.10 + 2.205` is `3.305`), of a product their sum (`1.10 * 3` is `3.30`). Past 34 digits a result rounds half to even; 34 digits before the point traps. `/` gives 34 significant digits, half to even (`1m / 3m` is `0.3333333333333333333333333333333333`); an exact quotient keeps the dividend's scale less the divisor's (`10.00m / 4` is `2.50`). `%` is exact. `===` and `<` compare values (`1.10m === 1.1m`); `toString()` keeps the scale (`"1.10"`).
+- `d.round(places?, mode?)` (modes as the TC39 Decimal proposal names them: `"halfEven"`, the default, `"halfExpand"`, `"halfTrunc"`, `"halfCeil"`, `"halfFloor"`, `"ceil"`, `"floor"`, `"trunc"`, `"expand"`), `floor()`, `ceil()`, `trunc()`, `abs()`, `toFixed(digits)` (half away from zero, as Number's). `JSON.stringify` writes a decimal as a number with its digits (`3.10`), and `JSON.parse` reads a number into a decimal exactly.
+- No `**`, bitwise operators or `Math` functions: decimals are for exact arithmetic.
 
 ### Records
 - `type P = { x: f64, y: f64 }` declares an exact record. Two record types with the same fields are the same type.

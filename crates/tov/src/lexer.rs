@@ -8,6 +8,8 @@ pub enum Tok {
     Float,
     /// `123n`: a bigint literal.
     BigInt,
+    /// `19.99m`: a decimal literal.
+    Decimal,
     Str,
     /// `` `text` `` with no substitutions.
     TemplateFull,
@@ -134,6 +136,7 @@ impl Tok {
             Ident => "identifier",
             Int | Float => "number",
             BigInt => "bigint",
+            Decimal => "decimal",
             Str => "string",
             TemplateFull | TemplateHead | TemplateMiddle | TemplateTail => "template literal",
             Eof => "end of file",
@@ -365,6 +368,12 @@ impl Lexer<'_> {
                     self.pos += 1;
                 }
             }
+        }
+        let hex = self.text.as_bytes()[start..self.pos].starts_with(b"0x") || self.text.as_bytes()[start..self.pos].starts_with(b"0X");
+        if self.peek(0) == b'm' && !hex && !self.peek(1).is_ascii_alphanumeric() && self.peek(1) != b'_' {
+            self.pos += 1;
+            self.push(Tok::Decimal, start, nl, 0);
+            return;
         }
         if self.peek(0) == b'n' {
             self.pos += 1;

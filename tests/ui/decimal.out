@@ -1,0 +1,33 @@
+error[T0504] decimal.tov:2:13: can't mix `decimal` and `f64` with `*`
+    2 |   const a = d * x
+  why: a `decimal` combines with decimals and integers; a float is binary, so `0.1` isn't exactly a tenth
+  fix[maybe]: convert the number (its shortest decimal form): `decimal(x)`
+  fix[maybe]: convert the decimal: `Number(d)`
+
+error[T0504] decimal.tov:3:13: can't mix `decimal` and `bigint` with `+`
+    3 |   const c = d + b
+  why: a `decimal` combines with decimals and integers; a float is binary, so `0.1` isn't exactly a tenth
+  fix[maybe]: convert: `decimal(b)`
+
+error[T0501] decimal.tov:4:13: `**` doesn't apply to `decimal`
+    4 |   const e = d ** 2
+  instead: multiply, or convert: `decimal(Number(x) ** n)` (inexact)
+
+error[T0001] decimal.tov:5:18: expected `f64`, found `decimal`
+    5 |   const g: f64 = d
+  why: a `decimal` never converts to a number implicitly
+  fix[maybe]: convert: `Number(d)`
+
+error[T0001] decimal.tov:6:22: expected `decimal`, found `f64`
+    6 |   const h: decimal = x
+  why: a float is binary: `0.1` isn't exactly a tenth, so it never becomes a `decimal` implicitly
+  fix[maybe]: convert (its shortest decimal form): `decimal(x)`
+
+error[T0001] decimal.tov:7:24: expected `"halfEven" | "halfExpand" | "halfTrunc" | "halfCeil" | "halfFloor" | "ceil" | "floor" | "trunc" | "expand" | undefined`, found `"halfUp"`
+    7 |   const i = d.round(2, "halfUp")
+  context: argument `mode` of `decimal.round`
+
+error[T0020] decimal.tov:8:13: 12345678901234567890123456789012345.5 doesn't fit in `decimal` (34 significant digits, at most 34 after the point)
+    8 |   const j = 12345678901234567890123456789012345.5m
+
+7 error(s)

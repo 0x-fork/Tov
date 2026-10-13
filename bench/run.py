@@ -194,7 +194,22 @@ def build_cargo(crate: Path, out: Path, a, checked: bool) -> Build:
     return Build([str(out)], secs, size, stripped_size(out))
 
 
+def install_packages(src: Path) -> None:
+    """A benchmark whose TypeScript imports npm packages (big.js) has a package.json beside it:
+    its packages are installed once, before (and outside) the timing."""
+    d = src.parent
+    if not (d / "package.json").exists() or (d / "node_modules").exists():
+        return
+    tool = which("bun") or which("npm")
+    if tool is None:
+        raise Skip("skipped", "needs npm packages and there's no `bun` or `npm` to install them")
+    r = subprocess.run([tool, "install"], cwd=d, capture_output=True, text=True)
+    if r.returncode != 0:
+        raise Skip("build failed", f"installing npm packages: {r.stderr[-500:]}")
+
+
 def build_node(src: Path, out: Path, a) -> Build:
+    install_packages(src)
     node = which("node")
     if node is None:
         raise Skip("skipped", "no `node` on PATH")
@@ -205,6 +220,7 @@ def build_node(src: Path, out: Path, a) -> Build:
 
 
 def build_bun(src: Path, out: Path, a) -> Build:
+    install_packages(src)
     bun = which("bun")
     if bun is None:
         raise Skip("skipped", "no `bun` on PATH")

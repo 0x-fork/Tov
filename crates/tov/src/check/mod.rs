@@ -1617,6 +1617,7 @@ impl<'a> Checker<'a> {
             "u32" => Some(U32),
             "u64" => Some(U64),
             "bigint" => Some(BIGINT),
+            "decimal" => Some(DECIMAL),
             "bool" | "boolean" => Some(BOOL),
             "string" => Some(STR),
             "never" => Some(NEVER),
@@ -1733,6 +1734,7 @@ impl<'a> Checker<'a> {
         let (s, d) = (*self.types.get(src), *self.types.get(dst));
         match (&s, &d) {
             (Ty::Int, Ty::F64 | Ty::F32) if top => return true,
+            (Ty::Int | Ty::I8 | Ty::I16 | Ty::I32 | Ty::U8 | Ty::U16 | Ty::U32 | Ty::U64, Ty::Decimal) if top => return true,
             (Ty::StrLit(_), Ty::Str) => return true,
             (Ty::Undefined, Ty::Void) => return true,
             _ => {}
@@ -1853,7 +1855,12 @@ impl<'a> Checker<'a> {
         }
         let text = self.src(span).to_string();
         let exp_no_undef = self.types.without_undefined(expected);
-        if found == BIGINT && self.types.is_numeric(exp_no_undef) {
+        if found == DECIMAL && self.types.is_numeric(exp_no_undef) {
+            let conv = if self.types.is_float(exp_no_undef) { "Number".to_string() } else { self.show(exp_no_undef) };
+            d = d.note("why", "a `decimal` never converts to a number implicitly").fix(Applicability::Maybe, format!("convert: `{conv}({text})`"), span, format!("{conv}({text})"));
+        } else if exp_no_undef == DECIMAL && self.types.is_float(found) {
+            d = d.note("why", "a float is binary: `0.1` isn't exactly a tenth, so it never becomes a `decimal` implicitly").fix(Applicability::Maybe, format!("convert (its shortest decimal form): `decimal({text})`"), span, format!("decimal({text})"));
+        } else if found == BIGINT && self.types.is_numeric(exp_no_undef) {
             let conv = if self.types.is_float(exp_no_undef) { "Number".to_string() } else { self.show(exp_no_undef) };
             let how = if self.types.is_float(exp_no_undef) { "the nearest number" } else { "traps if out of range" };
             d = d.note("why", "a `bigint` never converts to a number implicitly").fix(Applicability::Maybe, format!("convert ({how}): `{conv}({text})`"), span, format!("{conv}({text})"));

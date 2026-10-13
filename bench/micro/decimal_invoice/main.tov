@@ -1,0 +1,41 @@
+// Invoices in exact decimals: 200,000 invoices of 1 to 9 lines (price × quantity), each with a
+// lump-sum discount allocated across its lines in proportion to their totals (a division per
+// line, rounded to cents half to even), then 8.25% tax per line, rounded to cents.
+const INVOICES = 200000
+
+let seed = 7
+function next(): int {
+  seed = (seed * 48271) % 2147483647
+  return seed
+}
+
+let grand: decimal = 0
+let taxes: decimal = 0
+let discounts: decimal = 0
+for (let inv = 0; inv < INVOICES; inv++) {
+  const lines = 1 + Math.trunc(next() / 1024) % 9
+  const totals: decimal[] = []
+  let sum: decimal = 0
+  for (let l = 0; l < lines; l++) {
+    const price = decimal(Math.trunc(next() / 1024) % 100000) / 100
+    const qty = 1 + Math.trunc(next() / 1024) % 12
+    const total = price * qty
+    totals.push(total)
+    sum += total
+  }
+  if (sum === 0) {
+    continue
+  }
+  const discount = decimal(Math.trunc(next() / 1024) % 5000) / 100
+  for (let l = 0; l < lines; l++) {
+    const share = (discount * totals[l]! / sum).round(2)
+    const net = totals[l]! - share
+    const tax = (net * 0.0825).round(2)
+    grand += net + tax
+    taxes += tax
+    discounts += share
+  }
+}
+console.log(`grand total ${grand}`)
+console.log(`tax ${taxes}`)
+console.log(`discounts ${discounts}`)

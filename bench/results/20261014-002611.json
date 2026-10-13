@@ -1,0 +1,272 @@
+{
+  "started": "2026-10-14T00:26:11",
+  "machine": {
+    "platform": "macOS-27.0-arm64-arm-64bit-Mach-O",
+    "machine": "arm64",
+    "processor": "arm",
+    "cpu_count": 16,
+    "load_average": [
+      8.21142578125,
+      7.5927734375,
+      6.501953125
+    ]
+  },
+  "settings": {
+    "runs": 5,
+    "warmup": 0,
+    "timeout_s": 60.0,
+    "scriptc_cache": false
+  },
+  "toolchains": {
+    "c": "Apple clang version 17.0.0 (clang-1700.6.3.2)",
+    "rust": "rustc 1.98.1 (48a229cea 2026-09-01)",
+    "node": "v26.3.0",
+    "bun": "1.4.0",
+    "scriptc": "0.1.7",
+    "tov": "tov 0.0.1",
+    "rust-checked": null,
+    "tov-unchecked": null
+  },
+  "results": [
+    {
+      "bench": "decimal_invoice",
+      "lang": "rust",
+      "status": "ok",
+      "reason": "",
+      "compile_s": 1.7489770410002166,
+      "binary_bytes": 393456,
+      "stripped_bytes": 319080,
+      "source_lines": 39,
+      "times_s": [
+        0.3474666250003793,
+        0.13185829099984403,
+        0.1296092079992377,
+        0.12966487500034418,
+        0.13167220800005452
+      ],
+      "rss_bytes": [
+        2031616,
+        1982464,
+        1982464,
+        1998848,
+        1998848
+      ],
+      "median_s": 0.13167220800005452,
+      "min_s": 0.1296092079992377,
+      "peak_rss_bytes": 2031616,
+      "output_matches": true,
+      "stdout": "grand total 3504398929.99\ntax 267078902.53\ndiscounts 4992032.98\n",
+      "note": ""
+    },
+    {
+      "bench": "decimal_invoice",
+      "lang": "node",
+      "status": "ok",
+      "reason": "",
+      "compile_s": null,
+      "binary_bytes": null,
+      "stripped_bytes": null,
+      "source_lines": 40,
+      "times_s": [
+        10.844403292000607,
+        9.095222832999752,
+        8.972654041999704,
+        8.76821495799959,
+        8.693947040999774
+      ],
+      "rss_bytes": [
+        166313984,
+        164872192,
+        165888000,
+        165019648,
+        164462592
+      ],
+      "median_s": 8.972654041999704,
+      "min_s": 8.693947040999774,
+      "peak_rss_bytes": 166313984,
+      "output_matches": true,
+      "stdout": "grand total 3504398929.99\ntax 267078902.53\ndiscounts 4992032.98\n",
+      "note": ""
+    },
+    {
+      "bench": "decimal_invoice",
+      "lang": "bun",
+      "status": "ok",
+      "reason": "",
+      "compile_s": null,
+      "binary_bytes": null,
+      "stripped_bytes": null,
+      "source_lines": 40,
+      "times_s": [
+        6.556262582999807,
+        6.537205916999483,
+        6.035212624999986,
+        6.54994891700062,
+        6.623786041999665
+      ],
+      "rss_bytes": [
+        80101376,
+        80265216,
+        77447168,
+        80789504,
+        80330752
+      ],
+      "median_s": 6.54994891700062,
+      "min_s": 6.035212624999986,
+      "peak_rss_bytes": 80789504,
+      "output_matches": true,
+      "stdout": "grand total 3504398929.99\ntax 267078902.53\ndiscounts 4992032.98\n",
+      "note": ""
+    },
+    {
+      "bench": "decimal_invoice",
+      "lang": "tov",
+      "status": "ok",
+      "reason": "",
+      "compile_s": 0.07157887500034121,
+      "binary_bytes": 51016,
+      "stripped_bytes": 51000,
+      "source_lines": 36,
+      "times_s": [
+        0.3288642909992632,
+        0.05090129199925286,
+        0.051664667000295594,
+        0.05237866700008453,
+        0.05179854099969816
+      ],
+      "rss_bytes": [
+        1949696,
+        1949696,
+        1949696,
+        1949696,
+        1949696
+      ],
+      "median_s": 0.05179854099969816,
+      "min_s": 0.05090129199925286,
+      "peak_rss_bytes": 1949696,
+      "output_matches": true,
+      "stdout": "grand total 3504398929.99\ntax 267078902.53\ndiscounts 4992032.98\n",
+      "note": ""
+    },
+    {
+      "bench": "decimal_ledger",
+      "lang": "rust",
+      "status": "ok",
+      "reason": "",
+      "compile_s": 1.8124146250002013,
+      "binary_bytes": 398192,
+      "stripped_bytes": 319144,
+      "source_lines": 36,
+      "times_s": [
+        0.3435734169997886,
+        0.1426185419995818,
+        0.14655199999924662,
+        0.14087854199988215,
+        0.13779470900044544
+      ],
+      "rss_bytes": [
+        1966080,
+        1966080,
+        1966080,
+        1966080,
+        1966080
+      ],
+      "median_s": 0.1426185419995818,
+      "min_s": 0.13779470900044544,
+      "peak_rss_bytes": 1966080,
+      "output_matches": true,
+      "stdout": "gross 4993920942.01\nfees 145423710.98\nnet 4848497231.03\npayout EUR 4477102343.00\nmerchant 7: 4951294.16 gross, 4807112.47 net\n",
+      "note": ""
+    },
+    {
+      "bench": "decimal_ledger",
+      "lang": "node",
+      "status": "ok",
+      "reason": "",
+      "compile_s": null,
+      "binary_bytes": null,
+      "stripped_bytes": null,
+      "source_lines": 42,
+      "times_s": [
+        1.9837662090003505,
+        1.9942053750000923,
+        1.9976711660001456,
+        1.9700456249993294,
+        1.961338459000217
+      ],
+      "rss_bytes": [
+        190857216,
+        189530112,
+        186056704,
+        185171968,
+        181633024
+      ],
+      "median_s": 1.9837662090003505,
+      "min_s": 1.961338459000217,
+      "peak_rss_bytes": 190857216,
+      "output_matches": true,
+      "stdout": "gross 4993920942.01\nfees 145423710.98\nnet 4848497231.03\npayout EUR 4477102343.00\nmerchant 7: 4951294.16 gross, 4807112.47 net\n",
+      "note": ""
+    },
+    {
+      "bench": "decimal_ledger",
+      "lang": "bun",
+      "status": "ok",
+      "reason": "",
+      "compile_s": null,
+      "binary_bytes": null,
+      "stripped_bytes": null,
+      "source_lines": 42,
+      "times_s": [
+        1.8658302499998172,
+        1.8645755419993293,
+        1.8955227500000547,
+        1.9252045419998467,
+        1.846852666999439
+      ],
+      "rss_bytes": [
+        69566464,
+        69091328,
+        69812224,
+        69763072,
+        69795840
+      ],
+      "median_s": 1.8658302499998172,
+      "min_s": 1.846852666999439,
+      "peak_rss_bytes": 69812224,
+      "output_matches": true,
+      "stdout": "gross 4993920942.01\nfees 145423710.98\nnet 4848497231.03\npayout EUR 4477102343.00\nmerchant 7: 4951294.16 gross, 4807112.47 net\n",
+      "note": ""
+    },
+    {
+      "bench": "decimal_ledger",
+      "lang": "tov",
+      "status": "ok",
+      "reason": "",
+      "compile_s": 0.08793795899964607,
+      "binary_bytes": 67656,
+      "stripped_bytes": 67640,
+      "source_lines": 37,
+      "times_s": [
+        0.3029420000002574,
+        0.10897962500075664,
+        0.1076095409998743,
+        0.10812445800002024,
+        0.10887637500036362
+      ],
+      "rss_bytes": [
+        1949696,
+        1949696,
+        1949696,
+        1949696,
+        1949696
+      ],
+      "median_s": 0.10887637500036362,
+      "min_s": 0.1076095409998743,
+      "peak_rss_bytes": 1949696,
+      "output_matches": true,
+      "stdout": "gross 4993920942.01\nfees 145423710.98\nnet 4848497231.03\npayout EUR 4477102343.00\nmerchant 7: 4951294.16 gross, 4807112.47 net\n",
+      "note": ""
+    }
+  ]
+}

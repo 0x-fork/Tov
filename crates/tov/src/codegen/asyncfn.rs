@@ -525,6 +525,6 @@ pub(crate) fn has_await(ast: &ast::Ast, e: ExprId) -> bool {
         ExprKind::Member { obj, .. } => has_await(ast, *obj),
         ExprKind::Template(_, xs) | ExprKind::Array(xs) => any(xs),
         ExprKind::Object(fs) => fs.iter().any(|f| has_await(ast, f.value)),
-        ExprKind::Int(_) | ExprKind::Float(_) | ExprKind::BigInt(_) | ExprKind::Str(_) | ExprKind::Bool(_) | ExprKind::Undefined | ExprKind::Null | ExprKind::Ident(_) | ExprKind::This | ExprKind::Super | ExprKind::Error => false,
+        ExprKind::Int(_) | ExprKind::Float(_) | ExprKind::BigInt(_) | ExprKind::Decimal(_) | ExprKind::Str(_) | ExprKind::Bool(_) | ExprKind::Undefined | ExprKind::Null | ExprKind::Ident(_) | ExprKind::This | ExprKind::Super | ExprKind::Error => false,
     }
 }

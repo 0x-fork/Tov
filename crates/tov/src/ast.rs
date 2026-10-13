@@ -160,6 +160,8 @@ pub enum ExprKind {
     Float(f64),
     /// `123n`: the digits as written (decimal, or `0x`/`0o`/`0b` and digits), without `_` or `n`.
     BigInt(Sym),
+    /// `19.99m`: the text as written, without `_` or `m`.
+    Decimal(Sym),
     /// Interned at parse time, so checking never needs to mutate the interner.
     Str(Sym),
     Template(Vec<String>, Vec<ExprId>),
@@ -351,7 +353,7 @@ impl Ast {
         let fields = |fs: &mut Vec<FieldTy>| fs.iter_mut().for_each(|x| x.name = f(x.name));
         for e in &mut self.exprs {
             match &mut e.kind {
-                ExprKind::Ident(s) | ExprKind::Str(s) | ExprKind::BigInt(s) => *s = f(*s),
+                ExprKind::Ident(s) | ExprKind::Str(s) | ExprKind::BigInt(s) | ExprKind::Decimal(s) => *s = f(*s),
                 ExprKind::Member { name, .. } => *name = f(*name),
                 ExprKind::Object(fs) => fs.iter_mut().for_each(|x| x.name = f(x.name)),
                 ExprKind::Arrow(a) => params(&mut a.params),

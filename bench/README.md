@@ -23,6 +23,8 @@ Languages: `c`, `rust`, `node` and `bun` (both run `main.ts` directly), `scriptc
 | `async_tasks` | 1,000 × 10,000 | 1,000 async tasks each yielding to the event loop 10,000 times (`await Promise.resolve(0)`; Rust: `tokio::task::yield_now()` on the current-thread runtime), then `Promise.all`. |
 | `bigint_pidigits` | 10,000 digits | Benchmarks Game pidigits: a spigot over bigints that grow to ~7,500 limbs (multiply by a small number, add, divide with a one-digit quotient, compare). Rust uses num-bigint, the most used Rust bigint crate (`bigint` below compares others). |
 | `bigint_fib` | fib(300,000) | Repeated bigint addition up to 62,700 digits, then the decimal string. |
+| `decimal_ledger` | 2,000,000 charges | Amounts parsed from text ("1234.56"), a 2.9% + 0.30 fee rounded to cents half to even, net per merchant, payouts at an FX rate. Rust uses rust_decimal; Node and Bun use big.js (the most used decimal library for JavaScript). |
+| `decimal_invoice` | 200,000 invoices | Lines of price × quantity, a lump-sum discount allocated across each invoice's lines in proportion (a division per line, rounded to cents), 8.25% tax per line. rust_decimal and big.js again. |
 | `bigint_factorial` | 40,000! | `f *= BigInt(i)` up to 166,714 digits, then the decimal string, its digit sum and trailing zeros. |
 
 Each `bench/micro/<name>/` holds `main.c`, `main.rs`, `main.ts`, `main.tov` and `expected.txt` (C's output, used as the reference when C isn't among the selected languages). Where idiomatic Rust needs crates (tokio, serde), the Rust is a Cargo project in `rust/` instead of `main.rs`, and there's no C. Sizes are chosen so the C version takes roughly 0.2–1.5 s on an Apple M-series machine. The exception is `array_push`, where C takes about 55 ms. The work is memory-bound, and reaching 200 ms would need about 1 GB of array in C and about 3 GB of heap in Node/Bun.
@@ -94,6 +96,17 @@ Load average about 3. Apple clang 17, Rust 1.98, Node 26.3, Bun 1.4.0.
 pidigits against Rust's other bigint crates, the same program on each (best of 15 interleaved runs, a loaded machine): GMP through `rug` 284 ms, Tov 289, malachite 707, dashu 760, ibig 1,129, num-bigint 3,117. GMP is hand-written assembly; Tov's limb loops are C.
 
 What makes them fast: a bigint below 2^62 is one tagged word (no allocation); larger ones are reference-counted buffers that `x op= y` (and `x = (x + a * b) * c`) update in place when nothing else holds them; `z + x * y` is one pass; the limb loops take eight limbs a step along one add-with-carry chain; division estimates each quotient digit from a precomputed reciprocal (and skips the check pass when the estimate can't be off); decimal output divides and conquers.
+
+### decimal (macOS, Apple M4 Max)
+
+`python3 bench/run.py --only decimal_ledger,decimal_invoice --langs rust,node,bun,tov`, 5 runs ([results/20261014-002611.json](results/20261014-002611.json)). Every implementation prints the same totals to the cent.
+
+| benchmark | Rust (rust_decimal) | Node (big.js) | Bun (big.js) | **Tov** |
+|---|---:|---:|---:|---:|
+| decimal_ledger | 143 ms · 1.9 MB | 1984 ms · 182 MB | 1866 ms · 67 MB | **109 ms · 1.9 MB** |
+| decimal_invoice | 132 ms · 1.9 MB | 8973 ms · 159 MB | 6550 ms · 77 MB | **52 ms · 1.9 MB** |
+
+A decimal is 128 bits: a 34-digit coefficient and its scale, so same-scale `+`, `-`, `<` are single 128-bit operations, and a product of two 64-bit coefficients one multiply. Division by a coefficient under 2^64 goes 19 digits at a time by reciprocal; by a power of ten it only changes the scale; `(a / b).round(k)` divides straight to k places when that provably gives what dividing then rounding gives (it falls back otherwise).
 
 ### Linux, x86-64 (AMD Ryzen 9 9950X, 8 vCPUs, a cloud VM)
 

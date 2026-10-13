@@ -6,12 +6,12 @@ use crate::ast::Arg;
 
 pub(super) const BUILTIN_TYPES: &[&str] = &[
     "int", "i64", "f64", "number", "f32", "i8", "i16", "i32", "u8", "u16", "u32", "u64", "bool", "boolean", "string", "never", "unknown", "Js", "undefined", "void", "Array", "Map",
-    "Set", "Promise", "Record", "bigint",
+    "Set", "Promise", "Record", "bigint", "decimal",
 ];
 
 pub(super) const GLOBAL_NAMES: &[&str] = &[
     "Math", "console", "expect", "String", "Number", "parseInt", "parseFloat", "isNaN", "int", "f64", "f32", "i8", "i16", "i32", "u8", "u16", "u32", "u64", "process", "Date",
-    "performance", "JSON", "Promise", "BigInt",
+    "performance", "JSON", "Promise", "BigInt", "decimal",
 ];
 
 /// Runtime calls available to standard-library modules (`__native.name(...)`): parameters, result.
@@ -93,7 +93,7 @@ pub(super) fn is_builtin_ns(name: &str) -> bool {
 }
 
 pub(super) fn is_builtin_fn(name: &str) -> bool {
-    matches!(name, "expect" | "String" | "Number" | "BigInt" | "parseInt" | "parseFloat" | "isNaN" | "test")
+    matches!(name, "expect" | "String" | "Number" | "BigInt" | "decimal" | "parseInt" | "parseFloat" | "isNaN" | "test")
         || CONVERSIONS.contains(&name)
         || TIMER_FNS.contains(&name)
 }
@@ -179,6 +179,7 @@ fn methods_of(types: &Types, ty: TyId) -> &'static [&'static str] {
         Ty::Set(_) => SET_METHODS,
         _ if types.is_numeric(ty) => NUMBER_METHODS,
         Ty::Bool | Ty::BigInt => &["toString"],
+        Ty::Decimal => &["toString", "toFixed", "round", "floor", "ceil", "trunc", "abs"],
         _ => &[],
     }
 }
@@ -208,6 +209,7 @@ pub(super) fn type_label(types: &Types, ty: TyId) -> &'static str {
         Ty::Set(_) => "Set",
         Ty::Bool => "bool",
         Ty::BigInt => "bigint",
+        Ty::Decimal => "decimal",
         _ => "number",
     }
 }
@@ -351,6 +353,23 @@ pub(super) fn method(c: &mut Checker, base: TyId, name: &str) -> Option<MethodSi
             _ => None,
         },
         Ty::Bool if name == "toString" => mk(sig(vec![], STR), false),
+        Ty::Decimal => match name {
+            "toString" | "toJSON" => mk(sig(vec![], STR), false),
+            "toFixed" => mk(sig(vec![(p(INT), "digits")], STR), false),
+            "floor" | "ceil" | "trunc" | "abs" => mk(sig(vec![], DECIMAL), false),
+            "round" => {
+                let places = opt(c, INT);
+                let modes: Vec<TyId> = ["halfEven", "halfExpand", "halfTrunc", "halfCeil", "halfFloor", "ceil", "floor", "trunc", "expand"]
+                    .iter()
+                    .filter_map(|m| c.interner.lookup(m))
+                    .map(|s| c.types.str_lit(s))
+                    .collect();
+                let mode = c.types.union(&modes);
+                let mode = opt(c, mode);
+                mk(sig(vec![(places, "places"), (mode, "mode")], DECIMAL), false)
+            }
+            _ => None,
+        },
         Ty::BigInt if name == "toString" => {
             let radix = opt(c, INT);
             mk(sig(vec![(radix, "radix")], STR), false)
@@ -705,7 +724,7 @@ impl<'a> Checker<'a> {
         }
         seen.push(t);
         match *self.types.get(t) {
-            Ty::Error | Ty::Int | Ty::F64 | Ty::F32 | Ty::I8 | Ty::I16 | Ty::I32 | Ty::U8 | Ty::U16 | Ty::U32 | Ty::U64 | Ty::Bool | Ty::Str | Ty::StrLit(_) | Ty::Undefined => true,
+            Ty::Error | Ty::Int | Ty::F64 | Ty::F32 | Ty::I8 | Ty::I16 | Ty::I32 | Ty::U8 | Ty::U16 | Ty::U32 | Ty::U64 | Ty::Decimal | Ty::Bool | Ty::Str | Ty::StrLit(_) | Ty::Undefined => true,
             // A generic `T`: the instantiated type is written (functions come out as `null`).
             Ty::Param(_) => true,
             Ty::Array(e) => self.json_ok_in(e, allow_class, seen),
@@ -831,6 +850,10 @@ impl<'a> Checker<'a> {
                         }
                         if self.types.is_string(m) {
                             throws.push("SyntaxError");
+                        } else if m == DECIMAL {
+                            throws.push("RangeError");
+                        } else if self.types.is_string(m) {
+                            throws.push("SyntaxError");
                         } else if self.types.is_float(m) {
                             throws.push("RangeError");
                         } else {
@@ -852,6 +875,39 @@ impl<'a> Checker<'a> {
                 }
                 BIGINT
             }
+            // `decimal(x)`: an integer or bigint (exactly; past 34 digits traps), a number (its
+            // shortest decimal form, as it prints: decimal(0.1) is 0.1; NaN and the infinities
+            // trap) or a string (`try`: SyntaxError unless it's a number, RangeError past 34
+            // digits before the point).
+            "decimal" => {
+                let call = self.pending_call.take();
+                if let Some(t) = one(self) {
+                    let mut throws = false;
+                    for m in self.flat_members(t) {
+                        if m == ERROR || m == DECIMAL || m == BIGINT || self.types.is_numeric(m) {
+                            continue;
+                        }
+                        if self.types.is_string(m) {
+                            throws = true;
+                        } else {
+                            let s = self.ast().expr(args[0].expr).span;
+                            let msg = format!("`decimal` converts numbers, bigints and strings, found `{}`", self.show(t));
+                            self.report(Diagnostic::new("T0001", s, msg));
+                            throws = false;
+                            break;
+                        }
+                    }
+                    if throws {
+                        for cls in ["RangeError", "SyntaxError"] {
+                            let c = self.builtin_class(cls);
+                            if c != ERROR {
+                                self.on_throw(c, span, Some("decimal"), call);
+                            }
+                        }
+                    }
+                }
+                DECIMAL
+            }
             "Number" | "parseFloat" | "parseInt" => {
                 let ret = if name == "parseInt" { INT } else { F64 };
                 if args.is_empty() || args.len() > 1 + usize::from(name == "parseInt") {
@@ -859,8 +915,8 @@ impl<'a> Checker<'a> {
                     self.check_args_loose(args);
                 } else {
                     let t = self.expr(args[0].expr, Some(STR));
-                    // `Number(x)` of a bigint: the nearest number (never fails)
-                    if name == "Number" && t == BIGINT {
+                    // `Number(x)` of a bigint or a decimal: the nearest number (never fails)
+                    if name == "Number" && (t == BIGINT || t == DECIMAL) {
                         return Some(F64);
                     }
                     // `Number(x)` also takes numbers (and `number | string`), as in JavaScript.
@@ -954,7 +1010,7 @@ impl<'a> Checker<'a> {
                     return Some(target);
                 }
                 let t = self.expr(args[0].expr, Some(target));
-                if t != ERROR && !self.types.is_numeric(t) && t != BIGINT {
+                if t != ERROR && !self.types.is_numeric(t) && t != BIGINT && t != DECIMAL {
                     let s = self.ast().expr(args[0].expr).span;
                     let mut d = Diagnostic::new("T0001", s, format!("`{name}(...)` converts numbers, found `{}`", self.show(t)));
                     if self.types.is_string(t) {

@@ -102,6 +102,10 @@ pub fn load(paths: &[PathBuf], base: &Path) -> Result<Loaded, String> {
     // thread's ASTs in parallel.
     let mut interner = Interner::default();
     let maps: Vec<Vec<Sym>> = parsed.iter().map(|(local, _)| (0..local.len() as u32).map(|i| interner.intern(local.get(Sym(i)))).collect()).collect();
+    // (`decimal.round`'s modes, so its parameter's type names them all)
+    for mode in ["halfEven", "halfExpand", "halfTrunc", "halfCeil", "halfFloor", "ceil", "floor", "trunc", "expand"] {
+        interner.intern(mode);
+    }
     std::thread::scope(|scope| {
         for ((_, files), map) in parsed.iter_mut().zip(&maps) {
             scope.spawn(move || {

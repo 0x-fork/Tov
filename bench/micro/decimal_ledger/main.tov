@@ -1,0 +1,42 @@
+// A payments ledger in exact decimals: 2,000,000 charges arrive as text ("1234.56"), each pays a
+// 2.9% + 0.30 fee (rounded to cents, half to even), and the net goes to one of 1,000 merchants,
+// whose balances are then paid out in euros at 0.9234 (rounded to cents).
+const N = 2000000
+const MERCHANTS = 1000
+
+let seed = 42
+function next(): int {
+  seed = (seed * 48271) % 2147483647
+  return seed
+}
+
+const gross: decimal[] = []
+const net: decimal[] = []
+for (let i = 0; i < MERCHANTS; i++) {
+  gross.push(0)
+  net.push(0)
+}
+let fees: decimal = 0
+for (let i = 0; i < N; i++) {
+  const cents = Math.trunc(next() / 64) % 500000
+  const text = `${Math.trunc(cents / 100)}.${`${cents % 100}`.padStart(2, "0")}`
+  const amount = try decimal(text)
+  const fee = (amount * 0.029 + 0.30).round(2)
+  const m = Math.trunc(next() / 1024) % MERCHANTS
+  gross[m] = gross[m]! + amount
+  net[m] = net[m]! + (amount - fee)
+  fees += fee
+}
+let totalGross: decimal = 0
+let totalNet: decimal = 0
+let payout: decimal = 0
+for (let i = 0; i < MERCHANTS; i++) {
+  totalGross += gross[i]!
+  totalNet += net[i]!
+  payout += (net[i]! * 0.9234).round(2)
+}
+console.log(`gross ${totalGross}`)
+console.log(`fees ${fees}`)
+console.log(`net ${totalNet}`)
+console.log(`payout EUR ${payout}`)
+console.log(`merchant 7: ${gross[7]!} gross, ${net[7]!} net`)

@@ -488,10 +488,31 @@ static void tv_mag_mul(tv_limb *r, const tv_limb *a, uint32_t an, const tv_limb 
     free(t);
 }
 
-/* The reciprocal of a normalized divisor (top bit set): floor((B^2 - 1) / d) - B. */
-static inline tv_limb tv_recip(tv_limb d) {
-    return (tv_limb)((((tv_dlimb)~d) << 64 | ~(tv_limb)0) / d);
+/* (u1, u0) / v for a normalized v (top bit set) and u1 < v, in 32-bit halves with the
+ * hardware's 64-bit divide (Hacker's Delight's divlu): far cheaper than a general 128-bit
+ * division, which compilers leave to a library routine. */
+static inline tv_limb tv_divlu(tv_limb u1, tv_limb u0, tv_limb v) {
+    const tv_limb b = (tv_limb)1 << 32;
+    tv_limb vn1 = v >> 32, vn0 = v & 0xffffffffu, un1 = u0 >> 32, un0 = u0 & 0xffffffffu;
+    tv_limb q1 = u1 / vn1, rhat = u1 - q1 * vn1;
+    while (q1 >= b || q1 * vn0 > ((rhat << 32) | un1)) {
+        q1--;
+        rhat += vn1;
+        if (rhat >= b) break;
+    }
+    tv_limb un21 = (u1 << 32) + un1 - q1 * v;
+    tv_limb q0 = un21 / vn1;
+    rhat = un21 - q0 * vn1;
+    while (q0 >= b || q0 * vn0 > ((rhat << 32) | un0)) {
+        q0--;
+        rhat += vn1;
+        if (rhat >= b) break;
+    }
+    return (q1 << 32) | q0;
 }
+
+/* The reciprocal of a normalized divisor (top bit set): floor((B^2 - 1) / d) - B. */
+static inline tv_limb tv_recip(tv_limb d) { return tv_divlu(~d, ~(tv_limb)0, d); }
 
 /* (nh, nl) / d for a normalized d with reciprocal di, nh < d (Möller–Granlund). */
 static inline tv_limb tv_div_preinv(tv_limb nh, tv_limb nl, tv_limb d, tv_limb di, tv_limb *rem) {

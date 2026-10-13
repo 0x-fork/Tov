@@ -277,9 +277,35 @@ static inline char *tv_sb_reserve(tv_sb *sb, size_t extra) {
     return sb->data + sb->len;
 }
 
+/* memcpy for the short pieces strings are mostly built from: two overlapping word copies
+ * instead of a call. */
+static inline void tv_copy(char *d, const char *s, size_t n) {
+    if (n <= 16) {
+        if (n >= 8) {
+            uint64_t a, b;
+            memcpy(&a, s, 8);
+            memcpy(&b, s + n - 8, 8);
+            memcpy(d, &a, 8);
+            memcpy(d + n - 8, &b, 8);
+        } else if (n >= 4) {
+            uint32_t a, b;
+            memcpy(&a, s, 4);
+            memcpy(&b, s + n - 4, 4);
+            memcpy(d, &a, 4);
+            memcpy(d + n - 4, &b, 4);
+        } else if (n) {
+            d[0] = s[0];
+            d[n / 2] = s[n / 2];
+            d[n - 1] = s[n - 1];
+        }
+        return;
+    }
+    memcpy(d, s, n);
+}
+
 void tv_sb_push(tv_sb *sb, const char *s, size_t n) {
     if (!n) return;
-    memcpy(tv_sb_reserve(sb, n), s, n);
+    tv_copy(tv_sb_reserve(sb, n), s, n);
     sb->len += n;
 }
 
@@ -639,7 +665,7 @@ tv_str tv_str_from(const char *bytes, size_t n) {
     if (n == 0) return TV_EMPTY_STR;
     if (n == 1 && (unsigned char)bytes[0] - 32u < 96u) return tv_ascii_str((unsigned char)bytes[0]);
     tv_strbuf *b = tv_strbuf_new(n);
-    memcpy(b->data, bytes, n);
+    tv_copy(b->data, bytes, n);
     return (tv_str){b};
 }
 
@@ -742,8 +768,27 @@ tv_str tv_str_from_int(tv_int v) {
 }
 
 void tv_sb_push_int(tv_sb *sb, tv_int v) {
-    char buf[24];
-    tv_sb_push(sb, buf, tv_fmt_i64(buf, v));
+    /* written into the builder from the end of its room for 20 digits and a sign */
+    char tmp[24], *end = tmp + sizeof tmp;
+    uint64_t u = v < 0 ? (uint64_t)0 - (uint64_t)v : (uint64_t)v;
+    char *p = end;
+    while (u >= 100) {
+        static const char pairs[] = "00010203040506070809101112131415161718192021222324252627282930313233343536373839404142434445464748495051525354555657585960616263646566676869707172737475767778798081828384858687888990919293949596979899";
+        unsigned r = (unsigned)(u % 100);
+        u /= 100;
+        p -= 2;
+        p[0] = pairs[2 * r];
+        p[1] = pairs[2 * r + 1];
+    }
+    if (u >= 10) {
+        p -= 2;
+        p[0] = (char)('0' + u / 10);
+        p[1] = (char)('0' + u % 10);
+    } else {
+        *--p = (char)('0' + u);
+    }
+    if (v < 0) *--p = '-';
+    tv_sb_push(sb, p, (size_t)(end - p));
 }
 
 static void tv_sb_push_u64(tv_sb *sb, uint64_t v) {
@@ -3015,6 +3060,17 @@ bool tv_jp_number(tv_jp *p, double *out) {
     tmp[len] = 0;
     *out = strtod(tmp, NULL);
     if (tmp != buf) tv_free(tmp);
+    p->i = i;
+    return true;
+}
+
+/* A JSON number read exactly into a decimal (no detour through a double). */
+bool tv_jp_decimal(tv_jp *p, tv_dec *out) {
+    tv_jp_ws(p);
+    size_t start = p->i, i = p->i;
+    if (i < p->n && p->s[i] == '-') i++;
+    while (i < p->n && ((p->s[i] >= '0' && p->s[i] <= '9') || p->s[i] == '.' || p->s[i] == 'e' || p->s[i] == 'E' || p->s[i] == '+' || p->s[i] == '-')) i++;
+    if (i == start || tv_dec_parse_n(p->s + start, i - start, out) != 0) return tv_jp_fail(p, "a decimal number");
     p->i = i;
     return true;
 }

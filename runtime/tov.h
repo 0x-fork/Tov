@@ -400,6 +400,107 @@ void tv_sb_push_big(tv_sb *sb, tv_big a);
 void tv_sb_push_big_radix(tv_sb *sb, tv_big a, int radix);
 tv_str tv_big_to_string(tv_big a, tv_int radix, const char *loc);
 
+/* ------------------------------------------------------------------ decimal (runtime/dec.c) */
+
+/* coefficient × 10^-scale: a signed coefficient under 10^34 shifted left 8 bits, the scale
+ * (0..34) in the low byte. Two words, so it's 8-byte aligned wherever it's stored. */
+typedef struct { uint64_t lo, hi; } tv_dec;
+extern const tv_type tv_type_dec;
+#define TV_DEC_LIM ((__int128)10000000000000000ll * 1000000000000000000ll)
+static inline __int128 tv_dec_coef(tv_dec d) { return (__int128)(((unsigned __int128)d.hi << 64) | d.lo) >> 8; }
+static inline int tv_dec_scale(tv_dec d) { return (int)(d.lo & 0xFF); }
+static inline tv_dec tv_dec_make(__int128 c, int s) {
+    unsigned __int128 v = ((unsigned __int128)c << 8) | (unsigned)s;
+    return (tv_dec){ (uint64_t)v, (uint64_t)(v >> 64) };
+}
+static inline tv_dec tv_dec_from_int(int64_t x) { return tv_dec_make(x, 0); }
+tv_dec tv_dec_add_slow(tv_dec a, tv_dec b, int sign);
+tv_dec tv_dec_mul_slow(tv_dec a, tv_dec b);
+int tv_dec_cmp_slow(tv_dec a, tv_dec b);
+static inline tv_dec tv_dec_add(tv_dec a, tv_dec b) {
+    if (__builtin_expect(((a.lo ^ b.lo) & 0xFF) == 0, 1)) {
+        __int128 c = tv_dec_coef(a) + tv_dec_coef(b);
+        if (__builtin_expect(c < TV_DEC_LIM && c > -TV_DEC_LIM, 1)) return tv_dec_make(c, (int)(a.lo & 0xFF));
+    }
+    return tv_dec_add_slow(a, b, 1);
+}
+static inline tv_dec tv_dec_sub(tv_dec a, tv_dec b) {
+    if (__builtin_expect(((a.lo ^ b.lo) & 0xFF) == 0, 1)) {
+        __int128 c = tv_dec_coef(a) - tv_dec_coef(b);
+        if (__builtin_expect(c < TV_DEC_LIM && c > -TV_DEC_LIM, 1)) return tv_dec_make(c, (int)(a.lo & 0xFF));
+    }
+    return tv_dec_add_slow(a, b, -1);
+}
+static inline tv_dec tv_dec_mul(tv_dec a, tv_dec b) {
+    int s = (int)(a.lo & 0xFF) + (int)(b.lo & 0xFF);
+    __int128 x = tv_dec_coef(a), y = tv_dec_coef(b);
+    if (__builtin_expect(s <= 34 && x == (int64_t)x && y == (int64_t)y, 1)) {
+        __int128 c = (__int128)(int64_t)x * (int64_t)y;
+        if (__builtin_expect(c < TV_DEC_LIM && c > -TV_DEC_LIM, 1)) return tv_dec_make(c, s);
+    }
+    return tv_dec_mul_slow(a, b);
+}
+static inline int tv_dec_cmp(tv_dec a, tv_dec b) {
+    if (__builtin_expect(((a.lo ^ b.lo) & 0xFF) == 0, 1)) {
+        __int128 x = tv_dec_coef(a), y = tv_dec_coef(b);
+        return (x > y) - (x < y);
+    }
+    return tv_dec_cmp_slow(a, b);
+}
+static inline bool tv_dec_eq(tv_dec a, tv_dec b) {
+    if (((a.lo ^ b.lo) & 0xFF) == 0) return a.lo == b.lo && a.hi == b.hi;
+    return tv_dec_cmp_slow(a, b) == 0;
+}
+static inline tv_dec tv_dec_neg(tv_dec a) { return tv_dec_make(-tv_dec_coef(a), tv_dec_scale(a)); }
+static inline tv_dec tv_dec_abs(tv_dec a) { __int128 c = tv_dec_coef(a); return c < 0 ? tv_dec_make(-c, tv_dec_scale(a)) : a; }
+tv_dec tv_dec_div(tv_dec a, tv_dec b, const char *loc);      /* 34 significant digits, half even */
+tv_dec tv_dec_rem(tv_dec a, tv_dec b, const char *loc);
+uint64_t tv_dec_hash(tv_dec a);
+tv_dec tv_dec_round(tv_dec a, tv_int places, tv_str mode, const char *loc);
+tv_dec tv_dec_round_slow(tv_dec a, tv_int places, int mode, const char *loc);
+tv_dec tv_dec_div_round(tv_dec a, tv_dec b, tv_int places, int mode, const char *loc);  /* (a / b).round(places, mode) */
+extern const uint64_t tv_p10[20];
+/* round(places, mode): mode 0 halfEven, 1 halfExpand, 2 halfTrunc, 3 halfCeil, 4 halfFloor,
+ * 5 ceil, 6 floor, 7 trunc, 8 expand. Inline for a coefficient in 64 bits and a constant mode. */
+static inline tv_dec tv_dec_round_m(tv_dec a, tv_int places, int mode, const char *loc) {
+    int s = tv_dec_scale(a);
+    if (places >= s && places <= 34) return a;
+    __int128 c = tv_dec_coef(a);
+    if (__builtin_expect(places >= 0 && s - places <= 18 && c == (int64_t)c, 1)) {
+        bool neg = c < 0;
+        uint64_t ax = neg ? (uint64_t)0 - (uint64_t)(int64_t)c : (uint64_t)(int64_t)c, p = tv_p10[s - places];
+        uint64_t q = ax / p, r = ax - q * p, r2 = 2 * r;
+        bool up;
+        switch (mode) {
+        case 0: up = r2 > p || (r2 == p && (q & 1)); break;
+        case 1: up = r2 >= p && r != 0; break;
+        case 2: up = r2 > p; break;
+        case 3: up = r2 > p || (r2 == p && !neg); break;
+        case 4: up = r2 > p || (r2 == p && neg); break;
+        case 5: up = r && !neg; break;
+        case 6: up = r && neg; break;
+        case 7: up = false; break;
+        default: up = r != 0; break;
+        }
+        q += up;
+        return tv_dec_make(neg ? -(__int128)q : (__int128)q, (int)places);
+    }
+    return tv_dec_round_slow(a, places, mode, loc);
+}
+tv_dec tv_dec_floor(tv_dec a);
+tv_dec tv_dec_ceil(tv_dec a);
+tv_dec tv_dec_trunc(tv_dec a);
+void tv_sb_push_dec(tv_sb *sb, tv_dec a);
+tv_str tv_dec_to_string(tv_dec a);
+tv_str tv_dec_to_fixed(tv_dec a, tv_int digits, const char *loc);
+int tv_dec_parse_n(const char *s, size_t n, tv_dec *out);   /* 0 ok, 1 not a number, 2 too large */
+int tv_dec_parse(tv_str s, tv_dec *out);
+tv_dec tv_dec_lit(const char *text);
+bool tv_dec_from_f64(double x, tv_dec *out);
+double tv_dec_to_f64(tv_dec a);
+tv_dec tv_dec_from_big(tv_big b, const char *loc);
+tv_int tv_dec_to_int(tv_dec a, const char *loc);
+
 /* ------------------------------------------------------------------ math */
 
 double tv_math_round(double x);           /* JS Math.round: half toward +infinity */
@@ -593,6 +694,7 @@ bool tv_jp_try_char(tv_jp *p, char c);                 /* consumes c if it's nex
 bool tv_jp_word(tv_jp *p, const char *w);              /* null / true / false */
 bool tv_jp_string(tv_jp *p, tv_str *out);
 bool tv_jp_number(tv_jp *p, double *out);
+bool tv_jp_decimal(tv_jp *p, tv_dec *out);   /* a JSON number, exactly */
 bool tv_jp_skip(tv_jp *p);                             /* any value */
 bool tv_jp_end(tv_jp *p);                              /* only spaces left */
 bool tv_jp_fail(tv_jp *p, const char *expected);       /* records "expected X at position N"; returns false */

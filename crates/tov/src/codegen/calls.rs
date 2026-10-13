@@ -2,7 +2,7 @@
 
 use super::body::is_mutating_method;
 use super::{c_string, Gen, Val};
-use crate::ast::{Arg, ExprId, ExprKind};
+use crate::ast::{Arg, BinOp, ExprId, ExprKind};
 use crate::check::Callee;
 use crate::hash::FxMap;
 use crate::source::Span;
@@ -561,6 +561,36 @@ impl<'c, 'a> Gen<'c, 'a> {
             };
             return self.mutating_method(&lv, recv, name, args, params, ty, span);
         }
+        // `(a / b).round(k, "mode")` on decimals: rounded once, straight to k places (see
+        // tv_dec_div_round; it divides first when that could differ)
+        if given.is_none() && recv == DECIMAL && name == "round" {
+            const MODES: [&str; 9] = ["halfEven", "halfExpand", "halfTrunc", "halfCeil", "halfFloor", "ceil", "floor", "trunc", "expand"];
+            let m = self.cur_m();
+            let mut inner = obj;
+            while let ExprKind::Paren(x) = self.ast(m).expr(inner).kind {
+                inner = x;
+            }
+            let mode = match args.get(1).map(|a| &self.ast(m).expr(a.expr).kind) {
+                None => Some(0),
+                Some(ExprKind::Str(s)) => MODES.iter().position(|md| *md == self.sym(*s)),
+                _ => None,
+            };
+            if let (ExprKind::Binary(BinOp::Div, l, r), Some(mode), Some(a0)) = (&self.ast(m).expr(inner).kind, mode, args.first())
+                && self.ty(inner) == DECIMAL
+            {
+                let (l, r, a0) = (*l, *r, a0.expr);
+                let lv = self.expr_before(l, &[r, a0]);
+                let lv = self.coerce(lv, DECIMAL);
+                let rv = self.expr_before(r, &[a0]);
+                let rv = self.coerce(rv, DECIMAL);
+                let k = self.expr(a0);
+                let present = self.truthy_val(k.clone());
+                let k = self.project(k, INT);
+                let k = if present == "true" { k.code } else { format!("({present} ? {} : 0)", k.code) };
+                let loc = self.loc(span);
+                return Val::plain(format!("tv_dec_div_round({}, {}, {k}, {mode}, {loc})", lv.code, rv.code), DECIMAL);
+            }
+        }
         let rv = match given {
             Some(v) => v,
             None => self.expr(obj),
@@ -578,6 +608,52 @@ impl<'c, 'a> Gen<'c, 'a> {
                 let t = self.lit(b"true");
                 let f = self.lit(b"false");
                 Val::plain(format!("(({}) ? {t} : {f})", rv.code), STR)
+            }
+            Ty::Decimal => {
+                let loc = self.loc(span);
+                match name {
+                    "toFixed" => {
+                        let d = self.expr(args[0].expr);
+                        let d = self.int_code(d);
+                        self.tmp(STR, &format!("tv_dec_to_fixed({}, {d}, {loc})", rv.code), true)
+                    }
+                    "floor" | "ceil" | "trunc" => Val::plain(format!("tv_dec_{name}({})", rv.code), DECIMAL),
+                    "abs" => Val::plain(format!("tv_dec_abs({})", rv.code), DECIMAL),
+                    "round" => {
+                        let places = match args.first() {
+                            Some(a) => {
+                                let r = self.expr(a.expr);
+                                let present = self.truthy_val(r.clone());
+                                let r = self.project(r, INT);
+                                if present == "true" { r.code } else { format!("({present} ? {} : 0)", r.code) }
+                            }
+                            None => "0".into(),
+                        };
+                        const MODES: [&str; 9] = ["halfEven", "halfExpand", "halfTrunc", "halfCeil", "halfFloor", "ceil", "floor", "trunc", "expand"];
+                        let lit_mode = match args.get(1).map(|a| &self.ast(self.cur_m()).expr(a.expr).kind) {
+                            None => Some(0),
+                            Some(ExprKind::Str(s)) => MODES.iter().position(|m| *m == self.sym(*s)),
+                            _ => None,
+                        };
+                        if let Some(k) = lit_mode {
+                            return Val::plain(format!("tv_dec_round_m({}, {places}, {k}, {loc})", rv.code), DECIMAL);
+                        }
+                        let mode = match args.get(1) {
+                            Some(a) => {
+                                let m = self.expr(a.expr);
+                                let present = self.truthy_val(m.clone());
+                                let mt = self.c.types.without_undefined(m.ty);
+                                let ms = self.project(m, mt);
+                                let s = self.coerce(ms, STR);
+                                let even = self.lit(b"halfEven");
+                                if present == "true" { s.code } else { format!("({present} ? {} : {even})", s.code) }
+                            }
+                            None => self.lit(b"halfEven"),
+                        };
+                        Val::plain(format!("tv_dec_round({}, {places}, {mode}, {loc})", rv.code), DECIMAL)
+                    }
+                    _ => self.tmp(STR, &format!("tv_dec_to_string({})", rv.code), true),
+                }
             }
             Ty::BigInt => {
                 let radix = match args.first() {
@@ -1290,6 +1366,14 @@ impl<'c, 'a> Gen<'c, 'a> {
                 let v = self.expr(args[0].expr);
                 Val::plain(format!("tv_big_to_f64({})", v.code), F64)
             }
+            (None, "Number") if self.ty(args[0].expr) == DECIMAL => {
+                let v = self.expr(args[0].expr);
+                Val::plain(format!("tv_dec_to_f64({})", v.code), F64)
+            }
+            (None, "decimal") => {
+                let v = self.expr(args[0].expr);
+                self.to_decimal(v, span)
+            }
             (None, "BigInt") => {
                 let v = self.expr(args[0].expr);
                 self.to_bigint(v)
@@ -1402,11 +1486,83 @@ impl<'c, 'a> Gen<'c, 'a> {
         }
     }
 
+    /// `decimal(x)`: from an integer or bigint (exactly), a number (its shortest decimal form;
+    /// NaN and the infinities trap), or a string (SyntaxError / RangeError).
+    fn to_decimal(&mut self, v: Val, span: Span) -> Val {
+        let loc = self.loc(span);
+        match self.tget(v.ty) {
+            Ty::Decimal => v,
+            Ty::BigInt => Val::plain(format!("tv_dec_from_big({}, {loc})", v.code), DECIMAL),
+            Ty::F64 | Ty::F32 => {
+                let d = self.coerce(v, F64);
+                let out = self.fresh("d");
+                self.line(format!("tv_dec {out}; if (!tv_dec_from_f64({}, &{out})) tv_trap(\"decimal(): NaN and Infinity have no decimal value\", {loc});", d.code));
+                Val::plain(out, DECIMAL)
+            }
+            Ty::Str | Ty::StrLit(_) => {
+                let s = self.coerce(v, STR);
+                let (out, rc) = (self.fresh("d"), self.fresh("r"));
+                self.line(format!("tv_dec {out} = {{0, 0}}; int {rc} = tv_dec_parse({}, &{out});", s.code));
+                self.open(&format!("if ({rc} != 0) {{"));
+                for (code, cls, what) in [(1, "SyntaxError", "is not a number"), (2, "RangeError", "has more than 34 digits before the point")] {
+                    let err = self.c.builtin_error_class(cls);
+                    if err != ERROR {
+                        let msg = format!("({{ tv_sb sb_ = {{0}}; tv_sb_push_cstr(&sb_, \"Cannot convert \"); tv_sb_push_str(&sb_, {}); tv_sb_push_cstr(&sb_, \" to a decimal: it {what}\"); tv_str_from_sb(&sb_); }})", s.code);
+                        self.open(&format!("if ({rc} == {code}) {{"));
+                        let obj = self.error_object(err, &msg);
+                        self.line(format!("tvg_err = (void *)({obj});"));
+                        self.close("}");
+                    }
+                }
+                self.close("}");
+                Val::plain(out, DECIMAL)
+            }
+            Ty::Union(ms) => {
+                let ms = self.c.types.tys(ms).to_vec();
+                let out = self.fresh("d");
+                self.line(format!("tv_dec {out} = {{0, 0}};"));
+                let tag = self.u_tag(&v.code, v.ty);
+                self.open(&format!("switch ({tag}) {{"));
+                for (i, &mt) in ms.iter().enumerate() {
+                    self.open(&format!("case {i}: {{"));
+                    self.push_temps_pub();
+                    let payload = Val::plain(self.u_payload(&v.code, v.ty, i), mt);
+                    let r = self.to_decimal(payload, span);
+                    self.line(format!("{out} = {};", r.code));
+                    self.pop_temps_pub();
+                    self.line("break;");
+                    self.close("}");
+                }
+                self.close("}");
+                Val::plain(out, DECIMAL)
+            }
+            _ => self.coerce(v, DECIMAL),
+        }
+    }
+
     /// `BigInt(x)`: a bigint from an integer, a bool, a string (a SyntaxError unless it's one)
     /// or a number (a RangeError unless it's an integer), or a union of these.
     fn to_bigint(&mut self, v: Val) -> Val {
         match self.tget(v.ty) {
             Ty::BigInt => v,
+            Ty::Decimal => {
+                // an integral decimal, exactly (else a RangeError, as for BigInt(1.5))
+                let out = self.tmp(BIGINT, "((tv_big){1})", true);
+                let (dv, ok) = (self.fresh("d"), self.fresh("ok"));
+                self.line(format!("tv_dec {dv} = tv_dec_trunc({0}); bool {ok} = tv_dec_eq({dv}, {0});", v.code));
+                self.open(&format!("if ({ok}) {{"));
+                self.line(format!("tv_str s_ = tv_dec_to_string({dv}); (void)tv_big_parse(s_, &{}); tv_str_release(s_);", out.code));
+                self.close("}");
+                self.open(&format!("if (!{ok}) {{"));
+                let err = self.c.builtin_error_class("RangeError");
+                if err != ERROR {
+                    let msg = format!("({{ tv_sb sb_ = {{0}}; tv_sb_push_cstr(&sb_, \"The number \"); tv_sb_push_dec(&sb_, {}); tv_sb_push_cstr(&sb_, \" cannot be converted to a BigInt because it is not an integer\"); tv_str_from_sb(&sb_); }})", v.code);
+                    let obj = self.error_object(err, &msg);
+                    self.line(format!("tvg_err = (void *)({obj});"));
+                }
+                self.close("}");
+                out
+            }
             Ty::Bool => Val::plain(format!("(({}) ? ((tv_big){{3}}) : ((tv_big){{1}}))", v.code), BIGINT),
             Ty::U64 => self.tmp(BIGINT, &format!("tv_big_from_u64_({})", v.code), true),
             Ty::Int | Ty::I8 | Ty::I16 | Ty::I32 | Ty::U8 | Ty::U16 | Ty::U32 => {
@@ -1465,6 +1621,17 @@ impl<'c, 'a> Gen<'c, 'a> {
     }
 
     fn convert(&mut self, v: Val, conv: &str, ty: TyId, span: Span) -> Val {
+        if v.ty == DECIMAL {
+            let loc = self.loc(span);
+            if self.c.types.is_float(ty) {
+                return self.coerce(Val::plain(format!("tv_dec_to_f64({})", v.code), F64), ty);
+            }
+            let x = format!("tv_dec_to_int({}, {loc})", v.code);
+            if ty == INT {
+                return Val::plain(x, ty);
+            }
+            return self.convert(Val::plain(x, INT), conv, ty, span);
+        }
         if v.ty == BIGINT {
             let loc = self.loc(span);
             if self.c.types.is_float(ty) {

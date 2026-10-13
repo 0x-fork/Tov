@@ -50,6 +50,8 @@ pub enum Ty {
     U64,
     /// `bigint`: an arbitrary-precision integer (runtime/big.c).
     BigInt,
+    /// `decimal`: exact base-10, 34 digits (runtime/dec.c).
+    Decimal,
     Str,
     StrLit(Sym),
     Array(TyId),
@@ -155,6 +157,7 @@ prims! {
     STR = 16 => Ty::Str,
     JS = 17 => Ty::Js,
     BIGINT = 18 => Ty::BigInt,
+    DECIMAL = 19 => Ty::Decimal,
 }
 
 impl Default for Types {
@@ -464,7 +467,12 @@ impl Types {
 
     /// Primitive = compared and tested by value, never "present/absent" by truthiness.
     pub fn is_primitive(&self, ty: TyId) -> bool {
-        self.is_numeric(ty) || self.is_string(ty) || ty == BOOL || ty == BIGINT
+        self.is_numeric(ty) || self.is_string(ty) || ty == BOOL || ty == BIGINT || ty == DECIMAL
+    }
+
+    /// A number, or a decimal: a type a numeric literal can take.
+    pub fn is_num_like(&self, ty: TyId) -> bool {
+        self.is_numeric(ty) || ty == DECIMAL
     }
 
     pub fn is_bigint(&self, ty: TyId) -> bool {
@@ -609,6 +617,7 @@ impl Display<'_> {
             Ty::U32 => out.push_str("u32"),
             Ty::U64 => out.push_str("u64"),
             Ty::BigInt => out.push_str("bigint"),
+            Ty::Decimal => out.push_str("decimal"),
             Ty::Str => out.push_str("string"),
             Ty::StrLit(s) => {
                 out.push('"');
@@ -753,4 +762,38 @@ impl Display<'_> {
             Ty::Expect(_) => out.push_str("Expectation"),
         }
     }
+}
+
+/// A decimal literal's coefficient and scale (`19.99` is 1999 and 2; `1.5e3` is 1500 and 0), or
+/// `None` if it has more than 34 significant digits or a scale past 34.
+pub fn decimal_literal(text: &str) -> Option<(i128, u32)> {
+    let text: String = text.chars().filter(|&c| c != '_').collect();
+    let (mant, exp) = match text.find(['e', 'E']) {
+        Some(i) => (&text[..i], text[i + 1..].parse::<i32>().ok()?),
+        None => (&text[..], 0),
+    };
+    let (int, frac) = match mant.find('.') {
+        Some(i) => (&mant[..i], &mant[i + 1..]),
+        None => (mant, ""),
+    };
+    let digits: String = format!("{int}{frac}");
+    let digits = digits.trim_start_matches('0');
+    if digits.len() > 34 || !digits.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    let mut c: i128 = if digits.is_empty() { 0 } else { digits.parse().ok()? };
+    let mut scale = frac.len() as i32 - exp;
+    if scale < 0 {
+        for _ in 0..-scale {
+            c = c.checked_mul(10)?;
+        }
+        scale = 0;
+        if c >= 10i128.pow(34) {
+            return None;
+        }
+    }
+    if scale > 34 {
+        return None;
+    }
+    Some((c, scale as u32))
 }

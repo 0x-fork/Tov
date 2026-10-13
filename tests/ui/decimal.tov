@@ -1,0 +1,11 @@
+function f(d: decimal, n: int, x: f64, b: bigint) {
+  const a = d * x
+  const c = d + b
+  const e = d ** 2
+  const g: f64 = d
+  const h: decimal = x
+  const i = d.round(2, "halfUp")
+  const j = 12345678901234567890123456789012345.5m
+  const k = 1.5 + d
+  console.log(a, c, e, g, h, i, j, k, d * n, d > 3, d === 0)
+}

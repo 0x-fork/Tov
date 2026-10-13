@@ -14,3 +14,4 @@ site/dist/
 .vercel
 .env*
 bench/micro/*/rust/target/
+bench/micro/*/node_modules/

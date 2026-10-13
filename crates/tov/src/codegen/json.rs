@@ -54,6 +54,7 @@ impl<'c, 'a> Gen<'c, 'a> {
         match self.tget(t) {
             Ty::Int | Ty::I8 | Ty::I16 | Ty::I32 | Ty::U8 | Ty::U16 | Ty::U32 => "    tv_sb_push_int(sb, (tv_int)*v);\n".into(),
             Ty::U64 => "    tv_json_number(sb, (double)*v);\n".into(),
+            Ty::Decimal => "    tv_sb_push_dec(sb, *v);\n".into(),
             Ty::F64 | Ty::F32 => "    tv_json_number(sb, (double)*v);\n".into(),
             Ty::Bool => "    if (*v) tv_sb_add(sb, \"true\", 4); else tv_sb_add(sb, \"false\", 5);\n".into(),
             Ty::Str => "    tv_json_quote(sb, *v);\n".into(),
@@ -210,6 +211,7 @@ impl<'c, 'a> Gen<'c, 'a> {
             Ty::U32 => int_range("0.0", "4294967295.0"),
             Ty::U64 => int_range("0.0", "18446744073709551615.0"),
             Ty::F64 | Ty::F32 => "    double d;\n    if (!tv_jp_number(p, &d)) return false;\n    *out = (__typeof__(*out))d;\n    return true;\n".into(),
+            Ty::Decimal => "    return tv_jp_decimal(p, out);\n".into(),
             Ty::Bool => "    char c = tv_jp_peek(p);\n    if (c == 't') { if (!tv_jp_word(p, \"true\")) return false; *out = true; return true; }\n    if (c == 'f') { if (!tv_jp_word(p, \"false\")) return false; *out = false; return true; }\n    return tv_jp_fail(p, \"a boolean\");\n".into(),
             Ty::Str => "    tv_str s;\n    if (!tv_jp_string(p, &s)) return false;\n    tv_str_release(*out);\n    *out = s;\n    return true;\n".into(),
             Ty::StrLit(s) => {

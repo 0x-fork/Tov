@@ -1,0 +1,3 @@
+grand total 3504398929.99
+tax 267078902.53
+discounts 4992032.98

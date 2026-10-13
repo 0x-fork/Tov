@@ -1,0 +1,35 @@
+type Item = { name: string, price: decimal, qty: int }
+const items: Item[] = [
+  { name: "coffee", price: 3.10, qty: 3 },
+  { name: "bagel", price: 2.25, qty: 2 },
+  { name: "juice", price: 4.99, qty: 1 },
+]
+let subtotal: decimal = 0
+for (const it of items) {
+  subtotal += it.price * it.qty
+}
+const tax = (subtotal * 0.0825).round(2)
+const total = subtotal + tax
+console.log(subtotal, tax, total, `${total}`, total.toFixed(1))
+console.log(0.1m + 0.2m, 0.1m + 0.2m === 0.3m, 1.10m === 1.1m, 10.00m / 4m, 1m / 3m, 2m / 3m)
+console.log((-2.5m).round(), (2.5m).round(), (2.5m).round(0, "halfExpand"), (-7.5m).floor(), (7.01m).ceil(), (-7.99m).trunc(), (-3m).abs())
+console.log(Number(1.5m), int(42.000m), decimal(0.1), decimal(7), try decimal(" 12.50 "), 5.25m % 2m)
+const m = new Map<decimal, string>()
+m.set(1.50m, "a")
+console.log(m.get(1.5m), [1.5m, 2.25m], JSON.stringify({ total, items }))
+const back: { total: decimal } = try JSON.parse(`{"total": 12345678901234567890.123456789}`)
+console.log(back.total, back.total * 2)
+let d = 9.99m
+d++
+d -= 1
+console.log(d, d > 9, d < 10.5m, typeof d)
+try {
+  console.log(try decimal("abc"))
+} catch (e) {
+  console.log(e.name, e.message)
+}
+// division: 34 significant digits, half to even; exact results keep the dividend's scale less
+// the divisor's; (a / b).round(k) rounds once, exactly as dividing then rounding does
+console.log(10m / 3m, 1m / 0.001m, 123.45m / 100, (2m / 3m).round(4), (1m / 8m).round(2), (5m / 8m).round(2, "halfExpand"))
+const big = 9999999999999999999999999999999999m
+console.log(big, (big / 7).round(0, "floor"), -0.0000000000000000000000000000000005m)

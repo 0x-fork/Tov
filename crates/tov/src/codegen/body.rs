@@ -1783,6 +1783,15 @@ impl<'c, 'a> Gen<'c, 'a> {
         let ty = self.ty(e);
         match &node.kind {
             ExprKind::Error => Val::plain("0", ERROR),
+            ExprKind::Int(v) if ty == DECIMAL => Val::plain(self.dec_lit(&v.to_string()), DECIMAL),
+            ExprKind::Float(_) if ty == DECIMAL => {
+                let text = self.c.sm.get(span.file).text[span.start as usize..span.end as usize].to_string();
+                Val::plain(self.dec_lit(&text), DECIMAL)
+            }
+            ExprKind::Decimal(s) => {
+                let text = self.sym(*s).to_string();
+                Val::plain(self.dec_lit(&text), DECIMAL)
+            }
             ExprKind::Int(v) => {
                 let code = match self.tget(ty) {
                     Ty::F64 | Ty::F32 => format!("{}.0", v),
@@ -1840,6 +1849,11 @@ impl<'c, 'a> Gen<'c, 'a> {
                 }
                 let old = self.fresh("o");
                 self.line(format!("{ct} {old} = {lv};"));
+                if p.ty == DECIMAL {
+                    let f = if *inc { "tv_dec_add" } else { "tv_dec_sub" };
+                    self.line(format!("{lv} = {f}({old}, tv_dec_from_int(1));"));
+                    return Val::plain(if *prefix { lv } else { old }, p.ty);
+                }
                 let new = if self.c.types.is_float(p.ty) {
                     format!("{old} {} 1", if *inc { "+" } else { "-" })
                 } else {
@@ -2175,6 +2189,7 @@ impl<'c, 'a> Gen<'c, 'a> {
             (Ty::Int | Ty::I8 | Ty::I16 | Ty::I32 | Ty::U8 | Ty::U16 | Ty::U32 | Ty::U64, Ty::F64) => return Val::plain(format!("((double)({}))", v.code), to),
             (Ty::Int | Ty::I8 | Ty::I16 | Ty::I32 | Ty::U8 | Ty::U16 | Ty::U32 | Ty::U64 | Ty::F64, Ty::F32) => return Val::plain(format!("((float)({}))", v.code), to),
             (Ty::F32, Ty::F64) => return Val::plain(format!("((double)({}))", v.code), to),
+            (Ty::Int | Ty::I8 | Ty::I16 | Ty::I32 | Ty::U8 | Ty::U16 | Ty::U32 | Ty::U64, Ty::Decimal) => return Val::plain(format!("tv_dec_make((__int128)({}), 0)", v.code), to),
             (Ty::StrLit(s), Ty::Str) => {
                 let text = self.sym(s).to_string();
                 return Val::plain(self.lit(text.as_bytes()), STR);
@@ -2473,6 +2488,8 @@ impl<'c, 'a> Gen<'c, 'a> {
                 "number"
             } else if t == BIGINT {
                 "bigint"
+            } else if t == DECIMAL {
+                "decimal"
             } else if types.is_string(t) {
                 "string"
             } else if t == BOOL {
@@ -2551,6 +2568,11 @@ impl<'c, 'a> Gen<'c, 'a> {
                     }
                 }
                 self.tmp(BIGINT, &format!("tv_big_neg({})", v.code), true)
+            }
+            UnOp::Neg if ty == DECIMAL => {
+                let v = self.expr(x);
+                let v = self.coerce(v, DECIMAL);
+                Val::plain(format!("tv_dec_neg({})", v.code), DECIMAL)
             }
             UnOp::BitNot if ty == BIGINT => {
                 let v = self.expr(x);
@@ -2643,6 +2665,10 @@ impl<'c, 'a> Gen<'c, 'a> {
                 if self.c.types.is_string(lv.ty) {
                     let (a, b) = (self.coerce(lv, STR), self.coerce(rv, STR));
                     return Val::plain(format!("(tv_str_cmp({}, {}) {o} 0)", a.code, b.code), BOOL);
+                }
+                if lv.ty == DECIMAL || rv.ty == DECIMAL {
+                    let (a, b) = (self.coerce(lv, DECIMAL), self.coerce(rv, DECIMAL));
+                    return Val::plain(format!("(tv_dec_cmp({}, {}) {o} 0)", a.code, b.code), BOOL);
                 }
                 if lv.ty == BIGINT || rv.ty == BIGINT {
                     // (an integer side is compared exactly, as in JavaScript)
@@ -2802,6 +2828,17 @@ impl<'c, 'a> Gen<'c, 'a> {
 
     pub(crate) fn arith(&mut self, op: BinOp, lv: Val, rv: Val, ty: TyId, span: Span) -> Val {
         use BinOp::*;
+        if ty == DECIMAL {
+            let (a, b) = (self.coerce(lv, DECIMAL), self.coerce(rv, DECIMAL));
+            let code = match op {
+                Add => format!("tv_dec_add({}, {})", a.code, b.code),
+                Sub => format!("tv_dec_sub({}, {})", a.code, b.code),
+                Mul => format!("tv_dec_mul({}, {})", a.code, b.code),
+                Div => format!("tv_dec_div({}, {}, {})", a.code, b.code, self.loc(span)),
+                _ => format!("tv_dec_rem({}, {}, {})", a.code, b.code, self.loc(span)),
+            };
+            return Val::plain(code, DECIMAL);
+        }
         let ct = self.ctype(ty);
         if self.c.types.is_float(ty) {
             let a = self.coerce(lv, ty);
@@ -2842,6 +2879,10 @@ impl<'c, 'a> Gen<'c, 'a> {
             // JavaScript's ===
             let (a, b) = (self.js_of(a), self.js_of(b));
             return self.eq_code(JS, &a.code, &b.code);
+        }
+        if (ta == DECIMAL || tb == DECIMAL) && self.c.types.is_num_like(ta) && self.c.types.is_num_like(tb) {
+            let (x, y) = (self.coerce(a, DECIMAL), self.coerce(b, DECIMAL));
+            return format!("tv_dec_eq({}, {})", x.code, y.code);
         }
         if self.c.types.is_numeric(ta) && self.c.types.is_numeric(tb) {
             let (x, y) = self.numeric_operands(a, b);
@@ -3410,7 +3451,9 @@ impl<'c, 'a> Gen<'c, 'a> {
                         Val::plain(format!("(({ct})({} {o} {}))", cur.code, rhs.code), p.ty)
                     }
                     _ => {
-                        let arith_ty = if bop == BinOp::Div || self.c.types.is_float(p.ty) || self.c.types.is_float(rhs.ty) {
+                        let arith_ty = if p.ty == DECIMAL {
+                            DECIMAL
+                        } else if bop == BinOp::Div || self.c.types.is_float(p.ty) || self.c.types.is_float(rhs.ty) {
                             if p.ty == F32 { F32 } else { F64 }
                         } else {
                             p.ty

@@ -1,0 +1,15 @@
+[package]
+name = "decimal_ledger"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+rust_decimal = "1"
+rust_decimal_macros = "1"
+
+[profile.release]
+lto = true
+codegen-units = 1
+panic = "abort"
+
+[workspace]

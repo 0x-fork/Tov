@@ -29,6 +29,22 @@ enum Root {
 }
 
 impl<'a> Checker<'a> {
+    /// A decimal literal must fit: 34 significant digits, 34 after the point.
+    fn check_decimal_literal(&mut self, text: &str, span: Span) {
+        if crate::types::decimal_literal(text).is_none() {
+            self.report(Diagnostic::new("T0020", span, format!("{text} doesn't fit in `decimal` (34 significant digits, at most 34 after the point)")));
+        }
+    }
+
+    /// An integer or float literal (possibly negated or in parentheses).
+    pub(super) fn is_num_literal(&self, e: ExprId) -> bool {
+        match &self.ast().expr(e).kind {
+            ExprKind::Int(_) | ExprKind::Float(_) => true,
+            ExprKind::Unary(UnOp::Neg, x) | ExprKind::Paren(x) => self.is_num_literal(*x),
+            _ => false,
+        }
+    }
+
     pub(super) fn is_int_literal(&self, e: ExprId) -> bool {
         match &self.ast().expr(e).kind {
             ExprKind::Int(_) => true,
@@ -42,6 +58,9 @@ impl<'a> Checker<'a> {
         let members = self.flat_members(exp);
         if members.contains(&INT) {
             return Some(INT);
+        }
+        if members.contains(&DECIMAL) {
+            return Some(DECIMAL);
         }
         members.iter().copied().find(|&m| self.types.is_numeric(m))
     }
@@ -79,8 +98,18 @@ impl<'a> Checker<'a> {
                 t
             }
             ExprKind::BigInt(_) => BIGINT,
+            ExprKind::Decimal(s) => {
+                let text = self.name(*s).to_string();
+                self.check_decimal_literal(&text, span);
+                DECIMAL
+            }
             ExprKind::Float(_) => match self.numeric_hint(exp) {
                 Some(F32) => F32,
+                Some(DECIMAL) => {
+                    let text = self.src(span).to_string();
+                    self.check_decimal_literal(&text, span);
+                    DECIMAL
+                }
                 _ => F64,
             },
             ExprKind::Str(s) => self.types.str_lit(*s),
@@ -112,7 +141,7 @@ impl<'a> Checker<'a> {
             ExprKind::Assign(op, t, v) => self.assign(*op, *t, *v, span),
             ExprKind::Update { target, .. } => {
                 let Some(place) = self.place(*target, false) else { return ERROR };
-                if !self.types.is_numeric(place.ty) && place.ty != ERROR && place.ty != BIGINT {
+                if !self.types.is_num_like(place.ty) && place.ty != ERROR && place.ty != BIGINT {
                     let msg = format!("`++`/`--` need a number, found `{}`", self.show(place.ty));
                     self.report(Diagnostic::new("T0501", span, msg));
                 }
@@ -320,7 +349,7 @@ impl<'a> Checker<'a> {
         match op {
             UnOp::Neg => {
                 let t = self.expr(x, exp);
-                if t != ERROR && !self.types.is_numeric(t) && t != BIGINT {
+                if t != ERROR && !self.types.is_num_like(t) && t != BIGINT {
                     let msg = format!("unary `-` needs a number, found `{}`", self.show(t));
                     self.report(Diagnostic::new("T0501", span, msg));
                     return ERROR;
@@ -428,6 +457,10 @@ impl<'a> Checker<'a> {
                     }
                     return BOOL;
                 }
+                if tl == DECIMAL || tr == DECIMAL {
+                    self.decimal_arith(op, l, r, tl, tr, span);
+                    return BOOL;
+                }
                 let ok = (self.types.is_numeric(tl) && self.types.is_numeric(tr)) || (self.types.is_string(tl) && self.types.is_string(tr));
                 if !ok && tl != ERROR && tr != ERROR {
                     let msg = format!("can't compare `{}` with `{}` using `{}`", self.show(tl), self.show(tr), op.as_str());
@@ -453,6 +486,9 @@ impl<'a> Checker<'a> {
                     }
                     return STR;
                 }
+                if tl == DECIMAL || tr == DECIMAL {
+                    return self.decimal_arith(op, l, r, tl, tr, span);
+                }
                 if tl == BIGINT || tr == BIGINT {
                     return self.bigint_arith(op, l, r, tl, tr, span);
                 }
@@ -460,6 +496,9 @@ impl<'a> Checker<'a> {
             }
             Sub | Mul | Rem | Pow => {
                 let (tl, tr) = self.numeric_pair(l, r, exp);
+                if tl == DECIMAL || tr == DECIMAL {
+                    return self.decimal_arith(op, l, r, tl, tr, span);
+                }
                 if tl == BIGINT || tr == BIGINT {
                     return self.bigint_arith(op, l, r, tl, tr, span);
                 }
@@ -467,6 +506,9 @@ impl<'a> Checker<'a> {
             }
             Div => {
                 let (tl, tr) = self.numeric_pair(l, r, None);
+                if tl == DECIMAL || tr == DECIMAL {
+                    return self.decimal_arith(op, l, r, tl, tr, span);
+                }
                 if tl == BIGINT || tr == BIGINT {
                     return self.bigint_arith(op, l, r, tl, tr, span);
                 }
@@ -670,14 +712,14 @@ impl<'a> Checker<'a> {
 
     /// Checks two operands so an integer literal on either side adopts the other side's numeric type.
     fn numeric_pair(&mut self, l: ExprId, r: ExprId, exp: Option<TyId>) -> (TyId, TyId) {
-        if self.is_int_literal(l) && !self.is_int_literal(r) {
+        if self.is_num_literal(l) && !self.is_num_literal(r) {
             let tr = self.expr(r, exp);
-            let hint = if self.types.is_numeric(tr) { Some(tr) } else { exp };
+            let hint = if self.types.is_num_like(tr) { Some(tr) } else { exp };
             let tl = self.expr(l, hint);
             (tl, tr)
         } else {
             let tl = self.expr(l, exp);
-            let hint = if self.types.is_numeric(tl) { Some(tl) } else { None };
+            let hint = if self.types.is_num_like(tl) { Some(tl) } else { None };
             let tr = self.expr(r, hint);
             (tl, tr)
         }
@@ -686,6 +728,45 @@ impl<'a> Checker<'a> {
     fn mixed_ints(&mut self, a: TyId, b: TyId, span: Span) {
         let msg = format!("mixed integer types `{}` and `{}`", self.show(a), self.show(b));
         self.report(Diagnostic::new("T0504", span, msg).note("instead", "convert one side explicitly, e.g. `int(x)`"));
+    }
+
+    /// An operator with a `decimal` operand: the other is a `decimal` or an integer (converted
+    /// exactly). A float never converts implicitly: `0.1` isn't exactly a tenth.
+    fn decimal_arith(&mut self, op: BinOp, l: ExprId, r: ExprId, tl: TyId, tr: TyId, span: Span) -> TyId {
+        if tl == ERROR || tr == ERROR {
+            return ERROR;
+        }
+        let comparison = matches!(op, BinOp::Lt | BinOp::Gt | BinOp::Le | BinOp::Ge);
+        if !comparison && !matches!(op, BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Rem) {
+            let msg = format!("`{}` doesn't apply to `decimal`", op.as_str());
+            let mut d = Diagnostic::new("T0501", span, msg);
+            if op == BinOp::Pow {
+                d = d.note("instead", "multiply, or convert: `decimal(Number(x) ** n)` (inexact)");
+            }
+            self.report(d);
+            return ERROR;
+        }
+        let ok = |c: &Self, t: TyId| t == DECIMAL || c.types.is_int(t);
+        if ok(self, tl) && ok(self, tr) {
+            return DECIMAL;
+        }
+        let (ls, rs) = (self.show(tl), self.show(tr));
+        let mut d = Diagnostic::new("T0504", span, format!("can't mix `{ls}` and `{rs}` with `{}`", op.as_str()))
+            .note("why", "a `decimal` combines with decimals and integers; a float is binary, so `0.1` isn't exactly a tenth");
+        let (other, ot) = if tl == DECIMAL { (r, tr) } else { (l, tl) };
+        let os = self.ast().expr(other).span;
+        let text = self.src(os).to_string();
+        if self.types.is_float(ot) {
+            let ds = self.ast().expr(if tl == DECIMAL { l } else { r }).span;
+            let dtext = self.src(ds).to_string();
+            d = d
+                .fix(Applicability::Maybe, format!("convert the number (its shortest decimal form): `decimal({text})`"), os, format!("decimal({text})"))
+                .fix(Applicability::Maybe, format!("convert the decimal: `Number({dtext})`"), ds, format!("Number({dtext})"));
+        } else if ot == BIGINT {
+            d = d.fix(Applicability::Maybe, format!("convert: `decimal({text})`"), os, format!("decimal({text})"));
+        }
+        self.report(d);
+        ERROR
     }
 
     /// An arithmetic or bitwise operator with a `bigint` operand: both must be `bigint`, as in
@@ -762,7 +843,7 @@ impl<'a> Checker<'a> {
             (tl, tr)
         } else {
             let tl = self.expr(l, None);
-            let tr = self.expr(r, if self.types.is_numeric(tl) { Some(tl) } else { None });
+            let tr = self.expr(r, if self.types.is_num_like(tl) { Some(tl) } else { None });
             (tl, tr)
         };
         let undefined_literal = matches!(self.ast().expr(l).kind, ExprKind::Undefined) || matches!(self.ast().expr(r).kind, ExprKind::Undefined);
@@ -867,9 +948,11 @@ impl<'a> Checker<'a> {
                 self.expr(value, None);
             }
             AssignOp::Op(bop) => {
-                let hint = if self.types.is_numeric(place.ty) { Some(place.ty) } else { None };
+                let hint = if self.types.is_num_like(place.ty) { Some(place.ty) } else { None };
                 let tv = self.expr(value, hint);
-                let result = if place.ty == BIGINT || (tv == BIGINT && !self.types.is_string(place.ty)) {
+                let result = if place.ty == DECIMAL || (tv == DECIMAL && !self.types.is_string(place.ty)) {
+                    self.decimal_arith(bop, target, value, place.ty, tv, span)
+                } else if place.ty == BIGINT || (tv == BIGINT && !self.types.is_string(place.ty)) {
                     if bop == BinOp::UShr {
                         self.report(Diagnostic::new("T0501", span, "`>>>=` doesn't apply to `bigint`: a bigint has no fixed width"));
                         ERROR
@@ -2769,6 +2852,8 @@ impl<'a> Checker<'a> {
             d = d.fix(Applicability::Maybe, format!("test for presence: `{text} !== undefined`"), span, format!("{text} !== undefined"));
         } else if self.types.is_numeric(inner) {
             d = d.fix(Applicability::Maybe, format!("`{text} !== 0`"), span, format!("{text} !== 0"));
+        } else if inner == DECIMAL {
+            d = d.fix(Applicability::Maybe, format!("`{text} !== 0`"), span, format!("{text} !== 0"));
         } else if inner == BIGINT {
             d = d.fix(Applicability::Maybe, format!("`{text} !== 0n`"), span, format!("{text} !== 0n"));
         } else if self.types.is_string(inner) {
@@ -2997,6 +3082,8 @@ fn typeof_name(types: &Types, t: TyId) -> Option<&'static str> {
         Some("number")
     } else if t == BIGINT {
         Some("bigint")
+    } else if t == DECIMAL {
+        Some("decimal")
     } else if types.is_string(t) {
         Some("string")
     } else if t == BOOL {
