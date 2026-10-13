@@ -1,0 +1,214 @@
+// Bun.connect and Bun.listen: a program that is both ends (ephemeral ports), plain and TLS.
+type Count = { bytes: int }
+
+// a self-signed certificate for localhost (valid until 2126)
+const CERT =
+  "-----BEGIN CERTIFICATE-----\n" +
+  "MIIBmzCCAUGgAwIBAgIUZjNqwvmDx0AFEZs3WzHRZLdKZHcwCgYIKoZIzj0EAwIw\n" +
+  "FDESMBAGA1UEAwwJbG9jYWxob3N0MCAXDTI2MTAxMzE1NTMxMVoYDzIxMjYwOTE5\n" +
+  "MTU1MzExWjAUMRIwEAYDVQQDDAlsb2NhbGhvc3QwWTATBgcqhkjOPQIBBggqhkjO\n" +
+  "PQMBBwNCAAT/DfwMLFYj9PLIyg1PC81HMZU/6n+3fByOfxg4IQkY54dwjhBV/fT4\n" +
+  "DbCdoA4csLhOq+DIgrZkoZ1aqdf6w8D9o28wbTAdBgNVHQ4EFgQU/TlQgBrrt581\n" +
+  "MZU2lYeoX9hLUncwHwYDVR0jBBgwFoAU/TlQgBrrt581MZU2lYeoX9hLUncwDwYD\n" +
+  "VR0TAQH/BAUwAwEB/zAaBgNVHREEEzARgglsb2NhbGhvc3SHBH8AAAEwCgYIKoZI\n" +
+  "zj0EAwIDSAAwRQIgZb9ivhJBJ/12nmZIUhILt1WneywedKruJRYEeEnxyooCIQD1\n" +
+  "umOuIMt9FIL0Q5RZXoJNr/KfZFotEBSI6g0K/Lz7fQ==\n" +
+  "-----END CERTIFICATE-----\n"
+const KEY =
+  "-----BEGIN PRIVATE KEY-----\n" +
+  "MIGHAgEAMBMGByqGSM49AgEGCCqGSM49AwEHBG0wawIBAQQgHqb65r9XoBrDM6Gg\n" +
+  "1cpLM5oKkJPrQWKkMRiflxO9uTyhRANCAAT/DfwMLFYj9PLIyg1PC81HMZU/6n+3\n" +
+  "fByOfxg4IQkY54dwjhBV/fT4DbCdoA4csLhOq+DIgrZkoZ1aqdf6w8D9\n" +
+  "-----END PRIVATE KEY-----\n"
+
+async function plain() {
+  const dec = try new TextDecoder()
+  const server = Bun.listen({
+    hostname: "127.0.0.1",
+    port: 0,
+    socket: {
+      data(socket, data) {
+        socket.write(`echo: ${try dec.decode(data)}`)
+      },
+    },
+  })
+  let got = ""
+  const done = new Promise<int>((resolve) => {
+    Bun.connect({
+      hostname: "127.0.0.1",
+      port: server.port,
+      socket: {
+        open(socket) {
+          socket.write("hello")
+        },
+        data(socket, data) {
+          got += try dec.decode(data)
+          socket.end()
+        },
+        close(socket) {
+          resolve(0)
+        },
+      },
+    })
+  })
+  await done
+  server.stop()
+  console.log(got)
+}
+
+async function failures() {
+  try {
+    await Bun.connect({ hostname: "127.0.0.1", port: 1, socket: { data(socket, data) {} } })
+  } catch (e) {
+    console.log("refused:", e.message)
+  }
+  try {
+    await Bun.connect({ hostname: "no-such-host.invalid", port: 80, socket: { data(socket, data) {} } })
+  } catch (e) {
+    console.log("dns:", e.message)
+  }
+}
+
+async function bulk() {
+  // 32 MB through an echo server, 1 MB writes: everything arrives, in order
+  let served = 0
+  const server = Bun.listen<Count>({
+    hostname: "127.0.0.1",
+    port: 0,
+    socket: {
+      open(socket) {
+        socket.data = { bytes: 0 }
+      },
+      data(socket, data) {
+        socket.data = { bytes: socket.data!.bytes + data.length }
+        socket.write(data)
+      },
+      close(socket) {
+        served = socket.data!.bytes
+      },
+    },
+  })
+  const chunk: u8[] = []
+  for (let i = 0; i < 1 << 20; i++) {
+    chunk.push(u8(i % 251))
+  }
+  let received = 0
+  let sum = 0
+  const done = new Promise<int>((resolve) => {
+    Bun.connect({
+      hostname: "127.0.0.1",
+      port: server.port,
+      socket: {
+        open(socket) {
+          for (let i = 0; i < 32; i++) {
+            socket.write(chunk)
+          }
+        },
+        data(socket, data) {
+          for (const b of data) {
+            sum = (sum * 31 + int(b)) % 1000000007
+          }
+          received += data.length
+          if (received === 32 << 20) {
+            socket.end()
+          }
+        },
+        close(socket) {
+          resolve(0)
+        },
+      },
+    })
+  })
+  await done
+  await new Promise<int>((resolve) => setTimeout(() => resolve(0), 50))
+  server.stop()
+  console.log("bulk:", received, sum, served)
+}
+
+async function tls() {
+  const dec = try new TextDecoder()
+  const server = Bun.listen({
+    hostname: "127.0.0.1",
+    port: 0,
+    tls: { cert: CERT, key: KEY },
+    socket: {
+      data(socket, data) {
+        socket.write(`tls echo: ${try dec.decode(data)}`)
+      },
+    },
+  })
+  let got = ""
+  const done = new Promise<int>((resolve) => {
+    Bun.connect({
+      hostname: "localhost",
+      port: server.port,
+      tls: { ca: CERT },
+      socket: {
+        handshake(socket, ok) {
+          console.log("handshake:", ok)
+        },
+        open(socket) {
+          socket.write("secret")
+        },
+        data(socket, data) {
+          got += try dec.decode(data)
+          socket.end()
+        },
+        close(socket) {
+          resolve(0)
+        },
+      },
+    })
+  })
+  await done
+  console.log(got)
+  try {
+    await Bun.connect({ hostname: "localhost", port: server.port, tls: true, socket: { data(socket, data) {} } })
+  } catch (e) {
+    console.log("untrusted:", e.message)
+  }
+  server.stop(true)
+}
+
+async function halfOpen() {
+  // the client ends its side; the server still answers, then ends
+  const dec = try new TextDecoder()
+  const server = Bun.listen({
+    hostname: "127.0.0.1",
+    port: 0,
+    allowHalfOpen: true,
+    socket: {
+      end(socket) {
+        socket.end("bye")
+      },
+    },
+  })
+  let got = ""
+  const done = new Promise<int>((resolve) => {
+    Bun.connect({
+      hostname: "127.0.0.1",
+      port: server.port,
+      allowHalfOpen: true,
+      socket: {
+        open(socket) {
+          socket.end()
+        },
+        data(socket, data) {
+          got += try dec.decode(data)
+        },
+        close(socket) {
+          resolve(0)
+        },
+      },
+    })
+  })
+  await done
+  server.stop()
+  console.log("half open:", got)
+}
+
+try await plain()
+await failures()
+await bulk()
+try await tls()
+try await halfOpen()

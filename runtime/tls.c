@@ -22,6 +22,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
+#include <sys/socket.h>
 
 #include <openssl/base64.h>
 #include <openssl/bytestring.h>
@@ -31,8 +32,16 @@
 #include <openssl/ssl.h>
 #include <openssl/x509.h>
 
+/* What the socket gave beyond what TLS asked for (see tv_bio_read). */
+typedef struct tv_tls_ahead {
+    int fd;
+    uint8_t *buf;
+    size_t off, len, cap;
+} tv_tls_ahead;
+
 struct tv_tls {
     SSL *ssl;
+    tv_tls_ahead ahead;
     struct tv_tls_conf *conf;
     char key[256];            /* the session cache key (origin + configuration) */
     char code[64];            /* the last failure's code (ERR_SSL_...), see tv_tls_why */
@@ -114,6 +123,94 @@ static bool tv_tls_ready;
 static const char *tv_tls_bundle;   /* the CA bundle file */
 static tv_tls_conf *tv_tls_confs;
 static int tv_tls_index;            /* SSL ex_data slot holding the tv_tls */
+
+/* ---- the socket under TLS
+ *
+ * BoringSSL reads a record as two reads of exactly what it needs, the 5-byte header, then the
+ * body: two system calls a record. This BIO reads what the socket has, once, into a buffer the
+ * connections share, and keeps only what's left over (usually the record's body, asked for next)
+ * in the connection's own. tv_tls_pending counts it, so the loop never waits on bytes already
+ * read. Writes go straight to the socket. */
+
+static uint8_t tv_bio_shared[65536];
+
+/* Errors that mean "not yet" (as BoringSSL's socket BIO counts them): a socket still connecting
+ * takes a ClientHello later. */
+static bool tv_bio_retry(int e) {
+    return e == EAGAIN || e == EWOULDBLOCK || e == EINPROGRESS || e == EALREADY || e == ENOTCONN || e == EINTR;
+}
+
+static int tv_bio_read(BIO *b, char *out, int outl) {
+    tv_tls_ahead *a = BIO_get_data(b);
+    BIO_clear_retry_flags(b);
+    if (outl <= 0) return 0;
+    if (a->len > a->off) {
+        size_t n = a->len - a->off < (size_t)outl ? a->len - a->off : (size_t)outl;
+        memcpy(out, a->buf + a->off, n);
+        a->off += n;
+        if (a->off == a->len) a->off = a->len = 0;
+        return (int)n;
+    }
+    ssize_t r;
+    do r = recv(a->fd, tv_bio_shared, sizeof tv_bio_shared, 0); while (r < 0 && errno == EINTR);
+    if (r < 0) {
+        if (tv_bio_retry(errno)) BIO_set_retry_read(b);
+        return -1;
+    }
+    if (r == 0) return 0;
+    size_t n = (size_t)r < (size_t)outl ? (size_t)r : (size_t)outl;
+    memcpy(out, tv_bio_shared, n);
+    if ((size_t)r > n) {
+        size_t rest = (size_t)r - n;
+        if (a->cap < rest) {
+            free(a->buf);
+            a->cap = rest < 4096 ? 4096 : rest;
+            a->buf = malloc(a->cap);
+        }
+        memcpy(a->buf, tv_bio_shared + n, rest);
+        a->off = 0;
+        a->len = rest;
+    }
+    return (int)n;
+}
+
+static int tv_bio_write(BIO *b, const char *in, int inl) {
+    tv_tls_ahead *a = BIO_get_data(b);
+    BIO_clear_retry_flags(b);
+    ssize_t w;
+#ifdef MSG_NOSIGNAL
+    do w = send(a->fd, in, (size_t)inl, MSG_NOSIGNAL); while (w < 0 && errno == EINTR);
+#else
+    do w = send(a->fd, in, (size_t)inl, 0); while (w < 0 && errno == EINTR);
+#endif
+    if (w < 0) {
+        if (tv_bio_retry(errno)) BIO_set_retry_write(b);
+        return -1;
+    }
+    return (int)w;
+}
+
+static long tv_bio_ctrl(BIO *b, int cmd, long larg, void *parg) {
+    (void)b; (void)larg; (void)parg;
+    return cmd == BIO_CTRL_FLUSH ? 1 : 0;
+}
+
+static BIO_METHOD *tv_bio_method;
+
+/* The connection's socket as its BIO (reads ahead into t->ahead). */
+static void tv_tls_attach(tv_tls *t, int fd) {
+    if (!tv_bio_method) {
+        tv_bio_method = BIO_meth_new(BIO_get_new_index() | BIO_TYPE_SOURCE_SINK, "tov socket");
+        BIO_meth_set_read(tv_bio_method, tv_bio_read);
+        BIO_meth_set_write(tv_bio_method, tv_bio_write);
+        BIO_meth_set_ctrl(tv_bio_method, tv_bio_ctrl);
+    }
+    t->ahead.fd = fd;
+    BIO *b = BIO_new(tv_bio_method);
+    BIO_set_data(b, &t->ahead);
+    BIO_set_init(b, 1);
+    SSL_set_bio(t->ssl, b, b);
+}
 
 /* ---- remembered sessions (most recent per key) */
 
@@ -263,7 +360,7 @@ static tv_tls *tv_tls_open(int fd, const char *host, const char *key, bool verif
     t->conf = conf;
     snprintf(t->key, sizeof t->key, "%s|%d|%p", key, verify, (void *)conf);
     SSL_set_ex_data(ssl, tv_tls_index, t);
-    SSL_set_fd(ssl, fd);
+    tv_tls_attach(t, fd);
     SSL_set_connect_state(ssl);
     /* the name the certificate must match; SNI unless it's an IP address */
     char name[256];
@@ -312,13 +409,15 @@ static long tv_tls_write(tv_tls *t, const void *buf, size_t n) {
 }
 
 static size_t tv_tls_pending(tv_tls *t) {
-    return (size_t)SSL_pending(t->ssl);
+    return (size_t)SSL_pending(t->ssl) + (t->ahead.len - t->ahead.off);
 }
 
 /* Why the handshake or a read failed, as Node and Bun report it: (code, message). */
 static void tv_tls_why(tv_tls *t, const char *url, const char **code, char *msg, size_t n) {
     long vr = SSL_get_verify_result(t->ssl);
-    static const char verb[] = "For more information, pass `verbose: true` in the second argument to fetch()";
+    static const char verb_fetch[] = "For more information, pass `verbose: true` in the second argument to fetch()";
+    const char *verb = url ? verb_fetch : "";
+    if (!url) url = "";
     if (vr != X509_V_OK) {
         static const struct { long v; const char *code, *msg; } known[] = {
             {X509_V_ERR_CERT_HAS_EXPIRED, "CERT_HAS_EXPIRED", "certificate has expired"},
@@ -336,7 +435,8 @@ static void tv_tls_why(tv_tls *t, const char *url, const char **code, char *msg,
         if (vr == X509_V_ERR_UNABLE_TO_GET_ISSUER_CERT_LOCALLY && chain && sk_X509_num(chain) <= 1) vr = X509_V_ERR_UNABLE_TO_VERIFY_LEAF_SIGNATURE;
         if (vr == X509_V_ERR_HOSTNAME_MISMATCH || vr == X509_V_ERR_IP_ADDRESS_MISMATCH) {
             *code = "ERR_TLS_CERT_ALTNAME_INVALID";
-            snprintf(msg, n, "ERR_TLS_CERT_ALTNAME_INVALID fetching \"%s\". %s", url, verb);
+            if (*url) snprintf(msg, n, "ERR_TLS_CERT_ALTNAME_INVALID fetching \"%s\". %s", url, verb);
+            else snprintf(msg, n, "Hostname/IP does not match certificate's altnames");
             return;
         }
         for (size_t i = 0; i < sizeof known / sizeof *known; i++) {
@@ -354,10 +454,11 @@ static void tv_tls_why(tv_tls *t, const char *url, const char **code, char *msg,
         for (const char *p = reason; *p && k + 1 < sizeof t->code; p++) t->code[k++] = (char)(*p >= 'a' && *p <= 'z' ? *p - 32 : *p == ' ' ? '_' : *p);
         t->code[k] = 0;
         *code = t->code;
-        snprintf(msg, n, "%s fetching \"%s\". %s", t->code, url, verb);
+        if (*url) snprintf(msg, n, "%s fetching \"%s\". %s", t->code, url, verb);
+        else snprintf(msg, n, "%s", reason);
     } else {
         *code = "ECONNRESET";
-        snprintf(msg, n, "The socket connection was closed unexpectedly. %s", verb);
+        snprintf(msg, n, "The socket connection was closed unexpectedly.%s%s", *verb ? " " : "", verb);
     }
     ERR_clear_error();
 }
@@ -366,11 +467,68 @@ static void tv_tls_close(tv_tls *t, bool notify) {
     if (notify) SSL_shutdown(t->ssl); /* best effort: the socket may be gone */
     SSL_free(t->ssl);
     ERR_clear_error();
+    free(t->ahead.buf);
     free(t);
 }
 
+/* ---- servers (Bun.listen's and Bun.serve's `tls`) */
+
+/* A server context from a PEM certificate chain (the leaf first) and its private key. */
+static void *tv_tls_server(const char *cert, size_t cert_len, const char *key, size_t key_len, char *err, size_t err_n) {
+    tv_tls_init();
+    SSL_CTX *ctx = SSL_CTX_new(TLS_method());
+    if (!ctx) { snprintf(err, err_n, "can't create a TLS context"); return NULL; }
+    SSL_CTX_set_min_proto_version(ctx, TLS1_2_VERSION);
+    SSL_CTX_set_mode(ctx, SSL_MODE_ENABLE_PARTIAL_WRITE | SSL_MODE_ACCEPT_MOVING_WRITE_BUFFER | SSL_MODE_RELEASE_BUFFERS);
+    BIO *b = BIO_new_mem_buf(cert, (int)cert_len);
+    X509 *leaf = b ? PEM_read_bio_X509(b, NULL, NULL, NULL) : NULL;
+    bool ok = leaf && SSL_CTX_use_certificate(ctx, leaf) == 1;
+    X509_free(leaf);
+    if (ok) {
+        /* the rest of the chain */
+        X509 *x;
+        while ((x = PEM_read_bio_X509(b, NULL, NULL, NULL)) != NULL) {
+            if (!SSL_CTX_add0_chain_cert(ctx, x)) { X509_free(x); break; }
+        }
+    }
+    BIO_free(b);
+    if (!ok) {
+        snprintf(err, err_n, "the TLS certificate isn't a PEM certificate");
+        SSL_CTX_free(ctx);
+        ERR_clear_error();
+        return NULL;
+    }
+    b = BIO_new_mem_buf(key, (int)key_len);
+    EVP_PKEY *pk = b ? PEM_read_bio_PrivateKey(b, NULL, NULL, NULL) : NULL;
+    BIO_free(b);
+    ok = pk && SSL_CTX_use_PrivateKey(ctx, pk) == 1 && SSL_CTX_check_private_key(ctx) == 1;
+    EVP_PKEY_free(pk);
+    ERR_clear_error();
+    if (!ok) {
+        snprintf(err, err_n, "the TLS key isn't a PEM private key for the certificate");
+        SSL_CTX_free(ctx);
+        return NULL;
+    }
+    return ctx;
+}
+
+static tv_tls *tv_tls_accept(int fd, void *server) {
+    SSL *ssl = SSL_new((SSL_CTX *)server);
+    if (!ssl) return NULL;
+    tv_tls *t = calloc(1, sizeof *t);
+    t->ssl = ssl;
+    SSL_set_ex_data(ssl, tv_tls_index, t);
+    tv_tls_attach(t, fd);
+    SSL_set_accept_state(ssl);
+    ERR_clear_error();
+    return t;
+}
+
+static bool tv_tls_verified(tv_tls *t) { return SSL_get_verify_result(t->ssl) == X509_V_OK; }
+
 static const tv_tls_ops tv_tls_table = {
     tv_tls_open, tv_tls_handshake, tv_tls_read, tv_tls_write, tv_tls_pending, tv_tls_why, tv_tls_close,
+    tv_tls_server, tv_tls_accept, tv_tls_verified,
 };
 
 void tv_tls_install(void) {

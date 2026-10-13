@@ -199,7 +199,7 @@ console.log(`Listening on ${server.url}`)
 - **Errors.** A handler that throws (or whose promise rejects) is logged to stderr and answered by `error(err)` if given, else `500 Something went wrong!`, like Bun in production.
 - **Types.** `Request`: `method`, `url`, `headers`, `text()` (a `Promise<string>`), `json<T>()` (a `Promise<T, SyntaxError>`, parsed against the expected type). `Response(body?, { status?, statusText?, headers? })`, `Response.json(value, init?)`, `Response.redirect(url, status?)`, `status`, `ok`, `headers`, `text()`, `json<T>()` (promises, as on `Request`). `Headers(init?)`: `get`/`has`/`set`/`append`/`delete`/`forEach`/`toJSON`, case-insensitive; CR/LF in names and values are dropped. `URL(input, base?)` (throws `TypeError`): `href`, `protocol`, `host`, `hostname`, `port`, `pathname`, `search`, `hash`, `origin`, `searchParams`; `URL.parse`, `URL.canParse`. `URLSearchParams`: `get`/`getAll`/`has`/`set`/`append`/`delete`/`size`/`forEach`/`keys`/`values`/`toString`. `Request` also has `formData()`, `blob()`, `bytes()` and `arrayBuffer()`; a `Response` body can be a `Blob` or a `FormData`.
 - **Protocol.** HTTP/1.1 with keep-alive, pipelining, `Content-Length` and chunked request bodies, `Expect: 100-continue` and `HEAD`; `content-length` and `date` are added, and `content-type: text/plain;charset=utf-8` when a body has none. Malformed or oversized requests get `400`/`413`/`431` and are closed.
-- Not yet: TLS, HTTP/2, WebSockets, streaming bodies, `Bun.file`.
+- Not yet: TLS for `Bun.serve`, HTTP/2, WebSockets, streaming bodies, `Bun.file`.
 
 ## 7d. fetch (Bun's client)
 `fetch(input, init?)` is a global, as in Bun: `input` is a URL string, a `URL` or a `Request`; `init` is `{ method?, headers?, body?, redirect?, signal?, decompress?, tls?, unix?, proxy?, keepalive? }`. It returns `Promise<Response, Error>`: it resolves once the response's head has arrived (an HTTP error status still resolves, `ok` is false) and the body follows, and rejects with a `FetchError` (a `TypeError` with Bun's `message` and `code`: `ConnectionRefused`, `ENOTFOUND`, `ECONNRESET`, `TooManyRedirects`, `UnexpectedRedirect`, `Malformed_HTTP_Response`, `ZlibError`, `BrotliDecompressionError`, `ZstdDecompressionError`, `ERR_INVALID_URL`, ...) or, when its `signal` aborts, with the signal's reason.
@@ -221,6 +221,25 @@ const user = try (await res.json()) as User
 - **Proxies** (Bun's `proxy: "http://user:pass@host:port"`, else `HTTP_PROXY`/`HTTPS_PROXY` (or lower case) unless `NO_PROXY` names the host): plain HTTP goes to the proxy in absolute form; HTTPS through a `CONNECT` tunnel, with TLS and certificate checks end to end. Credentials in the proxy URL become `Proxy-Authorization`. A proxy that refuses the tunnel (`407`) answers the request, as in Bun.
 - **Blob, File, FormData.** `new Blob(parts?, { type? })` joins strings (as UTF-8), `u8[]` and Blobs: `size`, `type` (lower-cased; `""` unless printable ASCII), `slice(start?, end?, type?)` (negative offsets count from the end), `text()`, `json<T>()`, `bytes()`, `arrayBuffer()`, `stream()`. `new File(parts, name, { type?, lastModified? })` adds `name` and `lastModified`. `FormData`: `append`/`set` (a string, or a Blob added as a `File`: named by the third argument, else its own name, `"blob"` for a plain Blob), `get`, `getAll`, `has`, `delete`, `forEach`, `keys()`, `values()`; values are `string | File`. It's written as browsers write it: newlines in names and text values become CRLF, and `"`, CR and LF in names and file names are percent-escaped. Unlike Bun, a file is sent with its own `type` (Bun sends most as `application/octet-stream`), and a plain Blob is named `"blob"` (as the standard and Node do).
 - Not yet: request bodies as streams, client certificates, `https:` proxies.
+
+## 7e. TCP and TLS sockets (Bun's API)
+`Bun.connect(options)` and `Bun.listen(options)`, as in Bun: `hostname`, `port` (or `unix`), `tls` (`true`, or `{ ca?, rejectUnauthorized?, serverName? }` to connect; `{ cert, key }`, PEM text, to listen), `data` (the sockets' starting `socket.data`), `allowHalfOpen`, and `socket`, the handlers: `open(socket)`, `data(socket, bytes)` (a `u8[]`), `drain(socket)`, `end(socket)` (the peer finished sending), `close(socket, error?)`, `error(socket, error)`, `connectError(socket, error)`, `handshake(socket, success, authorizationError?)`.
+```ts
+type Session = { name: string }
+const server = Bun.listen<Session>({
+  hostname: "0.0.0.0",
+  port: 7000,
+  socket: {
+    open(socket) { socket.data = { name: "guest" } },
+    data(socket, data) { socket.write(data) },
+  },
+})
+const client = try await Bun.connect({ hostname: "localhost", port: 7000, socket: { data(socket, data) { console.log(data.length) } } })
+client.write("hello")
+```
+- `Bun.connect` resolves once the socket is open (with TLS, once the handshake is done and the certificate checked) and rejects with a `SocketError` (`code`: `ECONNREFUSED`, `ENOTFOUND`, `CERT_HAS_EXPIRED`, ...) when it can't connect. `Bun.listen` returns a `TCPSocketListener` (`port`, `hostname`, `stop(closeActive?)`, `ref`, `unref`); a port that can't be bound prints the error and exits, as an uncaught error does in Bun.
+- `Socket`: `write(text | bytes)`, `end(data?)`, `flush()`, `terminate()`, `shutdown()`, `setNoDelay(on?)`, `ref()`, `unref()`, `data`, `remoteAddress`, `remotePort`, `localAddress`, `localPort`, `bufferedAmount` (Tov). Unlike Bun's, `write` takes everything: what the kernel can't take yet is buffered (Bun returns a short count and drops the rest), and `drain` follows once it's out. Writes made in a handler go out together when it returns: one system call for many small writes.
+- `end()` closes the socket once its data is out (`close` runs); with `allowHalfOpen` it shuts only the sending side, and the peer can keep sending. A handler that throws hands the error to `error`, else it's logged and the socket closes. A connect's `socket.data` is `T | undefined` (`T` from `data`, or the type argument: `Bun.listen<Session>(...)`).
 
 ## 8. Tests **[M0]**
 ```ts

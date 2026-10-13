@@ -783,8 +783,14 @@ typedef struct tv_tls_ops {
     long (*read)(tv_tls *t, void *buf, size_t n);         /* > 0 bytes, 0 ended, -1 wants read, -2 write, -3 failed */
     long (*write)(tv_tls *t, const void *buf, size_t n);  /* as read */
     size_t (*pending)(tv_tls *t);                         /* decrypted bytes waiting to be read */
-    void (*why)(tv_tls *t, const char *url, const char **code, char *msg, size_t n);
+    void (*why)(tv_tls *t, const char *url, const char **code, char *msg, size_t n);  /* (url NULL: not a fetch) */
     void (*close)(tv_tls *t, bool notify);
+    /* A server context from PEM certificate chain and key (NULL and a message on failure), and a
+     * server-side session on an accepted socket. */
+    void *(*server)(const char *cert, size_t cert_len, const char *key, size_t key_len, char *err, size_t err_n);
+    tv_tls *(*accept)(int fd, void *server);
+    /* the peer's certificate checked out (a client with verification on) */
+    bool (*verified)(tv_tls *t);
 } tv_tls_ops;
 extern const tv_tls_ops *tv_tls_impl;
 /* Streaming body decoders (runtime/codecs.c, in the same archive): set by tv_tls_install too.
@@ -857,6 +863,24 @@ tv_str tv_native_mimeLower(tv_str s);
 tv_arr tv_native_multipartParse(tv_str body, tv_str boundary);
 tv_str tv_native_headerGet(tv_str block, tv_str name);        /* values joined with ", " */
 tv_arr tv_native_headerEntries(tv_str block);                  /* sorted [name, value, ...] */
-tv_arr tv_native_headerValues(tv_str block, tv_str name);          /* WHATWG UTF-8 decode (BOM dropped, U+FFFD for bad bytes) */
+tv_arr tv_native_headerValues(tv_str block, tv_str name);
+/* sockets (runtime/net.c): Bun.connect, Bun.listen */
+tv_int tv_native_netConnect(tv_str host, tv_int port, tv_int tls, bool verify, tv_str ca, tv_str unix_path);
+void tv_native_netBind(tv_int id, tv_fn events, tv_str host, tv_str unix_path);
+tv_int tv_native_netWrite(tv_int id, tv_arr bytes);
+tv_int tv_native_netWriteText(tv_int id, tv_str text);
+void tv_native_netEnd(tv_int id);
+void tv_native_netFlush(tv_int id);
+void tv_native_netClose(tv_int id);
+void tv_native_netRef(tv_int id, bool ref);
+bool tv_native_netNoDelay(tv_int id, bool on);
+void tv_native_netHalfOpen(tv_int id, bool on);
+tv_str tv_native_netAddress(tv_int id, tv_int which);
+tv_int tv_native_netBuffered(tv_int id);
+tv_int tv_native_netListen(tv_str host, tv_int port, tv_str cert, tv_str key, tv_str unix_path, tv_fn on_accept);
+tv_int tv_native_netListenPort(tv_int id);
+void tv_native_netStop(tv_int id);
+void tv_native_netListenRef(tv_int id, bool ref);
+tv_str tv_native_netError(void);          /* WHATWG UTF-8 decode (BOM dropped, U+FFFD for bad bytes) */
 
 #endif /* TOV_H */

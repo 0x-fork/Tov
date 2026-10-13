@@ -4640,6 +4640,8 @@ static void tv_http_detach(tv_http_conn *c) {
  * loop to the client's code, so programs that never fetch don't link it. */
 int tv_io_refs;
 void (*tv_io_after_batch)(void);
+/* Before the loop waits for events (runtime/net.c writes out what sockets were given). */
+static void (*tv_loop_before_wait_net)(void);
 void (*tv_io_after_fork)(void);
 
 static int tv_loop_queue(void) {
@@ -4820,6 +4822,7 @@ static void tv_http_loop(void) {
             tv_http_service(c, false, false);
             tv_run_microtasks();
         }
+        if (tv_loop_before_wait_net) tv_loop_before_wait_net();
         if (!tv_http_alive()) break;
         if (tv_out_len) tv_out_flush(); /* handler logs reach pipes and files promptly */
         while (tv_ntimers && !tv_timers[0].cb.fn) (void)tv_timer_pop();
@@ -5506,7 +5509,9 @@ typedef struct tv_dns {
     tv_addrs addrs;
     uint64_t expires;
     struct tv_fr *waiters;     /* requests waiting for this lookup */
+    void *net_waiters;         /* sockets waiting for it (runtime/net.c) */
 } tv_dns;
+static void (*tv_dns_net_done)(tv_dns *d);
 
 #define TV_DNS_BUCKETS 64
 static tv_dns *tv_dns_cache[TV_DNS_BUCKETS];
@@ -6692,6 +6697,7 @@ static void tv_fr_connect(tv_fr *r, const tv_addrs *addrs) {
 }
 
 static void tv_dns_resolved(tv_dns *d) {
+    if (d->net_waiters && tv_dns_net_done) tv_dns_net_done(d);
     tv_fr *w = d->waiters;
     d->waiters = NULL;
     while (w) {

@@ -2630,6 +2630,20 @@ impl<'a> Checker<'a> {
         // Pass 1: non-closure arguments drive inference; pass 2: closures get the inferred parameter
         // types. An object literal holding closures (`{ port, data, socket: { open(s) {...} } }`)
         // is both: its other fields infer in pass 1, the whole object is checked in pass 2.
+        // (an object literal for a parameter that mentions open type parameters: its fields infer
+        // them in pass 1, and the whole is checked against what they found in pass 2)
+        let deferred: Vec<bool> = args
+            .iter()
+            .enumerate()
+            .map(|(i, a)| {
+                matches!(self.ast().expr(a.expr).kind, ExprKind::Object(_))
+                    && !self.infer_free.is_empty()
+                    && param_for(i).is_some_and(|p| {
+                        let open: Vec<u32> = self.infer_free.iter().copied().filter(|x| !map.contains_key(x)).collect();
+                        self.types.mentions(p.ty, &open)
+                    })
+            })
+            .collect();
         for pass in 0..2 {
             if pass == 1 {
                 // what the arguments left open takes its default (`<T = undefined>`)
@@ -2642,7 +2656,7 @@ impl<'a> Checker<'a> {
                 }
             }
             for (i, a) in args.iter().enumerate() {
-                let with_closures = matches!(self.ast().expr(a.expr).kind, ExprKind::Object(_)) && self.has_closure(a.expr) && !self.infer_free.is_empty();
+                let with_closures = deferred[i];
                 let is_arrow = matches!(self.ast().expr(a.expr).kind, ExprKind::Arrow(_)) || with_closures;
                 if pass == 0 && with_closures {
                     if let Some(p) = param_for(i) {

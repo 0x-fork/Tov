@@ -15,3 +15,4 @@ site/dist/
 .env*
 bench/micro/*/rust/target/
 bench/micro/*/node_modules/
+bench/tcp/out/

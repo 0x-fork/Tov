@@ -341,6 +341,13 @@ impl<'a> Checker<'a> {
                             scope.push((tp.name, self.types.intern(Ty::Param(id))));
                             mtparams.push(id);
                         }
+                        for (tp, &id) in f.tparams.iter().zip(&mtparams) {
+                            if let Some(d) = tp.default {
+                                let default = self.resolve_type(d, &scope);
+                                let base = self.gparams_base.len();
+                                self.gparams[id as usize - base].default = Some(default);
+                            }
+                        }
                     }
                     let (ps, names) = self.member_params(f, &scope);
                     if getter && !ps.is_empty() {

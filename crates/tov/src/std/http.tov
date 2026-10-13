@@ -1690,5 +1690,387 @@ export async function fetch(input: string | URL | Request, init?: RequestInit): 
   return Response.fetched(id, signal)
 }
 
-// The `Bun` global (only `Bun.serve` so far).
-export const Bun = { serve: serve }
+// ---------------------------------------------------------------- TCP and TLS sockets
+//
+//   const socket = await Bun.connect({
+//     hostname: "localhost", port: 8080,
+//     socket: { data(socket, data) { console.log(new TextDecoder().decode(data)) } },
+//   })
+//   socket.write("hello")
+//
+// Bun's API (runtime/net.c underneath). Unlike Bun's, `write` never comes back partial: what the
+// kernel can't take yet is buffered, and `drain` says when it's all gone.
+
+// A failed connection or a socket error: `code` is the system's (ECONNREFUSED, ENOTFOUND, ...)
+// or TLS's (CERT_HAS_EXPIRED, ...).
+export class SocketError extends Error {
+  readonly code: string
+  readonly syscall: string
+  constructor(message: string, code: string, syscall?: string) {
+    super(message)
+    this.code = code
+    this.syscall = syscall ?? ""
+  }
+}
+
+// A handler that throws hands the error to `error` (else it's logged and the socket closes).
+export type SocketHandler<T> = {
+  open?: (socket: Socket<T>) => void throws Error
+  data?: (socket: Socket<T>, data: u8[]) => void throws Error
+  drain?: (socket: Socket<T>) => void throws Error
+  end?: (socket: Socket<T>) => void throws Error
+  close?: (socket: Socket<T>, error?: Error) => void throws Error
+  error?: (socket: Socket<T>, error: Error) => void
+  connectError?: (socket: Socket<T>, error: Error) => void throws Error
+  handshake?: (socket: Socket<T>, success: bool, authorizationError?: Error) => void throws Error
+}
+
+export type SocketTLSOptions = { rejectUnauthorized?: bool, ca?: string, serverName?: string }
+export type ServerTLSOptions = { cert: string, key: string }
+
+export type ConnectOptions<T> = {
+  hostname?: string
+  port?: number
+  unix?: string
+  tls?: bool | SocketTLSOptions
+  data?: T
+  allowHalfOpen?: bool
+  socket: SocketHandler<T>
+}
+
+export type ListenOptions<T> = {
+  hostname?: string
+  port?: number
+  unix?: string
+  tls?: ServerTLSOptions
+  data?: T
+  allowHalfOpen?: bool
+  socket: SocketHandler<T>
+}
+
+export class Socket<T = undefined> {
+  data: T | undefined
+  private id: int
+  private handlers: SocketHandler<T>
+  private resolved: ((s: Socket<T>) => void) | undefined
+  private rejected: ((e: Error) => void) | undefined
+  private gone: ((id: int) => void) | undefined
+  private host: string
+
+  constructor(id: int, handlers: SocketHandler<T>, data: T | undefined) {
+    this.id = id
+    this.handlers = handlers
+    this.data = data
+    this.resolved = undefined
+    this.rejected = undefined
+    this.gone = undefined
+    this.host = ""
+  }
+
+  // Internal: settles Bun.connect's promise; tells a listener when it closes.
+  waits(resolve: (s: Socket<T>) => void, reject: (e: Error) => void): void {
+    this.resolved = resolve
+    this.rejected = reject
+  }
+
+  tracked(gone: (id: int) => void): void {
+    this.gone = gone
+  }
+
+  // Internal: the socket's events go here; a connecting socket starts connecting.
+  start(host: string, unix: string): void {
+    this.host = host
+    const s = this
+    __native.netBind(this.id, (kind: int, bytes: u8[], text: string): void => s.event(kind, bytes, text), host, unix)
+  }
+
+  private event(kind: int, bytes: u8[], text: string): void {
+    try {
+      this.handle(kind, bytes, text)
+    } catch (e) {
+      const f = this.handlers.error
+      if (f !== undefined) {
+        f(this, e)
+      } else {
+        console.error(`error: ${e.message}`)
+        __native.netClose(this.id)
+      }
+    }
+  }
+
+  private handle(kind: int, bytes: u8[], text: string): void throws Error {
+    switch (kind) {
+      case 1: {
+        const f = this.handlers.open
+        if (f !== undefined) {
+          try f(this)
+        }
+        const r = this.resolved
+        this.resolved = undefined
+        this.rejected = undefined
+        if (r !== undefined) {
+          r(this)
+        }
+        return
+      }
+      case 2: {
+        const f = this.handlers.data
+        if (f !== undefined) {
+          try f(this, bytes)
+        }
+        return
+      }
+      case 3: {
+        const f = this.handlers.drain
+        if (f !== undefined) {
+          try f(this)
+        }
+        return
+      }
+      case 4: {
+        const f = this.handlers.end
+        if (f !== undefined) {
+          try f(this)
+        }
+        return
+      }
+      case 5: {
+        const g = this.gone
+        if (g !== undefined) {
+          g(this.id)
+        }
+        const f = this.handlers.close
+        if (f !== undefined) {
+          const tab = text.indexOf("\t")
+          if (text === "") {
+            try f(this)
+          } else if (tab >= 0) {
+            try f(this, new SocketError(text.slice(tab + 1), text.slice(0, tab)))
+          } else {
+            try f(this, new SocketError(`The socket closed: ${text}`, text))
+          }
+        }
+        return
+      }
+      case 6: {
+        const tab = text.indexOf("\t")
+        const err = text === "ENOTFOUND"
+          ? new SocketError(`getaddrinfo ENOTFOUND ${this.host}`, text, "getaddrinfo")
+          : tab >= 0
+            ? new SocketError(text.slice(tab + 1), text.slice(0, tab), "connect")
+            : new SocketError("Failed to connect", text, "connect")
+        const r = this.rejected
+        this.resolved = undefined
+        this.rejected = undefined
+        if (r !== undefined) {
+          r(err)
+        }
+        const f = this.handlers.connectError
+        if (f !== undefined) {
+          try f(this, err)
+        }
+        return
+      }
+      case 7: {
+        const f = this.handlers.handshake
+        if (f !== undefined) {
+          const tab = text.indexOf("\t")
+          if (text === "") {
+            try f(this, true)
+          } else if (tab >= 0) {
+            try f(this, false, new SocketError(text.slice(tab + 1), text.slice(0, tab)))
+          } else {
+            try f(this, false, new SocketError(text, text))
+          }
+        }
+        return
+      }
+    }
+  }
+
+  // Writes text (as UTF-8) or bytes; all of it is taken (see above). -1 once the socket has
+  // closed or ended.
+  write(data: string | u8[]): int {
+    if (typeof data === "string") {
+      return __native.netWriteText(this.id, data)
+    }
+    return __native.netWrite(this.id, data)
+  }
+
+  // Writes the last data, if any, and shuts the sending side once it's all out.
+  end(data?: string | u8[]): void {
+    if (data !== undefined) {
+      this.write(data)
+    }
+    __native.netEnd(this.id)
+  }
+
+  flush(): void {
+    __native.netFlush(this.id)
+  }
+
+  // Closes now; anything not yet written is dropped.
+  terminate(): void {
+    __native.netClose(this.id)
+  }
+
+  shutdown(): void {
+    __native.netEnd(this.id)
+  }
+
+  setNoDelay(noDelay?: bool): bool {
+    return __native.netNoDelay(this.id, noDelay ?? true)
+  }
+
+  ref(): void {
+    __native.netRef(this.id, true)
+  }
+
+  // The program can exit while the socket is open.
+  unref(): void {
+    __native.netRef(this.id, false)
+  }
+
+  get remoteAddress(): string {
+    return __native.netAddress(this.id, 0)
+  }
+
+  get remotePort(): int {
+    return parseInt(__native.netAddress(this.id, 1)) ?? 0
+  }
+
+  get localAddress(): string {
+    return __native.netAddress(this.id, 2)
+  }
+
+  get localPort(): int {
+    return parseInt(__native.netAddress(this.id, 3)) ?? 0
+  }
+
+  // Bytes written but not yet taken by the kernel (Tov).
+  get bufferedAmount(): int {
+    return __native.netBuffered(this.id)
+  }
+}
+
+// Opens a TCP (or TLS, or Unix socket) connection: resolves once it's open (TLS: once the
+// handshake is done), rejects with a SocketError when it can't be made.
+function connectSocket<T>(options: ConnectOptions<T>): Promise<Socket<T>, Error> {
+  const hostname = options.hostname ?? "localhost"
+  const portOpt = options.port ?? 0
+  const port = Math.trunc(portOpt)
+  let tls = 0
+  let verify = true
+  let ca = ""
+  let serverName = hostname
+  const t = options.tls
+  if (t !== undefined) {
+    if (typeof t === "boolean") {
+      tls = t ? 1 : 0
+    } else {
+      tls = 1
+      verify = t.rejectUnauthorized ?? true
+      ca = t.ca ?? ""
+      serverName = t.serverName ?? hostname
+    }
+  }
+  const unix = options.unix ?? ""
+  const id = __native.netConnect(serverName, port, tls, verify, ca, unix)
+  __native.netHalfOpen(id, options.allowHalfOpen ?? false)
+  const socket = new Socket<T>(id, options.socket, options.data)
+  const p = new Promise<Socket<T>, Error>((resolve, reject) => {
+    socket.waits(resolve, reject)
+  })
+  socket.start(hostname, unix)
+  return p
+}
+
+export class TCPSocketListener<T = undefined> {
+  readonly hostname: string
+  data: T | undefined
+  private id: int
+  private sockets: Map<int, Socket<T>>
+
+  constructor(hostname: string, data: T | undefined) {
+    this.hostname = hostname
+    this.data = data
+    this.id = -1
+    this.sockets = new Map<int, Socket<T>>()
+  }
+
+  // Internal
+  bound(id: int): void {
+    this.id = id
+  }
+
+  accepted(s: Socket<T>, id: int): void {
+    this.sockets.set(id, s)
+  }
+
+  closed(id: int): void {
+    this.sockets.delete(id)
+  }
+
+  get port(): int {
+    return __native.netListenPort(this.id)
+  }
+
+  // Stops accepting connections; the open ones stay open unless `closeActiveConnections`.
+  stop(closeActiveConnections?: bool): void {
+    __native.netStop(this.id)
+    if (closeActiveConnections ?? false) {
+      for (const s of this.sockets.values()) {
+        s.terminate()
+      }
+    }
+  }
+
+  ref(): void {
+    __native.netListenRef(this.id, true)
+  }
+
+  unref(): void {
+    __native.netListenRef(this.id, false)
+  }
+}
+
+// Accepts TCP (or TLS, or Unix socket) connections; each gets a Socket with `options.data`.
+// A port that can't be bound prints the error and exits, as an uncaught error does in Bun.
+function listenSockets<T>(options: ListenOptions<T>): TCPSocketListener<T> {
+  const hostname = options.hostname ?? "0.0.0.0"
+  const port = Math.trunc(options.port ?? 0)
+  const tls = options.tls
+  const cert = tls === undefined ? "" : tls.cert
+  const key = tls === undefined ? "" : tls.key
+  const listener = new TCPSocketListener<T>(hostname, options.data)
+  const handlers = options.socket
+  const halfOpen = options.allowHalfOpen ?? false
+  const id = __native.netListen(hostname, port, cert, key, options.unix ?? "", (sid: int): void => {
+    const s = new Socket<T>(sid, handlers, listener.data)
+    listener.accepted(s, sid)
+    s.tracked((gone: int): void => listener.closed(gone))
+    __native.netHalfOpen(sid, halfOpen)
+    s.start("", "")
+  })
+  if (id < 0) {
+    console.error(`error: ${__native.netError()}`)
+    process.exit(1)
+  }
+  listener.bound(id)
+  return listener
+}
+
+// The `Bun` global: Bun.serve, Bun.connect, Bun.listen.
+export class Bun {
+  static serve(options: ServeOptions): Server {
+    return serve(options)
+  }
+
+  static connect<T = undefined>(options: ConnectOptions<T>): Promise<Socket<T>, Error> {
+    return connectSocket(options)
+  }
+
+  static listen<T = undefined>(options: ListenOptions<T>): TCPSocketListener<T> {
+    return listenSockets(options)
+  }
+}

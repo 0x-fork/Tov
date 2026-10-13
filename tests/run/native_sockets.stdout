@@ -1,0 +1,8 @@
+echo: hello
+refused: Failed to connect
+dns: getaddrinfo ENOTFOUND no-such-host.invalid
+bulk: 33554432 997270530 33554432
+handshake: true
+tls echo: secret
+untrusted: self signed certificate
+half open: bye

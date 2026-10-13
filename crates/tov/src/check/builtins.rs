@@ -79,6 +79,30 @@ pub(super) fn native_sig(types: &mut Types, name: &str) -> Option<(Vec<TyId>, Ty
         "mimeLower" => (vec![STR], STR),
         "multipartParse" => (vec![STR, STR], str_arr),
         "headerEntries" => (vec![STR], str_arr),
+        // sockets (runtime/net.c)
+        "netConnect" => (vec![STR, INT, INT, BOOL, STR, STR], INT),
+        "netBind" => {
+            let p = |ty| FnParam { ty, inout: false, optional: false };
+            let bytes = types.array(U8);
+            let events = types.func(vec![p(INT), p(bytes), p(STR)], VOID);
+            (vec![INT, events, STR, STR], VOID)
+        }
+        "netWrite" => {
+            let bytes = types.array(U8);
+            (vec![INT, bytes], INT)
+        }
+        "netWriteText" => (vec![INT, STR], INT),
+        "netEnd" | "netFlush" | "netClose" | "netStop" => (vec![INT], VOID),
+        "netRef" | "netHalfOpen" | "netListenRef" => (vec![INT, BOOL], VOID),
+        "netNoDelay" => (vec![INT, BOOL], BOOL),
+        "netAddress" => (vec![INT, INT], STR),
+        "netBuffered" | "netListenPort" => (vec![INT], INT),
+        "netError" => (vec![], STR),
+        "netListen" => {
+            let p = |ty| FnParam { ty, inout: false, optional: false };
+            let on_accept = types.func(vec![p(INT)], VOID);
+            (vec![STR, INT, STR, STR, STR, on_accept], INT)
+        }
         "headerValues" => (vec![STR, STR], str_arr),
         _ => return None,
     })
