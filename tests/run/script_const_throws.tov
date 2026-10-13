@@ -1,0 +1,7 @@
+// A module-level const whose initializer throws must report `uncaught`, not exit 0.
+const x = try boom()
+console.log("never reached")
+
+function boom(): string throws Error {
+  throw new Error("boom")
+}
