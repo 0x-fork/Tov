@@ -679,6 +679,13 @@ static JSValueRef tv_js_read_file_fn(JSContextRef ctx, JSObjectRef f, JSObjectRe
     FILE *fp = fopen(path.p->data, "rb");
     tv_str_release(path);
     if (!fp) return JSValueMakeUndefined(ctx);
+    /* (a directory opens too, and reads as nothing: it isn't a file, so a require of one goes on
+     * to its index.js) */
+    struct stat st;
+    if (fstat(fileno(fp), &st) != 0 || S_ISDIR(st.st_mode)) {
+        fclose(fp);
+        return JSValueMakeUndefined(ctx);
+    }
     /* (a second argument: whether it's there, without reading it) */
     if (n > 1 && JSValueToBoolean(ctx, a[1])) {
         fclose(fp);
