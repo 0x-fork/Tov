@@ -12,6 +12,9 @@ const native = globalThis.__tov_native?.fetch;
 
 const kHeaders = Symbol('kHeaders');
 const kGuard = Symbol('kGuard');
+// (on a Headers: its content-type is the default its Response filled in for the body, not one the
+// code set; append, set and delete of content-type clear it. Bun.serve writes Bun's value for it.)
+const kDefaulted = Symbol('kDefaulted');
 const kBody = Symbol('kBody');
 const kState = Symbol('kState');
 const kDisturbed = Symbol.for('nodejs.stream.disturbed');
@@ -60,6 +63,7 @@ class Headers {
     // name (lowercase) -> [original name, [values]]
     this[kHeaders] = new Map();
     this[kGuard] = 'none';
+    this[kDefaulted] = false;
     if (init === undefined || init === null) return;
     if (typeof init !== 'object' && typeof init !== 'function') {
       throw new TypeError("Headers constructor: Expected init to be an object.");
@@ -95,6 +99,7 @@ class Headers {
     if (BAD_VALUE.test(value)) throw new TypeError(`Headers.append: "${value}" is an invalid header value.`);
     this.#mutable('append');
     const k = name.toLowerCase();
+    if (k === 'content-type') this[kDefaulted] = false;
     const entry = this[kHeaders].get(k);
     if (entry) entry[1].push(value);
     else this[kHeaders].set(k, [name, [value]]);
@@ -104,7 +109,9 @@ class Headers {
     name = `${name}`;
     checkName(name, 'delete');
     this.#mutable('delete');
-    this[kHeaders].delete(name.toLowerCase());
+    const k = name.toLowerCase();
+    if (k === 'content-type') this[kDefaulted] = false;
+    this[kHeaders].delete(k);
   }
 
   get(name) {
@@ -130,7 +137,9 @@ class Headers {
     checkName(name, 'set');
     if (BAD_VALUE.test(value)) throw new TypeError(`Headers.set: "${value}" is an invalid header value.`);
     this.#mutable('set');
-    this[kHeaders].set(name.toLowerCase(), [name, [value]]);
+    const k = name.toLowerCase();
+    if (k === 'content-type') this[kDefaulted] = false;
+    this[kHeaders].set(k, [name, [value]]);
   }
 
   // sorted, combined, set-cookie values each on their own
@@ -350,21 +359,22 @@ function parseForm(bytes, contentType) {
 
 // ---------------------------------------------------------------- bodies
 
-// a body init as [bytes | ReadableStream | null, content type or null]
+// a body init as [bytes | ReadableStream | null, content type or null, kind]: the kind (string,
+// bytes, arraybuffer, blob, form, stream) is what Bun.serve's default content-type depends on
 function extractBody(init) {
-  if (init === null || init === undefined) return [null, null];
-  if (typeof init === 'string') return [Buffer.from(init, 'utf8'), 'text/plain;charset=UTF-8'];
-  if (init instanceof URLSearchParams) return [Buffer.from(init.toString(), 'utf8'), 'application/x-www-form-urlencoded;charset=UTF-8'];
-  if (init instanceof ArrayBuffer || (typeof SharedArrayBuffer !== 'undefined' && init instanceof SharedArrayBuffer)) return [new Uint8Array(init.slice(0)), null];
-  if (ArrayBuffer.isView(init)) return [new Uint8Array(init.buffer.slice(init.byteOffset, init.byteOffset + init.byteLength)), null];
-  if (init instanceof Blob()) return [init, init.type || null];
+  if (init === null || init === undefined) return [null, null, null];
+  if (typeof init === 'string') return [Buffer.from(init, 'utf8'), 'text/plain;charset=UTF-8', 'string'];
+  if (init instanceof URLSearchParams) return [Buffer.from(init.toString(), 'utf8'), 'application/x-www-form-urlencoded;charset=UTF-8', 'form'];
+  if (init instanceof ArrayBuffer || (typeof SharedArrayBuffer !== 'undefined' && init instanceof SharedArrayBuffer)) return [new Uint8Array(init.slice(0)), null, 'arraybuffer'];
+  if (ArrayBuffer.isView(init)) return [new Uint8Array(init.buffer.slice(init.byteOffset, init.byteOffset + init.byteLength)), null, 'bytes'];
+  if (init instanceof Blob()) return [init, init.type || null, 'blob'];
   if (init instanceof FormData) {
     const body = new FormBody(init);
-    return [body, body.type];
+    return [body, body.type, 'form'];
   }
-  if (init instanceof ReadableStream()) return [init, null];
-  if (typeof init[Symbol.asyncIterator] === 'function') return [ReadableStream().from(init), null];
-  return [Buffer.from(`${init}`, 'utf8'), 'text/plain;charset=UTF-8'];
+  if (init instanceof ReadableStream()) return [init, null, 'stream'];
+  if (typeof init[Symbol.asyncIterator] === 'function') return [ReadableStream().from(init), null, 'stream'];
+  return [Buffer.from(`${init}`, 'utf8'), 'text/plain;charset=UTF-8', 'string'];
 }
 
 // all of a body's bytes
@@ -643,9 +653,13 @@ class Response {
     let bytes = null;
     if (body !== null && body !== undefined) {
       if (NULL_BODY_STATUS.has(status)) throw new TypeError('Response constructor: Invalid response status code ' + status);
-      const [b, type] = extractBody(body);
+      const [b, type, kind] = extractBody(body);
       bytes = b;
-      if (type && !this[kHeaders].has('content-type')) this[kHeaders].append('content-type', type);
+      this[kState].bodyKind = kind;
+      if (type && !this[kHeaders].has('content-type')) {
+        this[kHeaders].append('content-type', type);
+        this[kHeaders][kDefaulted] = true;   // (after append, which clears it)
+      }
     }
     this[kBody] = new BodyState(bytes);
   }
@@ -662,7 +676,13 @@ class Response {
     const text = JSON.stringify(data);
     if (text === undefined) throw new TypeError('Value is not JSON serializable');
     const r = new Response(text, init);
-    r[kHeaders].set('content-type', 'application/json');
+    // (the constructor filled in the string body's type unless the caller gave one: replaced only
+    // then, so a caller's content-type survives)
+    if (r[kHeaders][kDefaulted]) {
+      r[kHeaders].set('content-type', 'application/json');
+      r[kHeaders][kDefaulted] = true;
+    }
+    r[kState].bodyKind = 'json';
     return r;
   }
 
@@ -694,6 +714,7 @@ class Response {
     r[kState] = { ...this[kState] };
     r[kHeaders] = new Headers(this[kHeaders]);
     r[kHeaders][kGuard] = this[kHeaders][kGuard];
+    r[kHeaders][kDefaulted] = this[kHeaders][kDefaulted];
     r[kBody] = cloneBody(this[kBody]);
     return r;
   }
@@ -776,6 +797,8 @@ async function fetch(input, init = undefined) {
     throw fetchError(handle, result, signal);
   }
   const [status, statusText, wire, finalUrl, redirected] = native.info(handle);
+  // (no bodyKind, and headers from the wire are never marked defaulted: Bun.serve sends a fetched
+  // response's content-type exactly as it came. Keep it so if this moves to the constructor.)
   const response = Object.create(Response.prototype);
   response[kState] = { status, statusText, type: 'basic', url: finalUrl, redirected };
   response[kHeaders] = headersFromWire(wire, 'immutable');
@@ -826,6 +849,6 @@ function abortRequest(request, reason) {
   s.controller?.abort(reason);
 }
 
-const internals = { kState, kHeaders, kBody, serverRequest, abortRequest, bodyStream, bodyBytes, FormBody, encodeForm };
+const internals = { kState, kHeaders, kDefaulted, kBody, serverRequest, abortRequest, bodyStream, bodyBytes, FormBody, encodeForm };
 
 module.exports = { fetch, Headers, Request, Response, FormData, internals };
