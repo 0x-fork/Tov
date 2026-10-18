@@ -1,0 +1,11 @@
+const word = "ab".repeat(2)
+const count = process.argv.length + 1
+function readWord(): string { return word }
+function readCount(): number { return outer() }
+function outer(): number { return count }
+const fromWord = readWord() + "!"
+const fromCount = readCount() * 10
+function main() {
+  console.log(fromWord)
+  console.log(fromCount)
+}

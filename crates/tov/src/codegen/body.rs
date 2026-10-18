@@ -3797,7 +3797,7 @@ pub(crate) fn collect_exprs_stmt(ast: &ast::Ast, s: StmtId, out: &mut Vec<ExprId
     }
 }
 
-fn collect_exprs_expr(ast: &ast::Ast, e: ExprId, out: &mut Vec<ExprId>) {
+pub(crate) fn collect_exprs_expr(ast: &ast::Ast, e: ExprId, out: &mut Vec<ExprId>) {
     out.push(e);
     match &ast.expr(e).kind {
         ExprKind::Unary(_, x) | ExprKind::Paren(x) | ExprKind::NonNull(x) | ExprKind::Typeof(x) | ExprKind::As(x, _) | ExprKind::Try(x) | ExprKind::Await(x) => collect_exprs_expr(ast, *x, out),
