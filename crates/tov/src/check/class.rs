@@ -938,7 +938,8 @@ impl<'a> Checker<'a> {
             ClassMemberRef::Getter(m) => self.method_ret(m),
             ClassMemberRef::Method(m) => {
                 let r = self.method_ret(m);
-                self.types.func(m.params.clone(), r)
+                let throws = self.method_throws(m);
+                self.types.func_throws(m.params.clone(), r, throws)
             }
         }
     }

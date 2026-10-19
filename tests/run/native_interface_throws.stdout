@@ -1,0 +1,11 @@
+value 1
+caught true declared
+value 1
+caught true inferred
+value 7
+caught true inherited
+value 11
+result 12
+broad true declared
+plain 13
+after
