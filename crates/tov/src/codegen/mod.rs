@@ -1604,6 +1604,9 @@ impl<'c, 'a> Gen<'c, 'a> {
             if self.script_module == Some(m) && asyncfn::has_await(self.ast(m), *init) {
                 return Val::plain(gname, ty);
             }
+            for (cm, ci) in self.consts_read_by_called_fns(m, *init) {
+                self.const_ref(cm, ci);
+            }
             // Initialize dependencies first (their `const_ref` calls happen while emitting this initializer).
             let code = self.function_body(m, FxMap::default(), &[], ty, body::FnBodyKind::Expr(*init), None, None, None);
             let fname = format!("init_{gname}");
@@ -1614,6 +1617,38 @@ impl<'c, 'a> Gen<'c, 'a> {
             }
         }
         Val::plain(gname, ty)
+    }
+
+    fn consts_read_by_called_fns(&self, m: u32, init: ExprId) -> Vec<(u32, u32)> {
+        let mut exprs = Vec::new();
+        body::collect_exprs_expr(self.ast(m), init, &mut exprs);
+        let mut work: Vec<(u32, u32)> = exprs.iter().filter_map(|&e| self.fn_named_by(m, e)).collect();
+        let mut seen = FxSet::default();
+        let mut consts = Vec::new();
+        while let Some((fm, fi)) = work.pop() {
+            if !seen.insert((fm, fi)) {
+                continue;
+            }
+            let ast = self.ast(fm);
+            let ItemKind::Function(f) = &ast.items[fi as usize].kind else { continue };
+            let mut exprs = Vec::new();
+            body::collect_exprs_stmt_pub(ast, f.body, &mut exprs);
+            for e in exprs {
+                if let Some(g) = self.fn_named_by(fm, e) {
+                    work.push(g);
+                } else if let Some(IdentFact::Const(cm, ci)) = self.ident_fact(fm, e) {
+                    consts.push((cm, ci));
+                }
+            }
+        }
+        consts
+    }
+
+    fn fn_named_by(&self, m: u32, e: ExprId) -> Option<(u32, u32)> {
+        match (self.ident_fact(m, e), self.facts(m).calls.get(&e).map(|c| &c.callee)) {
+            (Some(IdentFact::Fn(fm, fi)), _) | (_, Some(&Callee::Fn(fm, fi))) => Some((fm, fi)),
+            _ => None,
+        }
     }
 
     pub(crate) fn ident_fact(&self, m: u32, e: ExprId) -> Option<IdentFact> {
