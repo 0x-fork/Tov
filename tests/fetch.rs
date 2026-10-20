@@ -394,7 +394,11 @@ fn main() {
     let mut cases: Vec<PathBuf> = std::fs::read_dir(&dir).unwrap().flatten().map(|e| e.path()).filter(|p| p.extension().is_some_and(|e| e == "tov")).collect();
     cases.sort();
     let mut failed = Vec::new();
-    let bun = Command::new("bun").arg("--version").output().is_ok_and(|o| o.status.success());
+    let bun_version = Command::new("bun").arg("--version").output().ok().filter(|o| o.status.success()).map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string());
+    let bun = bun_version.is_some();
+    // (the expectations are Bun 1.4.0's output: another version's differences are reported, not failed)
+    let bun_strict = bun_version.as_deref() == Some("1.4.0");
+    let mut bun_notes = Vec::new();
     // HTTPS: tests/fetch/tls/server.py (tls.tov and proxy.tov need it; skipped without python3)
     let tls = TlsServer::start(&dir.join("tls/server.py"));
     let mut skipped = 0;
@@ -423,7 +427,8 @@ fn main() {
             let out = Command::new("sh").arg(root.join("scripts/tov2js.sh")).arg(case).current_dir(&root).env("TOV2JS_RUNTIME", "bun").envs(env.iter().map(|(k, v)| (*k, v.as_str()))).output().expect("run bun");
             let js = String::from_utf8_lossy(&out.stdout);
             if js != expected {
-                failed.push(format!("{name}: the expectation differs from Bun's output\n--- expected\n{expected}--- bun\n{js}{}", String::from_utf8_lossy(&out.stderr)));
+                let msg = format!("{name}: the expectation differs from Bun's output\n--- expected\n{expected}--- bun\n{js}{}", String::from_utf8_lossy(&out.stderr));
+                if bun_strict { failed.push(msg) } else { bun_notes.push(name.clone()) }
             }
         }
         let opts = tov::build::Options { mode: tov::codegen::Mode::Run, unchecked: false, opt: "-O1".into(), emit_c: None, symbols: false };
@@ -464,6 +469,9 @@ fn main() {
         eprintln!("{f}\n");
     }
     drop(tls);
+    if !bun_notes.is_empty() {
+        println!("fetch: Bun {} prints differently from the recorded Bun 1.4.0 for {} (not a Tov failure)", bun_version.as_deref().unwrap_or(""), bun_notes.join(", "));
+    }
     let skip_note = if skipped > 0 { format!(", {skipped} skipped (no python3 for the HTTPS server)") } else { String::new() };
     println!("fetch: {} programs{}{skip_note}, {} failed", cases.len() - skipped, if bun { " (checked against Bun)" } else { "" }, failed.len());
     if !failed.is_empty() {
