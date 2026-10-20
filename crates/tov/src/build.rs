@@ -311,7 +311,16 @@ pub fn build(paths: &[PathBuf], base: &Path, opts: &Options) -> Result<Built, Bu
     }
     let t2 = Instant::now();
     if let Some(p) = &opts.emit_c {
-        std::fs::write(p, codegen::standalone(&c_src)).map_err(|e| BuildError::Message(format!("can't write {}: {e}", p.display())))?;
+        // (how to build it: the runtime's C is in it, and it needs only libm, unless it calls fetch()
+        // or imports npm packages, whose libraries `tov build` links)
+        let how = if uses_tls || !npm.is_empty() {
+            "/* It also links TLS or the JavaScript engine: build it with `tov build`. */\n"
+        } else {
+            "/* To build it: cc -O3 -std=gnu11 -ffp-contract=off FILE.c -o program -lm */\n"
+        };
+        let c = codegen::standalone(&c_src);
+        let first = c.find('\n').map_or(0, |i| i + 1);
+        std::fs::write(p, format!("{}{how}{}", &c[..first], &c[first..])).map_err(|e| BuildError::Message(format!("can't write {}: {e}", p.display())))?;
     }
     let (cc, sysroot) = c_compiler();
     // TOV_CFLAGS adds C compiler flags (e.g. "-fsanitize=address,undefined -g" to audit memory safety).
