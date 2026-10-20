@@ -1692,6 +1692,25 @@ tv_str tv_arr_join(tv_arr a, const tv_type *t, tv_str sep) {
         tv_str_retain(s);
         return s;
     }
+    if (t == &tv_type_str && tv_arr_len(a) > 1) {
+        /* strings: the length first, then one buffer of it */
+        int64_t n = tv_arr_len(a);
+        const tv_str *xs = (const tv_str *)(void *)a.p->data;
+        size_t sl = (size_t)sep.p->len, total = sl * (size_t)(n - 1);
+        for (int64_t i = 0; i < n; i++)
+            if (__builtin_add_overflow(total, (size_t)xs[i].p->len, &total)) tv_trap("string too long", NULL);
+        tv_strbuf *b = tv_strbuf_new(total);
+        char *w = b->data;
+        for (int64_t i = 0; i < n; i++) {
+            if (i && sl) {
+                memcpy(w, sep.p->data, sl);
+                w += sl;
+            }
+            memcpy(w, xs[i].p->data, (size_t)xs[i].p->len);
+            w += xs[i].p->len;
+        }
+        return (tv_str){b};
+    }
     tv_sb sb = {0};
     tv_join_into(&sb, a, t, sep.p->data, (size_t)sep.p->len);
     return tv_str_from_sb(&sb);
