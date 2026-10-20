@@ -1,5 +1,7 @@
 // Counting and running totals in a map: `m.set(k, (m.get(k) ?? d) op e)`, with keys from
 // `s.slice(a, b)` or any local.
+type Sale = { city: string, qty: int, price: f64 }
+
 function kmers(s: string, k: int): Map<string, int> {
   const counts = new Map<string, int>()
   for (let i = 0; i + k <= s.byteLength; i++) {
@@ -32,4 +34,12 @@ function main() {
     sums.set(k, (sums.get(k) ?? 0) + step)
   }
   console.log(sums)
+  // the amount: arithmetic over locals and record fields
+  const sales: Sale[] = [{ city: "Oslo", qty: 2, price: 1.5 }, { city: "Lima", qty: 1, price: 4 }, { city: "Oslo", qty: 3, price: 0.5 }]
+  const totals = new Map<string, f64>()
+  for (const s of sales) {
+    const city = s.city
+    totals.set(city, (totals.get(city) ?? 0) + s.qty * s.price)
+  }
+  console.log(totals)
 }
