@@ -1,0 +1,58 @@
+// The Benchmarks Game spectral-norm (single-threaded): power iteration on an infinite matrix.
+
+// The denominator of A[i][j] = 1 / ((i + j) * (i + j + 1) / 2 + i + 1).
+function a(i: number, j: number): number {
+  return ((i + j) * (i + j + 1)) / 2 + i + 1
+}
+
+function multiplyAv(v: number[], av: number[]) {
+  const n = v.length
+  for (let i = 0; i < n; i++) {
+    let sum = 0.0
+    for (let j = 0; j < n; j++) {
+      sum += v[j]! / a(i, j)
+    }
+    av[i] = sum
+  }
+}
+
+function multiplyAtv(v: number[], atv: number[]) {
+  const n = v.length
+  for (let i = 0; i < n; i++) {
+    let sum = 0.0
+    for (let j = 0; j < n; j++) {
+      sum += v[j]! / a(j, i)
+    }
+    atv[i] = sum
+  }
+}
+
+function multiplyAtAv(v: number[], tmp: number[], out: number[]) {
+  multiplyAv(v, tmp)
+  multiplyAtv(tmp, out)
+}
+
+function main() {
+  const n = 5500
+  let u: number[] = []
+  let v: number[] = []
+  let tmp: number[] = []
+  for (let i = 0; i < n; i++) {
+    u.push(1.0)
+    v.push(0.0)
+    tmp.push(0.0)
+  }
+  for (let i = 0; i < 10; i++) {
+    multiplyAtAv(u, tmp, v)
+    multiplyAtAv(v, tmp, u)
+  }
+  let vBv = 0.0
+  let vv = 0.0
+  for (let i = 0; i < n; i++) {
+    vBv += u[i]! * v[i]!
+    vv += v[i]! * v[i]!
+  }
+  console.log(Math.sqrt(vBv / vv).toFixed(9))
+}
+
+main()
