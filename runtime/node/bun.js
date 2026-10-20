@@ -217,6 +217,38 @@ const MIME = {
   wav: 'audio/wav', ogg: 'audio/ogg', opus: 'audio/opus', flac: 'audio/flac', pdf: 'application/pdf', wasm: 'application/wasm',
   zip: 'application/zip', gz: 'application/gzip', tar: 'application/x-tar', woff: 'font/woff', woff2: 'font/woff2',
 };
+// A Blob's type as Bun.serve sends it: a type in the table above as the table has it (with
+// `charset=utf-8` replacing any other for text), anything else as it is.
+const BLOB_TYPE = new Map([...Object.values(MIME).map((v) => [v.split(';')[0], v]), ['application/javascript', MIME.js]]);
+// (types reaching here come from a Blob, which lower-cases its own type, so an unmatched one is
+// already lower-case: see internal/blob.js)
+const blobType = (t) => BLOB_TYPE.get(t.split(';')[0].trim()) ?? t;
+
+// The content-type Bun.serve sends for a Response built in JavaScript, or undefined to send its
+// headers as they are. Its headers object keeps the Fetch standard's values (as Node.js has them);
+// the wire has Bun's: a default only for a type the Response filled in itself (a body's
+// kDefaulted content-type) or a body with none, never for one the code set, nor for a fetched
+// Response (no bodyKind).
+function wireType(res, kState, kHeaders, kDefaulted, kBody) {
+  const kind = res[kState].bodyKind;
+  if (!kind) return undefined;
+  const headers = res[kHeaders];
+  if (!headers.has('content-type')) {
+    if (kind === 'string' || kind === 'json') return 'text/plain;charset=utf-8';
+    if (kind === 'bytes' || kind === 'arraybuffer') return 'application/octet-stream';
+    if (kind === 'blob') {
+      const t = res[kBody].body?.type;
+      return t ? blobType(t) : 'text/plain;charset=utf-8';
+    }
+    return undefined;
+  }
+  if (!headers[kDefaulted]) return undefined;
+  if (kind === 'string') return 'text/plain;charset=utf-8';
+  if (kind === 'json') return 'application/json;charset=utf-8';
+  if (kind === 'blob') return blobType(headers.get('content-type'));
+  // (a form body's type, URL-encoded with `charset=UTF-8` or multipart with its boundary, is Bun's)
+  return undefined;
+}
 
 function mimeOf(path) {
   const dot = path.lastIndexOf('.');
@@ -846,13 +878,19 @@ function respond(server, id, res, method, keep, http10) {
     }
     return respond(server, id, onError(server, new TypeError(`Expected a Response object, but received '${res}'`)), method, keep, http10);
   }
-  const { kState, kHeaders, kBody, bodyStream, FormBody } = fetchApi().internals;
+  const { kState, kHeaders, kDefaulted, kBody, bodyStream, FormBody } = fetchApi().internals;
   const state = res[kState];
   const status = state.status;
   let head = `HTTP/1.1 ${status} ${state.statusText || STATUS[status] || ''}\r\n`;
   let length = -1;
   let hasDate = false;
+  const type = wireType(res, kState, kHeaders, kDefaulted, kBody);
+  if (type !== undefined && !res[kHeaders].has('content-type')) head += `content-type: ${type}\r\n`;
   for (const [k, [name, values]] of res[kHeaders][kHeaders]) {
+    if (k === 'content-type' && type !== undefined) {
+      head += `${name}: ${type}\r\n`;
+      continue;
+    }
     if (k === 'content-length') length = Number(values[0]);
     else if (k === 'date') hasDate = true;
     else if (k === 'connection' || k === 'keep-alive') continue;

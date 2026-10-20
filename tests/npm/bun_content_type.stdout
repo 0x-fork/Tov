@@ -1,0 +1,31 @@
+string: text/plain;charset=utf-8
+number: text/plain;charset=utf-8
+json: application/json;charset=utf-8
+json, the caller's type: application/vnd+json
+json, its type deleted: text/plain;charset=utf-8
+url-encoded: application/x-www-form-urlencoded;charset=UTF-8
+multipart: multipart/form-data; boundary=B (the body's boundary)
+blob text/html: text/html;charset=utf-8
+blob text/html;charset=latin1: text/html;charset=utf-8
+blob text/css: text/css;charset=utf-8
+blob application/json: application/json;charset=utf-8
+blob application/javascript: text/javascript;charset=utf-8
+blob text/csv: text/csv
+blob TEXT/PLAIN: text/plain;charset=utf-8
+blob image/svg+xml: image/svg+xml
+blob image/png: image/png
+blob application/x-custom: application/x-custom
+blob, no type: text/plain;charset=utf-8
+file, no type: text/plain;charset=utf-8
+blob type deleted: text/css;charset=utf-8
+Uint8Array: application/octet-stream
+ArrayBuffer: application/octet-stream
+stream: (none)
+no body: (none)
+an explicit text/plain: text/plain
+set to the default after: text/plain;charset=UTF-8
+appended after: text/plain;charset=UTF-8
+a clone: text/plain;charset=utf-8
+a clone of json: application/json;charset=utf-8
+a clone, set after: text/plain;charset=UTF-8
+a fetched response: text/plain;charset=UTF-8

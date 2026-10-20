@@ -1,0 +1,6 @@
+import run from "bun-content-type"
+
+async function main() {
+  // the content-type Bun.serve sends for Responses built in JavaScript, as Bun sends it
+  try await (try run())
+}

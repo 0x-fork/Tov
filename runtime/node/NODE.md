@@ -39,6 +39,7 @@ Per-context files also get `privateSymbols` and `perIsolateSymbols`.
 - `internal/tov/callsite.js` emulates V8's `Error.prepareStackTrace` and CallSite objects by parsing JavaScriptCore's stacks, as Bun does. While `prepareStackTrace` is a function, `Error.captureStackTrace` and `new Error()` call it. The global `Error` is then a wrapper around the engine's.
 - `internal/deps/` holds code vendored from npm (MIT; each license is beside it): whatwg-url 14.2.0's state machine, tr46 5.1.1 for international domain names (loaded only for hostnames that need it), and punycode 2.3.1.
 - `internal/tov/random.js` provides `getRandomValues` and `randomUUID` for the global `crypto`, without loading `crypto`. Without BoringSSL linked, they use the system's `arc4random`.
+- `internal/tov/fetch.js` is `fetch()` and its classes, over Tov's HTTP client; `bun.js` is Bun's API (`Bun.serve`, `Bun.file`, ...) on them. A `Response`'s headers object has the Fetch standard's values, as Node.js has them (`text/plain;charset=UTF-8` for a string body, `application/json` for `Response.json`). `Bun.serve` sends Bun's instead for a type the `Response` filled in itself, or for a body with none: `text/plain;charset=utf-8`, `application/json;charset=utf-8`, `application/octet-stream` for bytes, and a Blob's type through Bun's MIME table. A content-type the code set, or one a fetched `Response` came with, is sent as it is.
 
 ## Local edits to Node.js files
 
