@@ -1595,10 +1595,19 @@ impl<'c, 'a> Gen<'c, 'a> {
     /// C expression for a module constant, emitting its global and initializer on first use.
     pub(crate) fn const_ref(&mut self, m: u32, item: u32) -> Val {
         let ty = self.c.consts[&(m, item)];
-        let ItemKind::Const { name, init, .. } = &self.ast(m).items[item as usize].kind else { unreachable!() };
+        let ItemKind::Const { name, init, mutable, .. } = &self.ast(m).items[item as usize].kind else { unreachable!() };
+        let mutable = *mutable;
         let gname = format!("g{m}_{}", self.sym(*name));
         if self.consts_done.insert((m, item)) {
             let ct = self.ctype(ty);
+            // A number or boolean literal: a C constant, which the C compiler folds into its uses
+            if !mutable
+                && self.script_module != Some(m)
+                && let Some(lit) = self.literal_const(m, *init, ty)
+            {
+                let _ = writeln!(self.protos, "static const {ct} {gname} = {lit};");
+                return Val::plain(gname, ty);
+            }
             let _ = writeln!(self.protos, "static {ct} {gname};");
             // An initializer that awaits runs inline in the (async) script body instead.
             if self.script_module == Some(m) && asyncfn::has_await(self.ast(m), *init) {
@@ -1647,6 +1656,30 @@ impl<'c, 'a> Gen<'c, 'a> {
     fn fn_named_by(&self, m: u32, e: ExprId) -> Option<(u32, u32)> {
         match (self.ident_fact(m, e), self.facts(m).calls.get(&e).map(|c| &c.callee)) {
             (Some(IdentFact::Fn(fm, fi)), _) | (_, Some(&Callee::Fn(fm, fi))) => Some((fm, fi)),
+            _ => None,
+        }
+    }
+
+    /// The C text of a module constant's initializer when it's a number or boolean literal
+    /// (optionally negated) of the constant's own type.
+    fn literal_const(&self, m: u32, init: ExprId, ty: TyId) -> Option<String> {
+        let ast = self.ast(m);
+        let (neg, e) = match &ast.expr(init).kind {
+            ast::ExprKind::Unary(ast::UnOp::Neg, x) => ("-", *x),
+            _ => ("", init),
+        };
+        let t = *self.c.types.get(ty);
+        match (&ast.expr(e).kind, t) {
+            (ast::ExprKind::Int(v), Ty::Int) if *v <= i64::MAX as u64 => Some(format!("{neg}INT64_C({v})")),
+            (ast::ExprKind::Int(v), Ty::F64) => Some(format!("{neg}{v}.0")),
+            (ast::ExprKind::Float(f), Ty::F64) if f.is_finite() => {
+                let mut s = format!("{f:?}");
+                if !s.contains('.') && !s.contains('e') {
+                    s.push_str(".0");
+                }
+                Some(format!("{neg}{s}"))
+            }
+            (ast::ExprKind::Bool(b), Ty::Bool) if neg.is_empty() => Some(b.to_string()),
             _ => None,
         }
     }
