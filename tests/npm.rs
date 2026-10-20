@@ -48,6 +48,10 @@ fn main() {
                 continue;
             }
         };
+        if name == "node_tz" && !Path::new("/usr/share/zoneinfo/Asia/Tokyo").exists() {
+            println!("npm: node_tz skipped: no time zone database (/usr/share/zoneinfo; install tzdata)");
+            continue;
+        }
         if name == "node_tz" && !built.jsc_own {
             println!("npm: node_tz skipped: the system JavaScriptCore cannot see runtime TZ changes");
             continue;
