@@ -2679,6 +2679,9 @@ impl<'a> Checker<'a> {
                     })
             })
             .collect();
+        // type parameters only an int literal argument bound (`xs.reduce((a, b) => a + b, 0)`): a
+        // callback that makes them a float (as TypeScript's one `number` would be) rebinds them
+        let mut literal_bound: Vec<u32> = Vec::new();
         for pass in 0..2 {
             if pass == 1 {
                 // what the arguments left open takes the expected type's, or its default (`<T = undefined>`)
@@ -2721,9 +2724,34 @@ impl<'a> Checker<'a> {
                 let unhinted: Vec<u32> = still_free.iter().copied().filter(|x| !(pass == 0 && soft.contains_key(x))).collect();
                 let hint = if is_arrow || !self.types.mentions(pty, &unhinted) { Some(pty) } else { None };
                 self.infer_free = still_free;
-                let t = self.expr(a.expr, hint);
+                let marks = self.diags.len();
+                let mut t = self.expr(a.expr, hint);
+                if is_arrow && literal_bound.iter().any(|u| map.get(u) == Some(&INT) && self.types.mentions(p.ty, &[*u])) {
+                    let mut scratch = map.clone();
+                    for u in &literal_bound {
+                        scratch.remove(u);
+                    }
+                    self.unify(p.ty, t, &cs.tparams, &mut scratch);
+                    let floats: Vec<u32> = literal_bound.iter().copied().filter(|u| scratch.get(u).is_some_and(|&x| self.types.is_float(x))).collect();
+                    if !floats.is_empty() {
+                        self.diags.truncate(marks);
+                        for u in floats {
+                            map.insert(u, scratch[&u]);
+                        }
+                        let pty = self.types.subst(p.ty, &map);
+                        t = self.expr(a.expr, Some(pty));
+                    }
+                }
                 arg_tys[i] = Some(t);
                 let free = self.infer_free.clone();
+                if pass == 0
+                    && self.is_int_literal(a.expr)
+                    && let Ty::Param(u) = *self.types.get(p.ty)
+                    && free.contains(&u)
+                    && !map.contains_key(&u)
+                {
+                    literal_bound.push(u);
+                }
                 self.unify(p.ty, t, &free, &mut map);
             }
         }
