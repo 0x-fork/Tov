@@ -23,6 +23,8 @@ mod tls_files {
 /// The JavaScript bridge and the Node.js natives: linked by programs that import npm packages.
 const JS_C: &str = include_str!("../../../runtime/js.c");
 const NODE_C: &str = include_str!("../../../runtime/node.c");
+/// The API Tov's JavaScriptCore adds (scripts/jsc/patches), as this compiler's bridge expects it.
+const TOV_API_H: &str = include_str!("../../../scripts/jsc/patches/TovAPI.h");
 const NODE_TTY_H: &str = include_str!("../../../runtime/node_tty.h");
 /// Node-API (native addons): linked when the bundle holds one.
 const NAPI_C: &str = include_str!("../../../runtime/napi.c");
@@ -609,6 +611,11 @@ fn own_jsc_dir() -> Option<PathBuf> {
 
 fn jsc_flags() -> Result<JscFlags, BuildError> {
     if let Some(dir) = own_jsc_dir() {
+        // (an engine built from older patches lacks API the bridge calls: say so before C does)
+        let api = std::fs::read_to_string(dir.join("include/JavaScriptCore/TovAPI.h")).unwrap_or_default();
+        if api != TOV_API_H {
+            eprintln!("warning: Tov's JavaScriptCore in {} is older than this compiler (its TovAPI.h differs): rebuild it with scripts/jsc/build.sh, or set TOV_JSC=system", dir.display());
+        }
         // (the build's version: a rebuilt engine relinks programs)
         let version = std::fs::read_to_string(dir.join("VERSION")).unwrap_or_default();
         // (and the library as built: its size and time, so programs relink when it's rebuilt)
