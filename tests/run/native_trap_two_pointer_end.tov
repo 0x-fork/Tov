@@ -1,0 +1,13 @@
+// A two-pointer loop whose `j` starts past the end traps on the first index out of range.
+function main() {
+  const xs = [1, 2, 3]
+  let i = 0
+  let j = 3
+  let s = 0
+  while (i < j) {
+    s += xs[i]! + xs[j]!
+    i++
+    j--
+  }
+  console.log(s)
+}

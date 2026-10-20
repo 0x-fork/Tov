@@ -93,7 +93,10 @@ pub(crate) struct Body {
     pub divs: FxMap<u32, String>,
     /// (index local, array locals) of enclosing versioned loops' unchecked copies (see
     /// `version_plan`): `xs[i + k]` there is in bounds, and `i + k` can't overflow.
-    pub versioned: Vec<(u32, Vec<(u32, String, String)>)>,
+    pub versioned: Vec<(Vec<u32>, Vec<(u32, String, String)>)>,
+    /// Locals whose `++`/`--` can't overflow in the code being emitted (a two-pointer loop's
+    /// unchecked copy: see `two_pointer_plan`).
+    pub nowrap_locals: Vec<u32>,
 }
 
 /// A `for` loop emitted twice (see `Gen::version_plan`): its index local, whether its test is
@@ -261,6 +264,7 @@ impl<'c, 'a> Gen<'c, 'a> {
             nowrap_step: None,
             divs: FxMap::default(),
             versioned: Vec::new(),
+            nowrap_locals: Vec::new(),
         });
     }
 
@@ -453,6 +457,7 @@ impl<'c, 'a> Gen<'c, 'a> {
             nowrap_step: None,
             divs: FxMap::default(),
             versioned: Vec::new(),
+            nowrap_locals: Vec::new(),
         };
         for (i, &(key, ty, inout)) in params.iter().enumerate() {
             let access = if inout { format!("(*p{i})") } else { format!("p{i}") };
@@ -1369,6 +1374,113 @@ impl<'c, 'a> Gen<'c, 'a> {
         Some(VersionPlan { ik, le, hi, arrays })
     }
 
+    /// `while (i < j) { ...; i++; ...; j--; ... }` (one `i++` and one `j--` among the body's own
+    /// statements, nothing else changing `i` or `j`) indexing arrays at `i` and `j`, whose lengths
+    /// nothing in it changes: `i` only rises and `j` only falls while `i < j`, so `i >= 0` and
+    /// `j < xs.length` before it puts every such index in range, and neither step can overflow.
+    /// (`i`, `j`, the arrays), for a copy of the loop without those checks.
+    fn two_pointer_plan(&mut self, cond: ExprId, body: StmtId) -> Option<(u32, u32, Vec<u32>)> {
+        let boxed = self.b().boxed.clone();
+        let unique = self.b().unique.clone();
+        let types: FxMap<u32, TyId> = self.b().locals.iter().map(|(k, l)| (*k, l.ty)).collect();
+        let m = self.cur_m();
+        let ast = self.ast(m);
+        let facts = self.facts(m);
+        let local = |e: ExprId| match (&ast.expr(e).kind, facts.idents.get(&e)) {
+            (ExprKind::Ident(_), Some(IdentFact::Local(k))) => Some(*k),
+            _ => None,
+        };
+        let ExprKind::Binary(BinOp::Lt, l, r) = &ast.expr(cond).kind else { return None };
+        let (up, down) = (local(*l)?, local(*r)?);
+        if up == down || boxed.contains(&up) || boxed.contains(&down) || types.get(&up) != Some(&INT) || types.get(&down) != Some(&INT) {
+            return None;
+        }
+        let StmtKind::Block(ss) = &ast.stmt(body).kind else { return None };
+        // the steps: statements of their own
+        let step = |s: StmtId, k: u32, inc: bool| match &ast.stmt(s).kind {
+            StmtKind::Expr(e) => match &ast.expr(*e).kind {
+                ExprKind::Update { target, inc: i, .. } => local(*target) == Some(k) && *i == inc,
+                ExprKind::Assign(AssignOp::Op(op), t, v) => local(*t) == Some(k) && *op == if inc { BinOp::Add } else { BinOp::Sub } && matches!(ast.expr(*v).kind, ExprKind::Int(1)),
+                _ => false,
+            },
+            _ => false,
+        };
+        let steps: Vec<StmtId> = ss.iter().copied().filter(|&s| step(s, up, true) || step(s, down, false)).collect();
+        if ss.iter().filter(|&&s| step(s, up, true)).count() != 1 || ss.iter().filter(|&&s| step(s, down, false)).count() != 1 {
+            return None;
+        }
+        fn has_loop(ast: &ast::Ast, s: StmtId) -> bool {
+            match &ast.stmt(s).kind {
+                StmtKind::While(..) | StmtKind::DoWhile(..) | StmtKind::For { .. } | StmtKind::ForOf { .. } => true,
+                StmtKind::If(_, t, e) => has_loop(ast, *t) || e.is_some_and(|e| has_loop(ast, e)),
+                StmtKind::Block(xs) => xs.iter().any(|&x| has_loop(ast, x)),
+                StmtKind::Switch(_, cases) => cases.iter().any(|c| c.body.iter().any(|&x| has_loop(ast, x))),
+                StmtKind::Try { body, catch, finally } => has_loop(ast, *body) || catch.as_ref().is_some_and(|c| has_loop(ast, c.body)) || finally.is_some_and(|f| has_loop(ast, f)),
+                _ => false,
+            }
+        }
+        if has_loop(ast, body) {
+            return None;
+        }
+        let mut all = Vec::new();
+        for &s in ss.iter().filter(|s| !steps.contains(s)) {
+            collect_exprs_stmt(ast, s, &mut all);
+        }
+        if all.len() > 400 || all.iter().any(|&e| matches!(ast.expr(e).kind, ExprKind::Await(_))) {
+            return None;
+        }
+        // nothing else changes `i` or `j`
+        for &e in &all {
+            match &ast.expr(e).kind {
+                ExprKind::Assign(_, t, _) | ExprKind::Update { target: t, .. } if local(*t) == Some(up) || local(*t) == Some(down) => return None,
+                ExprKind::Call { args, .. } if args.iter().any(|a| a.by_ref.is_some() && (local(a.expr) == Some(up) || local(a.expr) == Some(down))) => return None,
+                _ => {}
+            }
+        }
+        // the arrays indexed at `i` or `j`, used only through indexing and `.length`
+        let mut fine: FxSet<ExprId> = FxSet::default();
+        let mut indexed: Vec<u32> = Vec::new();
+        let mut written: FxSet<u32> = FxSet::default();
+        for &e in &all {
+            match &ast.expr(e).kind {
+                ExprKind::Index { obj, index, .. } => {
+                    if let Some(xk) = local(*obj) {
+                        fine.insert(*obj);
+                        if (local(*index) == Some(up) || local(*index) == Some(down)) && !indexed.contains(&xk) {
+                            indexed.push(xk);
+                        }
+                    }
+                }
+                ExprKind::Member { obj, name, .. } if self.sym(*name) == "length" && local(*obj).is_some() => {
+                    fine.insert(*obj);
+                }
+                ExprKind::Assign(_, t, _) | ExprKind::Update { target: t, .. } => {
+                    let mut cur = *t;
+                    while let ExprKind::Paren(x) | ExprKind::NonNull(x) | ExprKind::Member { obj: x, .. } | ExprKind::Index { obj: x, .. } = &ast.expr(cur).kind {
+                        cur = *x;
+                    }
+                    if let Some(k) = local(cur) {
+                        written.insert(k);
+                    }
+                }
+                _ => {}
+            }
+        }
+        let arrays: Vec<u32> = indexed
+            .into_iter()
+            .filter(|&xk| {
+                matches!(types.get(&xk).map(|&t| self.c.types.get(t)), Some(Ty::Array(_)))
+                    && !boxed.contains(&xk)
+                    && (!written.contains(&xk) || unique.contains(&xk))
+                    && !all.iter().any(|&e| local(e) == Some(xk) && !fine.contains(&e))
+            })
+            .collect();
+        if arrays.is_empty() {
+            return None;
+        }
+        Some((up, down, arrays))
+    }
+
     /// `k` when `e` is `i`, `i + k`, `k + i` or `i - k` (for the local `i`, `k` a small literal).
     fn index_offset(&self, e: ExprId, ik: u32) -> Option<i64> {
         let m = self.cur_m();
@@ -1412,10 +1524,12 @@ impl<'c, 'a> Gen<'c, 'a> {
         let m = self.cur_m();
         let Some(IdentFact::Local(xk)) = self.ident_fact(m, obj) else { return None };
         let versioned = self.b().versioned.clone();
-        let (ik, (_, d, n)) = versioned.iter().rev().find_map(|(ik, arrays)| arrays.iter().find(|a| a.0 == xk).map(|a| (*ik, a.clone())))?;
-        if let Some(k) = self.index_offset(index, ik) {
-            let i = self.b().locals.get(&ik)?.access.clone();
-            return Some(format!("({d}[{i} + {k}])"));
+        let (iks, (_, d, n)) = versioned.iter().rev().find_map(|(iks, arrays)| arrays.iter().find(|a| a.0 == xk).map(|a| (iks.clone(), a.clone())))?;
+        for ik in iks {
+            if let Some(k) = self.index_offset(index, ik) {
+                let i = self.b().locals.get(&ik)?.access.clone();
+                return Some(format!("({d}[{i} + {k}])"));
+            }
         }
         let i = self.expr(index);
         let i = self.int_code(i);
@@ -1798,12 +1912,47 @@ impl<'c, 'a> Gen<'c, 'a> {
             }
             StmtKind::While(c, body) => {
                 let hoisted = self.hoist_unique(&[*body], &[*c]);
+                let plan = self.two_pointer_plan(*c, *body);
+                if let Some((up, down, arrays)) = &plan {
+                    // `i >= 0` and `j < xs.length` now: every `xs[i]` and `xs[j]` it reaches is too
+                    let (i, j) = (self.b().locals[up].access.clone(), self.b().locals[down].access.clone());
+                    let mut parts = vec![format!("{i} >= 0")];
+                    for xk in arrays {
+                        parts.push(format!("{j} < ({}).len", self.b().locals[xk].access));
+                    }
+                    self.open(&format!("if ({}) {{", parts.join(" && ")));
+                    let mut ptrs = Vec::new();
+                    for &xk in arrays {
+                        let local = self.b().locals[&xk].clone();
+                        let Ty::Array(et) = self.tget(local.ty) else { continue };
+                        let ect = self.ctype(et);
+                        let (d, n) = (self.fresh("xd"), self.fresh("xn"));
+                        self.line(format!("{ect} *{d} = ({ect} *)tv_arr_data({0}); tv_int {n} = tv_arr_len({0});", local.access));
+                        ptrs.push((xk, d, n));
+                    }
+                    self.b().versioned.push((vec![*up, *down], ptrs));
+                    self.b().nowrap_locals.extend([*up, *down]);
+                    let cont = self.fresh("cont");
+                    self.open("for (;;) {");
+                    self.cond_break(*c);
+                    self.loop_body(*body, &cont);
+                    self.line(format!("{cont}:;"));
+                    self.close("}");
+                    let n = self.b().nowrap_locals.len();
+                    self.b().nowrap_locals.truncate(n - 2);
+                    self.b().versioned.pop();
+                    self.close("} else {");
+                    self.b().indent += 1;
+                }
                 let cont = self.fresh("cont");
                 self.open("for (;;) {");
                 self.cond_break(*c);
                 self.loop_body(*body, &cont);
                 self.line(format!("{cont}:;"));
                 self.close("}");
+                if plan.is_some() {
+                    self.close("}");
+                }
                 self.unhoist(hoisted);
             }
             StmtKind::DoWhile(body, c) => {
@@ -1853,7 +2002,7 @@ impl<'c, 'a> Gen<'c, 'a> {
                         ptrs.push((xk, d, n));
                     }
                     let fast_cont = self.fresh("cont");
-                    self.b().versioned.push((plan.ik, ptrs));
+                    self.b().versioned.push((vec![plan.ik], ptrs));
                     self.for_loop(*cond, *step, *body, &fast_cont, bounds, Some(plan.ik), None);
                     self.b().versioned.pop();
                     self.close("} else {");
@@ -2455,7 +2604,7 @@ impl<'c, 'a> Gen<'c, 'a> {
                     self.line(format!("{lv} = {f}({old}, tv_dec_from_int(1));"));
                     return Val::plain(if *prefix { lv } else { old }, p.ty);
                 }
-                let nowrap = self.b().nowrap_step.is_some() && matches!(self.ident_fact(m, *target), Some(IdentFact::Local(k)) if Some(k) == self.b().nowrap_step);
+                let nowrap = matches!(self.ident_fact(m, *target), Some(IdentFact::Local(k)) if Some(k) == self.b().nowrap_step || self.b().nowrap_locals.contains(&k));
                 let new = if self.c.types.is_float(p.ty) || nowrap {
                     format!("{old} {} 1", if *inc { "+" } else { "-" })
                 } else {
@@ -4276,6 +4425,7 @@ impl<'c, 'a> Gen<'c, 'a> {
             nowrap_step: None,
             divs: FxMap::default(),
             versioned: Vec::new(),
+            nowrap_locals: Vec::new(),
         };
         for (i, &(key, ty, inout)) in params.iter().enumerate() {
             let access = if inout { format!("(*p{i})") } else { format!("p{i}") };
