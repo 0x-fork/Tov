@@ -116,6 +116,8 @@ tov explain T0001                # what an error code means
 
 The command line works like Bun's: `tov <file>` runs a program and passes it the arguments after the file name, `tov <script>` runs a `package.json` script (with `pre`/`post` scripts, the `npm_*` environment and Bun's output), and `--watch` restarts the program when the entry file or anything it imports changes.
 
+On macOS the first run of every new binary waits about half a second for the system's malware check, for Tov's as for any compiler's. Adding your terminal under System Settings → Privacy & Security → Developer Tools skips the wait.
+
 ## How it differs from TypeScript
 
 Tov keeps TypeScript's syntax and drops the parts that make programs hard to reason about or slow to run:
