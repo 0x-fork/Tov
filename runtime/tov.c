@@ -609,7 +609,8 @@ static void *tv_carve(tv_class_space *k, size_t sz) {
             tv_bump_end = tv_bump + TV_ARENA_BLOCK;
         }
         p = tv_bump;
-        tv_bump += bytes;
+        /* (rounded to 16, so the next chunk is as aligned as malloc's: tasks and promises need it) */
+        tv_bump += (bytes + 15) & ~(size_t)15;
     }
     k->cur = p + sz;
     k->lim = p + bytes;
