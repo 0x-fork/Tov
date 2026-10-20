@@ -241,7 +241,11 @@ static void test_string_basics(void) {
 
     CHECK(tv_str_hash(TV_LIT(lit_hello)) == tv_str_hash(S("hello")));
     CHECK(tv_str_hash(S("a")) != tv_str_hash(S("b")));
-    CHECK(tv_str_hash(TV_EMPTY_STR) != tv_str_hash(tv_str_from("\0", 1)));
+    {
+        tv_str nul = tv_str_from("\0", 1);
+        CHECK(tv_str_hash(TV_EMPTY_STR) != tv_str_hash(nul));
+        tv_str_release(nul);
+    }
     {   /* all lengths 0..40 hash distinctly and consistently */
         char buf[64];
         uint64_t hs[41];
