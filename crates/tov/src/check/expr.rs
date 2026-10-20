@@ -255,13 +255,14 @@ impl<'a> Checker<'a> {
         self.apply(&neg);
         let tb = self.expr(*b, exp.or(Some(ta)));
         self.pop_scope();
+        // (an int and a float branch: the float, as `int | f64` isn't a value Tov has)
+        if self.types.is_int(ta) && self.types.is_float(tb) || self.types.is_float(ta) && self.types.is_int(tb) {
+            return F64;
+        }
         if let Some(x) = exp
             && self.assignable(ta, x) && self.assignable(tb, x) {
                 return self.types.union(&[ta, tb]);
             }
-        if self.types.is_int(ta) && self.types.is_float(tb) || self.types.is_float(ta) && self.types.is_int(tb) {
-            return F64;
-        }
         self.types.union(&[ta, tb])
     }
 
@@ -2643,7 +2644,10 @@ impl<'a> Checker<'a> {
                 map.insert(p, t);
             }
         }
-        // The expected type can fix type parameters the arguments don't mention (`const s: Stack<int> = new Stack()`).
+        // The expected type can fix type parameters the arguments don't mention (`const s: Stack<int> = new Stack()`),
+        // and hints the arguments; what an argument shows wins (`total += xs.reduce((a, b) => a + b, 0.0)` with an int
+        // `total` that the f64 result promotes).
+        let mut soft: HashMap<u32, TyId> = HashMap::default();
         if type_args.is_empty()
             && !cs.tparams.is_empty()
             && let Some(x) = exp
@@ -2652,7 +2656,7 @@ impl<'a> Checker<'a> {
             let x = self.types.without_undefined(x);
             let free = cs.tparams.clone();
             let ret = self.types.without_undefined(cs.ret);
-            self.unify(ret, x, &free, &mut map);
+            self.unify(ret, x, &free, &mut soft);
         }
         let saved_free = std::mem::take(&mut self.infer_free);
         self.infer_free = cs.tparams.iter().copied().filter(|p| !map.contains_key(p)).collect();
@@ -2677,7 +2681,10 @@ impl<'a> Checker<'a> {
             .collect();
         for pass in 0..2 {
             if pass == 1 {
-                // what the arguments left open takes its default (`<T = undefined>`)
+                // what the arguments left open takes the expected type's, or its default (`<T = undefined>`)
+                for (&p, &t) in &soft {
+                    map.entry(p).or_insert(t);
+                }
                 for &p in &cs.tparams {
                     if !map.contains_key(&p)
                         && let Some(d) = self.gparam(p).default
@@ -2703,9 +2710,16 @@ impl<'a> Checker<'a> {
                     self.expr(a.expr, None);
                     continue;
                 };
-                let pty = self.types.subst(p.ty, &map);
+                let pty = if pass == 0 && !soft.is_empty() {
+                    let mut hinted = soft.clone();
+                    hinted.extend(map.iter().map(|(&k, &v)| (k, v)));
+                    self.types.subst(p.ty, &hinted)
+                } else {
+                    self.types.subst(p.ty, &map)
+                };
                 let still_free: Vec<u32> = self.infer_free.iter().copied().filter(|x| !map.contains_key(x)).collect();
-                let hint = if is_arrow || !self.types.mentions(pty, &still_free) { Some(pty) } else { None };
+                let unhinted: Vec<u32> = still_free.iter().copied().filter(|x| !(pass == 0 && soft.contains_key(x))).collect();
+                let hint = if is_arrow || !self.types.mentions(pty, &unhinted) { Some(pty) } else { None };
                 self.infer_free = still_free;
                 let t = self.expr(a.expr, hint);
                 arg_tys[i] = Some(t);

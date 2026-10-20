@@ -1,0 +1,16 @@
+// Mixed int and f64 in a conditional, and generic results that differ from what the call's
+// context expects: what TypeScript code with `number` writes.
+function pick(a: f64, b: int): f64 {
+  return a > 0 ? a : b
+}
+
+function main() {
+  const xs: f64[] = [1.5, 2.25, 3]
+  let total = 0
+  total += xs.reduce((a, b) => a + b, 0.0)
+  total += 2
+  console.log(total, pick(1.5, 2), pick(-1, 7))
+  const ys = [3, 1, 2, 1]
+  const sorted = ys.slice().sort((p, q) => p !== q ? p - q : 0.5)
+  console.log(sorted.join(","))
+}
