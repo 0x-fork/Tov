@@ -1272,10 +1272,11 @@ impl<'c, 'a> Gen<'c, 'a> {
         if local(*target) != Some(ik) {
             return None;
         }
-        // (innermost loops: each copy of an outer one would hold two of the inner)
+        // (no `for` inside: each copy of an outer one would hold two of the inner)
         fn has_loop(ast: &ast::Ast, s: StmtId) -> bool {
             match &ast.stmt(s).kind {
-                StmtKind::While(..) | StmtKind::DoWhile(..) | StmtKind::For { .. } | StmtKind::ForOf { .. } => true,
+                StmtKind::For { .. } | StmtKind::ForOf { .. } => true,
+                StmtKind::While(_, b) | StmtKind::DoWhile(b, _) => has_loop(ast, *b),
                 StmtKind::If(_, t, e) => has_loop(ast, *t) || e.is_some_and(|e| has_loop(ast, e)),
                 StmtKind::Block(xs) => xs.iter().any(|&x| has_loop(ast, x)),
                 StmtKind::Switch(_, cases) => cases.iter().any(|c| c.body.iter().any(|&x| has_loop(ast, x))),
@@ -1296,6 +1297,30 @@ impl<'c, 'a> Gen<'c, 'a> {
         // or its length read)
         let mut uses: FxMap<u32, (Vec<i64>, bool)> = FxMap::default();
         let mut fine: FxSet<ExprId> = FxSet::default();
+        // (the copy reaches the arrays' elements only through the pointers it holds: `xs[i]` read
+        // as `T | undefined` reads them through the array instead, so such an array stays out)
+        let mut through: FxSet<ExprId> = FxSet::default();
+        for &e in &all {
+            match &ast.expr(e).kind {
+                ExprKind::NonNull(x) => {
+                    through.insert(*x);
+                }
+                ExprKind::Assign(_, t, _) | ExprKind::Update { target: t, .. } => {
+                    through.insert(*t);
+                }
+                _ => {}
+            }
+        }
+        for &e in &all {
+            match &ast.expr(e).kind {
+                ExprKind::Index { obj, .. } if !through.contains(&e) => {
+                    if let Some(xk) = local(*obj) {
+                        uses.entry(xk).or_insert((Vec::new(), true)).1 = false;
+                    }
+                }
+                _ => {}
+            }
+        }
         for &e in &all {
             match &ast.expr(e).kind {
                 ExprKind::Assign(_, t, _) | ExprKind::Update { target: t, .. } if local(*t) == Some(ik) => return None,
@@ -1392,6 +1417,7 @@ impl<'c, 'a> Gen<'c, 'a> {
     /// `j < xs.length` before it puts every such index in range, and neither step can overflow.
     /// (`i`, `j`, the arrays), for a copy of the loop without those checks.
     fn two_pointer_plan(&mut self, cond: ExprId, body: StmtId) -> Option<(u32, u32, Vec<u32>)> {
+        let outer: Vec<u32> = self.b().versioned.iter().flat_map(|v| v.1.iter().map(|a| a.0)).collect();
         let boxed = self.b().boxed.clone();
         let unique = self.b().unique.clone();
         let types: FxMap<u32, TyId> = self.b().locals.iter().map(|(k, l)| (*k, l.ty)).collect();
@@ -1481,7 +1507,9 @@ impl<'c, 'a> Gen<'c, 'a> {
         let arrays: Vec<u32> = indexed
             .into_iter()
             .filter(|&xk| {
-                matches!(types.get(&xk).map(|&t| self.c.types.get(t)), Some(Ty::Array(_)))
+                // (an enclosing versioned loop's pointer reaches it already)
+                !outer.contains(&xk)
+                    && matches!(types.get(&xk).map(|&t| self.c.types.get(t)), Some(Ty::Array(_)))
                     && !boxed.contains(&xk)
                     && (!written.contains(&xk) || unique.contains(&xk))
                     && !all.iter().any(|&e| local(e) == Some(xk) && !fine.contains(&e))

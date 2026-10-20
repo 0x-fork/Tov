@@ -1,0 +1,32 @@
+// A loop indexing arrays at `i` with a `while` inside it, writing an array while a module
+// variable changes on every iteration: the same results whichever copy of the loop runs.
+let seed = 42
+
+function next(): f64 {
+  seed = (seed * 3877 + 29573) % 139968
+  return seed / 139968
+}
+
+function fill(line: u8[], codes: u8[], cum: f64[], w: int): u8[] {
+  let out = line
+  const last = cum.length - 1
+  for (let j = 0; j < w; j++) {
+    const r = next()
+    let i = 0
+    while (i < last && cum[i]! <= r) i++
+    out[j] = codes[i]!
+  }
+  return out
+}
+
+function main() {
+  const codes = new TextEncoder().encode("acgt")
+  const cum = [0.3, 0.5, 0.7, 1.0]
+  let line: u8[] = []
+  for (let j = 0; j < 12; j++) line.push(0)
+  line = fill(line, codes, cum, 12)
+  console.log(line.join(","), seed)
+  // a line no longer than the loop: still in range
+  const short: u8[] = [0, 0]
+  console.log(fill(short, codes, cum, 2).join(","), seed)
+}
