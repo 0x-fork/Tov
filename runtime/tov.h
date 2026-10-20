@@ -196,7 +196,12 @@ typedef struct tv_arr {
 
 #define TV_EMPTY_ARR ((tv_arr){NULL, 0})
 
-static inline tv_int tv_arr_len(tv_arr a) { return a.len; }
+/* (an array's length is under 2^48: its elements fill memory, and no machine has that much.
+ * Saying so lets the C compiler see that `i + j` of indexes below two lengths can't overflow.) */
+static inline tv_int tv_arr_len(tv_arr a) {
+    if ((uint64_t)a.len >= ((uint64_t)1 << 48)) __builtin_unreachable();
+    return a.len;
+}
 static inline void *tv_arr_data(tv_arr a) { return a.p ? (void *)a.p->data : NULL; }
 static inline void tv_arr_retain(tv_arr a) { if (a.p && a.p->rc >= 0) a.p->rc++; }
 void tv_arr_release_slow(tv_arr a, const tv_type *t);
