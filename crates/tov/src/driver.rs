@@ -90,6 +90,9 @@ pub fn load(paths: &[PathBuf], base: &Path) -> Result<Loaded, String> {
         }
     }
     roots.extend(walk_parallel(dirs));
+    if roots.is_empty() {
+        return Err("no `.tov` source files found in the input directories\n  hint: use the `.tov` extension, or pass a source file explicitly".into());
+    }
     let mut roots: Vec<PathBuf> = roots.iter().map(|p| normalize(p)).collect();
     roots.sort();
     roots.dedup();

@@ -18,6 +18,10 @@ path = "../../tests/ui.rs"
 harness = false
 
 [[test]]
+name = "cli"
+path = "../../tests/cli.rs"
+
+[[test]]
 name = "robustness"
 path = "../../tests/robustness.rs"
 harness = false
