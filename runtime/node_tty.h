@@ -3,6 +3,7 @@
 
 #include <stdbool.h>
 #include <errno.h>
+#include <pthread.h>
 #include <signal.h>
 #include <stdlib.h>
 #include <sys/types.h>
@@ -34,7 +35,7 @@ static void tv_node_tty_block_signals(sigset_t *before) {
     sigemptyset(&blocked);
     sigaddset(&blocked, SIGINT);
     sigaddset(&blocked, SIGTERM);
-    sigprocmask(SIG_BLOCK, &blocked, before);
+    pthread_sigmask(SIG_BLOCK, &blocked, before);
 }
 
 static int tv_node_tty_release(tv_node_tty_mode *m, bool closing) {
@@ -42,7 +43,7 @@ static int tv_node_tty_release(tv_node_tty_mode *m, bool closing) {
     tv_node_tty_block_signals(&before);
     if (m->owners > 1) {
         m->owners--;
-        sigprocmask(SIG_SETMASK, &before, NULL);
+        pthread_sigmask(SIG_SETMASK, &before, NULL);
         return 0;
     }
     int err = tcsetattr(m->fd, TCSADRAIN, &m->saved) == 0 ? 0 : -errno;
@@ -51,7 +52,7 @@ static int tv_node_tty_release(tv_node_tty_mode *m, bool closing) {
            retain the restoration fd for default-signal/exit reset or a later
            owner of this terminal. No slave is opened for a master snapshot. */
         if (closing) m->owners = 0;
-        sigprocmask(SIG_SETMASK, &before, NULL);
+        pthread_sigmask(SIG_SETMASK, &before, NULL);
         return err;
     }
     tv_node_tty_mode **p = &tv_node_tty_modes;
@@ -60,7 +61,7 @@ static int tv_node_tty_release(tv_node_tty_mode *m, bool closing) {
     if (!tv_node_tty_modes) tv_node_signal_defaults_stop();
     close(m->fd);
     free(m);
-    sigprocmask(SIG_SETMASK, &before, NULL);
+    pthread_sigmask(SIG_SETMASK, &before, NULL);
     return err;
 }
 

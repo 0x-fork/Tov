@@ -2511,11 +2511,11 @@ NATIVE(n_signal) {
     tv_node_tty_block_signals(&before);
     if (on) {
         int err = tv_node_signal_setup();
-        if (err) { sigprocmask(SIG_SETMASK, &before, NULL); return num(ctx, err); }
+        if (err) { pthread_sigmask(SIG_SETMASK, &before, NULL); return num(ctx, err); }
         struct sigaction sa = tv_node_signal_action();
         if (sigaction(sig, &sa, &tv_node_sig_before[sig]) != 0) {
             int err = errno;
-            sigprocmask(SIG_SETMASK, &before, NULL);
+            pthread_sigmask(SIG_SETMASK, &before, NULL);
             return num(ctx, -err);
         }
     } else {
@@ -2524,7 +2524,7 @@ NATIVE(n_signal) {
             sigaction(sig, &tv_node_sig_before[sig], NULL);
     }
     tv_node_sig_on[sig] = on;
-    sigprocmask(SIG_SETMASK, &before, NULL);
+    pthread_sigmask(SIG_SETMASK, &before, NULL);
     return num(ctx, 0);
 }
 
@@ -3030,7 +3030,7 @@ NATIVE(n_stream_set_raw_mode) {
         if (!registered) { atexit(tv_node_tty_reset); registered = true; }
         s->raw_mode = m;
     }
-    sigprocmask(SIG_SETMASK, &before, NULL);
+    pthread_sigmask(SIG_SETMASK, &before, NULL);
     if (err) return num(ctx, err);
     return num(ctx, 0);
 }
