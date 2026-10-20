@@ -667,7 +667,19 @@ impl<'c, 'a> Gen<'c, 'a> {
             let (mobj, k, _, e, d, _) = found;
             let (mk, kk) = (local(mobj)?, local(k)?);
             let simple = |x: ExprId| matches!(ast.expr(x).kind, ExprKind::Int(_) | ExprKind::Float(_));
-            let e_ok = simple(e) || local(e).is_some_and(|x| x != mk && x != kk);
+            // (`e` runs after the lookup instead of before it: nothing in it may call or read the map)
+            let mut es = Vec::new();
+            collect_exprs_expr(ast, e, &mut es);
+            let e_ok = es.iter().all(|&x| match &ast.expr(x).kind {
+                ExprKind::Int(_) | ExprKind::Float(_) | ExprKind::Paren(_) | ExprKind::Binary(..) | ExprKind::Unary(..) | ExprKind::Cond(..) => true,
+                ExprKind::Ident(_) => local(x).is_some_and(|x| x != mk),
+                // (a record's field, or a length: no getter runs)
+                ExprKind::Member { obj, name, optional: false, .. } => {
+                    let ot = self.facts(m).expr_ty.get(*obj as usize).copied().unwrap_or(ERROR);
+                    matches!(self.c.types.get(ot), Ty::Record(_)) || matches!(self.sym(*name), "length" | "byteLength") && !matches!(self.c.types.get(ot), Ty::Class(..))
+                }
+                _ => false,
+            });
             if mk == kk || !simple(d) || !e_ok {
                 return None;
             }
