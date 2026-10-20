@@ -1,0 +1,71 @@
+// The Benchmarks Game k-nucleotide (single-threaded), on a DNA sequence generated in the program
+// with fasta's LCG and Homo sapiens frequencies: count every k-mer for k = 1, 2 (printed as sorted
+// percentages) and for the lengths of five given k-mers (printed as counts), with a string-keyed
+// hash map.
+
+const IM = 139968
+const IA = 3877
+const IC = 29573
+
+function generate(n: number): string {
+  const chars = ["A", "C", "G", "T"]
+  const probs = [0.3029549426680, 0.1979883004921, 0.1975473066391, 0.3015094502008]
+  const cum: number[] = []
+  let p = 0.0
+  for (const x of probs) {
+    p += x
+    cum.push(p)
+  }
+  const last = cum.length - 1
+  const parts: string[] = []
+  let seed = 42
+  for (let j = 0; j < n; j++) {
+    seed = (seed * IA + IC) % IM
+    const r = seed / IM
+    let i = 0
+    while (i < last && cum[i]! <= r) i++
+    parts.push(chars[i]!)
+  }
+  return parts.join("")
+}
+
+function frequencies(seq: string, k: number): Map<string, number> {
+  const counts = new Map<string, number>()
+  const n = seq.length - k + 1
+  for (let i = 0; i < n; i++) {
+    const key = seq.slice(i, i + k)
+    counts.set(key, (counts.get(key) ?? 0) + 1)
+  }
+  return counts
+}
+
+function printFrequencies(seq: string, k: number) {
+  const counts = frequencies(seq, k)
+  const keys = [...counts.keys()]
+  keys.sort((a, b) => {
+    const d = counts.get(b)! - counts.get(a)!
+    if (d !== 0) return d
+    return a < b ? -1 : 1
+  })
+  const total = seq.length - k + 1
+  for (const key of keys) {
+    console.log(`${key} ${((100 * counts.get(key)!) / total).toFixed(3)}`)
+  }
+  console.log("")
+}
+
+function printCount(seq: string, fragment: string) {
+  const counts = frequencies(seq, fragment.length)
+  console.log(`${counts.get(fragment) ?? 0}\t${fragment}`)
+}
+
+function main() {
+  const seq = generate(5_000_000)
+  printFrequencies(seq, 1)
+  printFrequencies(seq, 2)
+  for (const fragment of ["GGT", "GGTA", "GGTATT", "GGTATTTTAATT", "GGTATTTTAATTTATAGT"]) {
+    printCount(seq, fragment)
+  }
+}
+
+main()

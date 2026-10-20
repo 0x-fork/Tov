@@ -1,0 +1,93 @@
+// The Benchmarks Game fasta (single-threaded): an ALU repeat and two sequences drawn from
+// nucleotide tables with the LCG, written as 60-column lines. Each line goes to a sink that
+// counts lines and bytes and checksums the bytes instead of writing them to stdout.
+
+const WIDTH = 60
+const IM = 139968
+const IA = 3877
+const IC = 29573
+
+const ALU =
+  "GGCCGGGCGCGGTGGCTCACGCCTGTAATCCCAGCACTTTGG" +
+  "GAGGCCGAGGCGGGCGGATCACCTGAGGTCAGGAGTTCGAGA" +
+  "CCAGCCTGGCCAACATGGTGAAACCCCGTCTCTACTAAAAAT" +
+  "ACAAAAATTAGCCGGGCGTGGTGGCGCGCGCCTGTAATCCCA" +
+  "GCTACTCGGGAGGCTGAGGCAGGAGAATCGCTTGAACCCGGG" +
+  "AGGCGGAGGTTGCAGTGAGCCGAGATCGCGCCACTGCACTCC" +
+  "AGCCTGGGCGACAGAGCGAGACTCCGTCTCAAAAA"
+
+let lines = 0
+let bytes = 0
+let hash = 0
+
+// One line: `len` bytes of `buf` from `start`, then "\n".
+function writeLine(buf: Uint8Array, start: number, len: number) {
+  let h = hash
+  for (let i = start; i < start + len; i++) {
+    h = (h * 31 + buf[i]!) & 0xffffff
+  }
+  hash = (h * 31 + 10) & 0xffffff
+  bytes += len + 1
+  lines++
+}
+
+let seed = 42
+
+function random(): number {
+  seed = (seed * IA + IC) % IM
+  return seed / IM
+}
+
+function repeatFasta(header: string, src: string, n: number) {
+  const head = new TextEncoder().encode(header)
+  writeLine(head, 0, head.length)
+  const s = new TextEncoder().encode(src + src.slice(0, WIDTH))
+  const len = src.length
+  let pos = 0
+  let left = n
+  while (left > 0) {
+    const w = Math.min(WIDTH, left)
+    writeLine(s, pos, w)
+    pos += w
+    if (pos >= len) pos -= len
+    left -= w
+  }
+}
+
+function randomFasta(header: string, chars: string, probs: number[], n: number) {
+  const head = new TextEncoder().encode(header)
+  writeLine(head, 0, head.length)
+  const codes = new TextEncoder().encode(chars)
+  const cum: number[] = []
+  let p = 0.0
+  for (const x of probs) {
+    p += x
+    cum.push(p)
+  }
+  const last = cum.length - 1
+  const line = new Uint8Array(WIDTH)
+  let left = n
+  while (left > 0) {
+    const w = Math.min(WIDTH, left)
+    for (let j = 0; j < w; j++) {
+      const r = random()
+      let i = 0
+      while (i < last && cum[i]! <= r) i++
+      line[j] = codes[i]!
+    }
+    writeLine(line, 0, w)
+    left -= w
+  }
+}
+
+function main() {
+  const n = 10_000_000
+  const iub = [0.27, 0.12, 0.12, 0.27, 0.02, 0.02, 0.02, 0.02, 0.02, 0.02, 0.02, 0.02, 0.02, 0.02, 0.02]
+  const homoSapiens = [0.3029549426680, 0.1979883004921, 0.1975473066391, 0.3015094502008]
+  repeatFasta(">ONE Homo sapiens alu", ALU, 2 * n)
+  randomFasta(">TWO IUB ambiguity codes", "acgtBDHKMNRSVWY", iub, 3 * n)
+  randomFasta(">THREE Homo sapiens frequency", "acgt", homoSapiens, 5 * n)
+  console.log(`${lines} ${bytes} ${hash}`)
+}
+
+main()
