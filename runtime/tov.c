@@ -4507,7 +4507,7 @@ static bool tv_http_process(tv_http_conn *c) {
         tv_http_v10 = http10;
         tv_http_rest_off = pos + consumed;
         tv_http_head = mlen == 4 && memcmp(start, "HEAD", 4) == 0;
-        ((void (*)(void *, tv_str, tv_str, tv_str, tv_str))h.fn)(h.env, method, target, hdrs, body);
+        ((void (*)(tv_env *, tv_str, tv_str, tv_str, tv_str))h.fn)(h.env, method, target, hdrs, body);
         if (tv_http_cur) tv_native_httpRespond(500, TV_EMPTY_STR, TV_EMPTY_STR, false); /* no response */
         tv_run_microtasks();   /* each request is a macrotask, as in JavaScript */
         tv_str_release(method);

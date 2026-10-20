@@ -252,7 +252,7 @@ static void tv_ws_emit(tv_ns *s, int kind, const uint8_t *p, size_t n, bool text
         bytes.len = (tv_int)n;
     }
     s->busy++;
-    ((void (*)(void *, tv_int, tv_arr, tv_str, tv_int))s->cb.fn)(s->cb.env, kind, bytes, t, code);
+    ((void (*)(tv_env *, tv_int, tv_arr, tv_str, tv_int))s->cb.fn)(s->cb.env, kind, bytes, t, code);
     s->busy--;
     tv_arr_release(bytes, &tv_type_u8);
     tv_str_release(t);

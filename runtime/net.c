@@ -124,7 +124,7 @@ static void tv_ns_emit(tv_ns *s, int kind, const void *data, size_t n, const cha
     }
     tv_str t = text ? tv_str_from(text, strlen(text)) : TV_EMPTY_STR;
     s->busy++;
-    ((void (*)(void *, tv_int, tv_arr, tv_str, tv_int))s->cb.fn)(s->cb.env, kind, bytes, t, 0);
+    ((void (*)(tv_env *, tv_int, tv_arr, tv_str, tv_int))s->cb.fn)(s->cb.env, kind, bytes, t, 0);
     s->busy--;
     tv_arr_release(bytes, &tv_type_u8);
     tv_str_release(t);
@@ -712,7 +712,7 @@ static void tv_nl_ready(tv_io *h, bool readable, bool writable, bool broken) {
         /* the listener's Socket for it binds its events (netBind), which opens it (the socket
          * may close in there: a TLS handshake that fails at once; it's freed below, not then) */
         s->busy++;
-        ((void (*)(void *, tv_int))l->on_accept.fn)(l->on_accept.env, s->id);
+        ((void (*)(tv_env *, tv_int))l->on_accept.fn)(l->on_accept.env, s->id);
         s->busy--;
         if (s->state != TV_NS_CLOSED && !s->bound) tv_ns_close(s, NULL);
         tv_ns_settle(s);
