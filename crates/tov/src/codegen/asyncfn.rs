@@ -436,7 +436,19 @@ impl<'c, 'a> Gen<'c, 'a> {
         self.line(format!("tv_fn {fv} = {};", exec.code));
         self.line(format!("tv_fn {rs} = {{ (void *){resolve}, tv_promise_resolver({}) }};", p.code));
         self.line(format!("tv_fn {rj} = {{ (void *)tvg_reject, tv_promise_resolver({}) }};", p.code));
-        self.line(format!("((void (*)(tv_env *, tv_fn, tv_fn)){fv}.fn)({fv}.env, {rs}, {rj});"));
+        // (called with the parameters it declares, `(resolve) => ...` with one, and its return type)
+        let (np, ret) = match self.tget(exec.ty) {
+            Ty::Func(ps, ret, _) => (self.c.types.params(ps).len().min(2), ret),
+            _ => (2, VOID),
+        };
+        let rct = if ret == VOID { "void".to_string() } else { self.ctype(ret) };
+        let (ps, argv) = (["tv_env *", "tv_fn", "tv_fn"][..np + 1].join(", "), [format!("{fv}.env"), rs.clone(), rj.clone()][..np + 1].join(", "));
+        let call = format!("(({rct} (*)({ps})){fv}.fn)({argv})");
+        if ret == VOID {
+            self.line(format!("{call};"));
+        } else {
+            let _ = self.tmp(ret, &call, true);
+        }
         self.line(format!("tv_env_release({rs}.env); tv_env_release({rj}.env);"));
         p
     }
