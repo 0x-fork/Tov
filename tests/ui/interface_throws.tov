@@ -1,0 +1,62 @@
+// Class-to-interface conformance must preserve declared and inferred method errors.
+
+class Big extends Error {}
+class Small extends Error {}
+
+interface Checker {
+  check(x: int): int
+}
+
+interface SmallChecker {
+  check(x: int): int throws Small
+}
+
+class Declared implements Checker {
+  check(x: int): int throws Big {
+    if (x > 1) throw new Big("declared")
+    return x
+  }
+}
+
+class Inferred implements Checker {
+  check(x: int): int {
+    if (x > 1) throw new Big("inferred")
+    return x
+  }
+}
+
+class Structural {
+  check(x: int): int throws Big {
+    if (x > 1) throw new Big("structural")
+    return x
+  }
+}
+
+class InferredStructural {
+  check(x: int): int {
+    if (x > 1) throw new Big("inferred structural")
+    return x
+  }
+}
+
+class Base<T> {
+  check(x: T): T throws Big {
+    throw new Big("inherited")
+  }
+}
+
+class Inherited extends Base<int> implements Checker {}
+class StructuralInherited extends Base<int> {}
+
+class WrongError implements SmallChecker {
+  check(x: int): int throws Big {
+    throw new Big("wrong error")
+  }
+}
+
+function main() {
+  const declared: Checker = new Structural()
+  const inferred: Checker = new InferredStructural()
+  const inherited: Checker = new StructuralInherited()
+  const wrong: SmallChecker = new Structural()
+}

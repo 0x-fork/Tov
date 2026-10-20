@@ -1,0 +1,71 @@
+// Compatible interface methods preserve success values and propagate their errors.
+
+class Big extends Error {}
+
+interface Checker {
+  check(x: int): int throws Big
+}
+
+interface BroadChecker {
+  check(x: int): int throws Error
+}
+
+interface PlainChecker {
+  check(x: int): int
+}
+
+class Declared implements Checker {
+  check(x: int): int throws Big {
+    if (x > 1) throw new Big("declared")
+    return x
+  }
+}
+
+class Inferred {
+  check(x: int): int {
+    if (x > 1) throw new Big("inferred")
+    return x
+  }
+}
+
+class Base<T> {
+  constructor(readonly value: T) {}
+  check(x: int): T throws Big {
+    if (x > 1) throw new Big("inherited")
+    return this.value
+  }
+}
+
+class Inherited extends Base<int> implements Checker {}
+
+class Plain implements PlainChecker, Checker {
+  check(x: int): int { return x + 10 }
+}
+
+function use(c: Checker, x: int): int throws Big {
+  return try c.check(x)
+}
+
+function useBroad(c: BroadChecker): int throws Error {
+  return try c.check(2)
+}
+
+function main() {
+  const checkers: Checker[] = [new Declared(), new Inferred(), new Inherited(7), new Plain()]
+  for (const c of checkers) {
+    try {
+      console.log("value", use(c, 1))
+      console.log("result", use(c, 2))
+    } catch (e) {
+      console.log("caught", e instanceof Big, e.message)
+    }
+  }
+  try {
+    console.log("unreachable", useBroad(new Declared()))
+  } catch (e) {
+    console.log("broad", e instanceof Big, e.message)
+  }
+  const plain: PlainChecker = new Plain()
+  console.log("plain", plain.check(3))
+  console.log("after")
+}
