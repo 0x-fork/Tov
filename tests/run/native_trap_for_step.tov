@@ -1,0 +1,11 @@
+// A `for` step that can overflow still traps: here the body moves `i` to the bound, the largest
+// int, and the step goes past it.
+function main() {
+  const max = 9223372036854775807
+  let n = 0
+  for (let i = max - 3; i < max; i++) {
+    n++
+    if (n === 2) i = max
+  }
+  console.log(n)
+}

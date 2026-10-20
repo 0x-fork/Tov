@@ -85,6 +85,9 @@ pub(crate) struct Body {
     /// Array locals whose capacity was reserved before a loop for every push it can make
     /// (see `reserve_for_pushes`): those pushes store without a capacity check.
     pub exact_pushes: FxSet<u32>,
+    /// The index local of the `for` loop whose step is being emitted, when that step can't
+    /// overflow (see `step_cannot_overflow`): its `i++` is a plain add.
+    pub nowrap_step: Option<u32>,
 }
 
 /// A function whose `return a + f(args)` self-calls run as a loop: the function (module,
@@ -240,6 +243,7 @@ impl<'c, 'a> Gen<'c, 'a> {
             in_bounds: Vec::new(),
             push_caps: FxMap::default(),
             exact_pushes: FxSet::default(),
+            nowrap_step: None,
         });
     }
 
@@ -429,6 +433,7 @@ impl<'c, 'a> Gen<'c, 'a> {
             in_bounds: Vec::new(),
             push_caps: FxMap::default(),
             exact_pushes: FxSet::default(),
+            nowrap_step: None,
         };
         for (i, &(key, ty, inout)) in params.iter().enumerate() {
             let access = if inout { format!("(*p{i})") } else { format!("p{i}") };
@@ -926,6 +931,44 @@ impl<'c, 'a> Gen<'c, 'a> {
         Some((ik, xk))
     }
 
+    /// `for (let i = a; i < n; i++)` where `n` has `i`'s integer type and nothing in the loop
+    /// assigns `i` but the step: every step starts from `i < n <= MAX`, so `i++` can't overflow.
+    fn step_cannot_overflow(&self, init: Option<StmtId>, cond: Option<ExprId>, step: Option<ExprId>, body: StmtId) -> Option<u32> {
+        let m = self.cur_m();
+        let ast = self.ast(m);
+        let facts = self.facts(m);
+        let local = |e: ExprId| match (&ast.expr(e).kind, facts.idents.get(&e)) {
+            (ExprKind::Ident(_), Some(IdentFact::Local(k))) => Some(*k),
+            _ => None,
+        };
+        let init = init?;
+        let StmtKind::Let { name_span, .. } = &ast.stmt(init).kind else { return None };
+        let ty = facts.bindings.get(&init).copied()?;
+        if !self.c.types.is_int(ty) {
+            return None;
+        }
+        let ik = name_span.start;
+        let cond = cond?;
+        let ExprKind::Binary(BinOp::Lt, l, r) = &ast.expr(cond).kind else { return None };
+        if local(*l) != Some(ik) || facts.expr_ty.get(*r as usize).copied() != Some(ty) {
+            return None;
+        }
+        let step = step?;
+        let ExprKind::Update { target, inc: true, .. } = &ast.expr(step).kind else { return None };
+        if local(*target) != Some(ik) {
+            return None;
+        }
+        let mut all = Vec::new();
+        collect_exprs_stmt(ast, body, &mut all);
+        collect_exprs_expr(ast, cond, &mut all);
+        let changes_i = all.iter().any(|&e| match &ast.expr(e).kind {
+            ExprKind::Assign(_, t, _) | ExprKind::Update { target: t, .. } => local(*t) == Some(ik),
+            ExprKind::Call { args, .. } => args.iter().any(|a| a.by_ref.is_some() && local(a.expr) == Some(ik)),
+            _ => false,
+        });
+        (!changes_i).then_some(ik)
+    }
+
     /// `for (let i = a; i < n; i++) { ...; xs.push(v); ... }` whose body always runs to the end
     /// (no break, continue, return, throw or `try`) and pushes onto `xs` as a statement of its
     /// own: the loop adds at least `n - i` elements, so the array grows to that size once, like
@@ -1292,6 +1335,7 @@ impl<'c, 'a> Gen<'c, 'a> {
                 let hoisted = self.hoist_unique(&[*body], &loop_exprs);
                 self.reserve_for_pushes(*init, *cond, *step, *body);
                 let bounds = self.counted_loop(*init, *cond, *step, *body);
+                let nowrap = self.step_cannot_overflow(*init, *cond, *step, *body);
                 self.open("for (;;) {");
                 if let Some(c) = cond {
                     self.cond_break(*c);
@@ -1306,7 +1350,9 @@ impl<'c, 'a> Gen<'c, 'a> {
                 self.line(format!("{cont}:;"));
                 if let Some(st) = step {
                     self.push_temps();
+                    self.b().nowrap_step = nowrap;
                     let _ = self.expr(*st);
+                    self.b().nowrap_step = None;
                     self.pop_temps();
                 }
                 self.close("}");
@@ -1854,7 +1900,8 @@ impl<'c, 'a> Gen<'c, 'a> {
                     self.line(format!("{lv} = {f}({old}, tv_dec_from_int(1));"));
                     return Val::plain(if *prefix { lv } else { old }, p.ty);
                 }
-                let new = if self.c.types.is_float(p.ty) {
+                let nowrap = self.b().nowrap_step.is_some() && matches!(self.ident_fact(m, *target), Some(IdentFact::Local(k)) if Some(k) == self.b().nowrap_step);
+                let new = if self.c.types.is_float(p.ty) || nowrap {
                     format!("{old} {} 1", if *inc { "+" } else { "-" })
                 } else {
                     format!("{}({ct}, {old}, 1, {loc})", if *inc { "TV_ADD" } else { "TV_SUB" })
@@ -3608,6 +3655,7 @@ impl<'c, 'a> Gen<'c, 'a> {
             in_bounds: Vec::new(),
             push_caps: FxMap::default(),
             exact_pushes: FxSet::default(),
+            nowrap_step: None,
         };
         for (i, &(key, ty, inout)) in params.iter().enumerate() {
             let access = if inout { format!("(*p{i})") } else { format!("p{i}") };

@@ -1,0 +1,18 @@
+// A `for (let i = a; i < n; i++)` loop runs up to the largest value of its type without
+// overflowing, and `i <= n` loops stop at the bound.
+function main() {
+  const max = 9223372036854775807
+  let n = 0
+  for (let i = max - 3; i < max; i++) n++
+  console.log(n)
+  let bytes = 0
+  const top: u8 = 255
+  for (let b: u8 = 250; b < top; b++) bytes++
+  console.log(bytes)
+  let k = 0
+  for (let i = 0; i < 10; i++) {
+    if (i % 3 === 0) continue
+    k += i
+  }
+  console.log(k)
+}
