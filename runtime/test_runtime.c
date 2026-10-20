@@ -7,11 +7,13 @@
  * Element ownership is checked with a counting tv_type ("obj") whose retain/release
  * calls are tallied per object: after each group every object must be dead.
  */
-#define _POSIX_C_SOURCE 200809L
+#define _GNU_SOURCE 1      /* accept4 (glibc), as tov.c asks for */
 #define _DEFAULT_SOURCE 1   /* MAP_ANON (glibc) */
 #define _DARWIN_C_SOURCE 1  /* MAP_ANON (macOS) */
 #include "tov.h"
 #include "tov.c"
+#include "big.c"   /* (dec.c's limb arithmetic) */
+#include "dec.c"   /* (tov.c's JSON reads decimals) */
 
 #include <stdio.h>
 #include <sys/wait.h>
@@ -95,6 +97,7 @@ static void drain(void) {
 static bool traps(void (*fn)(void), char *msg, size_t cap) {
     jmp_buf jb;
     tv_test_jmp = &jb;
+    tv_test_unwind = tv_test_longjmp;
     if (setjmp(jb) == 0) {
         fn();
         tv_test_jmp = NULL;
@@ -328,7 +331,7 @@ static void test_number_format(void) {
     f = -0.0f;
     tv_type_f32.to_str(&sb, &f);
     CHECK_SB(sb, "0");
-    tv_type_f32.inspect(&sb, &f, 1);
+    tv_inspect_value(&sb, &tv_type_f32, &f, 1);
     CHECK_SB(sb, "-0");
     f = 1e-10f;
     tv_type_f32.to_str(&sb, &f);
@@ -1360,13 +1363,13 @@ static void test_inspect(void) {
     CHECK_SB(sb, "0,0,1.5,NaN,1e+21,-Infinity");
     tv_arr_release(f, &tv_type_f64);
     bool t = true;
-    tv_type_bool.inspect(&sb, &t, 1);
-    tv_type_undefined.inspect(&sb, NULL, 1);
+    tv_inspect_value(&sb, &tv_type_bool, &t, 1);
+    tv_inspect_value(&sb, &tv_type_undefined, NULL, 1);
     CHECK_SB(sb, "trueundefined");
     int8_t i8 = -5;
     uint64_t u64 = UINT64_MAX;
     uint32_t u32 = 4000000000u;
-    tv_type_i8.inspect(&sb, &i8, 1);
+    tv_inspect_value(&sb, &tv_type_i8, &i8, 1);
     tv_sb_push_char(&sb, ' ');
     tv_type_u64.to_str(&sb, &u64);
     tv_sb_push_char(&sb, ' ');

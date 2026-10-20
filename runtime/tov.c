@@ -3099,7 +3099,7 @@ bool tv_jp_decimal(tv_jp *p, tv_dec *out) {
     size_t start = p->i, i = p->i;
     if (i < p->n && p->s[i] == '-') i++;
     while (i < p->n && ((p->s[i] >= '0' && p->s[i] <= '9') || p->s[i] == '.' || p->s[i] == 'e' || p->s[i] == 'E' || p->s[i] == '+' || p->s[i] == '-')) i++;
-    if (i == start || tv_dec_parse_n(p->s + start, i - start, out) != 0) return tv_jp_fail(p, "a decimal number");
+    if (i == start || tv_dec_parse_n((const char *)p->s + start, i - start, out) != 0) return tv_jp_fail(p, "a decimal number");
     p->i = i;
     return true;
 }

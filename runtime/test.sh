@@ -12,7 +12,7 @@ cd "$(dirname "$0")"
 
 if [ "${1:-}" = "--docker" ]; then
     # stream the sources in (bind mounts can serve stale files on Docker Desktop)
-    COPYFILE_DISABLE=1 tar -cf - tov.h tov.c test_runtime.c test.sh |
+    COPYFILE_DISABLE=1 tar -cf - tov.h tov.c big.c dec.c test_runtime.c test.sh |
         docker run --rm -i gcc:14 sh -c 'mkdir /rt && tar -C /rt -xf - 2>/dev/null && sh /rt/test.sh'
     exit $?
 fi
