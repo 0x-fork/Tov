@@ -64,8 +64,8 @@ fn main() {
         let os_expected = case.with_extension(format!("{}.stdout", std::env::consts::OS));
         let expected = std::fs::read_to_string(&os_expected).or_else(|_| std::fs::read_to_string(case.with_extension("stdout"))).unwrap_or_default();
         // `cache`: runs twice, with a cache of its own: compiled (writing the bytecode cache as it
-        // exits), then from the cache (on macOS, or with Tov's own engine: TOV_JSC_DIR)
-        let cache = (name == "cache" && (cfg!(target_vendor = "apple") || std::env::var_os("TOV_JSC_DIR").is_some())).then(|| std::env::temp_dir().join(format!("tov-npm-cache-{}", std::process::id())));
+        // exits), then from the cache (on macOS, or with Tov's own engine)
+        let cache = (name == "cache" && (cfg!(target_vendor = "apple") || built.jsc_own)).then(|| std::env::temp_dir().join(format!("tov-npm-cache-{}", std::process::id())));
         let runs = if cache.is_some() { 2 } else { 1 };
         for run in 0..runs {
             let pty = match name.as_str() {
