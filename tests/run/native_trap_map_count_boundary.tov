@@ -1,0 +1,10 @@
+// A map key sliced from the middle of a character traps as `slice` does, counted or not.
+function main() {
+  const counts = new Map<string, int>()
+  const s = "aé"
+  for (let i = 0; i < 3; i++) {
+    const key = s.slice(i, i + 1)
+    counts.set(key, (counts.get(key) ?? 0) + 1)
+  }
+  console.log(counts.size)
+}

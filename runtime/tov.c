@@ -1855,6 +1855,26 @@ bool tv_map_has(tv_map m, const tv_type *kt, const tv_type *vt, const void *key)
     return tv_map_get(m, kt, vt, key) != NULL;
 }
 
+/* A new entry for a key not in the (unique) map, whose empty index slot is `pos`: grows the map
+ * when it's full. The entry's key and value are the caller's to fill in. */
+static unsigned char *tv_map_add(tv_map *mp, tv_mapbuf *m, tv_mlayout L, const tv_type *kt, const tv_type *vt, uint64_t h, uint64_t pos) {
+    if (m->used == m->cap) {
+        /* full: compact if at least half the entries are deleted, else double */
+        int64_t ncap = m->count * 2 <= m->cap ? m->cap : m->cap * 2;
+        tv_mapbuf *n = tv_map_rebuild(m, L, ncap, false, kt, vt);
+        free(m);
+        mp->p = m = n;
+        pos = h & m->mask;
+        while (m->index[pos]) pos = (pos + 1) & m->mask;
+    }
+    int64_t idx = m->used++;
+    unsigned char *e = tv_entry(m, L, idx);
+    tv_entry_set_hash(e, h);
+    m->index[pos] = (uint32_t)(idx + 1);
+    m->count++;
+    return e;
+}
+
 void tv_map_set(tv_map *mp, const tv_type *kt, const tv_type *vt, void *key, void *value) {
     tv_mlayout L = tv_mlay(kt, vt);
     tv_mapbuf *m = tv_map_unique(mp, kt, vt, L);
@@ -1870,22 +1890,64 @@ void tv_map_set(tv_map *mp, const tv_type *kt, const tv_type *vt, void *key, voi
         if (kt->release && kt->size) kt->release(key);
         return;
     }
-    if (m->used == m->cap) {
-        /* full: compact if at least half the entries are deleted, else double */
-        int64_t ncap = m->count * 2 <= m->cap ? m->cap : m->cap * 2;
-        tv_mapbuf *n = tv_map_rebuild(m, L, ncap, false, kt, vt);
-        free(m);
-        mp->p = m = n;
-        pos = h & m->mask;
-        while (m->index[pos]) pos = (pos + 1) & m->mask;
-    }
-    int64_t idx = m->used++;
-    unsigned char *e = tv_entry(m, L, idx);
-    tv_entry_set_hash(e, h);
+    unsigned char *e = tv_map_add(mp, m, L, kt, vt, h, pos);
     if (kt->size) memcpy(e + 8, key, kt->size);
     if (vt->size) memcpy(e + L.voff, value, vt->size);
-    m->index[pos] = (uint32_t)(idx + 1);
-    m->count++;
+}
+
+/* Find-or-insert, for `m.set(k, (m.get(k) ?? d) op e)`: one probe. */
+void *tv_map_slot(tv_map *mp, const tv_type *kt, const tv_type *vt, void *key, bool *inserted) {
+    tv_mlayout L = tv_mlay(kt, vt);
+    tv_mapbuf *m = tv_map_unique(mp, kt, vt, L);
+    uint64_t h = tv_key_hash(kt, key);
+    bool found;
+    uint64_t pos = tv_map_find(m, L, kt, key, h, &found);
+    if (found) {
+        if (kt->release && kt->size) kt->release(key);
+        *inserted = false;
+        return tv_entry(m, L, m->index[pos] - 1) + L.voff;
+    }
+    unsigned char *e = tv_map_add(mp, m, L, kt, vt, h, pos);
+    if (kt->size) memcpy(e + 8, key, kt->size);
+    memset(e + L.voff, 0, vt->size);
+    *inserted = true;
+    return e + L.voff;
+}
+
+void *tv_map_slot_slice(tv_map *mp, const tv_type *vt, tv_str s, tv_int start, tv_int end, bool has_end, const char *loc, bool *inserted) {
+    int64_t len = s.p->len;
+    int64_t a = tv_clamp_index(start, len);
+    int64_t b = has_end ? tv_clamp_index(end, len) : len;
+    if (b < a) b = a;
+    tv_check_boundary(s, a, loc);
+    tv_check_boundary(s, b, loc);
+    const char *p = s.p->data + a;
+    size_t n = (size_t)(b - a);
+    const tv_type *kt = &tv_type_str;
+    tv_mlayout L = tv_mlay(kt, vt);
+    tv_mapbuf *m = tv_map_unique(mp, kt, vt, L);
+    uint64_t h = tv_hash_bytes(p, n) | TV_LIVE_BIT;
+    uint64_t pos = h & m->mask;
+    for (;;) {
+        uint32_t i = m->index[pos];
+        if (!i) break;
+        unsigned char *e = tv_entry(m, L, i - 1);
+        if (tv_entry_hash(e) == h) {
+            tv_str k;
+            memcpy(&k, e + 8, sizeof k);
+            if ((size_t)k.p->len == n && memcmp(k.p->data, p, n) == 0) {
+                *inserted = false;
+                return e + L.voff;
+            }
+        }
+        pos = (pos + 1) & m->mask;
+    }
+    tv_str k = tv_str_from(p, n);
+    unsigned char *e = tv_map_add(mp, m, L, kt, vt, h, pos);
+    memcpy(e + 8, &k, sizeof k);
+    memset(e + L.voff, 0, vt->size);
+    *inserted = true;
+    return e + L.voff;
 }
 
 bool tv_map_delete(tv_map *mp, const tv_type *kt, const tv_type *vt, const void *key) {

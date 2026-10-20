@@ -1,0 +1,9 @@
+// A counter that overflows traps.
+function main() {
+  const totals = new Map<string, int>()
+  const big = 9223372036854775807
+  for (const k of ["a", "a"]) {
+    totals.set(k, (totals.get(k) ?? 0) + big)
+  }
+  console.log(totals.get("a"))
+}

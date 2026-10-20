@@ -260,6 +260,12 @@ tv_int tv_map_size(tv_map m);
 void *tv_map_get(tv_map m, const tv_type *kt, const tv_type *vt, const void *key);
 void tv_map_set(tv_map *m, const tv_type *kt, const tv_type *vt, void *key, void *value);   /* moves key and value; replaces (and releases) an existing value, keeps insertion position */
 bool tv_map_has(tv_map m, const tv_type *kt, const tv_type *vt, const void *key);
+/* `m.set(k, (m.get(k) ?? d) op e)` in one probe: k's value slot, added zeroed (*inserted) when
+ * missing. Moves key in when it's added, releases it when it's found. */
+void *tv_map_slot(tv_map *mp, const tv_type *kt, const tv_type *vt, void *key, bool *inserted);
+/* The same for the string key s.slice(start, end) (with tv_str_slice's checks), whose string is
+ * only made when it's added. */
+void *tv_map_slot_slice(tv_map *mp, const tv_type *vt, tv_str s, tv_int start, tv_int end, bool has_end, const char *loc, bool *inserted);
 bool tv_map_delete(tv_map *m, const tv_type *kt, const tv_type *vt, const void *key);
 void tv_map_clear(tv_map *m, const tv_type *kt, const tv_type *vt);
 tv_arr tv_map_keys(tv_map m, const tv_type *kt, const tv_type *vt);     /* insertion order, retained copies */

@@ -575,14 +575,150 @@ impl<'c, 'a> Gen<'c, 'a> {
     /// of the block, so dead values don't add to peak memory.
     pub(crate) fn stmts(&mut self, ss: &[StmtId]) {
         let plan = if self.b().async_fn.is_none() && ss.len() > 1 { self.last_uses(ss) } else { Vec::new() };
+        let mut skip = false;
         for (i, &x) in ss.iter().enumerate() {
-            self.stmt(x);
+            if skip {
+                skip = false;
+            } else if let Some(n) = self.map_count(ss, i) {
+                skip = n == 2;
+            } else {
+                self.stmt(x);
+            }
             if let Some(keys) = plan.get(i) {
                 for &k in keys {
                     self.release_local_now(k);
                 }
             }
         }
+    }
+
+    /// `m.set(k, (m.get(k) ?? d) op e)` (a counter or running total in a map, `k` a local, `d`
+    /// a literal, `e` a literal or local) as one find-or-insert, and with `const k = s.slice(a, b)`
+    /// just before it (and `k` not used after), looked up by the slice's bytes: the key string is
+    /// made only when it's added. The statements it emitted (1 or 2), or None.
+    fn map_count(&mut self, ss: &[StmtId], i: usize) -> Option<usize> {
+        let boxed_ok = |g: &mut Self, k: u32| !g.b().boxed.contains(&k);
+        let m = self.cur_m();
+        let found = {
+            let ast = self.ast(m);
+            let local = |e: ExprId| match (&ast.expr(e).kind, self.ident_fact(m, e)) {
+                (ExprKind::Ident(_), Some(IdentFact::Local(k))) => Some(k),
+                _ => None,
+            };
+            let strip = |mut e: ExprId| {
+                while let ExprKind::Paren(x) = &ast.expr(e).kind {
+                    e = *x;
+                }
+                e
+            };
+            let method = |e: ExprId, name: &str| -> Option<(ExprId, Vec<ExprId>)> {
+                let ExprKind::Call { callee, args, optional: false, .. } = &ast.expr(e).kind else { return None };
+                let ExprKind::Member { obj, name: n, optional: false, .. } = &ast.expr(*callee).kind else { return None };
+                if self.sym(*n) != name || args.iter().any(|a| a.by_ref.is_some()) {
+                    return None;
+                }
+                Some((*obj, args.iter().map(|a| a.expr).collect()))
+            };
+            let parse = |s: StmtId| -> Option<(ExprId, ExprId, BinOp, ExprId, ExprId, ExprId)> {
+                let StmtKind::Expr(call) = &ast.stmt(s).kind else { return None };
+                let (mobj, args) = method(*call, "set")?;
+                let [k, v] = args[..] else { return None };
+                let v = strip(v);
+                let ExprKind::Binary(op @ (BinOp::Add | BinOp::Sub | BinOp::Mul), l, e) = &ast.expr(v).kind else { return None };
+                let ExprKind::Binary(BinOp::Nullish, g, d) = &ast.expr(strip(*l)).kind else { return None };
+                let (gobj, gargs) = method(strip(*g), "get")?;
+                let [k2] = gargs[..] else { return None };
+                let same = local(gobj).is_some() && local(gobj) == local(mobj) && local(k2).is_some() && local(k2) == local(k);
+                same.then_some((mobj, k, *op, *e, *d, v))
+            };
+            // this statement, or `const k = s.slice(a, b)` and it next (`k` used nowhere after them)
+            let (found, slice) = match parse(ss[i]) {
+                Some(f) => (f, None),
+                None => {
+                    let StmtKind::Let { mutable: false, name_span, init: Some(init), .. } = &ast.stmt(ss[i]).kind else { return None };
+                    let f = ss.get(i + 1).and_then(|&n| parse(n))?;
+                    if local(f.1) != Some(name_span.start) {
+                        return None;
+                    }
+                    let (sobj, sargs) = method(*init, "slice")?;
+                    if sargs.is_empty() || sargs.len() > 2 {
+                        return None;
+                    }
+                    let mut later = Vec::new();
+                    for &x in &ss[i + 2..] {
+                        collect_exprs_stmt(ast, x, &mut later);
+                    }
+                    if later.iter().any(|&x| local(x) == Some(name_span.start)) {
+                        return None;
+                    }
+                    (f, Some((*init, sobj, sargs)))
+                }
+            };
+            let (mobj, k, _, e, d, _) = found;
+            let (mk, kk) = (local(mobj)?, local(k)?);
+            let simple = |x: ExprId| matches!(ast.expr(x).kind, ExprKind::Int(_) | ExprKind::Float(_));
+            let e_ok = simple(e) || local(e).is_some_and(|x| x != mk && x != kk);
+            if mk == kk || !simple(d) || !e_ok {
+                return None;
+            }
+            (found, slice, kk)
+        };
+        let ((mobj, k, op, e, d, v), slice, kk) = found;
+        let mt = self.ty(mobj);
+        let Ty::Map(kt, vt) = self.tget(mt) else { return None };
+        if !(self.c.types.is_int(vt) || self.c.types.is_float(vt)) || self.ty(v) != vt {
+            return None;
+        }
+        if let Some((_, sobj, _)) = &slice {
+            let st = self.ty(*sobj);
+            if !matches!(self.tget(st), Ty::Str) || !boxed_ok(self, kk) {
+                return None;
+            }
+        }
+        let two = slice.is_some();
+        let span = self.expr_span(v);
+        let vct = self.ctype(vt);
+        let vd = self.desc(vt);
+        self.push_temps();
+        let (slot, ins) = (self.fresh("slot"), self.fresh("ins"));
+        match slice {
+            Some((call, sobj, sargs)) => {
+                let sv = self.expr(sobj);
+                let a = self.expr(sargs[0]);
+                let a = self.int_code(a);
+                let (b, has_end) = match sargs.get(1) {
+                    Some(&b) => {
+                        let b = self.expr(b);
+                        (self.int_code(b), "true")
+                    }
+                    None => ("0".to_string(), "false"),
+                };
+                let loc = self.loc(self.expr_span(call));
+                let mp = self.place(mobj);
+                let lv = self.place_lvalue(&mp);
+                self.line(format!("bool {ins}; {vct} *{slot} = ({vct} *)tv_map_slot_slice(&{lv}, {vd}, {}, {a}, {b}, {has_end}, {loc}, &{ins});", sv.code));
+            }
+            None => {
+                let kv = self.expr(k);
+                let kv = self.coerce(kv, kt);
+                let kc = self.consume(kv);
+                let kct = self.ctype(kt);
+                let kd = self.desc(kt);
+                let key = self.fresh("key");
+                self.line(format!("{kct} {key} = {kc};"));
+                let mp = self.place(mobj);
+                let lv = self.place_lvalue(&mp);
+                self.line(format!("bool {ins}; {vct} *{slot} = ({vct} *)tv_map_slot(&{lv}, {kd}, {vd}, &{key}, &{ins});"));
+            }
+        }
+        let dv = self.expr(d);
+        let dv = self.coerce(dv, vt);
+        self.line(format!("if ({ins}) *{slot} = {};", dv.code));
+        let ev = self.expr(e);
+        let r = self.arith(op, Val::plain(format!("(*{slot})"), vt), ev, vt, span);
+        self.line(format!("*{slot} = {};", r.code));
+        self.pop_temps();
+        Some(if two { 2 } else { 1 })
     }
 
     /// For each statement of `ss`, the locals declared in `ss` whose last use it is (none for the

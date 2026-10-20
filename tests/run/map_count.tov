@@ -1,0 +1,35 @@
+// Counting and running totals in a map: `m.set(k, (m.get(k) ?? d) op e)`, with keys from
+// `s.slice(a, b)` or any local.
+function kmers(s: string, k: int): Map<string, int> {
+  const counts = new Map<string, int>()
+  for (let i = 0; i + k <= s.byteLength; i++) {
+    const key = s.slice(i, i + k)
+    counts.set(key, (counts.get(key) ?? 0) + 1)
+  }
+  return counts
+}
+
+function main() {
+  const c = kmers("abracadabra", 2)
+  console.log(c)
+  const tails = new Map<string, int>()
+  for (const w of ["alpha", "beta", "gamma", "delta"]) {
+    const key = w.slice(-2)
+    tails.set(key, (tails.get(key) ?? 10) - 1)
+  }
+  console.log(tails)
+  const rests = new Map<string, int>()
+  for (const w of ["xyz", "wyz", "xyz"]) {
+    const key = w.slice(1)
+    rests.set(key, (rests.get(key) ?? 0) + 2)
+    console.log(key, rests.get(key))
+  }
+  const sums = new Map<int, number>()
+  const step = 0.5
+  for (let i = 0; i < 10; i++) {
+    const k = i % 3
+    sums.set(k, (sums.get(k) ?? 1) * 2 + 0)
+    sums.set(k, (sums.get(k) ?? 0) + step)
+  }
+  console.log(sums)
+}
