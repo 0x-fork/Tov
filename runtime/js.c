@@ -804,12 +804,15 @@ static void tv_js_wake_ready(tv_io *h, bool readable, bool writable, bool broken
     TVRunLoopCycle();
 }
 
-/* (weak: an engine built before it has none, and the program ends while that work is underway, as
- * it did; scripts/jsc/build.sh rebuilds it) */
-extern bool TVHasImminentWork(JSContextRef ctx) __attribute__((weak_import));
+/* (a weak stand-in, which the engine's own replaces: an engine built before it has none, and the
+ * program ends while that work is underway, as it did; scripts/jsc/build.sh rebuilds it) */
+__attribute__((weak)) bool TVHasImminentWork(JSContextRef ctx) {
+    (void)ctx;
+    return false;
+}
 
 static bool tv_js_host_busy(void) {
-    if (!tv_js_ctx || !TVHasImminentWork || !TVHasImminentWork(tv_js_ctx)) return false;
+    if (!tv_js_ctx || !TVHasImminentWork(tv_js_ctx)) return false;
     if (tv_js_wake_pipe[0] < 0) {
         if (pipe(tv_js_wake_pipe) != 0) tv_trap("can't create a pipe for the engine's threads", NULL);
         for (int i = 0; i < 2; i++) {
