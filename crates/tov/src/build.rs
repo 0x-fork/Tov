@@ -82,15 +82,19 @@ fn cached(p: &Path) -> bool {
 
 const GIB: u64 = 1 << 30;
 
-/// Keeps the cache in bounds, at most once a day: what interrupted builds left goes, then what
-/// hasn't been used for 30 days, then the least recently used while it's over 2 GiB (down to 1.5).
+/// Keeps the cache in bounds, once a day or, while builds pile up (a program with npm packages is
+/// tens of MB), once a minute: what interrupted builds left goes, then what hasn't been used for
+/// 30 days, then the least recently used while it's over 2 GiB (down to 1.5).
 pub fn prune_cache() {
     let dir = cache_dir();
     let stamp = dir.join(".pruned");
     let now = SystemTime::now();
     let age = |t: SystemTime| now.duration_since(t).unwrap_or(Duration::ZERO);
-    if std::fs::metadata(&stamp).and_then(|m| m.modified()).is_ok_and(|t| age(t) < Duration::from_secs(86400)) {
-        return;
+    if let Ok(t) = std::fs::metadata(&stamp).and_then(|m| m.modified()) {
+        let many = || std::fs::read_dir(dir.join("bin")).is_ok_and(|rd| rd.count() > 64);
+        if age(t) < Duration::from_secs(60) || (age(t) < Duration::from_secs(86400) && !many()) {
+            return;
+        }
     }
     if std::fs::create_dir_all(&dir).is_err() || std::fs::write(&stamp, b"").is_err() {
         return;
