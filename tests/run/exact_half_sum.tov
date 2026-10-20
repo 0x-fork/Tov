@@ -1,0 +1,26 @@
+// `n / c + t ...` for integers n, t and a power of two c: the same float whether the values are
+// small (added as integers) or not (added as floats), as JavaScript computes it.
+function a(i: int, j: int): f64 {
+  return ((i + j) * (i + j + 1)) / 2 + i + 1
+}
+
+function f(n: int, t: int, u: int): string {
+  const parts: f64[] = [n / 2 + t, n / 4 - t + u, n / 1024 + t - 1, (n) / 8 + (t) + u + 7, n / 2 - u]
+  return parts.join(",")
+}
+
+function main() {
+  let s = 0.0
+  for (let i = 0; i < 50; i++) {
+    for (let j = 0; j < 50; j++) s += 1 / a(i, j)
+  }
+  console.log(s.toFixed(12))
+  console.log(f(7, 3, -5))
+  console.log(f(-9, 1000, 12))
+  console.log(f(0, 0, 0))
+  console.log(f(-2, 1, 0))
+  const big = 4503599627370497
+  console.log(f(big, 3, 1))
+  console.log(f(big * 2 + 1, 1099511627777, -1099511627777))
+  console.log(f(-big, 123456789, 5))
+}

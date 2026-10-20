@@ -2617,6 +2617,7 @@ impl<'c, 'a> Gen<'c, 'a> {
             ExprKind::Ident(_) => self.ident(e, ty),
             ExprKind::Paren(x) => self.expr(*x),
             ExprKind::Unary(op, x) => self.unary(*op, *x, ty, span),
+            ExprKind::Binary(op @ (BinOp::Add | BinOp::Sub), l, r) if ty == F64 && let Some(v) = self.exact_half_sum(e, *op, *l, *r) => v,
             ExprKind::Binary(op, l, r) => self.binary(*op, *l, *r, ty, span),
             ExprKind::Assign(op, t, v) => self.assign(*op, *t, *v, span),
             ExprKind::Update { inc, prefix, target } => {
@@ -3432,6 +3433,80 @@ impl<'c, 'a> Gen<'c, 'a> {
                 Val::plain("0", UNDEFINED)
             }
         }
+    }
+
+    /// `n / c + t1 - t2 ...` as a float, `n` and the `t`s integers and `c` a power of two up to
+    /// 1024 (`(i + j) * (i + j + 1) / 2 + i + 1`): while they're small (|n| <= 2^50, |t| <= 2^40)
+    /// every partial sum is exactly a float, so `(n + c*t1 - c*t2 ...) / c`, integer adds and one
+    /// conversion, is the same value as the float adds; otherwise the float adds run as written.
+    fn exact_half_sum(&mut self, e: ExprId, op: BinOp, l: ExprId, r: ExprId) -> Option<Val> {
+        let m = self.cur_m();
+        let ast = self.ast(m);
+        let facts = self.facts(m);
+        let ty = |x: ExprId| facts.expr_ty.get(x as usize).copied().unwrap_or(ERROR);
+        let strip = |mut x: ExprId| {
+            while let ExprKind::Paren(y) = &ast.expr(x).kind {
+                x = *y;
+            }
+            x
+        };
+        // the spine: ((n / c) ± t1) ± t2 ...
+        let mut terms: Vec<(bool, ExprId)> = vec![(op == BinOp::Sub, r)];
+        let mut cur = strip(l);
+        let (n, c) = loop {
+            match &ast.expr(cur).kind {
+                ExprKind::Binary(o @ (BinOp::Add | BinOp::Sub), a, b) if ty(cur) == F64 => {
+                    terms.push((*o == BinOp::Sub, *b));
+                    cur = strip(*a);
+                }
+                ExprKind::Binary(BinOp::Div, a, b) if ty(cur) == F64 => match ast.expr(strip(*b)).kind {
+                    ExprKind::Int(c) if c.is_power_of_two() && c <= 1024 => break (*a, c),
+                    _ => return None,
+                },
+                _ => return None,
+            }
+        };
+        // (an integer literal is a term whatever its context made it)
+        let lit = |x: ExprId| match ast.expr(strip(x)).kind {
+            ExprKind::Int(v) if v < 1 << 40 => Some(v),
+            _ => None,
+        };
+        if ty(n) != INT || terms.len() > 8 || terms.iter().any(|&(_, t)| ty(t) != INT && lit(t).is_none()) {
+            return None;
+        }
+        let lits: Vec<Option<u64>> = terms.iter().map(|&(_, t)| lit(t)).collect();
+        terms.reverse();
+        let lits: Vec<Option<u64>> = lits.into_iter().rev().collect();
+        // (evaluated in the order the float code would: `n`, then each term)
+        let nv = self.expr(n);
+        let nc = self.int_code(nv);
+        let nn = self.fresh("hn");
+        self.line(format!("tv_int {nn} = {nc};"));
+        let mut tvars = Vec::new();
+        for (&(neg, t), l) in terms.iter().zip(&lits) {
+            let code = match l {
+                Some(v) => format!("INT64_C({v})"),
+                None => {
+                    let v = self.expr(t);
+                    self.int_code(v)
+                }
+            };
+            let tn = self.fresh("ht");
+            self.line(format!("tv_int {tn} = {code};"));
+            tvars.push((neg, tn));
+        }
+        let mut small = vec![format!("(uint64_t){nn} + ((uint64_t)1 << 50) <= ((uint64_t)1 << 51)")];
+        let mut exact = nn.clone();
+        let mut floats = format!("((double){nn} / {c}.0)");
+        for (neg, tn) in &tvars {
+            small.push(format!("(uint64_t){tn} + ((uint64_t)1 << 40) <= ((uint64_t)1 << 41)"));
+            let sign = if *neg { "-" } else { "+" };
+            exact = format!("{exact} {sign} {tn} * {c}");
+            floats = format!("({floats} {sign} (double){tn})");
+        }
+        let _ = e;
+        // (the empty asm keeps the float adds a branch apart, not computed alongside and selected)
+        Some(Val::plain(format!("(__builtin_expect({}, 1) ? (double)({exact}) / {c}.0 : ({{ __asm__ volatile(\"\"); {floats}; }}))", small.join(" && ")), F64))
     }
 
     fn binary(&mut self, op: BinOp, l: ExprId, r: ExprId, ty: TyId, span: Span) -> Val {
