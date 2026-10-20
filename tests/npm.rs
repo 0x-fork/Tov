@@ -43,6 +43,10 @@ fn main() {
             println!("npm: node_tz skipped: the system JavaScriptCore cannot see runtime TZ changes");
             continue;
         }
+        if name == "node_process_io" && !built.jsc_own {
+            println!("npm: node_process_io skipped: the system JavaScriptCore doesn't finish WebAssembly compiles for the event loop");
+            continue;
+        }
         // (<name>.linux.stdout, when a program's output differs there: process.platform, say)
         let os_expected = case.with_extension(format!("{}.stdout", std::env::consts::OS));
         let expected = std::fs::read_to_string(&os_expected).or_else(|_| std::fs::read_to_string(case.with_extension("stdout"))).unwrap_or_default();
