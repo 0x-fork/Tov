@@ -31,7 +31,7 @@ fn files(dir: &Path, out: &mut Vec<PathBuf>) {
 }
 
 fn main() {
-    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..").canonicalize().unwrap();
+    let root = PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").unwrap()).join("../..").canonicalize().unwrap();
     let vendor = root.join("vendor");
     let mut list = Vec::new();
     for lib in ["boringssl", "brotli", "libdeflate", "zlib", "zstd"] {
