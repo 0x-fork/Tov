@@ -1,0 +1,51 @@
+// Loops indexing arrays at `i + k`: results are the same whether every index is in range (the
+// loop's unchecked copy runs) or not (the checked loop runs, and traps only on a bad index).
+function edit(a: u8[], b: u8[]): int {
+  const m = a.length
+  let prev: int[] = []
+  let curr: int[] = []
+  for (let i = 0; i <= m; i++) {
+    prev.push(i)
+    curr.push(0)
+  }
+  for (let j = 1; j <= b.length; j++) {
+    curr[0] = j
+    const bj = b[j - 1]!
+    for (let i = 1; i <= m; i++) {
+      const cost = a[i - 1]! === bj ? 0 : 1
+      curr[i] = Math.min(prev[i]! + 1, curr[i - 1]! + 1, prev[i - 1]! + cost)
+    }
+    const t = prev
+    prev = curr
+    curr = t
+  }
+  return prev[m]!
+}
+
+function smooth(xs: f64[]): f64[] {
+  const out: f64[] = []
+  for (let i = 0; i < xs.length; i++) out.push(0)
+  for (let i = 1; i < xs.length - 1; i++) out[i] = (xs[i - 1]! + xs[i]! + xs[i + 1]!) / 3
+  return out
+}
+
+// `n` past the end: the checked loop runs, up to the index that's out of range
+function sumTo(xs: int[], n: int): int {
+  let s = 0
+  for (let i = 0; i < n; i++) {
+    if (i >= xs.length) break
+    s += xs[i]!
+  }
+  return s
+}
+
+function main() {
+  const enc = new TextEncoder()
+  console.log(edit(enc.encode("kitten"), enc.encode("sitting")), edit(enc.encode(""), enc.encode("abc")), edit(enc.encode("flaw"), enc.encode("lawn")))
+  console.log(smooth([3, 6, 9, 12, 15]).join(","))
+  console.log(sumTo([1, 2, 3], 2), sumTo([1, 2, 3], 10))
+  const ys = [5, 6, 7, 8]
+  let s = 0
+  for (let i = 2; i <= 3; i++) s += ys[i - 2]! * ys[i]!
+  console.log(s)
+}

@@ -216,6 +216,9 @@ static inline void *tv_arr_at(tv_arr a, size_t elem_size, tv_int i, const char *
     if ((uint64_t)i >= (uint64_t)a.len) tv_arr_oob(i, a.len, loc);
     return a.p->data + (size_t)i * elem_size;
 }
+/* An index checked against a length held apart (an array's, read before a loop that can't change
+ * it). A macro: as an inline function it keeps clang from pairing up the loop's float work. */
+#define TV_IDX(i, len, loc) ({ tv_int i_ = (i), n_ = (len); if ((uint64_t)i_ >= (uint64_t)n_) tv_arr_oob(i_, n_, loc); i_; })
 /* Mutable element access: makes the array unique first. */
 void *tv_arr_at_mut(tv_arr *a, const tv_type *t, tv_int i, const char *loc);
 

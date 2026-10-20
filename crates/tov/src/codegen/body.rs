@@ -88,6 +88,18 @@ pub(crate) struct Body {
     /// The index local of the `for` loop whose step is being emitted, when that step can't
     /// overflow (see `step_cannot_overflow`): its `i++` is a plain add.
     pub nowrap_step: Option<u32>,
+    /// (index local, array locals) of enclosing versioned loops' unchecked copies (see
+    /// `version_plan`): `xs[i + k]` there is in bounds, and `i + k` can't overflow.
+    pub versioned: Vec<(u32, Vec<(u32, String, String)>)>,
+}
+
+/// A `for` loop emitted twice (see `Gen::version_plan`): its index local, whether its test is
+/// `i <= n`, `n`, and each array it indexes at `i + k` with the least and greatest `k`.
+pub(crate) struct VersionPlan {
+    ik: u32,
+    le: bool,
+    hi: ExprId,
+    arrays: Vec<(u32, i64, i64)>,
 }
 
 /// A function whose `return a + f(args)` self-calls run as a loop: the function (module,
@@ -244,6 +256,7 @@ impl<'c, 'a> Gen<'c, 'a> {
             push_caps: FxMap::default(),
             exact_pushes: FxSet::default(),
             nowrap_step: None,
+            versioned: Vec::new(),
         });
     }
 
@@ -434,6 +447,7 @@ impl<'c, 'a> Gen<'c, 'a> {
             push_caps: FxMap::default(),
             exact_pushes: FxSet::default(),
             nowrap_step: None,
+            versioned: Vec::new(),
         };
         for (i, &(key, ty, inout)) in params.iter().enumerate() {
             let access = if inout { format!("(*p{i})") } else { format!("p{i}") };
@@ -942,6 +956,239 @@ impl<'c, 'a> Gen<'c, 'a> {
         Some((ik, xk))
     }
 
+    /// A `for` loop's `for (;;) { ... }` (its init already emitted).
+    #[allow(clippy::too_many_arguments)]
+    fn for_loop(&mut self, cond: Option<ExprId>, step: Option<ExprId>, body: StmtId, cont: &str, bounds: Option<(u32, u32)>, nowrap: Option<u32>, iteration_binding: Option<u32>) {
+        self.open("for (;;) {");
+        if let Some(c) = cond {
+            self.cond_break(c);
+        }
+        if let Some(pair) = bounds {
+            self.b().in_bounds.push(pair);
+        }
+        self.loop_body(body, cont);
+        if bounds.is_some() {
+            self.b().in_bounds.pop();
+        }
+        self.line(format!("{cont}:;"));
+        if let Some(key) = iteration_binding {
+            self.copy_iteration_binding(key);
+        }
+        if let Some(st) = step {
+            self.push_temps();
+            self.b().nowrap_step = nowrap;
+            let _ = self.expr(st);
+            self.b().nowrap_step = None;
+            self.pop_temps();
+        }
+        self.close("}");
+    }
+
+    /// `for (let i = a; i < n; i++)` (or `i <= n`) whose body reads or writes `xs[i + k]` for
+    /// constant `k`s, where nothing in the loop changes `i`, `n` or the length of `xs` (only
+    /// indexes it and reads its length): one test before the loop shows every such index in
+    /// range, so a copy of the loop can skip their checks (see `version_check`). Small bodies
+    /// without `await` only, as the body is emitted twice.
+    fn version_plan(&mut self, init: Option<StmtId>, cond: Option<ExprId>, step: Option<ExprId>, body: StmtId) -> Option<VersionPlan> {
+        let boxed = self.b().boxed.clone();
+        let unique = self.b().unique.clone();
+        let types: FxMap<u32, TyId> = self.b().locals.iter().map(|(k, l)| (*k, l.ty)).collect();
+        let m = self.cur_m();
+        let ast = self.ast(m);
+        let facts = self.facts(m);
+        let local = |e: ExprId| match (&ast.expr(e).kind, facts.idents.get(&e)) {
+            (ExprKind::Ident(_), Some(IdentFact::Local(k))) => Some(*k),
+            _ => None,
+        };
+        let init = init?;
+        let StmtKind::Let { name_span, .. } = &ast.stmt(init).kind else { return None };
+        if facts.bindings.get(&init).copied() != Some(INT) {
+            return None;
+        }
+        let ik = name_span.start;
+        if boxed.contains(&ik) {
+            return None;
+        }
+        let (le, hi) = match &ast.expr(cond?).kind {
+            ExprKind::Binary(BinOp::Lt, l, r) if local(*l) == Some(ik) => (false, *r),
+            ExprKind::Binary(BinOp::Le, l, r) if local(*l) == Some(ik) => (true, *r),
+            _ => return None,
+        };
+        if facts.expr_ty.get(hi as usize).copied() != Some(INT) {
+            return None;
+        }
+        let ExprKind::Update { target, inc: true, .. } = &ast.expr(step?).kind else { return None };
+        if local(*target) != Some(ik) {
+            return None;
+        }
+        // (innermost loops: each copy of an outer one would hold two of the inner)
+        fn has_loop(ast: &ast::Ast, s: StmtId) -> bool {
+            match &ast.stmt(s).kind {
+                StmtKind::While(..) | StmtKind::DoWhile(..) | StmtKind::For { .. } | StmtKind::ForOf { .. } => true,
+                StmtKind::If(_, t, e) => has_loop(ast, *t) || e.is_some_and(|e| has_loop(ast, e)),
+                StmtKind::Block(xs) => xs.iter().any(|&x| has_loop(ast, x)),
+                StmtKind::Switch(_, cases) => cases.iter().any(|c| c.body.iter().any(|&x| has_loop(ast, x))),
+                StmtKind::Try { body, catch, finally } => has_loop(ast, *body) || catch.as_ref().is_some_and(|c| has_loop(ast, c.body)) || finally.is_some_and(|f| has_loop(ast, f)),
+                _ => false,
+            }
+        }
+        if has_loop(ast, body) {
+            return None;
+        }
+        let mut all = Vec::new();
+        collect_exprs_stmt(ast, body, &mut all);
+        if all.len() > 400 || all.iter().any(|&e| matches!(ast.expr(e).kind, ExprKind::Await(_))) {
+            return None;
+        }
+        collect_exprs_expr(ast, cond?, &mut all);
+        // What the loop does with each array local: (indexed at i + k for these k, only indexed
+        // or its length read)
+        let mut uses: FxMap<u32, (Vec<i64>, bool)> = FxMap::default();
+        let mut fine: FxSet<ExprId> = FxSet::default();
+        for &e in &all {
+            match &ast.expr(e).kind {
+                ExprKind::Assign(_, t, _) | ExprKind::Update { target: t, .. } if local(*t) == Some(ik) => return None,
+                ExprKind::Call { args, .. } if args.iter().any(|a| a.by_ref.is_some() && local(a.expr) == Some(ik)) => return None,
+                ExprKind::Index { obj, index, .. } => {
+                    if let Some(xk) = local(*obj) {
+                        fine.insert(*obj);
+                        let entry = uses.entry(xk).or_insert((Vec::new(), true));
+                        if let Some(k) = self.index_offset(*index, ik) {
+                            entry.0.push(k);
+                        }
+                    }
+                }
+                ExprKind::Member { obj, name, .. } if self.sym(*name) == "length" => {
+                    if local(*obj).is_some() {
+                        fine.insert(*obj);
+                    }
+                }
+                _ => {}
+            }
+        }
+        for &e in &all {
+            if let Some(k) = local(e)
+                && !fine.contains(&e)
+                && let Some(u) = uses.get_mut(&k)
+            {
+                u.1 = false;
+            }
+        }
+        // `n`: a literal, a local nothing in the loop assigns, or the length of an array whose
+        // length nothing in it changes
+        let stable = |k: u32| -> bool {
+            !boxed.contains(&k)
+                && !all.iter().any(|&e| match &ast.expr(e).kind {
+                    ExprKind::Assign(_, t, _) | ExprKind::Update { target: t, .. } => local(*t) == Some(k),
+                    ExprKind::Call { args, .. } => args.iter().any(|a| a.by_ref.is_some() && local(a.expr) == Some(k)),
+                    _ => false,
+                })
+        };
+        match &ast.expr(hi).kind {
+            ExprKind::Int(_) => {}
+            ExprKind::Ident(_) if local(hi).is_some_and(stable) => {}
+            ExprKind::Member { obj, name, optional: false, .. } if self.sym(*name) == "length" => {
+                let xk = local(*obj)?;
+                if !matches!(self.tget(facts.expr_ty[*obj as usize]), Ty::Array(_)) || boxed.contains(&xk) || uses.get(&xk).is_some_and(|u| !u.1) {
+                    return None;
+                }
+                // (and nothing but the loop's own reads of it outside `xs[...]` and `.length`)
+                if all.iter().any(|&e| local(e) == Some(xk) && !fine.contains(&e)) {
+                    return None;
+                }
+            }
+            _ => return None,
+        }
+        // (an array the loop writes must be uniquely owned through it, made so before it: a
+        // write to a shared one copies it, moving its elements)
+        let mut written: FxSet<u32> = FxSet::default();
+        for &e in &all {
+            if let ExprKind::Assign(_, t, _) | ExprKind::Update { target: t, .. } = &ast.expr(e).kind {
+                let mut cur = *t;
+                loop {
+                    match &ast.expr(cur).kind {
+                        ExprKind::Paren(x) | ExprKind::NonNull(x) | ExprKind::Member { obj: x, .. } | ExprKind::Index { obj: x, .. } => cur = *x,
+                        _ => break,
+                    }
+                }
+                if let Some(k) = local(cur) {
+                    written.insert(k);
+                }
+            }
+        }
+        let mut arrays = Vec::new();
+        for (xk, (ks, only)) in uses {
+            if !only || ks.is_empty() || boxed.contains(&xk) || !stable(xk) || (written.contains(&xk) && !unique.contains(&xk)) {
+                continue;
+            }
+            let Some(&lt) = types.get(&xk) else { continue };
+            if !matches!(self.tget(lt), Ty::Array(_)) {
+                continue;
+            }
+            let (lo, hi) = (*ks.iter().min().unwrap(), *ks.iter().max().unwrap());
+            arrays.push((xk, lo, hi));
+        }
+        if arrays.is_empty() {
+            return None;
+        }
+        arrays.sort();
+        Some(VersionPlan { ik, le, hi, arrays })
+    }
+
+    /// `k` when `e` is `i`, `i + k`, `k + i` or `i - k` (for the local `i`, `k` a small literal).
+    fn index_offset(&self, e: ExprId, ik: u32) -> Option<i64> {
+        let m = self.cur_m();
+        let ast = self.ast(m);
+        let is_i = |x: ExprId| matches!((&ast.expr(x).kind, self.ident_fact(m, x)), (ExprKind::Ident(_), Some(IdentFact::Local(k))) if k == ik);
+        let lit = |x: ExprId| match ast.expr(x).kind {
+            ExprKind::Int(v) if v < 1 << 20 => Some(v as i64),
+            _ => None,
+        };
+        match &ast.expr(e).kind {
+            ExprKind::Paren(x) => self.index_offset(*x, ik),
+            ExprKind::Ident(_) if is_i(e) => Some(0),
+            ExprKind::Binary(BinOp::Add, a, b) if is_i(*a) => lit(*b),
+            ExprKind::Binary(BinOp::Add, a, b) if is_i(*b) => lit(*a),
+            ExprKind::Binary(BinOp::Sub, a, b) if is_i(*a) => lit(*b).map(|k| -k),
+            _ => None,
+        }
+    }
+
+    /// The test that every `xs[i + k]` of `plan` is in range: `i + min k >= 0` now, and
+    /// `n + max k (+ 1 for <=) <= xs.length` (no overflow: lengths and `k` are small).
+    fn version_check(&mut self, plan: &VersionPlan) -> String {
+        let i = self.b().locals[&plan.ik].access.clone();
+        self.push_temps();
+        let n = self.expr(plan.hi);
+        let n = self.int_code(n);
+        self.pop_temps();
+        let lo = plan.arrays.iter().map(|a| a.1).min().unwrap_or(0);
+        let mut parts = vec![format!("{i} >= {}", -lo)];
+        for &(xk, _, hi) in &plan.arrays {
+            let a = self.b().locals[&xk].access.clone();
+            parts.push(format!("{n} <= ({a}).len - {}", hi + plan.le as i64));
+        }
+        parts.join(" && ")
+    }
+
+    /// `xs[index]` in a versioned loop's unchecked copy: the element's C lvalue, through the
+    /// local holding the array's elements (every access to it, so the C compiler sees one base),
+    /// unchecked at `i + k` and checked against the length elsewhere.
+    fn versioned_index(&mut self, obj: ExprId, index: ExprId, span: Span) -> Option<String> {
+        let m = self.cur_m();
+        let Some(IdentFact::Local(xk)) = self.ident_fact(m, obj) else { return None };
+        let versioned = self.b().versioned.clone();
+        let (ik, (_, d, n)) = versioned.iter().rev().find_map(|(ik, arrays)| arrays.iter().find(|a| a.0 == xk).map(|a| (*ik, a.clone())))?;
+        if let Some(k) = self.index_offset(index, ik) {
+            let i = self.b().locals.get(&ik)?.access.clone();
+            return Some(format!("({d}[{i} + {k}])"));
+        }
+        let i = self.expr(index);
+        let i = self.int_code(i);
+        let loc = self.loc(span);
+        Some(format!("({d}[TV_IDX({i}, {n}, {loc})])"))
+    }
+
     /// `for (let i = a; i < n; i++)` where `n` has `i`'s integer type and nothing in the loop
     /// assigns `i` but the step: every step starts from `i < n <= MAX`, so `i++` can't overflow.
     fn step_cannot_overflow(&self, init: Option<StmtId>, cond: Option<ExprId>, step: Option<ExprId>, body: StmtId) -> Option<u32> {
@@ -1354,29 +1601,33 @@ impl<'c, 'a> Gen<'c, 'a> {
                 self.reserve_for_pushes(*init, *cond, *step, *body);
                 let bounds = self.counted_loop(*init, *cond, *step, *body);
                 let nowrap = self.step_cannot_overflow(*init, *cond, *step, *body);
-                self.open("for (;;) {");
-                if let Some(c) = cond {
-                    self.cond_break(*c);
+                let plan = if iteration_binding.is_none() { self.version_plan(*init, *cond, *step, *body) } else { None };
+                if let Some(plan) = plan {
+                    // Every `xs[i + k]` in range for every `i` the loop can reach: a copy without the
+                    // checks, and the checked loop otherwise.
+                    let check = self.version_check(&plan);
+                    self.open(&format!("if ({check}) {{"));
+                    // (each array's elements, from a local: nothing in the loop moves them)
+                    let mut ptrs = Vec::new();
+                    for &(xk, _, _) in &plan.arrays {
+                        let local = self.b().locals[&xk].clone();
+                        let Ty::Array(et) = self.tget(local.ty) else { continue };
+                        let ect = self.ctype(et);
+                        let (d, n) = (self.fresh("xd"), self.fresh("xn"));
+                        self.line(format!("{ect} *{d} = ({ect} *)tv_arr_data({0}); tv_int {n} = tv_arr_len({0});", local.access));
+                        ptrs.push((xk, d, n));
+                    }
+                    let fast_cont = self.fresh("cont");
+                    self.b().versioned.push((plan.ik, ptrs));
+                    self.for_loop(*cond, *step, *body, &fast_cont, bounds, Some(plan.ik), None);
+                    self.b().versioned.pop();
+                    self.close("} else {");
+                    self.b().indent += 1;
+                    self.for_loop(*cond, *step, *body, &cont, bounds, nowrap, None);
+                    self.close("}");
+                } else {
+                    self.for_loop(*cond, *step, *body, &cont, bounds, nowrap, iteration_binding);
                 }
-                if let Some(pair) = bounds {
-                    self.b().in_bounds.push(pair);
-                }
-                self.loop_body(*body, &cont);
-                if bounds.is_some() {
-                    self.b().in_bounds.pop();
-                }
-                self.line(format!("{cont}:;"));
-                if let Some(key) = iteration_binding {
-                    self.copy_iteration_binding(key);
-                }
-                if let Some(st) = step {
-                    self.push_temps();
-                    self.b().nowrap_step = nowrap;
-                    let _ = self.expr(*st);
-                    self.b().nowrap_step = None;
-                    self.pop_temps();
-                }
-                self.close("}");
                 self.unhoist(hoisted);
                 self.pop_scope();
                 self.close("}");
@@ -2167,6 +2418,11 @@ impl<'c, 'a> Gen<'c, 'a> {
                 if let ExprKind::Index { obj, index, optional: false } = &ast.expr(*x).kind {
                     let ot = self.ty(*obj);
                     if let Ty::Array(et) = self.tget(ot) {
+                        if !self.b().versioned.is_empty()
+                            && let Some(lv) = self.versioned_index(*obj, *index, span)
+                        {
+                            return self.coerce(Val::plain(lv, et), ty);
+                        }
                         let in_bounds = match (self.ident_fact(m, *obj), self.ident_fact(m, *index)) {
                             (Some(IdentFact::Local(xk)), Some(IdentFact::Local(ik))) => self.b().in_bounds.contains(&(ik, xk)),
                             _ => false,
@@ -3363,16 +3619,22 @@ impl<'c, 'a> Gen<'c, 'a> {
                     self.unsupported(span, "assigning through this index");
                     return Place { lv: "tv__dummy".into(), ty: ERROR, weak: false };
                 };
-                let i = self.expr(*index);
-                let i = self.int_code(i);
-                let d = self.desc(et);
-                let ect = self.ctype(et);
-                let loc = self.loc(span);
-                let pv = self.fresh("ep");
                 let unique = match (&ast.expr(*obj).kind, self.ident_fact(m, *obj)) {
                     (ExprKind::Ident(_), Some(IdentFact::Local(k))) => self.b().unique.contains(&k),
                     _ => false,
                 };
+                if unique
+                    && !self.b().versioned.is_empty()
+                    && let Some(lv) = self.versioned_index(*obj, *index, span)
+                {
+                    return Place { lv, ty: et, weak: false };
+                }
+                let ect = self.ctype(et);
+                let i = self.expr(*index);
+                let i = self.int_code(i);
+                let d = self.desc(et);
+                let loc = self.loc(span);
+                let pv = self.fresh("ep");
                 if unique {
                     self.line(format!("{ect} *{pv} = ({ect} *)tv_arr_at({}, sizeof({ect}), {i}, {loc});", p.lv));
                 } else {
@@ -3765,6 +4027,7 @@ impl<'c, 'a> Gen<'c, 'a> {
             push_caps: FxMap::default(),
             exact_pushes: FxSet::default(),
             nowrap_step: None,
+            versioned: Vec::new(),
         };
         for (i, &(key, ty, inout)) in params.iter().enumerate() {
             let access = if inout { format!("(*p{i})") } else { format!("p{i}") };
