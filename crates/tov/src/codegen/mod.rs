@@ -2018,6 +2018,25 @@ static __attribute__((noinline, cold)) tv_int tvg_tre_end_slow(tvg_tre_wide *w, 
 #define TV_SUB(T, a, b, loc) ({ T tv__r; if (__builtin_expect(__builtin_sub_overflow((a), (b), &tv__r), 0)) tv_trap("integer overflow in -", loc); tv__r; })
 #define TV_MUL(T, a, b, loc) ({ T tv__r; if (__builtin_expect(__builtin_mul_overflow((a), (b), &tv__r), 0)) tv_trap("integer overflow in *", loc); tv__r; })
 #endif
+/* `x % d` by a d a loop nest doesn't change (see Gen::hoist_divisors): d's reciprocal, worked out
+ * once before the loop (Granlund and Montgomery's round-up method), turns each remainder of
+ * x >= 0 by d > 0 into a multiply and shifts instead of a division. */
+typedef struct { uint64_t m, d; uint8_t s1, s2; } tvg_udiv;
+static inline tvg_udiv tvg_udiv_new(tv_int d) {
+    tvg_udiv r = {0, 0, 0, 0};
+    if (d <= 0) return r;
+    int l = d == 1 ? 0 : 64 - __builtin_clzll((uint64_t)d - 1);
+    r.m = (uint64_t)((((unsigned __int128)1 << 64) * (((unsigned __int128)1 << l) - (uint64_t)d)) / (uint64_t)d) + 1;
+    r.d = (uint64_t)d;
+    r.s1 = l < 1 ? l : 1;
+    r.s2 = l > 1 ? l - 1 : 0;
+    return r;
+}
+static inline uint64_t tvg_udiv_q(uint64_t x, tvg_udiv v) {
+    uint64_t t = (uint64_t)(((unsigned __int128)x * v.m) >> 64);
+    return (t + ((x - t) >> v.s1)) >> v.s2;
+}
+#define TVG_REM_BY(a, b, dv, loc) ({ tv_int tv__x = (a); (tv__x >= 0 && (dv).d) ? (tv_int)((uint64_t)tv__x - tvg_udiv_q((uint64_t)tv__x, (dv)) * (dv).d) : TV_REM(tv_int, tv__x, (b), loc); })
 #define TV_REM(T, a, b, loc) ({ T tv__b = (b); if (tv__b == 0) tv_trap("integer remainder by zero", loc); T tv__a = (a); (tv__b == -1) ? (T)0 : (T)(tv__a % tv__b); })
 #define TV_UREM(T, a, b, loc) ({ T tv__b = (b); if (tv__b == 0) tv_trap("integer remainder by zero", loc); (T)((a) % tv__b); })
 #define TV_NEG(T, a, loc) ({ T tv__r; if (__builtin_sub_overflow((T)0, (a), &tv__r)) tv_trap("integer overflow in unary -", loc); tv__r; })

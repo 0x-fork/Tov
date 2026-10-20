@@ -1,0 +1,9 @@
+// A remainder by a zero that a loop nest doesn't change traps as dividing does.
+function main() {
+  const d = process.argv.length - process.argv.length
+  let s = 0
+  for (let i = 0; i < 3; i++) {
+    for (let j = 0; j < 3; j++) s += j % d
+  }
+  console.log(s)
+}

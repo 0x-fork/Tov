@@ -88,6 +88,9 @@ pub(crate) struct Body {
     /// The index local of the `for` loop whose step is being emitted, when that step can't
     /// overflow (see `step_cannot_overflow`): its `i++` is a plain add.
     pub nowrap_step: Option<u32>,
+    /// Divisor locals of `%` with their reciprocal worked out before the enclosing loop nest
+    /// (see `hoist_divisors`): the C variable holding it.
+    pub divs: FxMap<u32, String>,
     /// (index local, array locals) of enclosing versioned loops' unchecked copies (see
     /// `version_plan`): `xs[i + k]` there is in bounds, and `i + k` can't overflow.
     pub versioned: Vec<(u32, Vec<(u32, String, String)>)>,
@@ -256,6 +259,7 @@ impl<'c, 'a> Gen<'c, 'a> {
             push_caps: FxMap::default(),
             exact_pushes: FxSet::default(),
             nowrap_step: None,
+            divs: FxMap::default(),
             versioned: Vec::new(),
         });
     }
@@ -447,6 +451,7 @@ impl<'c, 'a> Gen<'c, 'a> {
             push_caps: FxMap::default(),
             exact_pushes: FxSet::default(),
             nowrap_step: None,
+            divs: FxMap::default(),
             versioned: Vec::new(),
         };
         for (i, &(key, ty, inout)) in params.iter().enumerate() {
@@ -1092,6 +1097,99 @@ impl<'c, 'a> Gen<'c, 'a> {
         Some((ik, xk))
     }
 
+    /// Works out before a loop the reciprocal of each `int` local `d` that `x % d` divides by in a
+    /// loop nested in it, when nothing in the loop assigns `d` (each remainder then multiplies
+    /// instead of dividing: TVG_REM_BY). Only for nests, where the setup pays for itself. The
+    /// locals it added to `divs`.
+    fn hoist_divisors(&mut self, body: StmtId, exprs: &[ExprId]) -> Vec<u32> {
+        let m = self.cur_m();
+        let ast = self.ast(m);
+        let facts = self.facts(m);
+        let local = |e: ExprId| match (&ast.expr(e).kind, facts.idents.get(&e)) {
+            (ExprKind::Ident(_), Some(IdentFact::Local(k))) => Some(*k),
+            _ => None,
+        };
+        let mut all = Vec::new();
+        collect_exprs_stmt(ast, body, &mut all);
+        for &e in exprs {
+            collect_exprs_expr(ast, e, &mut all);
+        }
+        // the `%`s in loops inside this one
+        fn inner_loops(ast: &ast::Ast, s: StmtId, depth: u32, out: &mut Vec<StmtId>) {
+            match &ast.stmt(s).kind {
+                StmtKind::While(_, b) | StmtKind::DoWhile(b, _) | StmtKind::For { body: b, .. } | StmtKind::ForOf { body: b, .. } => {
+                    if depth > 0 {
+                        out.push(s);
+                    }
+                    inner_loops(ast, *b, depth + 1, out);
+                }
+                StmtKind::If(_, t, e) => {
+                    inner_loops(ast, *t, depth, out);
+                    if let Some(e) = e {
+                        inner_loops(ast, *e, depth, out);
+                    }
+                }
+                StmtKind::Block(xs) => xs.iter().for_each(|&x| inner_loops(ast, x, depth, out)),
+                StmtKind::Switch(_, cases) => cases.iter().for_each(|c| c.body.iter().for_each(|&x| inner_loops(ast, x, depth, out))),
+                StmtKind::Try { body, catch, finally } => {
+                    inner_loops(ast, *body, depth, out);
+                    if let Some(c) = catch {
+                        inner_loops(ast, c.body, depth, out);
+                    }
+                    if let Some(f) = finally {
+                        inner_loops(ast, *f, depth, out);
+                    }
+                }
+                _ => {}
+            }
+        }
+        // (a C local: an `await` in the nest would resume past it)
+        if all.iter().any(|&e| matches!(ast.expr(e).kind, ExprKind::Await(_))) {
+            return Vec::new();
+        }
+        let mut loops = Vec::new();
+        inner_loops(ast, body, 1, &mut loops);
+        let mut inner = Vec::new();
+        for l in loops {
+            collect_exprs_stmt(ast, l, &mut inner);
+        }
+        let ty = |e: ExprId| facts.expr_ty.get(e as usize).copied().unwrap_or(ERROR);
+        let mut wanted: Vec<u32> = Vec::new();
+        for &e in &inner {
+            if let ExprKind::Binary(BinOp::Rem, l, r) = &ast.expr(e).kind
+                && ty(e) == INT
+                && ty(*l) == INT
+                && let Some(k) = local(*r)
+                && !wanted.contains(&k)
+            {
+                wanted.push(k);
+            }
+        }
+        let assigned = |k: u32| {
+            all.iter().any(|&e| match &ast.expr(e).kind {
+                ExprKind::Assign(_, t, _) | ExprKind::Update { target: t, .. } => local(*t) == Some(k),
+                ExprKind::Call { args, .. } => args.iter().any(|a| a.by_ref.is_some() && local(a.expr) == Some(k)),
+                _ => false,
+            })
+        };
+        wanted.retain(|&k| !assigned(k));
+        let mut added = Vec::new();
+        for k in wanted {
+            if self.b().divs.contains_key(&k) || self.b().boxed.contains(&k) {
+                continue;
+            }
+            let Some(local) = self.b().locals.get(&k).cloned() else { continue };
+            if local.ty != INT {
+                continue;
+            }
+            let dv = self.fresh("dv");
+            self.line(format!("tvg_udiv {dv} = tvg_udiv_new({});", local.access));
+            self.b().divs.insert(k, dv);
+            added.push(k);
+        }
+        added
+    }
+
     /// A `for` loop's `for (;;) { ... }` (its init already emitted).
     #[allow(clippy::too_many_arguments)]
     fn for_loop(&mut self, cond: Option<ExprId>, step: Option<ExprId>, body: StmtId, cont: &str, bounds: Option<(u32, u32)>, nowrap: Option<u32>, iteration_binding: Option<u32>) {
@@ -1734,6 +1832,7 @@ impl<'c, 'a> Gen<'c, 'a> {
                 }
                 let loop_exprs: Vec<ExprId> = [cond, step].into_iter().flatten().copied().collect();
                 let hoisted = self.hoist_unique(&[*body], &loop_exprs);
+                let divs = self.hoist_divisors(*body, &loop_exprs);
                 self.reserve_for_pushes(*init, *cond, *step, *body);
                 let bounds = self.counted_loop(*init, *cond, *step, *body);
                 let nowrap = self.step_cannot_overflow(*init, *cond, *step, *body);
@@ -1765,6 +1864,9 @@ impl<'c, 'a> Gen<'c, 'a> {
                     self.for_loop(*cond, *step, *body, &cont, bounds, nowrap, iteration_binding);
                 }
                 self.unhoist(hoisted);
+                for k in divs {
+                    self.b().divs.remove(&k);
+                }
                 self.pop_scope();
                 self.close("}");
             }
@@ -3269,6 +3371,15 @@ impl<'c, 'a> Gen<'c, 'a> {
             Add | Sub | Mul | Div | Rem | Pow => {
                 let lv = self.expr_before(l, &[r]);
                 let rv = self.expr(r);
+                if op == Rem && ty == INT && lv.ty == INT && rv.ty == INT {
+                    let m = self.cur_m();
+                    if let Some(IdentFact::Local(k)) = self.ident_fact(m, r)
+                        && let Some(dv) = self.b().divs.get(&k).cloned()
+                    {
+                        let loc = self.loc(span);
+                        return Val::plain(format!("TVG_REM_BY({}, {}, {dv}, {loc})", lv.code, rv.code), INT);
+                    }
+                }
                 self.arith(op, lv, rv, ty, span)
             }
             BitAnd | BitOr | BitXor | Shl | Shr | UShr => {
@@ -4163,6 +4274,7 @@ impl<'c, 'a> Gen<'c, 'a> {
             push_caps: FxMap::default(),
             exact_pushes: FxSet::default(),
             nowrap_step: None,
+            divs: FxMap::default(),
             versioned: Vec::new(),
         };
         for (i, &(key, ty, inout)) in params.iter().enumerate() {
