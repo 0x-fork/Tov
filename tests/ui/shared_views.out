@@ -1,7 +1,0 @@
-error[V0120] shared_views.tov:15:10: this changes `t`, but `tasks` is a separate copy (TypeScript would change both)
-   15 |   if (t) t.done = true
-  why: `t` was initialized from `tasks.find((x) => x.id === 1)`: Tov records (object literals) are values, so assignment copies
-  if you meant a copy: say so explicitly: build a new value
-  if you meant one value: find its index (`const i = tasks.findIndex((x) => x.id === 1)`) and modify `tasks[i]` directly
-
-1 error(s)

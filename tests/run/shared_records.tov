@@ -1,0 +1,100 @@
+// Records are objects, shared by every reference, as in JavaScript.
+type Point = { x: number; y: number };
+interface Task { id: number; done: boolean; tags: string[] }
+type Cell = { v: number; kids: number[] };
+
+function bump(p: Point) { p.x += 1; }
+
+function aliases() {
+  const p: Point = { x: 1, y: 2 };
+  const q = p;
+  q.y = 10;
+  bump(p);
+  console.log(p.x, p.y, q.x, q.y, p === q, p === { x: 2, y: 10 });
+}
+
+function loops() {
+  const pts: Point[] = [{ x: 0, y: 0 }, { x: 5, y: 5 }];
+  for (const pt of pts) pt.x += 100;
+  const first = pts[0];
+  first.y = -1;
+  console.log(JSON.stringify(pts));
+  console.log(pts.indexOf(first), pts.includes({ x: 100, y: -1 }));
+}
+
+function finds(tasks: Task[]) {
+  const t = tasks.find((x) => x.id === 1);
+  if (t) {
+    t.done = true;
+    t.tags.push("urgent");
+  }
+  console.log(tasks);
+}
+
+function stored() {
+  const cells: Cell[] = [];
+  const c: Cell = { v: 1, kids: [] };
+  cells.push(c);
+  cells.push(c);
+  c.v = 2;
+  cells[1].kids.push(7);
+  console.log(cells, cells[0] === cells[1]);
+}
+
+function maps() {
+  const byName = new Map<string, Cell>();
+  byName.set("k", { v: 0, kids: [] });
+  const e = byName.get("k")!;
+  e.v = 42;
+  byName.get("k")!.v += 1;
+  console.log(byName.get("k")!.v, e.v);
+  const seen = new Set<Point>();
+  const a: Point = { x: 1, y: 1 };
+  seen.add(a);
+  seen.add({ x: 1, y: 1 });
+  seen.add(a);
+  console.log(seen.size, seen.has(a));
+}
+
+class Holder {
+  pt: Point = { x: 0, y: 0 };
+  all: Point[] = [];
+}
+
+function holders() {
+  const h = new Holder();
+  const hp = h.pt;
+  hp.x = 7;
+  h.all.push(hp);
+  h.all[0].y = 3;
+  console.log(h.pt.x, h.pt.y, h.all.length);
+}
+
+type Line = { from: Point; to: Point; label: string };
+
+function nested() {
+  const a: Point = { x: 0, y: 0 };
+  const line: Line = { from: a, to: { x: 1, y: 1 }, label: "l" };
+  const copy = { ...line };
+  a.x = 9;
+  line.to.y = 5;
+  console.log(line.from.x, copy.from.x, copy.to.y, copy.label);
+  copy.label = "c";
+  console.log(line.label, copy.label);
+}
+
+function counters() {
+  const stats = { count: 0, sum: 0 };
+  const add = (n: number) => { stats.count++; stats.sum += n; };
+  [3, 4, 5].forEach(add);
+  console.log(stats);
+}
+
+aliases();
+loops();
+finds([{ id: 1, done: false, tags: [] }, { id: 2, done: false, tags: ["x"] }]);
+stored();
+maps();
+holders();
+nested();
+counters();

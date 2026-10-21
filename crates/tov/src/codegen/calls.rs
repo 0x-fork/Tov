@@ -444,6 +444,7 @@ impl<'c, 'a> Gen<'c, 'a> {
         let desc = li == 1;
         // Every step of the key path must be a record field (not a built-in property like `byteLength`).
         let mut cur = et;
+        let mut access = String::new();
         for step in &lp {
             let rec = self.c.unfold(cur);
             let Ty::Record(fs) = self.tget(rec) else { return false };
@@ -451,6 +452,7 @@ impl<'c, 'a> Gen<'c, 'a> {
             if matches!(self.tget(cur), Ty::Rec(..)) {
                 return false;
             }
+            access.push_str(&format!("{}f_{}", if self.is_obj(rec) { "->v." } else { "." }, self.sym(*step)));
             cur = f.ty;
         }
         let key_ty = self.ty(*l);
@@ -466,7 +468,6 @@ impl<'c, 'a> Gen<'c, 'a> {
             return true;
         }
         // Keyed: radix-sort (key, index) pairs, then permute the elements.
-        let access: String = lp.iter().map(|s| format!(".f_{}", self.sym(*s))).collect();
         let name = self.fresh("rsort");
         let key_code = if key_ty == F64 {
             format!("tvg_f64_key((double)(a[i]{access}))")
@@ -540,7 +541,7 @@ impl<'c, 'a> Gen<'c, 'a> {
     }}
     if (n <= RUN) return;
     {ect} *buf = tv_alloc((size_t)n * sizeof({ect}));
-    {ect} *src = a, *dst = buf;
+    {ect} *src = a; {ect} *dst = buf;
     for (tv_int w = RUN; w < n; w *= 2) {{
         for (tv_int lo = 0; lo < n; lo += 2 * w) {{
             tv_int mid = lo + w < n ? lo + w : n, hi = lo + 2 * w < n ? lo + 2 * w : n;
@@ -1198,7 +1199,8 @@ impl<'c, 'a> Gen<'c, 'a> {
                     self.line(format!("{ect} {x} = {}; {r};", elem(&i).code));
                     if f.len() == 2 {
                         let (f0, f1) = (self.sym(f[0].name).to_string(), self.sym(f[1].name).to_string());
-                        self.line(format!("TVG_PUSH({rct}, &{}, {rd}, (({rct}){{ .f_{f0} = {i}, .f_{f1} = {x} }}));", out.code));
+                        let lit = self.rec_lit(rt, &format!(".f_{f0} = {i}, .f_{f1} = {x}"));
+                        self.line(format!("TVG_PUSH({rct}, &{}, {rd}, {lit});", out.code));
                     }
                 }
                 self.close("}");
@@ -1700,7 +1702,8 @@ impl<'c, 'a> Gen<'c, 'a> {
                                 let x = self.fresh("x");
                                 let r = self.retain_code(et, &x);
                                 self.line(format!("{ect} {x} = (({ect} *)tv_arr_data({}))[{i}]; {r};", v.code));
-                                self.line(format!("TVG_PUSH({rct}, &{}, {rd}, (({rct}){{ .f_{fa} = tv_str_from_int({i}), .f_{fb} = {x} }}));", out.code));
+                                let lit = self.rec_lit(rt, &format!(".f_{fa} = tv_str_from_int({i}), .f_{fb} = {x}"));
+                                self.line(format!("TVG_PUSH({rct}, &{}, {rd}, {lit});", out.code));
                             }
                         }
                         self.close("}");
@@ -1715,7 +1718,7 @@ impl<'c, 'a> Gen<'c, 'a> {
                         let tf = self.tuple_of(rt);
                         for f in &fields {
                             let key = self.lit(self.sym(f.name).to_string().as_bytes());
-                            let fv = Val::plain(format!("({}).f_{}", v.code, self.sym(f.name)), f.ty);
+                            let fv = Val::plain(self.fld(base, &v.code, self.sym(f.name)), f.ty);
                             let item = match name {
                                 "keys" => key,
                                 "values" => {
@@ -1728,7 +1731,8 @@ impl<'c, 'a> Gen<'c, 'a> {
                                     let x = self.coerce(fv, tf[1].ty);
                                     let x = self.own(x);
                                     let x = self.consume(x);
-                                    format!("(({rct}){{ .f_{} = {key}, .f_{} = {x} }})", self.sym(tf[0].name), self.sym(tf[1].name))
+                                    let parts = format!(".f_{} = {key}, .f_{} = {x}", self.sym(tf[0].name), self.sym(tf[1].name));
+                                    self.rec_lit(rt, &parts)
                                 }
                             };
                             self.line(format!("TVG_PUSH({rct}, &{}, {rd}, {item});", out.code));
@@ -2323,7 +2327,8 @@ impl<'c, 'a> Gen<'c, 'a> {
         self.open(&format!("while (tv_map_next({m}, {kd}, {vd}, &{i}, &{i}k, &{i}v)) {{"));
         let (rk, rv) = (self.retain_code(k, &format!("{i}x")), self.retain_code(v, &format!("{i}y")));
         self.line(format!("{kct} {i}x = *({kct} *){i}k; {rk}; {vct} {i}y = *({vct} *){i}v; {rv};"));
-        self.line(format!("TVG_PUSH({rct}, &{}, {rd}, (({rct}){{ .f_{f0} = {i}x, .f_{f1} = {i}y }}));", out.code));
+        let lit = self.rec_lit(rt, &format!(".f_{f0} = {i}x, .f_{f1} = {i}y"));
+        self.line(format!("TVG_PUSH({rct}, &{}, {rd}, {lit});", out.code));
         self.close("}");
         out
     }

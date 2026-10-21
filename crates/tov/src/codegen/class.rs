@@ -859,6 +859,28 @@ impl<'c, 'a> Gen<'c, 'a> {
                 }
                 (!cases.is_empty()).then(|| format!("switch (({place}).tag) {{{cases} default: break; }}"))
             }
+            Ty::Record(fs) if self.is_obj(ty) => {
+                // (an object: visited through its box, like a recursive alias's)
+                let bn = self.box_name(ty);
+                let fs = self.c.types.fields(fs).to_vec();
+                let mut body = String::new();
+                for f in fs {
+                    if let Some(code) = self.gc_visit(f.ty, &format!("(({bn} *)buf)->v.f_{}", self.sym(f.name)), gv) {
+                        body.push_str(&code);
+                        body.push(' ');
+                    }
+                }
+                if body.is_empty() {
+                    return None;
+                }
+                let name = format!("gv_{}", ty.0);
+                if !gv.contains_key(&ty) {
+                    gv.insert(ty, String::new());
+                    let code = format!("static void {name}(void *buf, int64_t len) {{\n    (void)len; {body}\n}}\n");
+                    gv.insert(ty, code);
+                }
+                Some(format!("if (tvg_gc_buf({place}, 0, {name})) {name}({place}, 0);"))
+            }
             Ty::Record(fs) => {
                 let fs = self.c.types.fields(fs).to_vec();
                 let mut out = String::new();
@@ -893,7 +915,7 @@ impl<'c, 'a> Gen<'c, 'a> {
                 if !gv.contains_key(&ty) {
                     gv.insert(ty, String::new());
                     let code = format!(
-                        "static void {name}(void *buf, int64_t len) {{\n    (void)len; tv_map m = {{ (tv_mapbuf *)buf }}; tv_int i = 0; void *kp, *vp;\n    while (tv_map_next(m, {kd}, {vd}, &i, &kp, &vp)) {{ {} {} }}\n}}\n",
+                        "static void {name}(void *buf, int64_t len) {{\n    (void)len; tv_map m = {{ (tv_maphdr *)buf }}; tv_int i = 0; void *kp, *vp;\n    while (tv_map_next(m, {kd}, {vd}, &i, &kp, &vp)) {{ {} {} }}\n}}\n",
                         kv.unwrap_or_default(),
                         vv.unwrap_or_default()
                     );
@@ -908,7 +930,7 @@ impl<'c, 'a> Gen<'c, 'a> {
                 let name = format!("gv_{}", ty.0);
                 if !gv.contains_key(&ty) {
                     gv.insert(ty, String::new());
-                    let code = format!("static void {name}(void *buf, int64_t len) {{\n    (void)len; tv_map m = {{ (tv_mapbuf *)buf }}; tv_int i = 0; void *kp, *vp;\n    while (tv_map_next(m, {kd}, &tv_type_undefined, &i, &kp, &vp)) {{ {kv} }}\n}}\n");
+                    let code = format!("static void {name}(void *buf, int64_t len) {{\n    (void)len; tv_map m = {{ (tv_maphdr *)buf }}; tv_int i = 0; void *kp, *vp;\n    while (tv_map_next(m, {kd}, &tv_type_undefined, &i, &kp, &vp)) {{ {kv} }}\n}}\n");
                     gv.insert(ty, code);
                 }
                 Some(format!("if (tvg_gc_buf(({place}).p, 0, {name})) {name}(({place}).p, 0);"))

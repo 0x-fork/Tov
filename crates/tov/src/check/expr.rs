@@ -886,6 +886,11 @@ impl<'a> Checker<'a> {
             (tl, tr)
         };
         let undefined_literal = matches!(self.ast().expr(l).kind, ExprKind::Undefined | ExprKind::Null) || matches!(self.ast().expr(r).kind, ExprKind::Undefined | ExprKind::Null);
+        // (records compared by identity, as JavaScript's objects are)
+        if !undefined_literal {
+            self.note_object(tl);
+            self.note_object(tr);
+        }
         if !undefined_literal && !self.comparable(tl, tr) {
             let (ls, rs) = (self.show(tl), self.show(tr));
             let mut d = Diagnostic::new("T0502", span, format!("this comparison is always false: `{ls}` and `{rs}` have no values in common"));
@@ -1179,13 +1184,14 @@ impl<'a> Checker<'a> {
         })
     }
 
-    /// The storage at path `e` (`xs`, `p.items`, `ps[0].x`'s object) is in an array, map, set or
-    /// recursive alias's box, or is one: an object every reference shares, as in JavaScript.
+    /// The storage at path `e` (`xs`, `p.items`, `ps[0].x`'s object) is in an array, map, set,
+    /// recursive alias's box or object (see `objects`), or is one: shared by every reference, as in
+    /// JavaScript.
     pub(super) fn inside_shared(&mut self, e: ExprId) -> bool {
         let mut cur = e;
         loop {
             if let Some(t) = self.path_ty(cur)
-                && (self.types.members(t).into_iter().any(|m| matches!(self.types.get(m), Ty::Rec(..)))
+                && (self.types.members(t).into_iter().any(|m| matches!(self.types.get(m), Ty::Rec(..)) || self.maybe_object(m))
                     || self.flat_members(t).iter().any(|&m| matches!(self.types.get(m), Ty::Array(_) | Ty::Map(..) | Ty::Set(_))))
             {
                 return true;
@@ -1425,6 +1431,11 @@ impl<'a> Checker<'a> {
                 {
                     self.rewrites.keys.push((self.cur, e));
                     return Some(Place { ty: v, local: None, root: None, sites: Vec::new(), global: None, int_field: None });
+                }
+                // (changed in place: an object, as JavaScript's are, if anything shares it)
+                self.note_mutated(t);
+                if let Ty::Param(_) = *self.types.get(self.types_without_undef(t)) {
+                    self.object_fields.insert(*name);
                 }
                 let ft = self.member_of(t, *name, *name_span, span, *obj)?;
                 let root = self.check_mutable_root(*obj, span);

@@ -52,6 +52,8 @@ pub(crate) struct Body {
     /// Enclosing labelled loops: (label, the label after it, its entry in `loops`, the scope
     /// depth outside it).
     pub labeled: Vec<(crate::intern::Sym, String, usize, usize)>,
+    /// A `for...of` variable made for each iteration: its release, at the end of each.
+    pub iter_release: Option<String>,
     /// (target, scope depth to unwind to)
     breaks: Vec<(BreakTarget, usize)>,
     /// Locals (by declaration offset) that live in heap cells because a heap closure captures them and they change.
@@ -254,6 +256,7 @@ impl<'c, 'a> Gen<'c, 'a> {
             ret: VOID,
             loops: Vec::new(),
             labeled: Vec::new(),
+            iter_release: None,
             breaks: Vec::new(),
             boxed: FxSet::default(),
             stack_arrows: FxSet::default(),
@@ -450,6 +453,7 @@ impl<'c, 'a> Gen<'c, 'a> {
             ret,
             loops: Vec::new(),
             labeled: Vec::new(),
+            iter_release: None,
             breaks: Vec::new(),
             boxed,
             stack_arrows,
@@ -2385,7 +2389,16 @@ impl<'c, 'a> Gen<'c, 'a> {
                         let cur = self.fresh("i");
                         self.line(format!("tv_int {cur} = 0; void *{cur}k, *{cur}v;"));
                         self.open(&format!("while (tv_map_next({sn}, {kd}, {vd}, &{cur}, &{cur}k, &{cur}v)) {{"));
-                        self.line(format!("{ect} {var} = ({ect}){{ .f_{f0} = *({kct} *){cur}k, .f_{f1} = *({vct} *){cur}v }};"));
+                        if self.is_obj(elem) {
+                            // (an object of its own each time: retained parts, released with it)
+                            let (rk, rv) = (self.retain_code(k, &format!("*({kct} *){cur}k")), self.retain_code(v, &format!("*({vct} *){cur}v")));
+                            let lit = self.rec_lit(elem, &format!(".f_{f0} = *({kct} *){cur}k, .f_{f1} = *({vct} *){cur}v"));
+                            self.line(format!("{rk}; {rv}; {ect} {var} = {lit};"));
+                            let rel = format!("{};", self.release_code(elem, &var));
+                            self.b().iter_release = Some(rel);
+                        } else {
+                            self.line(format!("{ect} {var} = ({ect}){{ .f_{f0} = *({kct} *){cur}k, .f_{f1} = *({vct} *){cur}v }};"));
+                        }
                     }
                     Ty::Set(_) => {
                         let kd = self.desc(elem);
@@ -2688,6 +2701,9 @@ impl<'c, 'a> Gen<'c, 'a> {
 
     fn loop_body_with_binding(&mut self, body: StmtId, cont: &str, binding: Option<u32>) {
         self.push_scope();
+        if let Some(rel) = self.b().iter_release.take() {
+            self.b().scopes.last_mut().unwrap().releases.push(rel);
+        }
         if let Some(key) = binding {
             let local = self.b().locals[&key].clone();
             let ct = self.cell_type(local.ty);
@@ -3038,7 +3054,7 @@ impl<'c, 'a> Gen<'c, 'a> {
                     let i = self.fresh("i");
                     self.open(&format!("for (tv_int {i} = 0; {i} < tv_arr_len({}); {i}++) {{", arr.code));
                     self.line(format!("{ect} *{i}e = &(({ect} *)tv_arr_data({}))[{i}];", arr.code));
-                    let (kx, vx) = (Val::plain(format!("{i}e->f_{f0}"), f[0].ty), Val::plain(format!("{i}e->f_{f1}"), f[1].ty));
+                    let (kx, vx) = (Val::plain(self.fld(et, &format!("(*{i}e)"), &f0), f[0].ty), Val::plain(self.fld(et, &format!("(*{i}e)"), &f1), f[1].ty));
                     let (kx, vx) = (self.coerce(kx, k), self.coerce(vx, v));
                     let (rk, rv) = (self.retain_code(k, &format!("{i}k")), self.retain_code(v, &format!("{i}v")));
                     self.line(format!("{kct} {i}k = {}; {rk}; {vct} {i}v = {}; {rv};", kx.code, vx.code));
@@ -3128,9 +3144,9 @@ impl<'c, 'a> Gen<'c, 'a> {
                         inits.push((tf.name, code));
                     }
                 }
-                let ct = self.ctype(target);
                 let parts: Vec<String> = inits.iter().map(|(n, c)| format!(".f_{} = {c}", self.sym(*n))).collect();
-                let v = self.tmp(target, &format!("({ct}){{ {} }}", parts.join(", ")), true);
+                let lit = self.rec_lit(target, &parts.join(", "));
+                let v = self.tmp(target, &lit, true);
                 if target != ty {
                     return self.coerce(v, ty);
                 }
@@ -3146,8 +3162,8 @@ impl<'c, 'a> Gen<'c, 'a> {
                     let code = self.consume(v);
                     parts.push(format!(".f_{} = {code}", self.sym(f.name)));
                 }
-                let ct = self.ctype(ty);
-                self.tmp(ty, &format!("({ct}){{ {} }}", parts.join(", ")), true)
+                let lit = self.rec_lit(ty, &parts.join(", "));
+                self.tmp(ty, &lit, true)
             }
             ExprKind::Array(elems) => {
                 let Ty::Array(et) = self.tget(ty) else {
@@ -3474,13 +3490,13 @@ impl<'c, 'a> Gen<'c, 'a> {
                 let (ffs, tfs) = (self.c.types.fields(ffs).to_vec(), self.c.types.fields(tfs).to_vec());
                 let mut parts = Vec::new();
                 for (ff, tfld) in ffs.iter().zip(&tfs) {
-                    let fv = Val { code: format!("({}).f_{}", v.code, self.sym(ff.name)), ty: ff.ty, owned: false };
+                    let fv = Val { code: self.fld(v.ty, &v.code, self.sym(ff.name)), ty: ff.ty, owned: false };
                     let cv = self.coerce(fv, tfld.ty);
                     let code = self.consume(cv);
                     parts.push(format!(".f_{} = {code}", self.sym(tfld.name)));
                 }
-                let ct = self.ctype(to);
-                return self.tmp(to, &format!("({ct}){{ {} }}", parts.join(", ")), true);
+                let lit = self.rec_lit(to, &parts.join(", "));
+                return self.tmp(to, &lit, true);
             }
             (Ty::Array(fe), Ty::Array(te)) => {
                 let d = self.desc(te);
@@ -4412,14 +4428,20 @@ impl<'c, 'a> Gen<'c, 'a> {
                 let mv = self.field(base, name, map_ty, span);
                 let res = self.fresh("rp");
                 let ct = self.ctype(rt);
-                self.line(format!("{ct} {res};"));
+                if self.is_obj(rt) {
+                    let d = self.default_value(rt);
+                    self.line(format!("{ct} {res} = {d};"));
+                } else {
+                    self.line(format!("{ct} {res};"));
+                }
                 let Ty::Record(fs) = self.tget(rt) else { return Val::plain("0", ty) };
                 for f in self.c.types.fields(fs).to_vec() {
                     let fname = self.sym(f.name).to_string();
                     let key = self.lit(fname.as_bytes());
                     let (kn, pn) = (self.fresh("k"), self.fresh("p"));
+                    let place = self.fld(rt, &res, &fname);
                     self.line(format!("tv_str {kn} = {key}; tv_str *{pn} = tv_map_get({}, &tv_type_str, &tv_type_str, &{kn});", mv.code));
-                    self.line(format!("{res}.f_{fname} = {pn} ? *{pn} : TV_EMPTY_STR; tv_str_retain({res}.f_{fname});"));
+                    self.line(format!("{place} = {pn} ? *{pn} : TV_EMPTY_STR; tv_str_retain({place});"));
                 }
                 self.b().temps.last_mut().unwrap().push((res.clone(), rt));
                 return self.coerce(Val { code: res, ty: rt, owned: true }, ty);
@@ -4516,7 +4538,7 @@ impl<'c, 'a> Gen<'c, 'a> {
                     self.unsupported(span, "this field access");
                     return Val::plain("0", ty);
                 };
-                let v = Val { code: format!("({}).f_{n}", base.code), ty: f.ty, owned: false };
+                let v = Val { code: self.fld(base.ty, &base.code, &n), ty: f.ty, owned: false };
                 // The checker may have narrowed this field path (`if (t.left !== undefined) t.left...`).
                 let v = if self.c.assignable_pub(ty, f.ty) && ty != f.ty && !self.c.assignable_pub(f.ty, ty) { self.project(v, ty) } else { self.coerce(v, ty) };
                 if base.owned && !v.owned && self.is_rc(v.ty) {
@@ -4595,7 +4617,7 @@ impl<'c, 'a> Gen<'c, 'a> {
             && let ExprKind::Int(i) = self.ast(self.cur_m()).expr(index).kind
             && let Some(f) = fields.get(i as usize)
         {
-            let v = Val { code: format!("({}).f_{}", a.code, self.sym(f.name)), ty: f.ty, owned: false };
+            let v = Val { code: self.fld(a.ty, &a.code, self.sym(f.name)), ty: f.ty, owned: false };
             return self.project(v, ty);
         }
         if let Ty::Map(k, v) = self.tget(a.ty) {
@@ -4760,7 +4782,7 @@ impl<'c, 'a> Gen<'c, 'a> {
                     _ => None,
                 };
                 match ft {
-                    Some(ft) => Place { lv: format!("({}).f_{n}", p.lv), ty: ft, weak: false },
+                    Some(ft) => Place { lv: self.fld(p.ty, &p.lv, &n), ty: ft, weak: false },
                     None => {
                         self.unsupported(span, "assigning to this member");
                         Place { lv: "tv__dummy".into(), ty: ERROR, weak: false }
@@ -5432,6 +5454,7 @@ impl<'c, 'a> Gen<'c, 'a> {
             ret,
             loops: Vec::new(),
             labeled: Vec::new(),
+            iter_release: None,
             breaks: Vec::new(),
             boxed: outer_boxed.union(&inner_boxed).copied().collect(),
             stack_arrows: outer_stack.union(&inner_stack).copied().collect(),

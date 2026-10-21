@@ -199,7 +199,8 @@ impl<'c, 'a> Gen<'c, 'a> {
                 let mut vals = Vec::new();
                 for f in &fields {
                     let name = self.sym(f.name).to_string();
-                    vals.push(self.js_to_code(f.ty, &format!("v.f_{name}")));
+                    let place = self.fld(t, "v", &name);
+                    vals.push(self.js_to_code(f.ty, &place));
                 }
                 if vals.is_empty() {
                     b.push_str("    return tv_js_object();\n");
@@ -325,7 +326,8 @@ impl<'c, 'a> Gen<'c, 'a> {
             }
             Ty::Record(fs) => {
                 let fs = self.c.types.fields(fs).to_vec();
-                let ct = self.ctype(t);
+                // (an object: the record, then its box)
+                let ct = self.rec_struct(t);
                 let _ = writeln!(b, "    if (tv_js_is_nullish(v) || strcmp(tv_js_typeof(v), \"object\") != 0) return false;");
                 let _ = writeln!(b, "    {ct} r;");
                 // fields convert in order; on a failure, the ones done are released
@@ -342,7 +344,8 @@ impl<'c, 'a> Gen<'c, 'a> {
                     let conv = conv.replace("return false;", &format!("{{ {undo}return false; }}"));
                     let _ = writeln!(b, "    {{ JSValueRef exc = NULL; JSValueRef x = tv_js_name_get(v, {key}, &exc); if (!x) {{ {undo}return false; }} {conv} }}");
                 }
-                b.push_str("    *out = r; return true;\n");
+                let r = self.rec_wrap(t, "r");
+                let _ = writeln!(b, "    *out = {r}; return true;");
             }
             Ty::Union(_) => {
                 let ms = self.members(t);

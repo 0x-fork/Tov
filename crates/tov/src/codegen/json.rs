@@ -89,14 +89,15 @@ impl<'c, 'a> Gen<'c, 'a> {
                     if i > 0 {
                         b.push_str("    tv_sb_add_char(sb, ',');\n");
                     }
-                    let _ = writeln!(b, "    tvg_js_nl(sb, ind, lvl + 1);\n    {w}(sb, (const {ct} *)&v->f_{}, ind, lvl + 1);", self.sym(f.name));
+                    let place = self.fld(t, "*v", self.sym(f.name));
+                    let _ = writeln!(b, "    tvg_js_nl(sb, ind, lvl + 1);\n    {w}(sb, (const {ct} *)&{place}, ind, lvl + 1);");
                 }
                 b.push_str("    tvg_js_nl(sb, ind, lvl);\n    tv_sb_add_char(sb, ']');\n");
                 b
             }
             Ty::Record(_) => {
                 let fields = self.c.types.fields_in_order(t);
-                let parts: Vec<(String, TyId, String)> = fields.iter().filter(|f| !matches!(self.tget(f.ty), Ty::Func(..))).map(|f| (self.sym(f.name).to_string(), f.ty, format!("v->f_{}", self.sym(f.name)))).collect();
+                let parts: Vec<(String, TyId, String)> = fields.iter().filter(|f| !matches!(self.tget(f.ty), Ty::Func(..))).map(|f| (self.sym(f.name).to_string(), f.ty, self.fld(t, "*v", self.sym(f.name)))).collect();
                 self.json_write_object(&parts)
             }
             Ty::Class(..) => {
@@ -267,7 +268,8 @@ impl<'c, 'a> Gen<'c, 'a> {
                     if i > 0 {
                         b.push_str("    if (!tv_jp_char(p, ',')) return false;\n");
                     }
-                    let _ = writeln!(b, "    if (!{pf}(p, &out->f_{})) return false;", self.sym(f.name));
+                    let place = self.fld(t, "*out", self.sym(f.name));
+                    let _ = writeln!(b, "    if (!{pf}(p, &{place})) return false;");
                 }
                 b.push_str("    if (!tv_jp_char(p, ']')) return false;\n    return true;\n");
                 b
@@ -282,9 +284,10 @@ impl<'c, 'a> Gen<'c, 'a> {
                 for (i, f) in fs.iter().enumerate() {
                     let n = self.sym(f.name).to_string();
                     let pf = self.json_parser(f.ty);
+                    let place = self.fld(t, "*out", &n);
                     let _ = write!(
                         b,
-                        "if (k.p->len == {} && memcmp(k.p->data, {}, {}) == 0) {{ tv_str_release(k); if (!{pf}(p, &out->f_{n})) return false; seen{i} = true; }}\n            else ",
+                        "if (k.p->len == {} && memcmp(k.p->data, {}, {}) == 0) {{ tv_str_release(k); if (!{pf}(p, &{place})) return false; seen{i} = true; }}\n            else ",
                         n.len(),
                         c_string(n.as_bytes()),
                         n.len()

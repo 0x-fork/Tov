@@ -13,7 +13,7 @@
 //! borrowed; return values are owned; storing a borrowed value retains it.
 
 mod asyncfn;
-mod body;
+pub(crate) mod body;
 mod calls;
 mod frame;
 pub(crate) mod class;
@@ -267,6 +267,9 @@ pub(crate) struct Gen<'c, 'a> {
     pub(crate) resizers: FxMap<(u32, u32), bool>,
     /// Per module: `const` locals holding new arrays (see `resize`).
     pub(crate) fresh_arrays: FxMap<u32, FxSet<u32>>,
+    /// Objects' record structs (see `is_obj`), and TOV_BOX_ALL=1 (every record an object, to test).
+    rec_structs: FxMap<TyId, String>,
+    box_all: bool,
     /// The awaited calls embedded in the async body just emitted: (union member, frame type).
     pub(crate) last_children: Vec<(String, String)>,
     /// Frame structs of async functions.
@@ -352,6 +355,8 @@ impl<'c, 'a> Gen<'c, 'a> {
             pushed: FxMap::default(),
             resizers: FxMap::default(),
             fresh_arrays: FxMap::default(),
+            rec_structs: FxMap::default(),
+            box_all: std::env::var("TOV_BOX_ALL").is_ok_and(|v| v == "1"),
             last_children: Vec::new(),
             pending_tre: None,
             uses_tls: false,
@@ -687,6 +692,7 @@ impl<'c, 'a> Gen<'c, 'a> {
     pub(crate) fn is_rc(&mut self, t: TyId) -> bool {
         match self.tget(t) {
             Ty::Str | Ty::Array(_) | Ty::Map(..) | Ty::Set(_) | Ty::Func(..) | Ty::Rec(..) | Ty::Class(..) | Ty::Interface(..) | Ty::Promise(..) | Ty::Js | Ty::BigInt => true,
+            Ty::Record(_) if self.is_obj(t) => true,
             Ty::Record(fs) => {
                 let fs = self.c.types.fields(fs).to_vec();
                 fs.iter().any(|f| self.is_rc(f.ty))
@@ -697,6 +703,45 @@ impl<'c, 'a> Gen<'c, 'a> {
             }
             _ => false,
         }
+    }
+
+    /// A record type whose values are objects, shared as JavaScript's (the checker's `objects`):
+    /// a pointer to a counted box holding the record, rather than the record itself.
+    pub(crate) fn is_obj(&self, t: TyId) -> bool {
+        let Ty::Record(fs) = *self.c.types.get(t) else { return false };
+        if self.box_all || self.c.objects.contains(&t) {
+            return true;
+        }
+        let fs = self.c.types.fields(fs);
+        (!self.c.object_fields.is_empty() && fs.iter().any(|f| self.c.object_fields.contains(&f.name)))
+            || (!self.c.object_shapes.is_empty() && self.c.object_shapes.contains(&fs.iter().map(|f| f.name).collect::<Vec<_>>()))
+    }
+
+    /// The C struct of a record type's fields (inside the box, for an object).
+    pub(crate) fn rec_struct(&mut self, t: TyId) -> String {
+        let ct = self.ctype(t);
+        self.rec_structs.get(&t).cloned().unwrap_or(ct)
+    }
+
+    /// A new record value from designated initializers (`.f_x = ...`): an object is boxed.
+    pub(crate) fn rec_lit(&mut self, t: TyId, parts: &str) -> String {
+        let st = self.rec_struct(t);
+        self.rec_wrap(t, &format!("(({st}){{ {parts} }})"))
+    }
+
+    /// The value of record type `t` holding the record (struct) `code`: boxed for an object.
+    pub(crate) fn rec_wrap(&mut self, t: TyId, code: &str) -> String {
+        if self.is_obj(t) {
+            let o = self.box_name(t);
+            format!("mk_{o}({code})")
+        } else {
+            code.to_string()
+        }
+    }
+
+    /// Field `name` of record value `code` (an lvalue when `code` is one).
+    pub(crate) fn fld(&self, t: TyId, code: &str, name: &str) -> String {
+        if self.is_obj(t) { format!("({code})->v.f_{name}") } else { format!("({code}).f_{name}") }
     }
 
     pub(crate) fn is_unit(&self, t: TyId) -> bool {
@@ -729,6 +774,17 @@ impl<'c, 'a> Gen<'c, 'a> {
             Ty::Js => "JSValueRef".into(),
             Ty::Map(..) | Ty::Set(_) => "tv_map".into(),
             Ty::Func(..) => "tv_fn".into(),
+            Ty::Record(_) if self.is_obj(t) => {
+                // (the box is defined after the record: other types only hold pointers to it)
+                let sfx = self.type_suffix(t);
+                let (r, o) = (format!("R{}{sfx}", t.0), format!("O{}{sfx}", t.0));
+                let _ = writeln!(self.typedefs, "typedef struct {r} {r};\ntypedef struct {o} {o};");
+                let p = format!("{o}*");
+                self.ctypes.insert(t, p.clone());
+                self.rec_structs.insert(t, r);
+                self.define_struct(t);
+                return p;
+            }
             Ty::Record(_) => {
                 let n = format!("R{}{}", t.0, self.type_suffix(t));
                 let _ = writeln!(self.typedefs, "typedef struct {n} {n};");
@@ -793,7 +849,7 @@ impl<'c, 'a> Gen<'c, 'a> {
         if !self.defined.insert(t) {
             return;
         }
-        let name = self.ctypes[&t].trim_end_matches('*').to_string();
+        let name = self.rec_structs.get(&t).cloned().unwrap_or_else(|| self.ctypes[&t].trim_end_matches('*').to_string());
         let mut body = String::new();
         match self.tget(t) {
             Ty::Record(fs) => {
@@ -807,6 +863,10 @@ impl<'c, 'a> Gen<'c, 'a> {
                     let _ = writeln!(body, "    {ct} f_{};", self.sym(f.name));
                 }
                 body.push_str("};\n");
+                if self.is_obj(t) {
+                    let o = self.box_name(t);
+                    let _ = writeln!(self.class_structs, "struct {o} {{ int64_t rc; {name} v; }};\nstatic inline {o} *mk_{o}({name} v) {{ {o} *b = tvg_alloc_small(sizeof({o})); b->rc = 1; b->v = v; return b; }}");
+                }
             }
             Ty::Union(ms) => {
                 let ms = self.c.types.tys(ms).to_vec();
@@ -855,16 +915,17 @@ impl<'c, 'a> Gen<'c, 'a> {
         }
         let ui = ms.iter().position(|&m| m == UNDEFINED)?;
         let pi = 1 - ui;
-        // A class instance or a recursive alias's box: a pointer, with NULL for `undefined`.
-        matches!(self.tget(ms[pi]), Ty::Class(..) | Ty::Rec(..)).then_some((pi, ui))
+        // A class instance, a recursive alias's box or an object: a pointer, with NULL for `undefined`.
+        (matches!(self.tget(ms[pi]), Ty::Class(..) | Ty::Rec(..)) || self.is_obj(ms[pi])).then_some((pi, ui))
     }
 
-    /// The recursive-alias member of a niche union (`Tree | undefined`), if that's what it holds.
+    /// The recursive-alias or object member of a niche union (`Tree | undefined`), if that's
+    /// what it holds (rather than a class instance).
     pub(crate) fn niche_rec(&self, u: TyId) -> Option<TyId> {
         let (pi, _) = self.niche(u)?;
         let Ty::Union(ms) = self.tget(u) else { return None };
         let m = self.c.types.tys(ms)[pi];
-        matches!(self.tget(m), Ty::Rec(..)).then_some(m)
+        (matches!(self.tget(m), Ty::Rec(..)) || self.is_obj(m)).then_some(m)
     }
 
     /// The tag of a union value (for `switch`).
@@ -959,6 +1020,20 @@ impl<'c, 'a> Gen<'c, 'a> {
                 let _ = writeln!(self.protos, "static void rt_{n}(void *p);\nstatic void rl_{n}(void *p);");
                 let (mut rt, mut rl) = (String::new(), String::new());
                 match self.tget(t) {
+                    Ty::Record(fs) if self.is_obj(t) => {
+                        // An object: counted; its fields are released with it.
+                        let fs = self.c.types.fields(fs).to_vec();
+                        let mut rel = String::new();
+                        for f in fs {
+                            if self.is_rc(f.ty) {
+                                let _ = writeln!(rel, "    {};", self.release_code(f.ty, &format!("b->v.f_{}", self.sym(f.name))));
+                            }
+                        }
+                        let _ = writeln!(self.protos, "static void fo_{n}({n} *b);");
+                        let _ = writeln!(self.helpers_after_decl, "static void fo_{n}({n} *b) {{\n{rel}    tvg_free_small(b, sizeof(*b));\n}}");
+                        let _ = writeln!(rt, "    if (*x) (*x)->rc++;");
+                        let _ = writeln!(rl, "    if (*x && --(*x)->rc == 0) fo_{n}(*x);");
+                    }
                     Ty::Record(fs) => {
                         let fs = self.c.types.fields(fs).to_vec();
                         for f in fs {
@@ -1005,6 +1080,8 @@ impl<'c, 'a> Gen<'c, 'a> {
                 let _ = writeln!(self.protos, "static bool eq_{n}(const void *a, const void *b);");
                 let mut b = String::new();
                 match self.tget(t) {
+                    // (objects: the same one, as `===` in JavaScript)
+                    Ty::Record(_) if self.is_obj(t) => b.push_str("    return *x == *y;\n"),
                     Ty::Record(fs) => {
                         let fs = self.c.types.fields(fs).to_vec();
                         for f in fs {
@@ -1038,6 +1115,7 @@ impl<'c, 'a> Gen<'c, 'a> {
                 let _ = writeln!(self.protos, "static uint64_t hs_{n}(const void *p);");
                 let mut b = String::from("    uint64_t h = 0x9E3779B97F4A7C15ull;\n");
                 match self.tget(t) {
+                    Ty::Record(_) if self.is_obj(t) => b.push_str("    h = (uint64_t)(uintptr_t)*x * h;\n"),
                     Ty::Record(fs) => {
                         let fs = self.c.types.fields(fs).to_vec();
                         for f in fs {
@@ -1146,7 +1224,9 @@ impl<'c, 'a> Gen<'c, 'a> {
                     }
                     _ => {}
                 }
-                let _ = writeln!(h, "static void {fname}({sig}) {{\n    const {ct} *x = p; (void)x; (void)sb;{}\n{b}}}", if inspect { " (void)depth;" } else { "" });
+                // (an object's fields are formatted from inside its box)
+                let decl = if self.is_obj(t) { format!("const {} *x = &(*(const {ct} *)p)->v;", self.rec_struct(t)) } else { format!("const {ct} *x = p;") };
+                let _ = writeln!(h, "static void {fname}({sig}) {{\n    {decl} (void)x; (void)sb;{}\n{b}}}", if inspect { " (void)depth;" } else { "" });
             }
             H_DEFAULT => {
                 let _ = writeln!(self.protos, "static {ct} df_{n}(void);");
@@ -1157,7 +1237,7 @@ impl<'c, 'a> Gen<'c, 'a> {
                             let d = self.default_value(f.ty);
                             format!(".f_{} = {d}", self.sym(f.name))
                         }).collect();
-                        format!("({ct}){{ {} }}", parts.join(", "))
+                        self.rec_lit(t, &parts.join(", "))
                     }
                     Ty::Union(ms) => {
                         let ms = self.c.types.tys(ms).to_vec();
@@ -1270,6 +1350,7 @@ impl<'c, 'a> Gen<'c, 'a> {
                 format!("((({a}) == NULL || ({b}) == NULL) ? (({a}) == ({b})) : {inner})")
             }
             Ty::Union(_) if self.niche(t).is_some() => format!("((void *)({a}) == (void *)({b}))"),
+            Ty::Record(_) if self.is_obj(t) => format!("(({a}) == ({b}))"),
             Ty::Record(_) | Ty::Union(_) | Ty::Rec(..) => {
                 self.ensure_helper(t, H_EQ);
                 format!("eq_{}(&({a}), &({b}))", self.box_name(t))

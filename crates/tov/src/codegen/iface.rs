@@ -168,7 +168,8 @@ impl<'c, 'a> Gen<'c, 'a> {
                             };
                             let fps = self.c.types.params(fps).to_vec();
                             let fv = self.fresh("fn");
-                            self.line(format!("tv_fn {fv} = ({value}).f_{};", self.sym(f.name)));
+                            let fc = self.fld(src, &value, self.sym(f.name));
+                            self.line(format!("tv_fn {fv} = {fc};"));
                             let mut all = vec![format!("{fv}.env")];
                             for (a, fp) in args.iter().zip(&fps) {
                                 let cv = self.coerce(a.clone(), fp.ty);
@@ -237,7 +238,7 @@ impl<'c, 'a> Gen<'c, 'a> {
                             self.class_field_read(Val::plain("x", src), f.name, mt, span)
                         }
                         Ty::Record(fs) => match self.c.types.fields(fs).iter().find(|x| x.name == f.name).copied() {
-                            Some(rf) => Val::plain(format!("({value}).f_{}", self.sym(f.name)), rf.ty),
+                            Some(rf) => Val::plain(self.fld(src, &value, self.sym(f.name)), rf.ty),
                             None => self.coerce(Val::plain("0", UNDEFINED), f.ty),
                         },
                         Ty::Interface(..) => {

@@ -1,7 +1,0 @@
-error[V0120] shared_copies.tov:13:3: this changes `p`, but `q` is a separate copy (TypeScript would change both)
-   13 |   p.x = 10
-  why: `q` was initialized from `p`: Tov records (object literals) are values, so assignment copies
-  if you meant a copy: say so explicitly: build a new value
-  if you meant one value: modify `p` directly instead of going through `q`
-
-1 error(s)

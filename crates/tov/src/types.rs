@@ -255,6 +255,11 @@ impl Types {
     }
 
     #[inline]
+    /// How many types there are (ids `0..count()`).
+    pub fn count(&self) -> u32 {
+        self.off[0] + self.list.len() as u32
+    }
+
     pub fn get(&self, id: TyId) -> &Ty {
         match &self.base {
             Some(b) if id.0 < self.off[0] => &b.list[id.0 as usize],
@@ -578,6 +583,20 @@ impl Types {
                 self.class(d, &args)
             }
             _ => ty,
+        }
+    }
+
+    /// True if `ty` mentions a generic parameter.
+    pub fn has_param(&self, ty: TyId) -> bool {
+        match *self.get(ty) {
+            Ty::Param(_) => true,
+            Ty::Array(e) | Ty::Set(e) | Ty::Expect(e) => self.has_param(e),
+            Ty::Map(k, v) | Ty::Promise(k, v) => self.has_param(k) || self.has_param(v),
+            Ty::Record(fs) => self.fields(fs).iter().any(|f| self.has_param(f.ty)),
+            Ty::Union(ms) => self.tys(ms).iter().any(|&m| self.has_param(m)),
+            Ty::Func(ps, r, _) => self.params(ps).iter().any(|p| self.has_param(p.ty)) || self.has_param(r),
+            Ty::Rec(_, args) | Ty::Interface(_, args) | Ty::Class(_, args) => self.tys(args).iter().any(|&a| self.has_param(a)),
+            _ => false,
         }
     }
 

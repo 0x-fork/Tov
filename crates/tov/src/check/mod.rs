@@ -4,6 +4,7 @@ mod builtins;
 pub(crate) mod class;
 mod expr;
 pub mod facts;
+mod objects;
 pub mod rewrite;
 mod spec;
 mod stmt;
@@ -356,6 +357,17 @@ pub struct Checker<'a> {
     /// What callbacks given to built-in methods throw (`xs.map((x) => parse(x))`), as their
     /// arrows are checked: the method call passes it on.
     cb_throws: Vec<TyId>,
+    /// Record types whose values JavaScript would show to be shared (changed in place, or
+    /// compared by identity): objects on the heap, every reference seeing every change. Records
+    /// never changed or compared stay values, which nothing can tell apart (see `find_objects`).
+    pub(crate) objects: HashSet<TyId>,
+    /// Record types changed in place: objects unless nothing shares their values (see
+    /// `objects.rs`).
+    mutated: HashSet<TyId>,
+    /// Field names changed through a type parameter (`o.x = v`, `o: T`): every record type with
+    /// one is an object. And the field names of generic objects, whose instances are too.
+    pub(crate) object_fields: HashSet<Sym>,
+    pub(crate) object_shapes: HashSet<Vec<Sym>>,
 }
 
 /// `threads`: phase-B worker count (default: all cores). Results don't depend on it.
@@ -418,6 +430,10 @@ fn new_checker<'a>(modules: &'a [Module], interner: &'a Interner, sm: &'a Source
         want_optional: false,
         float_args: false,
         cb_throws: Vec::new(),
+        objects: HashSet::default(),
+        mutated: HashSet::default(),
+        object_fields: HashSet::default(),
+        object_shapes: HashSet::default(),
     }
 }
 
@@ -470,6 +486,7 @@ pub fn check_for_build<'a>(modules: &'a [Module], interner: &'a mut Interner, sm
         }
         out.sort_by(|a, b| (a.span.file, a.span.start, a.code).cmp(&(b.span.file, b.span.start, b.code)));
         out.dedup_by(|a, b| a.span == b.span && a.code == b.code && a.message == b.message);
+        c.find_objects();
         return (out, c);
     }
 }
@@ -659,6 +676,10 @@ impl<'a> Checker<'a> {
             want_optional: false,
             float_args: false,
             cb_throws: Vec::new(),
+        objects: HashSet::default(),
+        mutated: HashSet::default(),
+        object_fields: HashSet::default(),
+        object_shapes: HashSet::default(),
         }
     }
 
@@ -2384,6 +2405,71 @@ impl<'a> Checker<'a> {
             _ => {}
         });
         self.global_hits.extend(hits);
+    }
+
+    /// A value of `ty` is changed in place: its records are objects if anything shares them.
+    pub(crate) fn note_mutated(&mut self, ty: TyId) {
+        for m in self.types.members(ty) {
+            if let Ty::Record(_) = self.types.get(m) {
+                self.mutated.insert(m);
+            }
+        }
+    }
+
+    /// Records of type `ty` changed in place or shared (objects, or maybe objects).
+    pub(crate) fn maybe_object(&self, ty: TyId) -> bool {
+        self.objects.contains(&ty) || self.mutated.contains(&ty)
+    }
+
+    /// A value of `ty` is compared by identity: its records are objects.
+    pub(crate) fn note_object(&mut self, ty: TyId) {
+        for m in self.types.members(ty) {
+            if let Ty::Record(_) = self.types.get(m) {
+                self.objects.insert(m);
+            }
+        }
+    }
+
+    /// The rest of `objects`: records searched for in arrays (`indexOf`, `includes`), set
+    /// members and map keys (found by identity), and records with fields changed generically.
+    fn find_objects(&mut self) {
+        let mut found = Vec::new();
+        if let Some(facts) = &self.facts {
+            for (m, f) in facts.iter().enumerate() {
+                let ast = &self.modules[m].ast;
+                for (&e, call) in &f.calls {
+                    if let facts::Callee::Method(recv) = call.callee
+                        && let Ty::Array(el) = *self.types.get(recv)
+                        && let ast::ExprKind::Call { callee, .. } = &ast.expr(e).kind
+                        && let ast::ExprKind::Member { name, .. } = &ast.expr(*callee).kind
+                        && matches!(self.interner.get(*name), "indexOf" | "lastIndexOf" | "includes")
+                    {
+                        found.push(el);
+                    }
+                }
+            }
+        }
+        for i in 0..self.types.count() {
+            match *self.types.get(TyId(i)) {
+                Ty::Set(k) | Ty::Map(k, _) => found.push(k),
+                Ty::Record(fs) if self.types.fields(fs).iter().any(|f| self.object_fields.contains(&f.name)) => found.push(TyId(i)),
+                _ => {}
+            }
+        }
+        for t in found {
+            self.note_object(t);
+        }
+        // Records changed in place: objects if something shares them.
+        let cands: HashSet<TyId> = self.mutated.iter().copied().filter(|t| !self.objects.contains(t)).collect();
+        let shared = self.shared_records(&cands);
+        self.objects.extend(shared);
+        let generic: Vec<TyId> = self.objects.iter().copied().filter(|&t| self.types.has_param(t)).collect();
+        for t in generic {
+            if let Ty::Record(fs) = *self.types.get(t) {
+                let names = self.types.fields(fs).iter().map(|f| f.name).collect();
+                self.object_shapes.insert(names);
+            }
+        }
     }
 
     /// Can values of these types ever be equal?
