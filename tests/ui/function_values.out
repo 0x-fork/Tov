@@ -1,0 +1,5 @@
+error[T0001] function_values.tov:59:16: expected `(int) => int`, found `(int) => int throws Big`
+   59 |   return apply(declared, 1)
+  context: argument `f` of `apply`
+
+1 error(s)
