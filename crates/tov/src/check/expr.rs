@@ -3573,6 +3573,8 @@ impl<'a> Checker<'a> {
             }
             ExprKind::This => self.lookup(super::THIS_SYM).map(|(id, ty)| (Target { local: id, path: Vec::new(), heap: false, global: None }, ty)),
             ExprKind::Paren(x) => self.target_of(*x),
+            // `(m = re.exec(s)) !== null`: the variable, as just assigned
+            ExprKind::Assign(crate::ast::AssignOp::Assign, l, _) if matches!(self.ast().expr(*l).kind, ExprKind::Ident(_)) => self.target_of(*l),
             ExprKind::Member { obj, name, optional: false, .. } => {
                 let (mut target, base) = self.target_of(*obj)?;
                 // (a module constant's contents can change under it: only its own value narrows)

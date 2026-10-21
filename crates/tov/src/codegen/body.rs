@@ -1913,6 +1913,15 @@ impl<'c, 'a> Gen<'c, 'a> {
                 }
                 let code = match value {
                     Some(v) => self.consume(v),
+                    // (`let m: T | undefined` starts out `undefined`, as in JavaScript)
+                    None if ty != UNDEFINED && self.c.types.has_undefined(ty) => {
+                        let v = self.coerce(Val::plain("0", UNDEFINED), ty);
+                        self.consume(v)
+                    }
+                    None if ty != NULL && self.members(ty).contains(&NULL) => {
+                        let v = self.coerce(Val::plain("0", NULL), ty);
+                        self.consume(v)
+                    }
                     None => self.default_value(ty),
                 };
                 if self.b().boxed.contains(&key) {

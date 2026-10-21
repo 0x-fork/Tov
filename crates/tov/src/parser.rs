@@ -1024,11 +1024,24 @@ impl<'a> Parser<'a> {
                 return;
             };
             let ty = if self.eat(Tok::Colon) { Some(self.ty()) } else { None };
-            if !self.expect(Tok::Eq, "(module constants need a value)") {
-                self.recover_line();
-                return;
-            }
-            let init = self.assign();
+            // `let m: T | null`: `undefined` to start with (`null` if that's the type's absent value)
+            let init = if mutable && ty.is_some() && !self.at(Tok::Eq) {
+                let te = ty.unwrap();
+                let null_only = match &self.ast.types[te as usize].kind {
+                    TypeExprKind::Union(ms) => {
+                        let has = |k: fn(&TypeExprKind) -> bool| ms.iter().any(|&m| k(&self.ast.types[m as usize].kind));
+                        has(|k| matches!(k, TypeExprKind::Null)) && !has(|k| matches!(k, TypeExprKind::Undefined))
+                    }
+                    _ => false,
+                };
+                self.mk_expr(if null_only { ExprKind::Null } else { ExprKind::Undefined }, name_span)
+            } else {
+                if !self.expect(Tok::Eq, "(module constants need a value)") {
+                    self.recover_line();
+                    return;
+                }
+                self.assign()
+            };
             let more = self.eat(Tok::Comma);
             if !more {
                 self.terminator();
