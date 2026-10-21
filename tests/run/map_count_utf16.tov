@@ -1,0 +1,20 @@
+// Counting keys sliced from a string: indexes are UTF-16 units, as `slice` takes them.
+function count(s: string, k: int): Map<string, int> {
+  const counts = new Map<string, int>()
+  for (let i = 0; i + k <= s.length; i++) {
+    const key = s.slice(i, i + k)
+    counts.set(key, (counts.get(key) ?? 0) + 1)
+  }
+  return counts
+}
+
+function main() {
+  for (const s of ["abab", "aéaé", "日本日本日", "aé日aé日b"]) {
+    for (const k of [1, 2, 3]) {
+      const c = count(s, k)
+      const parts: string[] = []
+      c.forEach((v, key) => parts.push(`${key.length}:${v}`))
+      console.log(s.length, k, c.size, parts.join(" "))
+    }
+  }
+}

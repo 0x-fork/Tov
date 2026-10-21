@@ -112,10 +112,16 @@ extern const tv_type tv_type_i8, tv_type_i16, tv_type_i32, tv_type_u8, tv_type_u
 /* ------------------------------------------------------------------ strings (immutable UTF-8) */
 
 typedef struct tv_strbuf {
-    int32_t rc;        /* < 0: immortal (literals) */
+    int32_t rc;        /* the count (TV_STR_COUNT bits) and what's known of the text (TV_STR_ASCII
+                        * or TV_STR_WIDE, set once it's first looked at); < 0: immortal (literals) */
     int32_t len;       /* bytes, excluding the trailing NUL (strings are < 2 GiB) */
     char data[];       /* NUL-terminated */
 } tv_strbuf;
+
+#define TV_STR_COUNT 0x1FFFFFFF
+#define TV_STR_ASCII 0x20000000   /* every byte is ASCII: UTF-16 indexes are byte indexes */
+#define TV_STR_WIDE  0x40000000   /* some byte isn't */
+#define TV_STR_IMMORTAL ((int32_t)0x80000000)
 
 typedef struct tv_str {
     tv_strbuf *p;      /* never NULL; the empty string is tv_empty_str */
@@ -124,15 +130,16 @@ typedef struct tv_str {
 extern const tv_strbuf tv_empty_strbuf;
 #define TV_EMPTY_STR ((tv_str){(tv_strbuf *)&tv_empty_strbuf})
 
-/* A static literal: TV_STR_LIT(name, "text") declares `name` usable as TV_LIT(name). Immortal
- * buffers are never written, so they're const (read-only pages, nothing in __data). */
+/* A static literal of ASCII text: TV_STR_LIT(name, "text") declares `name` usable as
+ * TV_LIT(name). Immortal buffers are never written, so they're const (read-only pages,
+ * nothing in __data). */
 #define TV_STR_LIT(name, text) \
-    static const struct { int32_t rc; int32_t len; char data[sizeof(text)]; } name = { -1, sizeof(text) - 1, text }
+    static const struct { int32_t rc; int32_t len; char data[sizeof(text)]; } name = { TV_STR_IMMORTAL | TV_STR_ASCII, sizeof(text) - 1, text }
 #define TV_LIT(name) ((tv_str){(tv_strbuf *)&(name)})
 
 static inline void tv_str_retain(tv_str s) { if (s.p->rc >= 0) s.p->rc++; }
 void tv_str_release_slow(tv_str s);
-static inline void tv_str_release(tv_str s) { if (s.p->rc > 0 && --s.p->rc == 0) tv_str_release_slow(s); }
+static inline void tv_str_release(tv_str s) { if (s.p->rc > 0 && (--s.p->rc & TV_STR_COUNT) == 0) tv_str_release_slow(s); }
 
 tv_str tv_str_from(const char *bytes, size_t n);
 tv_str tv_str_from_sb(tv_sb *sb);               /* takes the builder's contents; sb is reset */
@@ -141,6 +148,51 @@ bool tv_str_eq(tv_str a, tv_str b);
 int tv_str_cmp(tv_str a, tv_str b);             /* byte order == code point order */
 uint64_t tv_str_hash(tv_str s);
 static inline tv_int tv_str_byte_len(tv_str s) { return s.p->len; }
+
+/* JavaScript's view of a string: UTF-16 code units. An ASCII string's unit indexes are its byte
+ * indexes; others' lengths and positions come from a few cached ones (so a loop over
+ * `s.charCodeAt(i)` walks the string once). A unit that is half of a surrogate pair, cut out on
+ * its own (by `slice`, `s[i]`, `split("")`), becomes U+FFFD: UTF-8 can't hold a lone surrogate. */
+bool tv_str_classify(tv_strbuf *p);             /* sets TV_STR_ASCII or TV_STR_WIDE; true if ASCII */
+static inline bool tv_str_is_ascii(tv_str s) {
+    int32_t rc = s.p->rc;
+    return (rc & TV_STR_ASCII) || (!(rc & TV_STR_WIDE) && tv_str_classify(s.p));
+}
+/* What's cached of a non-ASCII string (the last one looked at is tv_uview_last): its UTF-16
+ * length (-1 until needed), a position (unit u starts at byte b), and once it's indexed again
+ * and again, its UTF-16 units. */
+typedef struct tv_uview { const tv_strbuf *p; int64_t len, u, b; uint16_t *units; int64_t looks; } tv_uview;
+extern tv_uview *tv_uview_last;
+tv_int tv_str_wide_length(tv_strbuf *p);
+static inline tv_int tv_str_length(tv_str s) {
+    if (tv_str_is_ascii(s)) return s.p->len;
+    const tv_uview *v = tv_uview_last;
+    return v->p == s.p && v->len >= 0 ? v->len : tv_str_wide_length(s.p);
+}
+tv_int tv_str_char_code_at_slow(tv_str s, tv_int i);
+/* s.charCodeAt(i); out of range -1 (JavaScript's NaN: it fails every comparison with a code) */
+static inline tv_int tv_str_char_code_at(tv_str s, tv_int i) {
+    const tv_strbuf *p = s.p;
+    if (__builtin_expect((p->rc & TV_STR_ASCII) && (uint64_t)i < (uint64_t)p->len, 1)) return (unsigned char)p->data[i];
+    tv_uview *v = tv_uview_last;
+    if (v->p == p && v->units && (uint64_t)i < (uint64_t)v->len) return v->units[i];
+    /* the unit after the cached one, both ASCII characters: a step */
+    if (v->p == p && i == v->u + 1 && i < v->len) {
+        const unsigned char *d = (const unsigned char *)p->data + v->b;
+        if ((d[0] | d[1]) < 0x80) {
+            v->u = i;
+            v->b++;
+            return d[1];
+        }
+    }
+    return tv_str_char_code_at_slow(s, i);
+}
+tv_int tv_str_code_point_at(tv_str s, tv_int i);            /* -1 out of range */
+tv_str tv_str_unit_at(tv_str s, tv_int i);                  /* one unit as a string (0 <= i < length) */
+tv_str tv_str_char_at(tv_str s, tv_int i);                  /* charAt: "" out of range */
+tv_str tv_str_from_char_code(tv_int c);                     /* String.fromCharCode(c) */
+tv_str tv_str_from_char_codes(const tv_int *c, size_t n);   /* pairs surrogates given together */
+tv_str tv_str_from_code_points(const tv_int *c, size_t n, const char *loc);   /* traps on an invalid code point */
 
 /* JavaScript-compatible conversions */
 tv_str tv_str_from_int(tv_int v);
@@ -158,8 +210,8 @@ void tv_sb_push_str(tv_sb *sb, tv_str s);
 bool tv_parse_float(tv_str s, double *out);     /* JS Number(s)/parseFloat subset: decimal, exponent, Infinity */
 bool tv_parse_int(tv_str s, tv_int radix, tv_int *out);  /* radix 0 = 10 (or 16 with 0x); JS parseInt accepts a numeric prefix */
 
-/* String methods (JavaScript semantics, with indices in BYTES; slice positions that split
- * a UTF-8 character trap). Negative indices count from the end, as in JS slice. */
+/* String methods (JavaScript semantics: indexes count UTF-16 code units). Negative indices
+ * count from the end, as in JS slice. */
 struct tv_arr;
 struct tv_arr tv_str_chars(tv_str s);           /* one string per Unicode scalar value */
 tv_int tv_str_char_count(tv_str s);
@@ -167,8 +219,15 @@ tv_str tv_str_slice(tv_str s, tv_int start, tv_int end, bool has_end, const char
 bool tv_str_includes(tv_str s, tv_str needle);
 bool tv_str_starts_with(tv_str s, tv_str prefix);
 bool tv_str_ends_with(tv_str s, tv_str suffix);
-tv_int tv_str_index_of(tv_str s, tv_str needle);            /* byte index or -1 */
-struct tv_arr tv_str_split(tv_str s, tv_str sep);           /* "" separator splits into characters */
+tv_str tv_str_substring(tv_str s, tv_int start, tv_int end, bool has_end);
+tv_str tv_str_substr(tv_str s, tv_int start, tv_int count, bool has_count);
+tv_int tv_str_index_of(tv_str s, tv_str needle);            /* unit index or -1 */
+tv_int tv_str_index_of_from(tv_str s, tv_str needle, tv_int from);
+tv_int tv_str_last_index_of(tv_str s, tv_str needle, tv_int from, bool has_from);
+bool tv_str_includes_at(tv_str s, tv_str needle, tv_int from);
+bool tv_str_starts_with_at(tv_str s, tv_str prefix, tv_int pos);
+bool tv_str_ends_with_at(tv_str s, tv_str suffix, tv_int end);
+struct tv_arr tv_str_split(tv_str s, tv_str sep);           /* "" separator splits into UTF-16 units */
 tv_str tv_str_trim(tv_str s);
 tv_str tv_str_trim_start(tv_str s);
 tv_str tv_str_trim_end(tv_str s);
@@ -177,7 +236,7 @@ tv_str tv_str_to_lower(tv_str s);
 tv_str tv_str_replace(tv_str s, tv_str search, tv_str replacement);      /* first occurrence */
 tv_str tv_str_replace_all(tv_str s, tv_str search, tv_str replacement);
 tv_str tv_str_repeat(tv_str s, tv_int count, const char *loc);         /* traps on count < 0 */
-tv_str tv_str_pad_start(tv_str s, tv_int len, tv_str fill);            /* len in characters */
+tv_str tv_str_pad_start(tv_str s, tv_int len, tv_str fill);            /* len in UTF-16 units */
 tv_str tv_str_pad_end(tv_str s, tv_int len, tv_str fill);
 
 /* ------------------------------------------------------------------ arrays (copy-on-write) */

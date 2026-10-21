@@ -430,8 +430,6 @@ static void test_parse(void) {
 }
 
 static tv_str g_s;
-static void trap_slice(void) { tv_str r = tv_str_slice(g_s, 1, 2, true, "s.tov:4:9"); tv_str_release(r); }
-static void trap_slice_start(void) { tv_str r = tv_str_slice(g_s, -1, 0, false, "s.tov:5:1"); tv_str_release(r); }
 static void trap_repeat(void) { tv_str r = tv_str_repeat(g_s, -1, "s.tov:6:1"); tv_str_release(r); }
 static void trap_repeat_huge(void) { tv_str r = tv_str_repeat(g_s, INT64_MAX, "s.tov:7:1"); tv_str_release(r); }
 
@@ -452,13 +450,28 @@ static void test_string_methods(void) {
     CHECK_STR(tv_str_slice(h, 5, 9, true, "t"), "");
     CHECK_STR(tv_str_slice(h, 0, 100, true, "t"), "hello");
     tv_str whole = tv_str_slice(h, 0, 0, false, "t");
-    CHECK(whole.p == h.p && h.p->rc == 2);
+    CHECK(whole.p == h.p && (h.p->rc & TV_STR_COUNT) == 2);
     tv_str_release(whole);
-    CHECK_STR(tv_str_slice(s, 1, 3, true, "t"), "é");
-    CHECK_STR(tv_str_slice(s, -4, 0, false, "t"), "😀");
-    g_s = s;
-    CHECK_TRAPS(trap_slice, "trap: string index 2 is not on a UTF-8 character boundary");
-    CHECK_TRAPS(trap_slice_start, "trap: string index 9 is not on a UTF-8 character boundary");
+    /* indexes count UTF-16 units: "héllo😀" is h é l l o \uD83D \uDE00 */
+    CHECK(tv_str_length(s) == 7 && tv_str_length(h) == 5 && tv_str_length(S("")) == 0);
+    CHECK(tv_str_length(S("aaaaaaaaaaéééééééééé😀😀😀x")) == 27);
+    CHECK_STR(tv_str_slice(s, 1, 2, true, "t"), "é");
+    CHECK_STR(tv_str_slice(s, -2, 0, false, "t"), "😀");
+    CHECK_STR(tv_str_slice(s, 5, 6, true, "t"), "\xef\xbf\xbd"); /* a lone half: U+FFFD */
+    CHECK_STR(tv_str_slice(s, 6, 0, false, "t"), "\xef\xbf\xbd");
+    CHECK_STR(tv_str_slice(s, 4, 6, true, "t"), "o\xef\xbf\xbd");
+    CHECK_STR(tv_str_substring(s, 5, 1, true), "éllo");
+    CHECK_STR(tv_str_substr(s, 1, 3, true), "éll");
+    CHECK(tv_str_char_code_at(s, 0) == 'h' && tv_str_char_code_at(s, 1) == 0xE9 && tv_str_char_code_at(s, 5) == 0xD83D);
+    CHECK(tv_str_char_code_at(s, 6) == 0xDE00 && tv_str_char_code_at(s, 7) == -1 && tv_str_char_code_at(s, -1) == -1);
+    CHECK(tv_str_char_code_at(s, 2) == 'l' && tv_str_char_code_at(s, 4) == 'o'); /* walking back from the cache */
+    CHECK(tv_str_code_point_at(s, 5) == 0x1F600 && tv_str_code_point_at(s, 6) == 0xDE00 && tv_str_code_point_at(s, 9) == -1);
+    CHECK_STR(tv_str_char_at(s, 1), "é");
+    CHECK_STR(tv_str_char_at(s, 70), "");
+    CHECK_STR(tv_str_from_char_codes((tv_int[]){0xD83D, 0xDE00, 'a'}, 3), "😀a");
+    CHECK_STR(tv_str_from_char_code(0xDE00), "\xef\xbf\xbd");
+    CHECK(tv_str_last_index_of(S("é😀é😀"), S("é"), 0, false) == 3 && tv_str_last_index_of(S("é😀é😀"), S("😀"), 3, true) == 1);
+    CHECK(tv_str_index_of_from(S("é😀é😀"), S("😀"), 2) == 4 && tv_str_index_of_from(S("é😀é"), S(""), 9) == 4);
 
     CHECK(tv_str_includes(h, S("ell")) && !tv_str_includes(h, S("elo")) && tv_str_includes(h, S("")));
     CHECK(tv_str_starts_with(h, S("he")) && !tv_str_starts_with(h, S("hello!")) && tv_str_starts_with(h, S("")));
@@ -467,7 +480,7 @@ static void test_string_methods(void) {
     CHECK(tv_str_index_of(h, S("")) == 0);
     CHECK(tv_str_index_of(h, S("xyz")) == -1);
     CHECK(tv_str_index_of(S("aaab"), S("aab")) == 1);
-    CHECK(tv_str_index_of(s, S("😀")) == 6);
+    CHECK(tv_str_index_of(s, S("😀")) == 5);
     CHECK(tv_str_index_of(S("ab"), S("abc")) == -1);
 
     CHECK_STR_ARR(tv_str_split(S("a,b,,c"), S(",")), "a", "b", "", "c");
@@ -477,7 +490,7 @@ static void test_string_methods(void) {
     CHECK_STR_ARR(tv_str_split(S("a--b--"), S("--")), "a", "b", "");
     CHECK_STR_ARR(tv_str_split(S("--"), S("--")), "", "");
     CHECK_STR_ARR(tv_str_split(S("abc"), S("x")), "abc");
-    CHECK_STR_ARR(tv_str_split(S("é😀"), S("")), "é", "😀");
+    CHECK_STR_ARR(tv_str_split(S("é😀"), S("")), "é", "\xef\xbf\xbd", "\xef\xbf\xbd");
     CHECK_STR_ARR(tv_str_split(S("aaa"), S("aa")), "", "a");
 
     CHECK_STR(tv_str_trim(S(" \t\n\v\f\r hi there \xc2\xa0\xe3\x80\x80\xef\xbb\xbf\xe2\x80\xa8")), "hi there");
@@ -526,7 +539,9 @@ static void test_string_methods(void) {
     CHECK_STR(tv_str_pad_start(S("abc"), 10, S("123")), "1231231abc");
     CHECK_STR(tv_str_pad_end(S("é"), 4, S("ü")), "éüüü");
     CHECK_STR(tv_str_pad_end(S("a"), 4, S("xy")), "axyx");
-    CHECK_STR(tv_str_pad_start(S("😀"), 3, S("é😀")), "é😀😀");
+    CHECK_STR(tv_str_pad_start(S("😀"), 3, S("é😀")), "é😀");
+    CHECK_STR(tv_str_pad_start(S("x"), 3, S("😀")), "😀x");
+    CHECK_STR(tv_str_pad_start(S("x"), 2, S("😀")), "\xef\xbf\xbdx");
     CHECK_STR(tv_str_pad_start(S("abc"), 2, S("x")), "abc");
     CHECK_STR(tv_str_pad_start(S("abc"), 6, S("")), "abc");
     CHECK_STR(tv_str_pad_end(S("abc"), -5, S("x")), "abc");

@@ -626,7 +626,8 @@ impl<'c, 'a> Gen<'c, 'a> {
             return format!("TVG_LIT({n})");
         }
         let n = format!("L{}", self.lit_names.len());
-        let _ = writeln!(self.lits, "TVG_STR_LIT({n}, {});", c_string(bytes));
+        let flag = if bytes.is_ascii() { "TV_STR_ASCII" } else { "TV_STR_WIDE" };
+        let _ = writeln!(self.lits, "TVG_STR_LIT({n}, {}, {flag});", c_string(bytes));
         self.lit_names.insert(bytes.to_vec(), n.clone());
         format!("TVG_LIT({n})")
     }
@@ -1716,7 +1717,7 @@ const PRELUDE: &str = r#"
 typedef uint8_t tv_unit;
 /* String literals are real tv_strbuf objects (GNU static flexible-array initializer), so the
  * program can be compiled with strict aliasing. */
-#define TVG_STR_LIT(name, text) static const tv_strbuf name = { -1, sizeof(text) - 1, text }
+#define TVG_STR_LIT(name, text, kind) static const tv_strbuf name = { TV_STR_IMMORTAL | kind, sizeof(text) - 1, text }
 #define TVG_LIT(name) ((tv_str){(tv_strbuf *)&(name)})
 /* Boxes, cells and class instances come from the runtime's small-object free lists (sizes
  * known at every call site, 8-byte classes, see tv_small_bins). */

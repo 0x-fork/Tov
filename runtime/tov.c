@@ -556,10 +556,10 @@ int32_t tv_f64_to_i32_slow(double d) {
 
 /* ================================================================== strings */
 
-const tv_strbuf tv_empty_strbuf = {-1, 0, {0}}; /* flexible-array initializer: GNU C (gcc, clang) */
+const tv_strbuf tv_empty_strbuf = {TV_STR_IMMORTAL | TV_STR_ASCII, 0, {0}}; /* flexible-array initializer: GNU C (gcc, clang) */
 
 typedef struct { int32_t rc; int32_t len; char data[4]; } tv_small_strbuf;
-#define TV_A1(c) {-1, 1, {(char)(c), 0}}
+#define TV_A1(c) {TV_STR_IMMORTAL | TV_STR_ASCII, 1, {(char)(c), 0}}
 #define TV_A4(c) TV_A1(c), TV_A1((c) + 1), TV_A1((c) + 2), TV_A1((c) + 3)
 #define TV_A16(c) TV_A4(c), TV_A4((c) + 4), TV_A4((c) + 8), TV_A4((c) + 12)
 /* Immortal one-character strings for printable ASCII: chars()/split("") and friends don't allocate for them. */
@@ -657,7 +657,9 @@ static tv_strbuf *tv_strbuf_new(size_t n) {
     return b;
 }
 
+static void tv_uview_drop(const tv_strbuf *p);
 void tv_str_release_slow(tv_str s) {
+    if (s.p->rc & TV_STR_WIDE) tv_uview_drop(s.p);
     size_t size = tv_strbuf_size((size_t)s.p->len);
     if (size <= TV_SMALL_MAX) tv_small_free(s.p, size);
 #ifdef TV_SB_MAPS
@@ -675,6 +677,13 @@ tv_str tv_str_from(const char *bytes, size_t n) {
     tv_strbuf *b = tv_strbuf_new(n);
     tv_copy(b->data, bytes, n);
     return (tv_str){b};
+}
+
+/* Text known to be ASCII (number formatting): its UTF-16 length is its byte length. */
+static tv_str tv_str_from_ascii(const char *bytes, size_t n) {
+    tv_str r = tv_str_from(bytes, n);
+    if (r.p->rc > 0) r.p->rc |= TV_STR_ASCII;
+    return r;
 }
 
 tv_str tv_str_from_sb(tv_sb *sb) {
@@ -732,6 +741,7 @@ tv_str tv_str_concat(tv_str a, tv_str b) {
     tv_strbuf *r = tv_strbuf_new(tv_size_mul_add(na, 1, nb));
     memcpy(r->data, a.p->data, na);
     memcpy(r->data + na, b.p->data, nb);
+    r->rc |= (a.p->rc & b.p->rc & TV_STR_ASCII) | ((a.p->rc | b.p->rc) & TV_STR_WIDE);
     return (tv_str){r};
 }
 
@@ -772,7 +782,7 @@ static size_t tv_fmt_i64(char *buf, int64_t v) { /* buf >= 21 bytes */
 
 tv_str tv_str_from_int(tv_int v) {
     char buf[24];
-    return tv_str_from(buf, tv_fmt_i64(buf, v));
+    return tv_str_from_ascii(buf, tv_fmt_i64(buf, v));
 }
 
 void tv_sb_push_int(tv_sb *sb, tv_int v) {
@@ -900,7 +910,7 @@ static size_t tv_fmt_number(char *buf, double v, bool is_f32) {
 
 tv_str tv_str_from_f64(double v) {
     char buf[40];
-    return tv_str_from(buf, tv_fmt_number(buf, v, false));
+    return tv_str_from_ascii(buf, tv_fmt_number(buf, v, false));
 }
 
 static const char tv_radix_digits[] = "0123456789abcdefghijklmnopqrstuvwxyz";
@@ -914,7 +924,7 @@ tv_str tv_int_to_radix(tv_int v, tv_int radix, const char *loc) {
         u /= (uint64_t)radix;
     } while (u);
     if (v < 0) *--p = '-';
-    return tv_str_from(p, (size_t)(end - p));
+    return tv_str_from_ascii(p, (size_t)(end - p));
 }
 
 /* V8's DoubleToRadixCString: the shortest digits that read back as v, fractions
@@ -972,7 +982,7 @@ tv_str tv_f64_to_radix(double v, tv_int radix, const char *loc) {
         integer = (integer - rem) / r;
     } while (integer > 0);
     if (neg) buf[--icur] = '-';
-    return tv_str_from(buf + icur, (size_t)(fcur - icur));
+    return tv_str_from_ascii(buf + icur, (size_t)(fcur - icur));
 }
 
 void tv_sb_push_f64(tv_sb *sb, double v) {
@@ -1022,7 +1032,7 @@ tv_str tv_f64_to_fixed(double v, tv_int digits, const char *loc) {
     } else {
         len = snprintf(buf, sizeof buf, "%.*f", f, v);
     }
-    return tv_str_from(buf, (size_t)len);
+    return tv_str_from_ascii(buf, (size_t)len);
 }
 
 tv_str tv_int_to_fixed(tv_int v, tv_int digits, const char *loc) {
@@ -1101,11 +1111,277 @@ tv_int tv_str_char_count(tv_str s) {
     return (tv_int)count;
 }
 
-/* Byte offset after `chars` characters starting at d (bounded by n). */
-static size_t tv_utf8_advance(const char *d, size_t n, size_t chars) {
-    size_t i = 0;
-    while (chars-- && i < n) i += tv_utf8_len((unsigned char)d[i]);
-    return i < n ? i : n;
+/* ------------------------------------------------------------------ UTF-16 view */
+
+static const tv_strbuf tv_fffd_strbuf = {TV_STR_IMMORTAL | TV_STR_WIDE, 3, {(char)0xEF, (char)0xBF, (char)0xBD, 0}};
+
+static inline bool tv_ascii8(const unsigned char *p) { return (tv_r64(p) & 0x8080808080808080ULL) == 0; }
+
+static inline void tv_str_mark(tv_str s, bool ascii) {
+    if (s.p->rc > 0) s.p->rc |= ascii ? TV_STR_ASCII : TV_STR_WIDE;
+}
+
+__attribute__((noinline, cold)) bool tv_str_classify(tv_strbuf *p) {
+    const unsigned char *d = (const unsigned char *)p->data;
+    size_t n = (size_t)p->len, i = 0;
+    uint64_t any = 0;
+    for (; i + 8 <= n; i += 8) any |= tv_r64(d + i);
+    for (; i < n; i++) any |= d[i];
+    bool ascii = (any & 0x8080808080808080ULL) == 0;
+    if (p->rc >= 0) p->rc |= ascii ? TV_STR_ASCII : TV_STR_WIDE;
+    return ascii;
+}
+
+/* The character starting at d[i] (n bytes in all): its byte length, *units its UTF-16 length. */
+static inline size_t tv_char_units(const unsigned char *d, size_t n, size_t i, int64_t *units) {
+    size_t l = tv_utf8_len(d[i]);
+    if (l > n - i) l = n - i;
+    *units = l == 4 ? 2 : 1;
+    return l;
+}
+
+/* UTF-16 units in d[from, to), both character boundaries. */
+static int64_t tv_units_between(const unsigned char *d, size_t n, size_t from, size_t to) {
+    size_t i = from;
+    int64_t u = 0, k;
+    while (i < to) {
+        if (i + 8 <= to && tv_ascii8(d + i)) { i += 8; u += 8; continue; }
+        i += tv_char_units(d, n, i, &k);
+        u += k;
+    }
+    return u;
+}
+
+/* What's known of a few non-ASCII strings: the length (-1 until needed) and the last position
+ * converted (a character boundary: its unit and byte index), so walking one index by index,
+ * either way, converts each index in a step; and a loop over two strings (an edit distance)
+ * keeps both. Freeing a string drops its entry. */
+enum { TV_UVIEWS = 4 };
+static tv_uview tv_uviews[TV_UVIEWS];
+static unsigned tv_uview_next;
+
+tv_uview *tv_uview_last = tv_uviews;
+
+static inline tv_uview *tv_uview_of(const tv_strbuf *p) {
+    if (TV_LIKELY(tv_uview_last->p == p)) return tv_uview_last;
+    tv_uview *v = NULL;
+    for (int i = 0; i < TV_UVIEWS; i++)
+        if (tv_uviews[i].p == p) v = &tv_uviews[i];
+    if (!v) {
+        v = &tv_uviews[tv_uview_next++ % TV_UVIEWS];
+        free(v->units);
+        *v = (tv_uview){p, -1, 0, 0, NULL, 0};
+    }
+    tv_uview_last = v;
+    return v;
+}
+
+static void tv_uview_drop(const tv_strbuf *p) {
+    for (int i = 0; i < TV_UVIEWS; i++)
+        if (tv_uviews[i].p == p) {
+            free(tv_uviews[i].units);
+            tv_uviews[i] = (tv_uview){NULL, -1, 0, 0, NULL, 0};
+        }
+}
+
+tv_int tv_str_wide_length(tv_strbuf *p) {
+    tv_uview *v = tv_uview_of(p);
+    if (v->len < 0) v->len = tv_units_between((const unsigned char *)p->data, (size_t)p->len, 0, (size_t)p->len);
+    return v->len;
+}
+
+/* Byte offset of the character holding unit u (0 <= u) of a non-ASCII string (past the end:
+ * its end); *mid when u is the second half of a surrogate pair (that character's low half). */
+static size_t tv_str_unit_byte(const tv_strbuf *p, int64_t u, bool *mid) {
+    const unsigned char *d = (const unsigned char *)p->data;
+    size_t n = (size_t)p->len;
+    tv_uview *v = tv_uview_of(p);
+    int64_t cu = v->u, k;
+    size_t b = (size_t)v->b;
+    *mid = false;
+    if (u < cu && u < cu - u) { cu = 0; b = 0; } /* nearer the start than the cache */
+    if (u < cu) {                                /* walk back */
+        while (cu > u && b > 0) {
+            size_t st = b - 1;
+            while (st > 0 && tv_is_cont(d[st]) && b - st < 4) st--;
+            tv_char_units(d, n, st, &k);
+            b = st;
+            cu -= k;
+        }
+        *mid = cu < u;
+    } else {
+        while (cu < u && b < n) {
+            if (u - cu >= 8 && b + 8 <= n && tv_ascii8(d + b)) { b += 8; cu += 8; continue; }
+            size_t l = tv_char_units(d, n, b, &k);
+            if (cu + k > u) { *mid = true; break; }
+            cu += k;
+            b += l;
+        }
+    }
+    v->u = cu;
+    v->b = (int64_t)b;
+    return b;
+}
+
+/* Unit index of byte offset b (a character boundary) of a non-ASCII string. */
+static int64_t tv_str_byte_unit(const tv_strbuf *p, size_t b) {
+    tv_uview *v = tv_uview_of(p);
+    size_t from = 0;
+    int64_t u = 0;
+    if ((size_t)v->b <= b) { from = (size_t)v->b; u = v->u; }
+    u += tv_units_between((const unsigned char *)p->data, (size_t)p->len, from, b);
+    v->u = u;
+    v->b = (int64_t)b;
+    return u;
+}
+
+static inline uint32_t tv_decode_at(const tv_strbuf *p, size_t b) {
+    uint32_t cp;
+    tv_utf8_decode((const unsigned char *)p->data + b, (size_t)p->len - b, &cp);
+    return cp;
+}
+
+/* A string indexed again and again gets its UTF-16 units (up to 16M of them, 32 MiB), so each
+ * index after that is a load, as in a JavaScript engine's two-byte string. */
+static bool tv_uview_units(tv_uview *v) {
+    if (++v->looks < 64 || v->len > (16 << 20)) return false;
+    uint16_t *w = (uint16_t *)tv_alloc((size_t)v->len * 2 + 2), *o = w;
+    const unsigned char *d = (const unsigned char *)v->p->data;
+    size_t n = (size_t)v->p->len, i = 0;
+    while (i < n) {
+        uint32_t cp;
+        size_t l = tv_utf8_decode(d + i, n - i, &cp);
+        if (l == 4) {
+            *o++ = (uint16_t)(0xD800 + ((cp - 0x10000) >> 10));
+            *o++ = (uint16_t)(0xDC00 + ((cp - 0x10000) & 0x3FF));
+        } else {
+            *o++ = (uint16_t)cp;
+        }
+        i += l;
+    }
+    v->units = w;
+    return true;
+}
+
+tv_int tv_str_char_code_at_slow(tv_str s, tv_int i) {
+    if (tv_str_is_ascii(s)) return (uint64_t)i < (uint64_t)s.p->len ? (unsigned char)s.p->data[i] : -1;
+    tv_uview *v = tv_uview_of(s.p);
+    const unsigned char *d = (const unsigned char *)s.p->data;
+    if (v->len < 0) v->len = tv_units_between(d, (size_t)s.p->len, 0, (size_t)s.p->len);
+    if ((uint64_t)i >= (uint64_t)v->len) return -1;
+    if (v->units || tv_uview_units(v)) return v->units[i];
+    if (i == v->u + 1 && d[v->b] < 0x80) { /* the next unit after a one-byte character */
+        v->u = i;
+        v->b++;
+        if (d[v->b] < 0x80) return d[v->b];
+    }
+    bool mid;
+    uint32_t cp = tv_decode_at(s.p, tv_str_unit_byte(s.p, i, &mid));
+    if (cp < 0x10000) return cp;
+    return mid ? 0xDC00 + ((cp - 0x10000) & 0x3FF) : 0xD800 + ((cp - 0x10000) >> 10);
+}
+
+tv_int tv_str_code_point_at(tv_str s, tv_int i) {
+    if (tv_str_is_ascii(s)) return (uint64_t)i < (uint64_t)s.p->len ? (unsigned char)s.p->data[i] : -1;
+    if ((uint64_t)i >= (uint64_t)tv_str_wide_length(s.p)) return -1;
+    bool mid;
+    uint32_t cp = tv_decode_at(s.p, tv_str_unit_byte(s.p, i, &mid));
+    return mid ? 0xDC00 + ((cp - 0x10000) & 0x3FF) : cp;
+}
+
+/* Bytes [*ba, *bb) for units [a, b) (0 <= a < b <= length) of s; *pre / *post when the range
+ * starts with a pair's low half / ends with a pair's high half (each becomes U+FFFD). */
+static void tv_unit_range(tv_str s, int64_t a, int64_t b, size_t *ba, size_t *bb, bool *pre, bool *post) {
+    if (tv_str_is_ascii(s)) { *ba = (size_t)a; *bb = (size_t)b; *pre = *post = false; return; }
+    bool mid;
+    size_t x = tv_str_unit_byte(s.p, a, &mid);
+    *pre = mid;
+    if (mid) x += 4;
+    size_t y = tv_str_unit_byte(s.p, b, &mid);
+    *post = mid;
+    if (y < x) y = x; /* (units a, a + 1 of one pair: its low half only) */
+    *ba = x;
+    *bb = y;
+}
+
+/* Units [a, b) of s (clamped already) as a string. */
+static tv_str tv_str_units(tv_str s, int64_t a, int64_t b) {
+    if (a >= b) return TV_EMPTY_STR;
+    size_t x, y;
+    bool pre, post;
+    tv_unit_range(s, a, b, &x, &y, &pre, &post);
+    if (!pre && !post) {
+        if (x == 0 && y == (size_t)s.p->len) { tv_str_retain(s); return s; }
+        tv_str r = tv_str_from(s.p->data + x, y - x);
+        if (s.p->rc & TV_STR_ASCII) tv_str_mark(r, true);
+        return r;
+    }
+    if (b - a == 1) return (tv_str){(tv_strbuf *)&tv_fffd_strbuf};
+    tv_sb sb = {0};
+    if (pre) tv_sb_push(&sb, "\xEF\xBF\xBD", 3);
+    tv_sb_push(&sb, s.p->data + x, y - x);
+    if (post) tv_sb_push(&sb, "\xEF\xBF\xBD", 3);
+    return tv_str_from_sb(&sb);
+}
+
+tv_str tv_str_unit_at(tv_str s, tv_int i) {
+    if (tv_str_is_ascii(s)) {
+        unsigned char c = (unsigned char)s.p->data[i];
+        return c - 32u < 96u ? tv_ascii_str(c) : tv_str_from(s.p->data + i, 1);
+    }
+    return tv_str_units(s, i, i + 1);
+}
+
+tv_str tv_str_char_at(tv_str s, tv_int i) {
+    if ((uint64_t)i >= (uint64_t)tv_str_length(s)) return TV_EMPTY_STR;
+    return tv_str_unit_at(s, i);
+}
+
+static void tv_sb_push_utf8(tv_sb *sb, uint32_t cp);
+
+/* Appends UTF-16 unit c, pairing it with a pending high surrogate *hi. */
+static void tv_sb_push_unit(tv_sb *sb, uint32_t c, uint32_t *hi) {
+    if (*hi) {
+        uint32_t h = *hi;
+        *hi = 0;
+        if (c >= 0xDC00 && c <= 0xDFFF) {
+            tv_sb_push_utf8(sb, 0x10000 + ((h - 0xD800) << 10) + (c - 0xDC00));
+            return;
+        }
+        tv_sb_push(sb, "\xEF\xBF\xBD", 3);
+    }
+    if (c >= 0xD800 && c <= 0xDBFF) { *hi = c; return; }
+    if (c >= 0xDC00 && c <= 0xDFFF) c = 0xFFFD;
+    tv_sb_push_utf8(sb, c);
+}
+
+tv_str tv_str_from_char_codes(const tv_int *c, size_t n) {
+    tv_sb sb = {0};
+    uint32_t hi = 0;
+    for (size_t i = 0; i < n; i++) tv_sb_push_unit(&sb, (uint32_t)c[i] & 0xFFFF, &hi);
+    if (hi) tv_sb_push(&sb, "\xEF\xBF\xBD", 3);
+    return tv_str_from_sb(&sb);
+}
+
+tv_str tv_str_from_char_code(tv_int c) {
+    uint32_t u = (uint32_t)c & 0xFFFF;
+    if (u - 32u < 96u) return tv_ascii_str((unsigned char)u);
+    return tv_str_from_char_codes(&c, 1);
+}
+
+tv_str tv_str_from_code_points(const tv_int *c, size_t n, const char *loc) {
+    tv_sb sb = {0};
+    for (size_t i = 0; i < n; i++) {
+        if (c[i] < 0 || c[i] > 0x10FFFF) {
+            char msg[80];
+            snprintf(msg, sizeof msg, "invalid code point %lld", (long long)c[i]);
+            tv_trap(msg, loc);
+        }
+        uint32_t cp = (uint32_t)c[i];
+        if (cp >= 0xD800 && cp <= 0xDFFF) cp = 0xFFFD;
+        tv_sb_push_utf8(&sb, cp);
+    }
+    return tv_str_from_sb(&sb);
 }
 
 /* ------------------------------------------------------------------ string methods */
@@ -1115,23 +1391,27 @@ static inline int64_t tv_clamp_index(int64_t i, int64_t len) {
     return i > len ? len : i;
 }
 
-static void tv_check_boundary(tv_str s, int64_t i, const char *loc) {
-    if (i > 0 && i < s.p->len && tv_is_cont((unsigned char)s.p->data[i])) {
-        char msg[96];
-        snprintf(msg, sizeof msg, "string index %lld is not on a UTF-8 character boundary", (long long)i);
-        tv_trap(msg, loc);
-    }
-}
+static inline int64_t tv_clamp0(int64_t i, int64_t len) { return i < 0 ? 0 : i > len ? len : i; }
 
 tv_str tv_str_slice(tv_str s, tv_int start, tv_int end, bool has_end, const char *loc) {
-    int64_t len = s.p->len;
+    (void)loc;
+    int64_t len = tv_str_length(s);
     int64_t a = tv_clamp_index(start, len);
     int64_t b = has_end ? tv_clamp_index(end, len) : len;
-    if (b < a) b = a;
-    tv_check_boundary(s, a, loc);
-    tv_check_boundary(s, b, loc);
-    if (a == 0 && b == len) { tv_str_retain(s); return s; }
-    return tv_str_from(s.p->data + a, (size_t)(b - a));
+    return tv_str_units(s, a, b);
+}
+
+tv_str tv_str_substring(tv_str s, tv_int start, tv_int end, bool has_end) {
+    int64_t len = tv_str_length(s);
+    int64_t a = tv_clamp0(start, len), b = has_end ? tv_clamp0(end, len) : len;
+    return a <= b ? tv_str_units(s, a, b) : tv_str_units(s, b, a);
+}
+
+tv_str tv_str_substr(tv_str s, tv_int start, tv_int count, bool has_count) {
+    int64_t len = tv_str_length(s);
+    int64_t a = tv_clamp_index(start, len);
+    int64_t b = !has_count ? len : count <= 0 ? a : count > len - a ? len : a + count;
+    return tv_str_units(s, a, b);
 }
 
 /* Byte index of needle in h at or after `from`, or -1. */
@@ -1149,7 +1429,69 @@ static int64_t tv_find(const char *h, size_t hn, const char *nd, size_t nn, size
     return -1;
 }
 
-bool tv_str_includes(tv_str s, tv_str needle) { return tv_str_index_of(s, needle) >= 0; }
+bool tv_str_includes(tv_str s, tv_str needle) {
+    return tv_find(s.p->data, (size_t)s.p->len, needle.p->data, (size_t)needle.p->len, 0) >= 0;
+}
+
+/* Byte offset of unit u (>= 0; past the end: the end). *mid as for tv_str_unit_byte. */
+static inline size_t tv_unit_to_byte(tv_str s, int64_t u, bool *mid) {
+    *mid = false;
+    if (tv_str_is_ascii(s)) return u > s.p->len ? (size_t)s.p->len : (size_t)u;
+    return tv_str_unit_byte(s.p, u, mid);
+}
+
+/* Unit index of byte offset b (a character boundary). (A string whose length isn't known yet
+ * just counts up to b, which costs no more than finding b did.) */
+static inline int64_t tv_byte_to_unit(tv_str s, size_t b) {
+    if (s.p->rc & TV_STR_ASCII) return (int64_t)b;
+    return tv_str_byte_unit(s.p, b);
+}
+
+tv_int tv_str_index_of_from(tv_str s, tv_str needle, tv_int from) {
+    bool mid = false;
+    size_t fb = from <= 0 ? 0 : tv_unit_to_byte(s, from, &mid);
+    if (mid) fb += 4; /* (no match starts at a pair's second half) */
+    if (needle.p->len == 0) {
+        int64_t len = tv_str_length(s);
+        return from <= 0 ? 0 : from > len ? len : from;
+    }
+    int64_t pos = tv_find(s.p->data, (size_t)s.p->len, needle.p->data, (size_t)needle.p->len, fb);
+    return pos < 0 ? -1 : tv_byte_to_unit(s, (size_t)pos);
+}
+
+tv_int tv_str_last_index_of(tv_str s, tv_str needle, tv_int from, bool has_from) {
+    int64_t len = tv_str_length(s);
+    int64_t start = !has_from || from > len ? len : from < 0 ? 0 : from;
+    if (needle.p->len == 0) return start;
+    size_t n = (size_t)s.p->len, nn = (size_t)needle.p->len;
+    if (nn > n) return -1;
+    bool mid;
+    size_t k = tv_unit_to_byte(s, start, &mid);
+    if (k > n - nn) k = n - nn;
+    const char *h = s.p->data, *nd = needle.p->data;
+    for (;;) {
+        if (h[k] == nd[0] && memcmp(h + k, nd, nn) == 0) return tv_byte_to_unit(s, k);
+        if (k == 0) return -1;
+        k--;
+    }
+}
+
+bool tv_str_includes_at(tv_str s, tv_str needle, tv_int from) { return tv_str_index_of_from(s, needle, from) >= 0; }
+
+bool tv_str_starts_with_at(tv_str s, tv_str prefix, tv_int pos) {
+    bool mid = false;
+    size_t b = pos <= 0 ? 0 : tv_unit_to_byte(s, pos, &mid);
+    if (mid) return prefix.p->len == 0;
+    return (size_t)prefix.p->len <= (size_t)s.p->len - b && memcmp(s.p->data + b, prefix.p->data, (size_t)prefix.p->len) == 0;
+}
+
+bool tv_str_ends_with_at(tv_str s, tv_str suffix, tv_int end) {
+    bool mid = false;
+    size_t e = end <= 0 ? 0 : tv_unit_to_byte(s, end, &mid);
+    if (mid) return suffix.p->len == 0;
+    size_t nn = (size_t)suffix.p->len;
+    return nn <= e && memcmp(s.p->data + e - nn, suffix.p->data, nn) == 0;
+}
 
 bool tv_str_starts_with(tv_str s, tv_str prefix) {
     return prefix.p->len <= s.p->len && memcmp(s.p->data, prefix.p->data, (size_t)prefix.p->len) == 0;
@@ -1161,7 +1503,8 @@ bool tv_str_ends_with(tv_str s, tv_str suffix) {
 }
 
 tv_int tv_str_index_of(tv_str s, tv_str needle) {
-    return tv_find(s.p->data, (size_t)s.p->len, needle.p->data, (size_t)needle.p->len, 0);
+    int64_t pos = tv_find(s.p->data, (size_t)s.p->len, needle.p->data, (size_t)needle.p->len, 0);
+    return pos <= 0 ? pos : tv_byte_to_unit(s, (size_t)pos);
 }
 
 static tv_arrbuf *tv_arrbuf_new(size_t esize, int64_t cap);
@@ -1184,7 +1527,26 @@ tv_arr tv_str_chars(tv_str s) {
 }
 
 tv_arr tv_str_split(tv_str s, tv_str sep) {
-    if (sep.p->len == 0) return tv_str_chars(s);
+    if (sep.p->len == 0) {
+        if (tv_str_is_ascii(s)) return tv_str_chars(s);
+        /* into UTF-16 units: a pair's halves can't stand alone in UTF-8, each is U+FFFD */
+        tv_arrbuf *b = tv_arrbuf_new(sizeof(tv_str), tv_str_length(s));
+        tv_str *out = (tv_str *)(void *)b->data;
+        const unsigned char *d = (const unsigned char *)s.p->data;
+        size_t n = (size_t)s.p->len, i = 0;
+        int64_t k = 0, units;
+        while (i < n) {
+            size_t l = tv_char_units(d, n, i, &units);
+            if (units == 2) {
+                out[k++] = (tv_str){(tv_strbuf *)&tv_fffd_strbuf};
+                out[k++] = (tv_str){(tv_strbuf *)&tv_fffd_strbuf};
+            } else {
+                out[k++] = d[i] - 32u < 96u ? tv_ascii_str(d[i]) : tv_str_from((const char *)d + i, l);
+            }
+            i += l;
+        }
+        return (tv_arr){b, k};
+    }
     tv_arr r = TV_EMPTY_ARR;
     const char *d = s.p->data;
     size_t n = (size_t)s.p->len, sn = (size_t)sep.p->len, from = 0;
@@ -1194,9 +1556,11 @@ tv_arr tv_str_split(tv_str s, tv_str sep) {
         tv_arr_push(&r, &tv_type_str, &s);
         return r;
     }
+    bool ascii = tv_str_is_ascii(s); /* (then so are the pieces: none needs a look of its own) */
     for (;;) {
         size_t end = pos < 0 ? n : (size_t)pos;
         tv_str piece = tv_str_from(d + from, end - from);
+        if (ascii) tv_str_mark(piece, true);
         tv_arr_push_fast(&r, &tv_type_str, &piece);
         if (pos < 0) break;
         from = end + sn;
@@ -1209,7 +1573,9 @@ static tv_str tv_str_trim_impl(tv_str s, bool left, bool right) {
     size_t a, b;
     tv_trim_range(s, left, right, &a, &b);
     if (a == 0 && b == (size_t)s.p->len) { tv_str_retain(s); return s; }
-    return tv_str_from(s.p->data + a, b - a);
+    tv_str r = tv_str_from(s.p->data + a, b - a);
+    if (s.p->rc & TV_STR_ASCII) tv_str_mark(r, true);
+    return r;
 }
 
 tv_str tv_str_trim(tv_str s) { return tv_str_trim_impl(s, true, true); }
@@ -1225,6 +1591,7 @@ static tv_str tv_str_map_ascii(tv_str s, char lo, char hi, int delta) {
     memcpy(b->data, d, n);
     for (; i < n; i++)
         if (b->data[i] >= lo && b->data[i] <= hi) b->data[i] = (char)(b->data[i] + delta);
+    b->rc |= s.p->rc & (TV_STR_ASCII | TV_STR_WIDE);
     return (tv_str){b};
 }
 
@@ -1257,7 +1624,9 @@ tv_str tv_str_replace(tv_str s, tv_str search, tv_str replacement) {
     tv_sb_push(&sb, d, (size_t)pos);
     tv_push_replacement(&sb, replacement, d, n, (size_t)pos, mn);
     tv_sb_push(&sb, d + pos + mn, n - (size_t)pos - mn);
-    return tv_str_from_sb(&sb);
+    tv_str r = tv_str_from_sb(&sb);
+    if (s.p->rc & replacement.p->rc & TV_STR_ASCII) tv_str_mark(r, true);
+    return r;
 }
 
 tv_str tv_str_replace_all(tv_str s, tv_str search, tv_str replacement) {
@@ -1286,7 +1655,9 @@ tv_str tv_str_replace_all(tv_str s, tv_str search, tv_str replacement) {
         pos = tv_find(d, n, search.p->data, mn, last);
     }
     tv_sb_push(&sb, d + last, n - last);
-    return tv_str_from_sb(&sb);
+    tv_str r = tv_str_from_sb(&sb);
+    if (s.p->rc & replacement.p->rc & TV_STR_ASCII) tv_str_mark(r, true);
+    return r;
 }
 
 tv_str tv_str_repeat(tv_str s, tv_int count, const char *loc) {
@@ -1308,19 +1679,24 @@ tv_str tv_str_repeat(tv_str s, tv_int count, const char *loc) {
         memcpy(b->data + have, b->data, c);
         have += c;
     }
+    b->rc |= s.p->rc & (TV_STR_ASCII | TV_STR_WIDE);
     return (tv_str){b};
 }
 
 /* Appends `chars` characters of fill (cycled). fill is non-empty. */
-static void tv_push_fill(tv_sb *sb, tv_str fill, int64_t chars) {
-    int64_t fc = tv_str_char_count(fill);
-    int64_t full = chars / fc, rem = chars % fc;
+static void tv_push_fill(tv_sb *sb, tv_str fill, int64_t units) {
+    int64_t fc = tv_str_length(fill);
+    int64_t full = units / fc, rem = units % fc;
     for (int64_t i = 0; i < full; i++) tv_sb_push_str(sb, fill);
-    tv_sb_push(sb, fill.p->data, tv_utf8_advance(fill.p->data, (size_t)fill.p->len, (size_t)rem));
+    if (rem) {
+        tv_str part = tv_str_units(fill, 0, rem);
+        tv_sb_push_str(sb, part);
+        tv_str_release(part);
+    }
 }
 
 static tv_str tv_str_pad(tv_str s, tv_int len, tv_str fill, bool at_start) {
-    int64_t cur = tv_str_char_count(s);
+    int64_t cur = tv_str_length(s);
     if (len <= cur || fill.p->len == 0) { tv_str_retain(s); return s; }
     tv_sb sb = {0};
     if (!at_start) tv_sb_push_str(&sb, s);
@@ -1713,8 +2089,12 @@ tv_str tv_arr_join(tv_arr a, const tv_type *t, tv_str sep) {
         int64_t n = tv_arr_len(a);
         const tv_str *xs = (const tv_str *)(void *)a.p->data;
         size_t sl = (size_t)sep.p->len, total = sl * (size_t)(n - 1);
-        for (int64_t i = 0; i < n; i++)
+        int32_t all = sep.p->rc, any = sep.p->rc; /* what's known of the parts */
+        for (int64_t i = 0; i < n; i++) {
             if (__builtin_add_overflow(total, (size_t)xs[i].p->len, &total)) tv_trap("string too long", NULL);
+            all &= xs[i].p->rc;
+            any |= xs[i].p->rc;
+        }
         tv_strbuf *b = tv_strbuf_new(total);
         char *w = b->data;
         for (int64_t i = 0; i < n; i++) {
@@ -1725,6 +2105,7 @@ tv_str tv_arr_join(tv_arr a, const tv_type *t, tv_str sep) {
             memcpy(w, xs[i].p->data, (size_t)xs[i].p->len);
             w += xs[i].p->len;
         }
+        b->rc |= (all & TV_STR_ASCII) | (any & TV_STR_WIDE);
         return (tv_str){b};
     }
     tv_sb sb = {0};
@@ -1949,15 +2330,8 @@ void *tv_map_slot(tv_map *mp, const tv_type *kt, const tv_type *vt, void *key, b
     return e + L.voff;
 }
 
-void *tv_map_slot_slice(tv_map *mp, const tv_type *vt, tv_str s, tv_int start, tv_int end, bool has_end, const char *loc, bool *inserted) {
-    int64_t len = s.p->len;
-    int64_t a = tv_clamp_index(start, len);
-    int64_t b = has_end ? tv_clamp_index(end, len) : len;
-    if (b < a) b = a;
-    tv_check_boundary(s, a, loc);
-    tv_check_boundary(s, b, loc);
-    const char *p = s.p->data + a;
-    size_t n = (size_t)(b - a);
+/* The slot for the key with bytes p[0, n); a new key is `key` when given (owned), else a copy. */
+static inline __attribute__((always_inline)) void *tv_map_slot_bytes(tv_map *mp, const tv_type *vt, const char *p, size_t n, tv_str key, bool given, bool ascii, bool *inserted) {
     const tv_type *kt = &tv_type_str;
     tv_mlayout L = tv_mlay(kt, vt);
     tv_mapbuf *m = tv_map_unique(mp, kt, vt, L);
@@ -1971,18 +2345,45 @@ void *tv_map_slot_slice(tv_map *mp, const tv_type *vt, tv_str s, tv_int start, t
             tv_str k;
             memcpy(&k, e + 8, sizeof k);
             if ((size_t)k.p->len == n && memcmp(k.p->data, p, n) == 0) {
+                if (given) tv_str_release(key);
                 *inserted = false;
                 return e + L.voff;
             }
         }
         pos = (pos + 1) & m->mask;
     }
-    tv_str k = tv_str_from(p, n);
+    tv_str k = given ? key : tv_str_from(p, n);
+    if (ascii) tv_str_mark(k, true);
     unsigned char *e = tv_map_add(mp, m, L, kt, vt, h, pos);
     memcpy(e + 8, &k, sizeof k);
     memset(e + L.voff, 0, vt->size);
     *inserted = true;
     return e + L.voff;
+}
+
+/* (a non-ASCII string: its unit indexes convert, and a slice that cuts a surrogate pair isn't
+ * bytes of s) */
+__attribute__((noinline)) static void *tv_map_slot_slice_wide(tv_map *mp, const tv_type *vt, tv_str s, tv_int start, tv_int end, bool has_end, bool *inserted) {
+    int64_t len = tv_str_wide_length(s.p);
+    int64_t a = tv_clamp_index(start, len);
+    int64_t b = has_end ? tv_clamp_index(end, len) : len;
+    if (a >= b) return tv_map_slot_bytes(mp, vt, s.p->data, 0, TV_EMPTY_STR, false, true, inserted);
+    size_t x, y;
+    bool pre, post;
+    tv_unit_range(s, a, b, &x, &y, &pre, &post);
+    if (!pre && !post) return tv_map_slot_bytes(mp, vt, s.p->data + x, y - x, TV_EMPTY_STR, false, false, inserted);
+    tv_str cut = tv_str_units(s, a, b);
+    return tv_map_slot_bytes(mp, vt, cut.p->data, (size_t)cut.p->len, cut, true, false, inserted);
+}
+
+void *tv_map_slot_slice(tv_map *mp, const tv_type *vt, tv_str s, tv_int start, tv_int end, bool has_end, const char *loc, bool *inserted) {
+    (void)loc;
+    if (TV_UNLIKELY(!tv_str_is_ascii(s))) return tv_map_slot_slice_wide(mp, vt, s, start, end, has_end, inserted);
+    int64_t len = s.p->len;
+    int64_t a = tv_clamp_index(start, len);
+    int64_t b = has_end ? tv_clamp_index(end, len) : len;
+    if (b < a) b = a;
+    return tv_map_slot_bytes(mp, vt, s.p->data + a, (size_t)(b - a), TV_EMPTY_STR, false, true, inserted);
 }
 
 bool tv_map_delete(tv_map *mp, const tv_type *kt, const tv_type *vt, const void *key) {
