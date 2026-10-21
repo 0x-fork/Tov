@@ -221,6 +221,9 @@ tv_str tv_f64_to_exponential(double v, tv_int digits, bool has_digits, const cha
 tv_int tv_str_locale_compare(tv_str a, tv_str b); /* -1, 0, 1: letters in alphabetical order (case after), then code points */
 void tv_sb_push_int(tv_sb *sb, tv_int v);
 void tv_sb_push_f64(tv_sb *sb, double v);       /* same format as tv_str_from_f64 */
+/* A TypeScript number held as an integer: past 2^53 written as JavaScript writes that double. */
+static inline void tv_sb_push_jint(tv_sb *sb, tv_int v) { if ((uint64_t)v + (UINT64_C(1) << 53) > (UINT64_C(1) << 54)) tv_sb_push_f64(sb, (double)v); else tv_sb_push_int(sb, v); }
+static inline tv_str tv_str_from_jint(tv_int v) { return (uint64_t)v + (UINT64_C(1) << 53) > (UINT64_C(1) << 54) ? tv_str_from_f64((double)v) : tv_str_from_int(v); }
 void tv_sb_push_str(tv_sb *sb, tv_str s);
 
 /* Parsing: returns false when the whole string (after trimming whitespace) isn't a number. */

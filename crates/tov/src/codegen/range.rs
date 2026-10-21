@@ -59,6 +59,9 @@ enum Def {
     Op(u32, BinOp, ExprId),
     /// `x++` / `x--`.
     Step(i128),
+    /// The step of `for (let x = a; x < n; x++)` (or `<=`): from where x started up to n (n + 1),
+    /// as nothing else changes x there (module, n, `<=`).
+    UpTo(u32, ExprId, bool),
     Top,
 }
 
@@ -83,7 +86,9 @@ impl<'c, 'a> Gen<'c, 'a> {
     /// `l op r` (`+`, `-`, `*` of `int`s) can't overflow.
     pub(crate) fn cannot_overflow(&mut self, op: BinOp, l: ExprId, r: ExprId) -> bool {
         let (a, b) = (self.int_range(l), self.int_range(r));
-        matches!(interval_op(op, a, b), R::In(..))
+        // (in TypeScript, nor pass 2^53: see TV_JADD)
+        let limit: i128 = if self.js_ints(self.cur_m()) { 1 << 53 } else { MAX };
+        matches!(interval_op(op, a, b), R::In(lo, hi) if lo >= -limit && hi <= limit)
     }
 
     fn var_of(&self, m: u32, e: ExprId) -> Option<Var> {
@@ -97,6 +102,8 @@ impl<'c, 'a> Gen<'c, 'a> {
 
     fn compute_ranges(&self) -> Ranges {
         let mut defs: FxMap<Var, Vec<Def>> = FxMap::default();
+        // (the steps of counted loops, given their bounds instead)
+        let mut loop_steps: FxSet<(u32, ExprId)> = FxSet::default();
         // names assigned where it isn't known what they name: anything
         let mut unknown: FxSet<(u32, Sym)> = FxSet::default();
         let n = self.c.modules.len() as u32;
@@ -121,10 +128,43 @@ impl<'c, 'a> Gen<'c, 'a> {
                     defs.entry(Var::Global(m, ii as u32)).or_default().push(Def::Expr(m, *init));
                 }
             }
+            // counted loops: their steps are bounded by their conditions
+            for s in ast.stmts.iter() {
+                let StmtKind::For { init: Some(init), cond: Some(cond), step: Some(step), body } = &s.kind else { continue };
+                let StmtKind::Let { name_span, .. } = &ast.stmt(*init).kind else { continue };
+                let k = name_span.start;
+                let is_i = |e: ExprId| matches!((&ast.expr(e).kind, facts.idents.get(&e)), (ExprKind::Ident(_), Some(IdentFact::Local(x))) if *x == k);
+                let (hi, incl) = match &ast.expr(*cond).kind {
+                    ExprKind::Binary(BinOp::Lt, l, r) if is_i(*l) => (*r, false),
+                    ExprKind::Binary(BinOp::Le, l, r) if is_i(*l) => (*r, true),
+                    _ => continue,
+                };
+                let steps_up = match &ast.expr(*step).kind {
+                    ExprKind::Update { target, inc: true, .. } => is_i(*target),
+                    ExprKind::Assign(AssignOp::Op(BinOp::Add), t, v) => is_i(*t) && matches!(ast.expr(*v).kind, ExprKind::Int(1)),
+                    _ => false,
+                };
+                // (and nothing in the body changes x, nor anything else that could)
+                let mut inner = Vec::new();
+                super::body::collect_exprs_stmt_pub(ast, *body, &mut inner);
+                let changed = inner.iter().any(|&e| match &ast.expr(e).kind {
+                    ExprKind::Assign(_, t, _) | ExprKind::Update { target: t, .. } => is_i(*t),
+                    ExprKind::Call { args, .. } => args.iter().any(|a| a.by_ref.is_some() && is_i(a.expr)),
+                    ExprKind::Arrow(_) => true,
+                    _ => false,
+                });
+                if steps_up && !changed {
+                    loop_steps.insert((m, *step));
+                    defs.entry(Var::Local(m, k)).or_default().push(Def::UpTo(m, hi, incl));
+                }
+            }
         }
         for m in 0..n {
             let ast = self.ast(m);
-            for e in ast.exprs.iter() {
+            for (ei, e) in ast.exprs.iter().enumerate() {
+                if loop_steps.contains(&(m, ei as ExprId)) {
+                    continue;
+                }
                 let (target, def) = match &e.kind {
                     ExprKind::Assign(AssignOp::Assign, t, v) => (*t, Def::Expr(m, *v)),
                     ExprKind::Assign(op, t, v) => match assign_bin(*op) {
@@ -194,6 +234,11 @@ impl<'c, 'a> Gen<'c, 'a> {
                     Def::Expr(m, e) => g.eval_range(vars, m, e),
                     Def::Op(m, op, e) => interval_op(op, old, g.eval_range(vars, m, e)),
                     Def::Step(s) => interval_op(BinOp::Add, old, R::In(s, s)),
+                    Def::UpTo(m, hi, incl) => match (old, g.eval_range(vars, m, hi)) {
+                        (R::In(lo, h0), R::In(_, h1)) => R::fit(lo, h0.max(h1 + i128::from(incl))),
+                        (R::Bot, _) => R::Bot,
+                        _ => R::Top,
+                    },
                     Def::Top => R::Top,
                 };
                 new = new.join(r);
@@ -297,8 +342,14 @@ impl<'c, 'a> Gen<'c, 'a> {
         }
         for &v in &keys {
             if cand.contains(&v) && !defs[&v].iter().all(|d| matches!(*d, Def::Expr(m, e) if self.small(&vars, m, e))) {
-                let lo = if settled && low[&v] >= -SMALL { low[&v] } else { -SMALL - STEPS };
-                vars.insert(v, R::In(lo, SMALL + STEPS));
+                // (TypeScript's counters stay below 2^53, where JavaScript's stop counting: 2^52
+                // steps take weeks)
+                let vm = match v {
+                    Var::Local(m, _) | Var::Global(m, _) | Var::Elems(m, _) => m,
+                };
+                let steps = if self.js_ints(vm) { 1 << 52 } else { STEPS };
+                let lo = if settled && low[&v] >= -SMALL { low[&v] } else { -SMALL - steps };
+                vars.insert(v, R::In(lo, SMALL + steps));
             }
         }
         Ranges { vars }

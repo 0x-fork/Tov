@@ -749,7 +749,8 @@ impl<'c, 'a> Gen<'c, 'a> {
                 _ => {
                     if self.c.types.is_int(recv) {
                         let x = self.int_code(rv);
-                        self.tmp(STR, &format!("tv_str_from_int({x})"), true)
+                        let f = if recv == INT && self.js_ints(self.cur_m()) { "tv_str_from_jint" } else { "tv_str_from_int" };
+                        self.tmp(STR, &format!("{f}({x})"), true)
                     } else {
                         let x = self.coerce(rv, F64);
                         self.tmp(STR, &format!("tv_str_from_f64({})", x.code), true)

@@ -2956,6 +2956,8 @@ impl<'c, 'a> Gen<'c, 'a> {
                 Val::plain(self.dec_lit(&text), DECIMAL)
             }
             ExprKind::Int(v) => {
+                // (in TypeScript, past 2^53 the double nearest it, as JavaScript reads it)
+                let v = if ty == INT && *v > 1 << 53 && self.js_ints(m) { (*v as f64) as u64 } else { *v };
                 let code = match self.tget(ty) {
                     Ty::F64 | Ty::F32 => format!("{}.0", v),
                     Ty::U64 => format!("UINT64_C({v})"),
@@ -3018,10 +3020,14 @@ impl<'c, 'a> Gen<'c, 'a> {
                     self.line(format!("{lv} = {f}({old}, tv_dec_from_int(1));"));
                     return Val::plain(if *prefix { lv } else { old }, p.ty);
                 }
+                // (in TypeScript, never past 2^53 either: see TV_JADD)
+                let limit: i128 = if self.js_ints(m) { 1 << 53 } else { i64::MAX as i128 };
                 let nowrap = matches!(self.ident_fact(m, *target), Some(IdentFact::Local(k)) if Some(k) == self.b().nowrap_step || self.b().nowrap_locals.contains(&k))
-                    || (p.ty == INT && matches!(self.int_range(*target), super::range::R::In(lo, hi) if if *inc { hi < i64::MAX as i128 } else { lo > i64::MIN as i128 }));
+                    || (p.ty == INT && matches!(self.int_range(*target), super::range::R::In(lo, hi) if if *inc { hi < limit } else { lo > -limit }));
                 let new = if self.c.types.is_float(p.ty) || nowrap {
                     format!("{old} {} 1", if *inc { "+" } else { "-" })
+                } else if p.ty == INT && self.js_ints(m) {
+                    format!("{}({old}, 1, {loc})", if *inc { "TV_JADDK" } else { "TV_JSUBK" })
                 } else {
                     format!("{}({ct}, {old}, 1, {loc})", if *inc { "TV_ADD" } else { "TV_SUB" })
                 };
@@ -4225,6 +4231,7 @@ impl<'c, 'a> Gen<'c, 'a> {
                     let o = match op { Add => "+", Sub => "-", _ => "*" };
                     return Val::plain(format!("({} {o} {})", lv.code, rv.code), INT);
                 }
+                self.js_mul_operand = has_mul(self.ast(self.cur_m()), l) || has_mul(self.ast(self.cur_m()), r);
                 self.arith(op, lv, rv, ty, span)
             }
             BitAnd | BitOr | BitXor | Shl | Shr | UShr => {
@@ -4376,7 +4383,17 @@ impl<'c, 'a> Gen<'c, 'a> {
         let loc = self.loc(span);
         let unsigned = matches!(self.tget(ty), Ty::U8 | Ty::U16 | Ty::U32 | Ty::U64);
         let (a, b) = (lv.code, rv.code);
+        let js = ty == INT && self.js_ints(self.cur_m());
+        let js_sum = js && std::mem::take(&mut self.js_mul_operand);
+        // (`n - 1`: a constant to add or take away, one test)
+        let konst = |s: &str| s.strip_prefix("INT64_C(").and_then(|x| x.strip_suffix(')')).and_then(|x| x.parse::<i64>().ok()).filter(|&k| k > 0 && k < 1 << 40);
         let code = match op {
+            Add if js && konst(&b).is_some() => format!("TV_JADDK({a}, {b}, {loc})"),
+            Add if js && konst(&a).is_some() => format!("TV_JADDK({b}, {a}, {loc})"),
+            Sub if js && konst(&b).is_some() => format!("TV_JSUBK({a}, {b}, {loc})"),
+            Add if js_sum => format!("TV_JADD({a}, {b}, {loc})"),
+            Sub if js_sum => format!("TV_JSUB({a}, {b}, {loc})"),
+            Mul if js => format!("TV_JMUL({a}, {b}, {loc})"),
             Add => format!("TV_ADD({ct}, {a}, {b}, {loc})"),
             Sub => format!("TV_SUB({ct}, {a}, {b}, {loc})"),
             Mul => format!("TV_MUL({ct}, {a}, {b}, {loc})"),
@@ -5293,6 +5310,7 @@ impl<'c, 'a> Gen<'c, 'a> {
                         } else {
                             p.ty
                         };
+                        self.js_mul_operand = has_mul(self.ast(self.cur_m()), value);
                         let r = self.arith(bop, cur.clone(), rhs, arith_ty, span);
                         self.coerce(r, p.ty)
                     }
@@ -5788,5 +5806,17 @@ impl Gen<'_, '_> {
     pub(crate) fn tuple_of(&self, t: TyId) -> Option<Vec<crate::types::Field>> {
         let Ty::Record(fs) = *self.c.types.get(t) else { return None };
         crate::types::tuple_fields(self.c.types.fields(fs), self.c.interner)
+    }
+}
+
+/// Does `e` multiply (outside nested functions)? (A sum with a product in it is rounded as
+/// JavaScript's in TypeScript: see TV_JADD.)
+pub(crate) fn has_mul(ast: &ast::Ast, e: ExprId) -> bool {
+    match &ast.expr(e).kind {
+        ExprKind::Binary(BinOp::Mul | BinOp::Pow, ..) | ExprKind::Assign(AssignOp::Op(BinOp::Mul | BinOp::Pow), ..) => true,
+        ExprKind::Binary(_, a, b) => has_mul(ast, *a) || has_mul(ast, *b),
+        ExprKind::Paren(x) | ExprKind::Unary(_, x) | ExprKind::NonNull(x) | ExprKind::As(x, _) => has_mul(ast, *x),
+        ExprKind::Cond(_, a, b) => has_mul(ast, *a) || has_mul(ast, *b),
+        _ => false,
     }
 }

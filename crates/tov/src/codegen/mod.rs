@@ -178,6 +178,9 @@ struct Instance {
 pub(crate) type TypeArgs = Vec<(u32, TyId)>;
 
 pub(crate) struct Gen<'c, 'a> {
+    /// The `+` or `-` being compiled has a product among its operands (`h * 31 + c`): in
+    /// TypeScript it's rounded past 2^53 too (see TV_JADD; sums of other values stay exact).
+    pub(crate) js_mul_operand: bool,
     pub(crate) c: &'c mut Checker<'a>,
     /// JavaScript values (npm packages).
     pub(crate) js: js::JsGen,
@@ -350,6 +353,7 @@ impl<'c, 'a> Gen<'c, 'a> {
             pending_async: None,
             self_closure: None,
             ranges: None,
+            js_mul_operand: false,
             resizers: FxMap::default(),
             fresh_arrays: FxMap::default(),
             rec_structs: FxMap::default(),
@@ -704,6 +708,12 @@ impl<'c, 'a> Gen<'c, 'a> {
 
     /// A record type whose values are objects, shared as JavaScript's (the checker's `objects`):
     /// a pointer to a counted box holding the record, rather than the record itself.
+    /// Module `m` is TypeScript (`.ts`): its integers are numbers, as JavaScript rounds them past
+    /// 2^53 (see TV_JADD).
+    pub(crate) fn js_ints(&self, m: u32) -> bool {
+        matches!(self.c.modules[m as usize].path.extension().and_then(|e| e.to_str()), Some("ts" | "tsx" | "mts" | "cts"))
+    }
+
     pub(crate) fn is_obj(&self, t: TyId) -> bool {
         let Ty::Record(fs) = *self.c.types.get(t) else { return false };
         if self.box_all || self.c.objects.contains(&t) {
@@ -1369,6 +1379,7 @@ impl<'c, 'a> Gen<'c, 'a> {
                 let text = self.sym(s).to_string();
                 format!("tv_sb_push_cstr(sb, {})", c_string(text.as_bytes()))
             }
+            Ty::Int if self.js_ints(self.cur_m()) => format!("tv_sb_push_jint(sb, {place})"),
             Ty::Int => format!("tv_sb_push_int(sb, {place})"),
             Ty::F64 | Ty::F32 => format!("tv_sb_push_f64(sb, {place})"),
             Ty::I8 | Ty::I16 | Ty::I32 | Ty::U8 | Ty::U16 | Ty::U32 => format!("tv_sb_push_int(sb, (tv_int)({place}))"),
@@ -2164,6 +2175,27 @@ static __attribute__((noinline, cold)) tv_int tvg_tre_end_slow(tvg_tre_wide *w, 
     if (__builtin_expect(tre_acc < 0, 0)) tre_r_ = tvg_tre_end_slow(&tre_ws, tre_acc, tre_b_, (loc)); \
     else if (__builtin_expect(__builtin_add_overflow(tre_acc, tre_b_, &tre_r_), 0)) tre_r_ = tvg_tre_end_slow(&tre_ws, tre_acc, tre_b_, (loc)); \
     tre_r_; })
+#endif
+/* TypeScript's numbers, computed as integers: a result past ±2^53 is the double nearest it, as
+ * JavaScript holds it (each operand is one exactly, so the double operation rounds the exact
+ * result), and one past the integer range traps. */
+static __attribute__((noinline, cold)) tv_int tvg_jround(double d, const char *loc) {
+    if (!(d > -9223372036854775808.0 && d < 9223372036854775808.0)) tv_trap("a number computed as an integer passed the integer range", loc);
+    return (tv_int)d;
+}
+#define TVG_PAST53(r) ((uint64_t)(r) + (UINT64_C(1) << 53) > (UINT64_C(1) << 54))
+/* `a + k` / `a - k`, k a constant 0 < k < 2^53: one test of a (it's within ±2^53, and the
+ * result is too), so no overflow test besides. */
+#define TV_JADDK(a, k, loc) ({ tv_int tv__a = (a); __builtin_expect((uint64_t)tv__a + (UINT64_C(1) << 53) > (UINT64_C(1) << 54) - (uint64_t)(k), 0) ? tvg_jround((double)tv__a + (double)(k), loc) : tv__a + (k); })
+#define TV_JSUBK(a, k, loc) ({ tv_int tv__a = (a); __builtin_expect((uint64_t)tv__a + (UINT64_C(1) << 53) - (uint64_t)(k) > (UINT64_C(1) << 54) - (uint64_t)(k), 0) ? tvg_jround((double)tv__a - (double)(k), loc) : tv__a - (k); })
+#ifdef TOV_UNCHECKED
+#define TV_JADD(a, b, loc) TV_ADD(tv_int, a, b, loc)
+#define TV_JSUB(a, b, loc) TV_SUB(tv_int, a, b, loc)
+#define TV_JMUL(a, b, loc) TV_MUL(tv_int, a, b, loc)
+#else
+#define TV_JADD(a, b, loc) ({ tv_int tv__a = (a), tv__b = (b), tv__r; if (__builtin_expect(__builtin_add_overflow(tv__a, tv__b, &tv__r) || TVG_PAST53(tv__r), 0)) tv__r = tvg_jround((double)tv__a + (double)tv__b, loc); tv__r; })
+#define TV_JSUB(a, b, loc) ({ tv_int tv__a = (a), tv__b = (b), tv__r; if (__builtin_expect(__builtin_sub_overflow(tv__a, tv__b, &tv__r) || TVG_PAST53(tv__r), 0)) tv__r = tvg_jround((double)tv__a - (double)tv__b, loc); tv__r; })
+#define TV_JMUL(a, b, loc) ({ tv_int tv__a = (a), tv__b = (b), tv__r; if (__builtin_expect(__builtin_mul_overflow(tv__a, tv__b, &tv__r) || TVG_PAST53(tv__r), 0)) tv__r = tvg_jround((double)tv__a * (double)tv__b, loc); tv__r; })
 #endif
 #ifdef TOV_UNCHECKED
 /* --unchecked: two's-complement wrapping (defined behaviour, like Rust release builds). */
