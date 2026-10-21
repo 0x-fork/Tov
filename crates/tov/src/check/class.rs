@@ -265,8 +265,10 @@ impl<'a> Checker<'a> {
                     let fty = match (declared, init) {
                         (Some(t), _) => t,
                         (None, Some(e)) => {
-                            // Infer from the initializer (checked again with `this` in phase B).
-                            self.fcx.push(FnCtx::default());
+                            // Infer from the initializer (checked again with `this` in phase B),
+                            // the class's type parameters in scope (`map = new Map<K, V>()`).
+                            let field_tscope = if mem.is_static { Vec::new() } else { tscope.to_vec() };
+                            self.fcx.push(FnCtx { tscope: field_tscope, ..FnCtx::default() });
                             self.fcx.last_mut().unwrap().scopes.push(Vec::new());
                             let t = self.expr(*e, None);
                             self.fcx.pop();

@@ -430,7 +430,8 @@ pub(super) fn method(c: &mut Checker, base: TyId, name: &str) -> Option<MethodSi
             let opt_v = c.types.optional(v);
             match name {
                 "get" => mk(sig(vec![(p(k), "key")], opt_v), false),
-                "set" => mk(sig(vec![(p(k), "key"), (p(v), "value")], VOID), true),
+                // (the map itself, so calls chain: `m.set(a, 1).set(b, 2)`)
+                "set" => mk(sig(vec![(p(k), "key"), (p(v), "value")], ty), true),
                 "has" => mk(sig(vec![(p(k), "key")], BOOL), false),
                 "delete" => mk(sig(vec![(p(k), "key")], BOOL), true),
                 "clear" => mk(sig(vec![], VOID), true),
@@ -455,7 +456,7 @@ pub(super) fn method(c: &mut Checker, base: TyId, name: &str) -> Option<MethodSi
             }
         }
         Ty::Set(e) => match name {
-            "add" => mk(sig(vec![(p(e), "value")], VOID), true),
+            "add" => mk(sig(vec![(p(e), "value")], ty), true),
             "has" => mk(sig(vec![(p(e), "value")], BOOL), false),
             "delete" => mk(sig(vec![(p(e), "value")], BOOL), true),
             "clear" => mk(sig(vec![], VOID), true),

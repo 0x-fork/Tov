@@ -919,7 +919,9 @@ impl<'c, 'a> Gen<'c, 'a> {
                 let (kn, vn) = (self.fresh("k"), self.fresh("v"));
                 self.line(format!("{kct} {kn} = {kc}; {vct} {vn} = {vc};"));
                 self.line(format!("tv_map_set(&{lv}, {kd}, {vd}, &{kn}, &{vn});"));
-                Val::plain("0", VOID)
+                // (the map, borrowed: nothing to release when it isn't used)
+                let me = Val::plain(lv.to_string(), recv);
+                self.coerce(me, ty)
             }
             (Ty::Map(k, _), "delete") | (Ty::Set(k), "delete") => {
                 let kd = self.desc(k);
@@ -943,7 +945,8 @@ impl<'c, 'a> Gen<'c, 'a> {
                 let kn = self.fresh("k");
                 self.line(format!("{kct} {kn} = {kc};"));
                 self.line(format!("tv_map_set(&{lv}, {kd}, &tv_type_undefined, &{kn}, NULL);"));
-                Val::plain("0", VOID)
+                let me = Val::plain(lv.to_string(), recv);
+                self.coerce(me, ty)
             }
             (Ty::Set(k), "clear") => {
                 let kd = self.desc(k);
