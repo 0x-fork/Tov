@@ -99,6 +99,9 @@ pub struct ModuleFacts {
     /// Module variables (module, item) this module changes: code generation treats them like
     /// heap values (arguments read from them are owned, since a call may change them).
     pub mutated_globals: crate::hash::FxSet<(u32, u32)>,
+    /// Named local functions that call each other (see `stmt::closure_groups`), by the first's
+    /// statement: made together, sharing one environment.
+    pub closure_groups: FxMap<StmtId, Vec<StmtId>>,
 }
 
 impl ModuleFacts {

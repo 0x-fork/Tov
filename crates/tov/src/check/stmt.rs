@@ -10,6 +10,126 @@ enum SwitchMode {
 }
 
 impl<'a> Checker<'a> {
+    /// Named local functions that call each other (`function isEven` / `function isOdd` in a
+    /// body): each is declared, with the type its annotations give, before any is checked; all are
+    /// checked again while what they throw changes.
+    fn closure_group(&mut self, group: &[StmtId]) {
+        let tscope = self.tscope();
+        let mut pre = Vec::new();
+        for &st in group {
+            let StmtKind::Let { name, name_span, init: Some(i), .. } = self.ast().stmt(st).kind else { continue };
+            let ExprKind::Arrow(f) = &self.ast().expr(i).kind else { continue };
+            let t = match (f.ret, f.params.iter().all(|p| p.ty.is_some())) {
+                (Some(rt), true) => {
+                    let ps: Vec<(crate::ast::TypeId, bool, bool)> = f.params.iter().map(|p| (p.ty.unwrap(), p.inout, p.optional)).collect();
+                    let throws = f.throws;
+                    let params: Vec<FnParam> = ps
+                        .into_iter()
+                        .map(|(t, inout, optional)| {
+                            let ty = self.resolve_type(t, &tscope);
+                            let ty = if optional { self.types.optional(ty) } else { ty };
+                            FnParam { ty, inout, optional }
+                        })
+                        .collect();
+                    let ret = self.resolve_type(rt, &tscope);
+                    let throws = match throws {
+                        Some(t) => self.resolve_type(t, &tscope),
+                        None => NEVER,
+                    };
+                    self.types.func_throws(params, ret, throws)
+                }
+                _ => {
+                    let n = self.name(name).to_string();
+                    self.report(Diagnostic::new("T0303", name_span, format!("`{n}` and the functions beside it call each other, so its parameters and result need types")));
+                    ERROR
+                }
+            };
+            let id = self.declare(name, t, LocalKind::Const, name_span, None, false);
+            pre.push((id, name));
+        }
+        if let Some(f) = self.facts_mut() {
+            f.closure_groups.insert(group[0], group.to_vec());
+        }
+        let marks = self.diags.len();
+        let saved = self.rewrites.clone();
+        for round in 0..3 {
+            for &st in group {
+                self.stmt(st);
+            }
+            let mut changed = false;
+            for &(id, name) in &pre {
+                let found = self.lookup(name).map(|(_, t)| t).unwrap_or(ERROR);
+                if found != ERROR && self.fcx().locals[id].ty != ERROR && self.fcx().locals[id].ty != found {
+                    self.fcx().locals[id].ty = found;
+                    changed = true;
+                }
+            }
+            if !changed || round == 2 {
+                break;
+            }
+            self.diags.truncate(marks);
+            self.rewrites = saved.clone();
+        }
+    }
+
+    /// `const fib = (n: number): number => ... fib(n - 1) ...` (a nested `function fib` too): the
+    /// name is visible in its own body, with the type its annotations give. Checked again if what
+    /// it throws turns out otherwise. `None` if the arrow doesn't refer to itself.
+    fn recursive_arrow(&mut self, name: Sym, name_span: Span, init: ExprId, kind: LocalKind) -> Option<TyId> {
+        let ast = self.ast();
+        let ExprKind::Arrow(f) = &ast.expr(init).kind else { return None };
+        let span = ast.expr(init).span;
+        if !ast.exprs.iter().any(|e| matches!(e.kind, ExprKind::Ident(n) if n == name) && e.span.file == span.file && e.span.start >= span.start && e.span.end <= span.end) {
+            return None;
+        }
+        let tscope = self.tscope();
+        let pre = match (f.ret, f.params.iter().all(|p| p.ty.is_some())) {
+            (Some(rt), true) => {
+                let params: Vec<FnParam> = f
+                    .params
+                    .iter()
+                    .map(|p| {
+                        let ty = self.resolve_type(p.ty.unwrap(), &tscope);
+                        let ty = if p.optional { self.types.optional(ty) } else { ty };
+                        FnParam { ty, inout: p.inout, optional: p.optional }
+                    })
+                    .collect();
+                let ret = self.resolve_type(rt, &tscope);
+                let throws = match f.throws {
+                    Some(t) => self.resolve_type(t, &tscope),
+                    None => NEVER,
+                };
+                if f.is_async {
+                    let rspan = self.ast().ty(rt).span;
+                    let inner = self.async_inner(ret, rspan);
+                    let p = self.types.promise(inner, throws);
+                    self.types.func(params, p)
+                } else {
+                    self.types.func_throws(params, ret, throws)
+                }
+            }
+            _ => {
+                let n = self.name(name).to_string();
+                self.report(Diagnostic::new("T0303", name_span, format!("`{n}` calls itself, so its parameters and result need types")));
+                ERROR
+            }
+        };
+        let id = self.declare(name, pre, kind, name_span, None, false);
+        let marks = self.diags.len();
+        let saved = self.rewrites.clone();
+        let mut t = self.expr(init, None);
+        for _ in 0..3 {
+            if t == ERROR || pre == ERROR || t == self.fcx().locals[id].ty {
+                break;
+            }
+            self.diags.truncate(marks);
+            self.rewrites = saved.clone();
+            self.fcx().locals[id].ty = t;
+            t = self.expr(init, None);
+        }
+        Some(t)
+    }
+
     pub(super) fn stmt(&mut self, s: StmtId) {
         let ast = self.ast();
         let node = ast.stmt(s);
@@ -57,7 +177,10 @@ impl<'a> Checker<'a> {
                         (declared, false)
                     }
                     (None, Some(i)) => {
-                        let found = self.expr(*i, None);
+                        let found = match self.recursive_arrow(*name, *name_span, *i, kind) {
+                            Some(t) => t,
+                            None => self.expr(*i, None),
+                        };
                         let ispan = self.ast().expr(*i).span;
                         let t = self.check_inferred_binding(found, ispan);
                         let t = if *mutable { self.types.widen(t) } else { t };
@@ -133,8 +256,20 @@ impl<'a> Checker<'a> {
                 let entry = self.fcx().locals.len();
                 self.push_scope();
                 let mut reported_unreachable = false;
-                for (i, &st) in stmts.iter().enumerate() {
-                    if i > 0 && !reported_unreachable && self.always_jumps(stmts[i - 1]) {
+                let groups = closure_groups(ast, stmts);
+                let mut i = 0;
+                while i < stmts.len() {
+                    if let Some(g) = groups.iter().find(|g| g[0] == stmts[i]) {
+                        self.closure_group(g);
+                        i += g.len();
+                        continue;
+                    }
+                    let st = stmts[i];
+                    i += 1;
+                    let i = i - 1;
+                    // (a nested function after a `return` is still declared: hoisting)
+                    let local_fn = matches!(&ast.stmt(st).kind, StmtKind::Let { init: Some(x), .. } if matches!(ast.expr(*x).kind, ExprKind::Arrow(_)));
+                    if i > 0 && !reported_unreachable && !local_fn && self.always_jumps(stmts[i - 1]) {
                         let sp = self.ast().stmt(st).span;
                         self.report(Diagnostic::new("F0102", sp, "unreachable code").note("why", "the previous statement always returns, breaks or continues"));
                         reported_unreachable = true;
@@ -1207,4 +1342,35 @@ pub(super) fn path_depth(ast: &Ast, e: ExprId) -> u32 {
         ExprKind::Member { obj, .. } | ExprKind::Index { obj, .. } => 1 + path_depth(ast, *obj),
         _ => 0,
     }
+}
+
+/// Runs of named local functions (`const f = (...) => ...`, nested function declarations) side
+/// by side in `stmts` where one calls a later one: they're declared together.
+pub(crate) fn closure_groups(ast: &Ast, stmts: &[StmtId]) -> Vec<Vec<StmtId>> {
+    let named = |s: StmtId| match &ast.stmt(s).kind {
+        StmtKind::Let { mutable: false, ty: None, init: Some(i), name, .. } => match &ast.expr(*i).kind {
+            ExprKind::Arrow(f) if !f.is_async => Some((*name, ast.expr(*i).span)),
+            _ => None,
+        },
+        _ => None,
+    };
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i < stmts.len() {
+        let mut j = i;
+        while j < stmts.len() && named(stmts[j]).is_some() {
+            j += 1;
+        }
+        if j - i >= 2 {
+            let run: Vec<(Sym, Span)> = stmts[i..j].iter().map(|&s| named(s).unwrap()).collect();
+            let forward = run.iter().enumerate().any(|(a, &(_, sp))| {
+                run[a + 1..].iter().any(|&(n, _)| ast.exprs.iter().any(|e| matches!(e.kind, ExprKind::Ident(x) if x == n) && e.span.file == sp.file && e.span.start >= sp.start && e.span.end <= sp.end))
+            });
+            if forward {
+                out.push(stmts[i..j].to_vec());
+            }
+        }
+        i = j.max(i + 1);
+    }
+    out
 }

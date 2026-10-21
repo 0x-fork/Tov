@@ -1,0 +1,71 @@
+// Nested function declarations and function expressions: hoisted, recursive, mutually
+// recursive, capturing and changing outer variables (checked against Node)
+function outer(n: number): number {
+  let total = 0
+  function add(x: number): void {
+    total += x
+  }
+  function fib(k: number): number {
+    return k < 2 ? k : fib(k - 1) + fib(k - 2)
+  }
+  for (let i = 0; i < n; i++) add(i)
+  return total + fib(10) + later(1)
+  function later(z: number): number { return z * 100 }
+}
+console.log(outer(5))
+function outer2(n: number): number {
+  const fib = (k: number): number => k < 2 ? k : fib(k - 1) + fib(k - 2)
+  return fib(n)
+}
+console.log(outer2(10))
+function parity(): void {
+  function isEven(n: number): boolean { return n === 0 ? true : isOdd(n - 1) }
+  function isOdd(n: number): boolean { return n === 0 ? false : isEven(n - 1) }
+  console.log(isEven(10), isOdd(7))
+}
+parity()
+function evaluate(src: string): number {
+  let pos = 0
+  function peek(): string { return pos < src.length ? src[pos] : "" }
+  function expr(): number {
+    let v = term()
+    while (peek() === "+" || peek() === "-") {
+      const op = src[pos++]
+      const r = term()
+      v = op === "+" ? v + r : v - r
+    }
+    return v
+  }
+  function term(): number {
+    let v = factor()
+    while (peek() === "*" || peek() === "/") {
+      const op = src[pos++]
+      const r = factor()
+      v = op === "*" ? v * r : v / r
+    }
+    return v
+  }
+  function factor(): number {
+    if (peek() === "(") {
+      pos++
+      const v = expr()
+      if (peek() !== ")") throw new Error(`expected ) at ${pos}`)
+      pos++
+      return v
+    }
+    const start = pos
+    while (peek() >= "0" && peek() <= "9") pos++
+    if (start === pos) throw new Error(`expected a number at ${pos}`)
+    return Number(src.slice(start, pos))
+  }
+  return expr()
+}
+console.log(evaluate("2*(3+4)-5"), evaluate("10/4"))
+try {
+  evaluate("2*(3+")
+} catch (e) {
+  console.log((e as Error).message)
+}
+let total = 0
+for (let i = 0; i < 1000; i++) total += evaluate("1+2*3")
+console.log(total)

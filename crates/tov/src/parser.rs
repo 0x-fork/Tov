@@ -15,7 +15,7 @@ pub fn parse(src: &str, file: FileId, interner: &mut Interner) -> (Ast, Vec<Diag
             lexed.tokens[i].kind = Tok::Ident;
         }
     }
-    let mut p = Parser { src, toks: lexed.tokens, strings: lexed.strings, pos: 0, file, interner, ast: Ast::default(), diags, script_stmts: Vec::new(), defaults: Vec::new(), more_stmts: Vec::new(), hidden: 0, prologue: Vec::new(), index_sig: None };
+    let mut p = Parser { src, toks: lexed.tokens, strings: lexed.strings, pos: 0, file, interner, ast: Ast::default(), diags, script_stmts: Vec::new(), defaults: Vec::new(), more_stmts: Vec::new(), hidden: 0, prologue: Vec::new(), index_sig: None, local_fns: Vec::new() };
     p.module();
     (p.ast, p.diags)
 }
@@ -43,6 +43,8 @@ struct Parser<'a> {
     prologue: Vec<StmtId>,
     /// The index signature `[k: K]: V` of the object type just parsed.
     index_sig: Option<(TypeId, TypeId, Span)>,
+    /// Function declarations in bodies, as `const`s (to hoist).
+    local_fns: Vec<StmtId>,
 }
 
 /// A destructuring pattern (desugared into `let`s).
@@ -915,6 +917,11 @@ impl<'a> Parser<'a> {
             self.bump();
         }
         let (name, name_span) = self.ident("a function name")?;
+        self.function_rest(name, name_span)
+    }
+
+    /// A function after its name: type parameters, parameters, result, body.
+    fn function_rest(&mut self, name: Sym, name_span: Span) -> Option<FnDecl> {
         let tparams = self.tparams();
         let params = self.params();
         let defaults = (std::mem::take(&mut self.defaults), std::mem::take(&mut self.prologue));
@@ -1400,8 +1407,66 @@ impl<'a> Parser<'a> {
             }
         }
         self.expect(Tok::RBrace, "to close the block");
+        self.hoist_functions(&mut stmts);
         let span = start.to(self.prev_span());
         self.mk_stmt(StmtKind::Block(stmts), span)
+    }
+
+    fn local_function(&mut self, start: Span, is_async: bool) -> StmtId {
+        let Some(f) = self.function() else { return self.mk_stmt(StmtKind::Error, start) };
+        let span = start.to(self.prev_span());
+        if !f.tparams.is_empty() {
+            self.push(
+                Diagnostic::new("U0010", span, "generic nested functions are not supported yet")
+                    .note("instead", "declare it at the top level"),
+            );
+            return self.mk_stmt(StmtKind::Error, span);
+        }
+        let (name, name_span) = (f.name, f.name_span);
+        let init = self.arrow_of(f, is_async, span);
+        let s = self.mk_stmt(StmtKind::Let { mutable: false, name, name_span, ty: None, init: Some(init) }, span);
+        self.local_fns.push(s);
+        s
+    }
+
+    fn arrow_of(&mut self, f: FnDecl, is_async: bool, span: Span) -> ExprId {
+        let arrow = ArrowFn { params: f.params, ret: f.ret, throws: f.throws, body: ArrowBody::Block(f.body), is_async };
+        self.mk_expr(ExprKind::Arrow(Box::new(arrow)), span)
+    }
+
+    /// Function declarations are hoisted in JavaScript: each of a block's moves up to before the
+    /// first statement that uses it (an earlier one's body, say).
+    fn hoist_functions(&mut self, stmts: &mut Vec<StmtId>) {
+        let fns: Vec<StmtId> = stmts.iter().copied().filter(|s| self.local_fns.contains(s)).collect();
+        if fns.is_empty() {
+            return;
+        }
+        for _ in 0..fns.len() {
+            let mut moved = false;
+            for &f in &fns {
+                let StmtKind::Let { name, name_span, .. } = self.ast.stmts[f as usize].kind else { continue };
+                let uses: Vec<u32> = self
+                    .ast
+                    .exprs
+                    .iter()
+                    .filter(|e| matches!(e.kind, ExprKind::Ident(n) if n == name) && e.span.file == name_span.file)
+                    .map(|e| e.span.start)
+                    .collect();
+                let at = stmts.iter().position(|&x| x == f).unwrap();
+                let first = stmts[..at].iter().position(|&x| {
+                    let sp = self.ast.stmts[x as usize].span;
+                    uses.iter().any(|&u| u >= sp.start && u < sp.end)
+                });
+                if let Some(to) = first {
+                    stmts.remove(at);
+                    stmts.insert(to, f);
+                    moved = true;
+                }
+            }
+            if !moved {
+                break;
+            }
+        }
     }
 
     fn stmt(&mut self) -> StmtId {
@@ -1498,13 +1563,12 @@ impl<'a> Parser<'a> {
                 let span = start.to(self.prev_span());
                 self.mk_stmt(StmtKind::Try { body, catch, finally }, span)
             }
-            Tok::Function => {
-                self.push(
-                    Diagnostic::new("U0010", start, "nested function declarations are not supported yet")
-                        .note("instead", "declare it at the top level, or use `const name = (...) => { ... }`"),
-                );
-                self.skip_decl();
-                self.mk_stmt(StmtKind::Error, start)
+            // `function f(...) { }` in a body: `const f = (...) => { }`, moved up to before its
+            // first use in the block (see `hoist_functions`)
+            Tok::Function => self.local_function(start, false),
+            Tok::Async if self.nth(1) == Tok::Function => {
+                self.bump();
+                self.local_function(start, true)
             }
             Tok::Class | Tok::Enum | Tok::Interface | Tok::Import | Tok::Export => {
                 let msg = format!("{} declarations are only allowed at the top level", self.found());
@@ -2541,6 +2605,14 @@ impl<'a> Parser<'a> {
                 self.mk_expr(ExprKind::Array(elems), span)
             }
             Tok::LBrace => self.object_literal(),
+            // `function (x) { }`: an arrow function (`this` and `arguments` aren't supported)
+            Tok::Function if matches!(self.nth(1), Tok::LParen | Tok::Ident) && !(self.nth(1) == Tok::Ident && self.nth(2) == Tok::Lt) => {
+                self.bump();
+                let (name, name_span) = if self.at(Tok::Ident) { self.ident("a function name").unwrap() } else { (self.interner.intern(""), start) };
+                let Some(f) = self.function_rest(name, name_span) else { return self.mk_expr(ExprKind::Error, start) };
+                let span = start.to(self.prev_span());
+                self.arrow_of(f, false, span)
+            }
             Tok::Function => {
                 self.push(
                     Diagnostic::new("U0010", start, "function expressions are not supported")

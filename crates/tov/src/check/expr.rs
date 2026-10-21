@@ -2127,7 +2127,9 @@ impl<'a> Checker<'a> {
         // A test's body can throw (an uncaught error fails the test); other closures only when
         // their function type says so.
         let test_body = fcx.test_body && fcx.frames.is_empty();
-        let can_throw = test_body || exp_throws != NEVER || is_async;
+        // (an arrow with no function type expected, `const f = () => ...` or a nested
+        // function, throws what its body does, as a function declaration)
+        let can_throw = test_body || exp_throws != NEVER || is_async || exp_fn.is_none();
         let decl = if exp_throws != NEVER && exp_throws != ERROR { Some(exp_throws) } else { None };
         let mut frame = Frame::new(declared_ret, None, can_throw, decl);
         frame.is_async = is_async;

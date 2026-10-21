@@ -586,8 +586,15 @@ impl<'c, 'a> Gen<'c, 'a> {
     pub(crate) fn stmts(&mut self, ss: &[StmtId]) {
         let plan = if self.b().async_fn.is_none() && ss.len() > 1 { self.last_uses(ss) } else { Vec::new() };
         let mut skip = false;
+        let mut in_group = 0;
         for (i, &x) in ss.iter().enumerate() {
-            if skip {
+            let m = self.cur_m();
+            if in_group > 0 {
+                in_group -= 1;
+            } else if let Some(g) = self.facts(m).closure_groups.get(&x).cloned() {
+                self.closure_group(&g);
+                in_group = g.len() - 1;
+            } else if skip {
                 skip = false;
             } else if let Some(n) = self.map_count(ss, i) {
                 skip = n == 2;
@@ -1894,10 +1901,16 @@ impl<'c, 'a> Gen<'c, 'a> {
                 let ct = self.ctype(ty);
                 let key = name_span.start;
                 self.push_temps();
+                if let Some(i) = init
+                    && matches!(ast.expr(*i).kind, ExprKind::Arrow(_))
+                {
+                    self.self_closure = Some(key);
+                }
                 let value = init.map(|i| {
                     let v = self.expr(i);
                     self.coerce(v, ty)
                 });
+                self.self_closure = None;
                 // `const x = <field path of a read-only parameter or unchanging local>` that is never
                 // changed itself: x is a borrowed view — no retain now, no release at scope end.
                 if let (false, Some(i), Some(v)) = (*mutable, init, &value)
@@ -4816,57 +4829,83 @@ impl<'c, 'a> Gen<'c, 'a> {
     pub(crate) fn emit_arrow(&mut self, e: ExprId, fty: TyId, stack: bool) -> ArrowInfo {
         let m = self.cur_m();
         let ast = self.ast(m);
-        let ExprKind::Arrow(f) = &ast.expr(e).kind else { unreachable!() };
-        let Ty::Func(ps, ret, _) = self.tget(fty) else {
+        if !matches!(self.tget(fty), Ty::Func(..)) {
             let span = self.expr_span(e);
             self.unsupported(span, "this function value");
             return ArrowInfo { cname: "NULL".into(), env_type: String::new(), captures: Vec::new() };
-        };
-        let ps = self.c.types.params(ps).to_vec();
+        }
         let cname = self.fresh("arrow");
-        let captures_keys = arrow_captures(ast, self.facts(m), e);
+        let me = self.self_closure.take();
+        let mut captures_keys = arrow_captures(ast, self.facts(m), e);
+        captures_keys.retain(|&k| Some(k) != me);
+        let captures = self.capture_list(captures_keys, stack);
+        let env_type = format!("E{}", &cname[5..]);
+        self.define_env(&env_type, &captures, stack);
+        // (the closure calling itself: its own function and environment)
+        let siblings: Vec<(u32, String, TyId)> = me.map(|k| (k, cname.clone(), fty)).into_iter().collect();
+        self.emit_arrow_fn(e, fty, &cname, &env_type, &captures, stack, &siblings);
+        ArrowInfo { cname, env_type, captures }
+    }
+
+    /// The captured locals among `keys`: (key, type, boxed).
+    fn capture_list(&mut self, keys: Vec<u32>, stack: bool) -> Vec<(u32, TyId, bool)> {
         let boxed = self.b().boxed.clone();
-        let mut captures: Vec<(u32, TyId, bool)> = Vec::new();
-        for k in captures_keys {
+        let mut captures = Vec::new();
+        for k in keys {
             if let Some(l) = self.b().locals.get(&k).cloned() {
                 captures.push((k, l.ty, boxed.contains(&k) && !stack));
             }
         }
-        let env_type = format!("E{}", &cname[5..]);
-        if !captures.is_empty() {
-            let mut fields = String::new();
-            for (j, (_, ty, bx)) in captures.iter().enumerate() {
-                let ct = self.ctype(*ty);
-                if stack {
-                    let _ = write!(fields, " {ct} *c{j};");
-                } else if *bx {
-                    let cell = self.cell_type(*ty);
-                    let _ = write!(fields, " {cell} *c{j};");
-                } else {
-                    let _ = write!(fields, " {ct} c{j};");
-                }
-            }
-            // Environments hold captured values by value: defined after every value struct.
-            let _ = writeln!(self.typedefs, "typedef struct {env_type} {env_type};");
-            let _ = writeln!(self.env_structs, "struct {env_type} {{ tv_env h;{fields} }};");
-            if !stack {
-                let mut drops = String::new();
-                for (j, (_, ty, bx)) in captures.iter().enumerate() {
-                    if *bx {
-                        let _ = write!(drops, " {}", self.cell_release(*ty, &format!("x->c{j}")));
-                    } else if self.is_rc(*ty) {
-                        let _ = write!(drops, " {};", self.release_code(*ty, &format!("x->c{j}")));
-                    }
-                }
-                let _ = writeln!(self.protos, "static void drop_{env_type}(tv_env *e);");
-                let _ = writeln!(self.helpers, "static void drop_{env_type}(tv_env *e) {{ {env_type} *x = ({env_type} *)e; (void)x;{drops} }}");
+        captures
+    }
+
+    /// The environment struct holding `captures` (and its drop function).
+    fn define_env(&mut self, env_type: &str, captures: &[(u32, TyId, bool)], stack: bool) {
+        if captures.is_empty() {
+            return;
+        }
+        let mut fields = String::new();
+        for (j, (_, ty, bx)) in captures.iter().enumerate() {
+            let ct = self.ctype(*ty);
+            if stack {
+                let _ = write!(fields, " {ct} *c{j};");
+            } else if *bx {
+                let cell = self.cell_type(*ty);
+                let _ = write!(fields, " {cell} *c{j};");
+            } else {
+                let _ = write!(fields, " {ct} c{j};");
             }
         }
-        // Emit the function body with captured locals mapped into the environment.
+        // Environments hold captured values by value: defined after every value struct.
+        let _ = writeln!(self.typedefs, "typedef struct {env_type} {env_type};");
+        let _ = writeln!(self.env_structs, "struct {env_type} {{ tv_env h;{fields} }};");
+        if !stack {
+            let mut drops = String::new();
+            for (j, (_, ty, bx)) in captures.iter().enumerate() {
+                if *bx {
+                    let _ = write!(drops, " {}", self.cell_release(*ty, &format!("x->c{j}")));
+                } else if self.is_rc(*ty) {
+                    let _ = write!(drops, " {};", self.release_code(*ty, &format!("x->c{j}")));
+                }
+            }
+            let _ = writeln!(self.protos, "static void drop_{env_type}(tv_env *e);");
+            let _ = writeln!(self.helpers, "static void drop_{env_type}(tv_env *e) {{ {env_type} *x = ({env_type} *)e; (void)x;{drops} }}");
+        }
+    }
+
+    /// Emits arrow `e`'s C function `cname`, its captured locals mapped into the environment;
+    /// `siblings` (key, function, type) are closures sharing it (the arrow itself, when it calls
+    /// itself, and the functions beside it that call each other).
+    #[allow(clippy::too_many_arguments)]
+    fn emit_arrow_fn(&mut self, e: ExprId, fty: TyId, cname: &str, env_type: &str, captures: &[(u32, TyId, bool)], stack: bool, siblings: &[(u32, String, TyId)]) {
+        let m = self.cur_m();
+        let ast = self.ast(m);
+        let ExprKind::Arrow(f) = &ast.expr(e).kind else { unreachable!() };
+        let Ty::Func(ps, ret, _) = self.tget(fty) else { unreachable!() };
+        let ps = self.c.types.params(ps).to_vec();
         let subst = self.b().subst.clone();
         let params: Vec<(u32, TyId, bool)> = f.params.iter().zip(&ps).map(|(p, fp)| (p.span.start, fp.ty, fp.inout)).collect();
-        let proto_params: Vec<FnParam> = ps.clone();
-        let proto = self.fn_proto(&cname, &proto_params, ret, &FxMap::default(), true);
+        let proto = self.fn_proto(cname, &ps, ret, &FxMap::default(), true);
         let _ = writeln!(self.protos, "static {proto};");
         let kind = match &f.body {
             ArrowBody::Block(b) => FnBodyKind::Block(*b),
@@ -4883,13 +4922,76 @@ impl<'c, 'a> Gen<'c, 'a> {
             };
             env_locals.insert(*k, Local { access, ty: *ty });
         }
+        for (k, sib, sty) in siblings {
+            env_locals.insert(*k, Local { access: format!("((tv_fn){{ (void *){sib}, env_ }})"), ty: *sty });
+        }
         if f.is_async {
-            self.emit_async_arrow(&cname, m, subst, &params, ret, kind, env_locals);
-            return ArrowInfo { cname, env_type, captures };
+            self.emit_async_arrow(cname, m, subst, &params, ret, kind, env_locals);
+            return;
         }
         let code = self.arrow_body(m, subst, &params, ret, kind, env_locals);
         let _ = writeln!(self.funcs, "static {proto} {{\n    (void)env_;\n{code}}}\n");
-        ArrowInfo { cname, env_type, captures }
+    }
+
+    /// Named local functions that call each other (`check::stmt::closure_groups`): one
+    /// environment for all, holding what any of them captures; each is (its function, it).
+    fn closure_group(&mut self, group: &[StmtId]) {
+        let m = self.cur_m();
+        let ast = self.ast(m);
+        let mut members = Vec::new();
+        for &st in group {
+            let StmtKind::Let { name, name_span, init: Some(i), .. } = ast.stmt(st).kind else { return };
+            let ty = self.facts(m).bindings.get(&st).copied().unwrap_or(ERROR);
+            let ty = self.inst(ty);
+            members.push((name, name_span.start, i, ty, self.fresh("arrow")));
+        }
+        let keys: Vec<u32> = members.iter().map(|x| x.1).collect();
+        let mut cap_keys: Vec<u32> = Vec::new();
+        for x in &members {
+            for k in arrow_captures(ast, self.facts(m), x.2) {
+                if !keys.contains(&k) && !cap_keys.contains(&k) {
+                    cap_keys.push(k);
+                }
+            }
+        }
+        let captures = self.capture_list(cap_keys, false);
+        let env_type = format!("E{}", &members[0].4[5..]);
+        self.define_env(&env_type, &captures, false);
+        let siblings: Vec<(u32, String, TyId)> = members.iter().map(|x| (x.1, x.4.clone(), x.3)).collect();
+        for x in &members {
+            self.emit_arrow_fn(x.2, x.3, &x.4, &env_type, &captures, false, &siblings);
+        }
+        self.push_temps();
+        let env = if captures.is_empty() {
+            "NULL".to_string()
+        } else {
+            let env = self.fresh("env");
+            self.line(format!("{env_type} *{env} = tv_alloc(sizeof({env_type})); {env}->h.rc = {}; {env}->h.drop = drop_{env_type};", members.len()));
+            for (j, (key, ty, boxed)) in captures.iter().enumerate() {
+                let Some(local) = self.b().locals.get(key).cloned() else { continue };
+                if *boxed {
+                    let cell = local.access.trim_end_matches("->v").to_string();
+                    self.line(format!("{env}->c{j} = {cell}; {cell}->rc++;"));
+                } else {
+                    let v = Val::plain(local.access.clone(), *ty);
+                    let code = self.consume(v);
+                    self.line(format!("{env}->c{j} = {code};"));
+                }
+            }
+            format!("(tv_env *){env}")
+        };
+        self.pop_temps();
+        for (name, key, _, ty, cname) in members {
+            let uniq = self.fresh("");
+            let v = format!("v_{}_{}", self.sym(name), uniq);
+            let ct = self.ctype(ty);
+            self.line(format!("{ct} {v} = ((tv_fn){{ (void *){cname}, {env} }});"));
+            if self.is_rc(ty) {
+                let rel = format!("{};", self.release_code(ty, &v));
+                self.b().scopes.last_mut().unwrap().releases.push(rel);
+            }
+            self.b().locals.insert(key, Local { access: v, ty });
+        }
     }
 
     fn arrow_body(&mut self, m: u32, subst: FxMap<u32, TyId>, params: &[(u32, TyId, bool)], ret: TyId, kind: FnBodyKind, env_locals: FxMap<u32, Local>) -> String {

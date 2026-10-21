@@ -254,6 +254,9 @@ pub(crate) struct Gen<'c, 'a> {
     needs_uncaught: bool,
     /// The async function whose body `function_body` emits next (see `asyncfn.rs`).
     pub(crate) pending_async: Option<(u32, u32)>,
+    /// The local an arrow being emitted initializes (its key), when the arrow refers to it: the
+    /// closure itself, not a capture.
+    pub(crate) self_closure: Option<u32>,
     /// The awaited calls embedded in the async body just emitted: (union member, frame type).
     pub(crate) last_children: Vec<(String, String)>,
     /// Frame structs of async functions.
@@ -334,6 +337,7 @@ impl<'c, 'a> Gen<'c, 'a> {
             fn_adapters: FxMap::default(),
             needs_uncaught: false,
             pending_async: None,
+            self_closure: None,
             last_children: Vec::new(),
             pending_tre: None,
             uses_tls: false,

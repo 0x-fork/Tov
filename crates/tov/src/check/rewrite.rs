@@ -3,7 +3,8 @@
 //! parameters passed without `&` (V0110) and `const`s passed to them (V0001, V0102); the driver
 //! rewrites the program as if it said `inout`, `&` and `let`, and checks it again. A parameter the
 //! function reassigns stays as it is (TypeScript would rebind only its own variable), as do
-//! parameters of async functions (which can't be `inout`) and of arrow functions.
+//! parameters of async functions (which can't be `inout`) and of arrow functions other than
+//! named ones (`const f = (...) => ...`, nested function declarations).
 
 use super::*;
 use crate::ast::{Arg, ExprKind, MemberKind, StmtKind};
@@ -94,6 +95,34 @@ pub fn apply(modules: &mut [Module], rw: &Rewrites) -> bool {
             };
             f.params[pi].inout = true;
             changed = true;
+        }
+        // a named local function (`function walk(acc: T[])` in a body, `const f = (...) => ...`)
+        let named: Vec<ExprId> = ast
+            .stmts
+            .iter()
+            .filter_map(|s| match s.kind {
+                StmtKind::Let { mutable: false, init: Some(i), .. } => Some(i),
+                _ => None,
+            })
+            .collect();
+        for i in named {
+            let ExprKind::Arrow(f) = &ast.exprs[i as usize].kind else { continue };
+            let Some(pi) = f.params.iter().position(|p| p.span.start == start && !p.inout && !p.rest && p.prop.is_none()) else { continue };
+            if f.is_async {
+                continue;
+            }
+            let mut assigned = Vec::new();
+            match f.body {
+                crate::ast::ArrowBody::Block(b) => stmt::collect_assigned_stmt(ast, b, &mut assigned),
+                crate::ast::ArrowBody::Expr(_) => continue,
+            }
+            if assigned.contains(&f.params[pi].name) {
+                continue;
+            }
+            if let ExprKind::Arrow(f) = &mut ast.exprs[i as usize].kind {
+                f.params[pi].inout = true;
+                changed = true;
+            }
         }
     }
     for &(m, arg) in &rw.args {

@@ -1,0 +1,56 @@
+// Nested functions in methods and callbacks: throwing, mutating parameters, escaping
+class Parser {
+  pos = 0
+  parse(text: string): number[] {
+    const out: number[] = []
+    const self = this
+    function fail(msg: string): never {
+      throw new Error(`at ${self.pos}: ${msg}`)
+    }
+    function digit(c: string): number {
+      if (c < "0" || c > "9") fail(`bad ${c}`)
+      return c.charCodeAt(0) - 48
+    }
+    for (const c of text) {
+      out.push(digit(c))
+      this.pos++
+    }
+    return out
+  }
+}
+async function main(): Promise<void> {
+  const p = new Parser()
+  console.log(p.parse("123"))
+  try {
+    new Parser().parse("1x")
+  } catch (e) {
+    console.log("caught", (e as Error).message)
+  }
+  const xs = [1, 2, 3]
+  function double(x: number): number { return x * 2 }
+  console.log(xs.map(double), xs.filter(function (x) { return x > 1 }))
+  let count = 0
+  function bump(): void { count++ }
+  bump(); bump()
+  console.log(count)
+  function counter(start: number): () => number {
+    let n = start
+    return function next(): number { n++; return n }
+  }
+  const c = counter(10)
+  console.log(c(), c())
+  function walk(n: number, acc: number[]): number[] {
+    if (n === 0) return acc
+    acc.push(n)
+    return walk(n - 1, acc)
+  }
+  console.log(walk(3, []))
+  const depth = 2
+  function tree(d: number): string {
+    return d >= depth ? "leaf" : `(${tree(d + 1)} ${tree(d + 1)})`
+  }
+  console.log(tree(0))
+  async function later(x: number): Promise<number> { return x + 1 }
+  console.log("async", await later(41))
+}
+main()

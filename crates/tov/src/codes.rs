@@ -140,7 +140,7 @@ pub const CODES: &[(&str, &str)] = &[
     ("U0006", "Destructuring is not supported yet."),
     ("U0007", "Numeric and boolean literal types are not supported yet."),
     ("U0008", "Tuple types are not supported yet; use a record."),
-    ("U0010", "Function expressions and nested function declarations are not supported yet; use arrow functions."),
+    ("U0010", "Generic nested functions and generator-style function expressions are not supported yet; declare the function at the top level."),
     ("U0011", "Spread and rest syntax are not supported yet."),
     ("U0012", "Methods in object literals are not supported yet."),
     ("U0013", "Generators are not supported yet."),
