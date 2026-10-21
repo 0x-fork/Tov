@@ -2242,12 +2242,14 @@ impl<'a> Checker<'a> {
         match *self.types.get(base) {
             Ty::Array(e) | Ty::Set(e) => e,
             Ty::Str | Ty::StrLit(_) => STR,
+            // (a map's entries: `[key, value]`)
+            Ty::Map(k, v) => self.tuple_ty(&[k, v]),
             Ty::Js => JS,
             Ty::Error => ERROR,
             _ => {
                 let shown = self.show(t);
                 let s = self.ast().expr(x).span;
-                self.report(Diagnostic::new("T0402", s, format!("can't spread `{shown}`: `...` takes an array, a set or a string")));
+                self.report(Diagnostic::new("T0402", s, format!("can't spread `{shown}`: `...` takes an array, a set, a map or a string")));
                 ERROR
             }
         }
@@ -2590,9 +2592,11 @@ impl<'a> Checker<'a> {
                     let t = self.expr(a.expr, hint);
                     match *self.types.get(t) {
                         Ty::Array(e) => elem = elem.or(Some(self.types.widen(e))),
+                        // (a string's characters)
+                        Ty::Str | Ty::StrLit(_) => elem = elem.or(Some(STR)),
                         Ty::Error => {}
                         _ => {
-                            let msg = format!("`new Set(...)` takes an array, found `{}`", self.show(t));
+                            let msg = format!("`new Set(...)` takes an array or a string, found `{}`", self.show(t));
                             let s = self.ast().expr(a.expr).span;
                             self.report(Diagnostic::new("T0001", s, msg));
                         }

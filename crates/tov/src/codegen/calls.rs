@@ -2336,6 +2336,12 @@ impl<'c, 'a> Gen<'c, 'a> {
                 let s = self.coerce(v, STR);
                 self.tmp(arr, &format!("tv_str_chars({})", s.code), true)
             }
+            // (a map's `[key, value]` entries)
+            Ty::Map(k, val) => {
+                let pair = self.c.tuple_ty(&[k, val]);
+                let arr = self.c.types.array(pair);
+                self.map_entries(v, k, val, arr)
+            }
             _ => v,
         }
     }

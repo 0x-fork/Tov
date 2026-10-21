@@ -2872,7 +2872,8 @@ impl<'c, 'a> Gen<'c, 'a> {
                 }
                 if name == "Set" && !args.is_empty() {
                     let Ty::Set(elem) = self.tget(ty) else { return Val::plain("TV_EMPTY_MAP", ty) };
-                    let arr = self.expr(args[0].expr);
+                    // (a string: its characters)
+                    let arr = self.spread_array(args[0].expr);
                     let arr_ty = self.c.types.array(elem);
                     let arr = self.coerce(arr, arr_ty);
                     let res = self.tmp(ty, "TV_EMPTY_MAP", true);
