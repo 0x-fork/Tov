@@ -1,0 +1,5 @@
+error[N0003] tests/run/computed_keys.ts:6:7: `hex` is already declared in this module
+    6 | const hex: Record<Color, string> = { [Color.Red]: "#f00", [Color.Green]: "#0f0" }
+  previous: line 4
+
+build: 1 error

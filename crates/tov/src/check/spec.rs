@@ -184,7 +184,13 @@ impl<'a> Checker<'a> {
                 self.spec_diff(v1, v2, out, depth + 1);
             }
             (Ty::Set(a), Ty::Set(b)) => self.spec_diff(a, b, out, depth + 1),
-            (Ty::Promise(a, _), Ty::Promise(b, _)) => self.spec_diff(a, b, out, depth + 1),
+            (Ty::Promise(a, ea), Ty::Promise(b, eb)) => {
+                // (a promise that rejects where `Promise<T>` says it doesn't)
+                if ea != NEVER && eb == NEVER {
+                    self.blame_fn_type(e);
+                }
+                self.spec_diff(a, b, out, depth + 1)
+            }
             // a class that doesn't fit an interface: either side's numbers
             (Ty::Class(c, _), Ty::Interface(i, _)) | (Ty::Interface(i, _), Ty::Class(c, _)) => {
                 out.extend(self.iface_sites(i));
@@ -524,6 +530,12 @@ pub(crate) fn field_key(class: u32, member: u32) -> (u32, u32) {
 /// function that throws: it throws `Error`): (2^29 + module, the type node).
 pub(crate) fn fn_type_key(m: u32, te: ast::TypeId) -> (u32, u32) {
     (0x2000_0000 + m, te)
+}
+
+/// A `Promise<T>` annotation's key among `float_globals` (given a promise that rejects, it
+/// rejects with `Error`): (2^28 + module, where it's written).
+pub(crate) fn promise_key(m: u32, at: u32) -> (u32, u32) {
+    (0x1000_0000 + m, at)
 }
 
 /// An integer literal's key among `float_globals` (a field of an inferred record literal,

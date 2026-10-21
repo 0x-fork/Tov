@@ -2139,7 +2139,17 @@ impl<'a> Checker<'a> {
             }
             // `Promise<T>` never rejects; `Promise<T, E>` can reject with `E` (errors are checked).
             "Promise" => Some(match *targs {
-                [v] => self.types.promise(v, NEVER),
+                // (`Promise<T>`, as TypeScript's, may reject once a promise that does is given to
+                // it: see `spec::blame_fn_type`)
+                [v] => {
+                    let key = spec::promise_key(self.cur, span.start);
+                    let e = if self.spec.float_globals.contains(&key) { self.error_class() } else { NEVER };
+                    let t = self.types.promise(v, e);
+                    if e == NEVER {
+                        self.fn_sites.entry(t).or_default().push(key);
+                    }
+                    t
+                }
                 [v, e] => {
                     self.check_throws_type(e, span);
                     self.types.promise(v, e)
@@ -2238,6 +2248,10 @@ impl<'a> Checker<'a> {
                     let r = self.types.record(fs);
                     self.types.note_field_order(r, lits);
                     return Some(r);
+                }
+                // (`Record<number, V>`: a number-keyed map)
+                if self.types.is_numeric(targs[0]) {
+                    return Some(self.types.intern(Ty::Map(targs[0], targs[1])));
                 }
                 if targs[0] != STR && targs[0] != ERROR {
                     self.report(

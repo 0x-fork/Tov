@@ -2897,6 +2897,9 @@ impl<'a> Parser<'a> {
         let start = self.cur_span();
         self.bump(); // {
         let mut fields = Vec::new();
+        // keys written as expressions (`[Color.Red]: v`, `1: v`), by field index: the literal is a
+        // `Record<K, V>`'s, a map (see the end)
+        let mut keyed: Vec<(usize, ExprId)> = Vec::new();
         while !self.at(Tok::RBrace) && !self.at(Tok::Eof) {
             let fstart = self.cur_span();
             if self.at(Tok::DotDotDot) {
@@ -2908,17 +2911,19 @@ impl<'a> Parser<'a> {
                 let name = self.interner.intern("...");
                 fields.push(ObjField { name, name_span: span, value, quoted: false });
             } else if self.at(Tok::Int) || self.at(Tok::LBracket) {
-                self.push(
-                    Diagnostic::new("X0017", fstart, "number and computed keys are not supported in object literals")
-                        .note("instead", "records have identifier field names; use `Map<K, V>` for dynamic keys"),
-                );
-                if self.at(Tok::LBracket) {
-                    self.skip_balanced();
+                let key = if self.eat(Tok::LBracket) {
+                    let k = self.assign();
+                    self.expect(Tok::RBracket, "after the computed key");
+                    k
                 } else {
-                    self.bump();
-                }
-                if self.eat(Tok::Colon) {
-                    self.assign();
+                    self.primary()
+                };
+                let name_span = fstart.to(self.prev_span());
+                if self.expect(Tok::Colon, "after the key") {
+                    let value = self.assign();
+                    let name = self.interner.intern("[key]");
+                    keyed.push((fields.len(), key));
+                    fields.push(ObjField { name, name_span, value, quoted: false });
                 }
             } else if self.at(Tok::Str) {
                 // `"key": value` — valid for a `Record<string, V>` (or a record field of that name).
@@ -2976,7 +2981,34 @@ impl<'a> Parser<'a> {
         }
         self.expect(Tok::RBrace, "to close the object literal");
         let span = start.to(self.prev_span());
+        if !keyed.is_empty() {
+            return self.keyed_object(fields, keyed, span);
+        }
         self.mk_expr(ExprKind::Object(fields), span)
+    }
+
+    /// `{ [k]: v, 1: w, name: x }`: `new Map([[k, v], [1, w], ["name", x]])` (a `Record<K, V>`
+    /// is a map; records' field names are identifiers).
+    fn keyed_object(&mut self, fields: Vec<ObjField>, keyed: Vec<(usize, ExprId)>, span: Span) -> ExprId {
+        let mut entries = Vec::new();
+        for (i, f) in fields.into_iter().enumerate() {
+            if matches!(self.ast.expr(f.value).kind, ExprKind::Spread(_)) {
+                self.push(Diagnostic::new("X0017", f.name_span, "a spread among computed keys is not supported").note("instead", "build the map with `new Map(...)` and `set`"));
+                continue;
+            }
+            let key = match keyed.iter().find(|(at, _)| *at == i) {
+                Some(&(_, k)) => k,
+                None => self.mk_expr(ExprKind::Str(f.name), f.name_span),
+            };
+            let es = self.expr_span(key).to(self.expr_span(f.value));
+            entries.push(self.mk_expr(ExprKind::Array(vec![key, f.value]), es));
+        }
+        let list = self.mk_expr(ExprKind::Array(entries), span);
+        let map = self.interner.intern("Map");
+        let callee = self.mk_expr(ExprKind::Ident(map), span);
+        let e = self.mk_expr(ExprKind::New { callee, type_args: Vec::new(), args: vec![Arg { expr: list, by_ref: None }] }, span);
+        self.ast.keyed_objects.push(e);
+        e
     }
 }
 

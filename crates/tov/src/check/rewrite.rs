@@ -31,11 +31,14 @@ pub struct Rewrites {
     /// A class instance where a number is wanted (`Number(x)`, `+x`): (module, the value, the
     /// method), as `x.valueOf()` (JavaScript's conversion calls it).
     pub(crate) prims: Vec<(u32, ExprId, crate::intern::Sym)>,
+    /// `{ [Color.Red]: v }` where a record type is expected (every key a string literal): (module,
+    /// the `new Map(...)` it was written as, the field names), as `{ red: v }`.
+    pub(crate) records: Vec<(u32, ExprId, Vec<crate::intern::Sym>)>,
 }
 
 impl Rewrites {
     pub fn is_empty(&self) -> bool {
-        self.args.is_empty() && self.prims.is_empty() && self.consts.is_empty() && self.items.is_empty() && self.awaits.is_empty() && self.calls.is_empty() && self.elems.is_empty() && self.keys.is_empty() && self.spreads.is_empty() && self.keyed.is_empty()
+        self.args.is_empty() && self.prims.is_empty() && self.records.is_empty() && self.consts.is_empty() && self.items.is_empty() && self.awaits.is_empty() && self.calls.is_empty() && self.elems.is_empty() && self.keys.is_empty() && self.spreads.is_empty() && self.keyed.is_empty()
     }
 
     pub(crate) fn extend(&mut self, o: Rewrites) {
@@ -49,6 +52,7 @@ impl Rewrites {
         self.spreads.extend(o.spreads);
         self.keyed.extend(o.keyed);
         self.prims.extend(o.prims);
+        self.records.extend(o.records);
     }
 }
 
@@ -177,6 +181,19 @@ pub fn apply(modules: &mut [Module], rw: &Rewrites) -> bool {
         ast.exprs.push(crate::ast::Expr { kind: ExprKind::Str(name), span: name_span });
         let index = ast.exprs.len() as ExprId - 1;
         ast.exprs[at as usize].kind = ExprKind::Index { obj, index, optional };
+        changed = true;
+    }
+    for (m, e, names) in &rw.records {
+        let ast = &mut modules[*m as usize].ast;
+        let ExprKind::New { args, .. } = &ast.exprs[*e as usize].kind else { continue };
+        let ExprKind::Array(entries) = &ast.exprs[args[0].expr as usize].kind else { continue };
+        let mut fields = Vec::new();
+        for (&entry, &name) in entries.iter().zip(names) {
+            let ExprKind::Array(kv) = &ast.exprs[entry as usize].kind else { continue };
+            let (k, v) = (kv[0], kv[1]);
+            fields.push(crate::ast::ObjField { name, name_span: ast.exprs[k as usize].span, value: v, quoted: false });
+        }
+        ast.exprs[*e as usize].kind = ExprKind::Object(fields);
         changed = true;
     }
     for &(m, x, method) in &rw.prims {

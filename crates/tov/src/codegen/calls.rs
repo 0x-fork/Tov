@@ -1701,6 +1701,15 @@ impl<'c, 'a> Gen<'c, 'a> {
                     Ty::Map(k, val) => {
                         let (kd, vd) = (self.desc(k), self.desc(val));
                         match name {
+                            "keys" if self.c.types.is_numeric(k) => {
+                                // (as strings, an object's keys)
+                                let (kct, ks, out, i) = (self.ctype(k), self.fresh("ks"), self.fresh("out"), self.fresh("i"));
+                                let conv = if self.c.types.is_float(k) { "tv_str_from_f64" } else { "tv_str_from_int" };
+                                self.line(format!("tv_arr {ks} = tv_map_keys({}, {kd}, {vd}); tv_arr {out} = tv_arr_with_capacity(&tv_type_str, tv_arr_len({ks}));", v.code));
+                                self.line(format!("for (tv_int {i} = 0; {i} < tv_arr_len({ks}); {i}++) TVG_PUSH(tv_str, &{out}, &tv_type_str, {conv}((({kct} *)tv_arr_data({ks}))[{i}]));"));
+                                self.line(format!("tv_arr_release({ks}, {kd});"));
+                                self.tmp(ty, &out, true)
+                            }
                             "keys" => self.tmp(ty, &format!("tv_map_keys({}, {kd}, {vd})", v.code), true),
                             "values" => self.tmp(ty, &format!("tv_map_values({}, {kd}, {vd})", v.code), true),
                             _ => self.map_entries(v, k, val, ty),

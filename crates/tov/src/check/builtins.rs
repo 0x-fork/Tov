@@ -744,6 +744,8 @@ impl<'a> Checker<'a> {
                 let base = self.types.without_undefined(t);
                 match *self.types.get(base) {
                     Ty::Map(k, v) => match name {
+                        // (a `Record<number, V>`'s keys are strings, as an object's are)
+                        "keys" if self.types.is_numeric(k) => self.types.array(STR),
                         "keys" => self.types.array(k),
                         "values" => self.types.array(v),
                         _ => {

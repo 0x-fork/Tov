@@ -2603,7 +2603,61 @@ impl<'a> Checker<'a> {
         self.types.promise(value, rejects)
     }
 
+    /// The string `e` always is: a literal, or a field of a module constant written as one
+    /// (`Color.Red` of an enum).
+    fn const_str(&self, e: ExprId) -> Option<Sym> {
+        match &self.ast().expr(e).kind {
+            ExprKind::Str(s) => Some(*s),
+            ExprKind::Paren(x) => self.const_str(*x),
+            ExprKind::Member { obj, name, optional: false, .. } => {
+                let ExprKind::Ident(o) = self.ast().expr(*obj).kind else { return None };
+                if self.lookup(o).is_some() {
+                    return None;
+                }
+                let Some(Decl::Const(m, i)) = self.scopes[self.cur as usize].values.get(&o).map(|d| d.0) else { return None };
+                let ItemKind::Const { init, mutable: false, .. } = &self.modules[m as usize].ast.items[i as usize].kind else { return None };
+                let ast = &self.modules[m as usize].ast;
+                let ExprKind::Object(fs) = &ast.expr(*init).kind else { return None };
+                let f = fs.iter().find(|f| f.name == *name)?;
+                match ast.expr(f.value).kind {
+                    ExprKind::Str(s) => Some(s),
+                    _ => None,
+                }
+            }
+            _ => None,
+        }
+    }
+
     fn new_expr(&mut self, e: ExprId, callee: ExprId, type_args: &[crate::ast::TypeId], args: &[Arg], exp: Option<TyId>, span: Span) -> TyId {
+        // `{ [Color.Red]: v }` where a record type is expected: a record literal, its keys string
+        // literals (rewritten as `{ red: v }`)
+        if self.ast().keyed_objects.contains(&e)
+            && let Some(rt) = exp.map(|t| self.types.without_undefined(t)).filter(|&t| matches!(self.types.get(t), Ty::Record(_)))
+            && let ExprKind::Array(entries) = &self.ast().expr(args[0].expr).kind
+        {
+            let entries = entries.clone();
+            let mut names = Vec::new();
+            for &entry in &entries {
+                let ExprKind::Array(kv) = &self.ast().expr(entry).kind else { break };
+                let k = kv[0];
+                let kt = self.expr(k, None);
+                if let Some(s) = self.const_str(k) {
+                    names.push(s);
+                    continue;
+                }
+                match self.flat_members(kt).as_slice() {
+                    [m] => match *self.types.get(*m) {
+                        Ty::StrLit(s) => names.push(s),
+                        _ => break,
+                    },
+                    _ => break,
+                }
+            }
+            if names.len() == entries.len() {
+                self.rewrites.records.push((self.cur, e, names));
+                return rt;
+            }
+        }
         // `new X(...)` on a JavaScript constructor (`import { X } from "pkg"`, `new pkg.X()`)
         let js_callee = match self.ast().expr(callee).kind {
             ExprKind::Ident(s) => match self.lookup(s) {

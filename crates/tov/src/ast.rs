@@ -20,6 +20,9 @@ pub struct Ast {
     pub script_span: Option<Span>,
     /// Labelled loops (`outer: for (...)`): the loop statement and its label.
     pub labels: Vec<(StmtId, Sym)>,
+    /// Object literals with computed or number keys, written as `new Map([[k, v], ...])` (see
+    /// `parser::keyed_object`; given a record type, they're record literals again).
+    pub keyed_objects: Vec<ExprId>,
 }
 
 impl Ast {
