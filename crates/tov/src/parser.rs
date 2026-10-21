@@ -15,7 +15,7 @@ pub fn parse(src: &str, file: FileId, interner: &mut Interner) -> (Ast, Vec<Diag
             lexed.tokens[i].kind = Tok::Ident;
         }
     }
-    let mut p = Parser { src, toks: lexed.tokens, strings: lexed.strings, pos: 0, file, interner, ast: Ast::default(), diags, script_stmts: Vec::new() };
+    let mut p = Parser { src, toks: lexed.tokens, strings: lexed.strings, pos: 0, file, interner, ast: Ast::default(), diags, script_stmts: Vec::new(), defaults: Vec::new() };
     p.module();
     (p.ast, p.diags)
 }
@@ -31,6 +31,9 @@ struct Parser<'a> {
     diags: Vec<Diagnostic>,
     /// Top-level statements: (index of the next item, statement).
     script_stmts: Vec<(usize, StmtId)>,
+    /// Default parameter values of the parameter list just parsed, for its body: (name, its
+    /// span, its type, the default).
+    defaults: Vec<(Sym, Span, Option<TypeId>, ExprId)>,
 }
 
 impl<'a> Parser<'a> {
@@ -202,12 +205,13 @@ impl<'a> Parser<'a> {
 
     /// Runs `f`; if it fails or reports errors, rewinds as if it never ran.
     fn speculate<T>(&mut self, f: impl FnOnce(&mut Self) -> Option<T>) -> Option<T> {
-        let (pos, nd, ne, ns, nt) = (self.pos, self.diags.len(), self.ast.exprs.len(), self.ast.stmts.len(), self.ast.types.len());
+        let (pos, nd, ne, ns, nt, ndf) = (self.pos, self.diags.len(), self.ast.exprs.len(), self.ast.stmts.len(), self.ast.types.len(), self.defaults.len());
         let r = f(self);
         if r.is_some() && self.diags.len() == nd {
             return r;
         }
         self.pos = pos;
+        self.defaults.truncate(ndf);
         self.diags.truncate(nd);
         self.ast.exprs.truncate(ne);
         self.ast.stmts.truncate(ns);
@@ -568,10 +572,12 @@ impl<'a> Parser<'a> {
         if self.at(Tok::LParen) || self.at(Tok::Lt) {
             let tparams = self.tparams();
             let params = self.params();
+            let defaults = std::mem::take(&mut self.defaults);
             let ret = if self.eat(Tok::Colon) { Some(self.ty()) } else { None };
             let throws = self.effects_clause();
             let body = if self.at(Tok::LBrace) {
-                self.block()
+                let b = self.block();
+                self.with_defaults(defaults, b)
             } else {
                 if !is_abstract {
                     let span = self.cur_span();
@@ -788,14 +794,24 @@ impl<'a> Parser<'a> {
                 self.skip_to_paren_end();
                 break;
             };
-            let optional = self.eat(Tok::Question);
-            let ty = if self.eat(Tok::Colon) { Some(self.ty()) } else { None };
+            let mut optional = self.eat(Tok::Question);
+            let mut ty = if self.eat(Tok::Colon) { Some(self.ty()) } else { None };
             if self.at(Tok::Eq) {
                 let s = self.cur_span();
                 self.bump();
                 let e = self.assign();
                 let s = s.to(self.expr_span(e));
-                self.err("U0005", s, "default parameter values are not supported yet; make the parameter optional (`x?: T`) and use `x ?? default`");
+                if prop.is_some() || inout || rest {
+                    self.err("U0005", s, "a default value for this parameter is not supported yet; make it optional (`x?: T`) and use `x ?? default`");
+                } else {
+                    // `x: T = d`: an optional parameter, and `let x: T = x ?? d` (shadowing it)
+                    // starting the body.
+                    if ty.is_none() {
+                        ty = self.literal_type(e);
+                    }
+                    optional = true;
+                    self.defaults.push((name, span, ty, e));
+                }
             }
             out.push(Param { name, span, ty, inout, optional, prop, rest });
             if !self.eat(Tok::Comma) {
@@ -804,6 +820,40 @@ impl<'a> Parser<'a> {
         }
         self.expect(Tok::RParen, "to close the parameter list");
         out
+    }
+
+    /// The type a parameter takes from its default value when it has no annotation (`n = 10`).
+    fn literal_type(&mut self, e: ExprId) -> Option<TypeId> {
+        let name = match &self.ast.exprs[e as usize].kind {
+            ExprKind::Int(_) | ExprKind::Float(_) => "number",
+            ExprKind::Str(_) | ExprKind::Template(..) => "string",
+            ExprKind::Bool(_) => "boolean",
+            ExprKind::Unary(_, x) if matches!(self.ast.exprs[*x as usize].kind, ExprKind::Int(_) | ExprKind::Float(_)) => "number",
+            _ => return None,
+        };
+        let span = self.expr_span(e);
+        let sym = self.interner.intern(name);
+        Some(self.mk_ty(TypeExprKind::Named { ns: None, name: sym, name_span: span, args: Vec::new() }, span))
+    }
+
+    /// Starts `body` with `let x: T = x ?? default` for each parameter with a default (the
+    /// `let` declared at the default, so it's a variable of its own).
+    fn with_defaults(&mut self, defaults: Vec<(Sym, Span, Option<TypeId>, ExprId)>, body: StmtId) -> StmtId {
+        if defaults.is_empty() {
+            return body;
+        }
+        let mut stmts = Vec::new();
+        for (name, name_span, ty, d) in defaults {
+            let a = self.mk_expr(ExprKind::Ident(name), name_span);
+            let ds = self.expr_span(d);
+            let init = self.mk_expr(ExprKind::Binary(BinOp::Nullish, a, d), name_span.to(ds));
+            stmts.push(self.mk_stmt(StmtKind::Let { mutable: true, name, name_span: ds, ty, init: Some(init) }, name_span.to(ds)));
+        }
+        let span = self.ast.stmts[body as usize].span;
+        if let StmtKind::Block(ss) = &self.ast.stmts[body as usize].kind {
+            stmts.extend(ss.iter().copied());
+        }
+        self.mk_stmt(StmtKind::Block(stmts), span)
     }
 
     fn skip_to_paren_end(&mut self) {
@@ -833,6 +883,7 @@ impl<'a> Parser<'a> {
         let (name, name_span) = self.ident("a function name")?;
         let tparams = self.tparams();
         let params = self.params();
+        let defaults = std::mem::take(&mut self.defaults);
         let ret = if self.eat(Tok::Colon) { Some(self.ty()) } else { None };
         let throws = self.effects_clause();
         if !self.at(Tok::LBrace) {
@@ -843,6 +894,7 @@ impl<'a> Parser<'a> {
             return None;
         }
         let body = self.block();
+        let body = self.with_defaults(defaults, body);
         Some(FnDecl { name, name_span, tparams, params, ret, throws, body, is_async: false })
     }
 
@@ -1008,6 +1060,7 @@ impl<'a> Parser<'a> {
                 if let Some(close) = self.matching_paren()
                     && self.toks.get(close + 1).map(|t| t.kind) == Some(Tok::Arrow) {
                         let params = self.params();
+                        self.defaults.clear();
                         self.expect(Tok::Arrow, "in the function type");
                         let ret = self.ty();
                         let throws = if self.at_word("throws") {
@@ -1133,6 +1186,7 @@ impl<'a> Parser<'a> {
                         self.err("U0015", start, "generic methods in interfaces are not supported yet");
                     }
                     let params = self.params();
+                    self.defaults.clear();
                     self.expect(Tok::Colon, "before the method return type");
                     let ret = self.ty();
                     let throws = self.effects_clause();
@@ -1933,7 +1987,21 @@ impl<'a> Parser<'a> {
     }
 
     fn arrow_body(&mut self, start: Span, params: Vec<Param>, ret: Option<TypeId>, throws: Option<TypeId>) -> ExprId {
+        let defaults = std::mem::take(&mut self.defaults);
         let body = if self.at(Tok::LBrace) { ArrowBody::Block(self.block()) } else { ArrowBody::Expr(self.assign()) };
+        let body = if defaults.is_empty() {
+            body
+        } else {
+            let block = match body {
+                ArrowBody::Block(b) => b,
+                ArrowBody::Expr(x) => {
+                    let sp = self.expr_span(x);
+                    let r = self.mk_stmt(StmtKind::Return(Some(x)), sp);
+                    self.mk_stmt(StmtKind::Block(vec![r]), sp)
+                }
+            };
+            ArrowBody::Block(self.with_defaults(defaults, block))
+        };
         let span = start.to(self.prev_span());
         self.mk_expr(ExprKind::Arrow(Box::new(ArrowFn { params, ret, throws, body, is_async: false })), span)
     }
@@ -2172,6 +2240,7 @@ impl<'a> Parser<'a> {
             self.tparams();
         }
         let params = self.params();
+        let defaults = std::mem::take(&mut self.defaults);
         let ret = if self.eat(Tok::Colon) { Some(self.ty()) } else { None };
         if !self.at(Tok::LBrace) {
             let msg = format!("expected `{{` to start the method body, found {}", self.found());
@@ -2179,7 +2248,8 @@ impl<'a> Parser<'a> {
             self.err("P0001", span, msg);
             return None;
         }
-        let body = ArrowBody::Block(self.block());
+        let b = self.block();
+        let body = ArrowBody::Block(self.with_defaults(defaults, b));
         let span = start.to(self.prev_span());
         let value = self.mk_expr(ExprKind::Arrow(Box::new(ArrowFn { params, ret, throws: None, body, is_async })), span);
         Some(ObjField { name, name_span, value, quoted: false })

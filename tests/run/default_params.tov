@@ -1,0 +1,24 @@
+// Default parameter values, as in TypeScript.
+function greet(name: string, greeting = "Hello", times: number = 1): string {
+  return `${greeting}, ${name}`.repeat(times)
+}
+function scale(x: number, k = 2) { return x * k }
+function fsum(xs: number[], start = 0.5): number {
+  let s = start
+  for (const x of xs) s += x
+  return s
+}
+class Acc {
+  total: number
+  constructor(start = 10) { this.total = start }
+  add(n = 1): Acc { this.total += n; return this }
+}
+const inc = (n: number, by = 1) => n + by
+function main() {
+  console.log(greet("Ada"), greet("Bob", "Hi"), greet("Cy", "Yo", 2))
+  console.log(scale(3), scale(3, 0.5), fsum([1, 2]), fsum([1], 2))
+  const a = new Acc()
+  a.add()
+  a.add(5)
+  console.log(a.total, new Acc(1).total, inc(1), inc(1, 10), greet("Z", undefined, 1))
+}

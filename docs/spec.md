@@ -162,7 +162,7 @@ Node's names, so existing habits work:
 - `process.argv` (`[binary, binary, ...args]`, so `process.argv.slice(2)` are the arguments), `process.env.NAME` (`string | undefined`), `process.exit(code?)`, `process.cwd()`, `process.platform`, `process.arch`, `process.pid`, `process.stdout.write(s)`, `process.stderr.write(s)`; `console.error` / `console.warn` write to stderr.
 - `Date.now()` and `performance.now()` (milliseconds).
 - `JSON.stringify(value, undefined, indent?)` as in JavaScript (maps with string keys are written as objects, where JavaScript writes `{}`). `JSON.parse(text)` takes its type from context — `const c: Config = JSON.parse(text)` or `JSON.parse(text) as Config` — and **checks** the input against it (exact integers, string literals, discriminants, required fields; extra keys ignored, `null` and missing keys read as `undefined`), throwing `SyntaxError` otherwise.
-- Rest parameters: `function f(first: T, ...rest: U[])` (not in methods yet).
+- Rest parameters: `function f(first: T, ...rest: U[])` (not in methods yet). Default values: `function f(x: T = d)` (an unannotated `n = 10` takes the literal's type); `d` is evaluated when the argument is missing or `undefined`, as in JavaScript (not yet for `inout`, rest and constructor parameter properties).
 - Web servers: see §7c.
 
 ## 7b. Async
