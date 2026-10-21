@@ -20,9 +20,9 @@ const MIN: i128 = i64::MIN as i128;
 const MAX: i128 = i64::MAX as i128;
 /// Arrays and strings are shorter than 2^48 (see `tv_arr`).
 const MAX_LEN: i128 = 1 << 48;
-/// Small values (lengths, indexes) and how far steps of one can take a counter (see
-/// `compute_ranges`).
-const SMALL: i128 = 1 << 48;
+/// Small values (lengths, indexes, one past them) and how far steps of one can take a counter
+/// (see `compute_ranges`).
+const SMALL: i128 = 1 << 49;
 const STEPS: i128 = 1 << 62;
 
 impl R {
@@ -285,9 +285,9 @@ impl<'c, 'a> Gen<'c, 'a> {
             }
         }
         // Counters and the like: variables (and array elements) only ever given small values
-        // (within 2^48 of zero, as lengths and indexes are) or one of their own values moved by at
+        // (within 2^49 of zero, as lengths and indexes are) or one of their own values moved by at
         // most one (`flips++`, `d = Math.min(prev[i]! + 1, curr[i - 1]! + cost)`). After N such
-        // steps none is more than N past 2^48; 2^62 steps take decades, so that's as far as they go.
+        // steps none is more than N past 2^49; 2^62 steps take decades, so that's as far as they go.
         let mut cand: FxSet<Var> = keys.iter().copied().filter(|v| !forced.contains(v)).collect();
         loop {
             let before = cand.len();
@@ -355,7 +355,7 @@ impl<'c, 'a> Gen<'c, 'a> {
         Ranges { vars }
     }
 
-    /// `e` is within 2^48 of zero.
+    /// `e` is within 2^49 of zero.
     fn small(&self, vars: &FxMap<Var, R>, m: u32, e: ExprId) -> bool {
         matches!(self.eval_range(vars, m, e), R::In(lo, hi) if lo >= -SMALL && hi <= SMALL)
     }
