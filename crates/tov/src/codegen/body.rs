@@ -1862,7 +1862,12 @@ impl<'c, 'a> Gen<'c, 'a> {
         }
         let ik = name_span.start;
         let Some(cond) = cond else { return };
-        let ExprKind::Binary(BinOp::Lt, l, r) = &ast.expr(cond).kind else { return };
+        // (`i < n`, or `i <= n`: one more run)
+        let (l, r, inclusive) = match &ast.expr(cond).kind {
+            ExprKind::Binary(BinOp::Lt, l, r) => (l, r, false),
+            ExprKind::Binary(BinOp::Le, l, r) => (l, r, true),
+            _ => return,
+        };
         if local(*l) != Some(ik) || facts.expr_ty.get(*r as usize).copied() != Some(INT) {
             return;
         }
@@ -1907,6 +1912,7 @@ impl<'c, 'a> Gen<'c, 'a> {
             return;
         }
         let lit = match &ast.expr(*r).kind {
+            ExprKind::Int(v) if inclusive => (*v < i64::MAX as u64).then(|| format!("INT64_C({})", v + 1)),
             ExprKind::Int(v) => Some(format!("INT64_C({v})")),
             _ => None,
         };
@@ -1930,7 +1936,8 @@ impl<'c, 'a> Gen<'c, 'a> {
                 _ => None,
             }
         }
-        let pushed: Vec<u32> = ss.iter().filter_map(|&x| always_pushes(self, ast, &local, x)).collect();
+        let mut pushed: Vec<u32> = ss.iter().filter_map(|&x| always_pushes(self, ast, &local, x)).collect();
+        pushed.dedup();
         let mut push_counts: FxMap<u32, usize> = FxMap::default();
         for &e in &all {
             if let ExprKind::Call { callee, .. } = &ast.expr(e).kind
@@ -1947,6 +1954,8 @@ impl<'c, 'a> Gen<'c, 'a> {
             let Ty::Array(et) = self.tget(xl.ty) else { continue };
             let n = match bound {
                 Some(k) => match self.b().locals.get(&k) {
+                    // (`i <= n` runs to `n + 1`; never past `INT64_MAX`)
+                    Some(l) if inclusive => format!("({0} + ({0} < INT64_MAX))", l.access),
                     Some(l) => l.access.clone(),
                     None => continue,
                 },
@@ -1971,7 +1980,6 @@ impl<'c, 'a> Gen<'c, 'a> {
             } else {
                 self.line(format!("if ({n} > {i} && tv_arr_len({xs}) + ({n} - {i}) > {cv}) {{ {xs} = tvg_reserve({xs}, {d}, tv_arr_len({xs}) + ({n} - {i})); {cv} = {xs}.p->cap; }}"));
             }
-            return;
         }
     }
 
