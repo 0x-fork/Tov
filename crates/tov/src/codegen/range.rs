@@ -20,6 +20,10 @@ const MIN: i128 = i64::MIN as i128;
 const MAX: i128 = i64::MAX as i128;
 /// Arrays and strings are shorter than 2^48 (see `tv_arr`).
 const MAX_LEN: i128 = 1 << 48;
+/// Small values (lengths, indexes) and how far steps of one can take a counter (see
+/// `compute_ranges`).
+const SMALL: i128 = 1 << 48;
+const STEPS: i128 = 1 << 62;
 
 impl R {
     fn join(self, o: R) -> R {
@@ -36,14 +40,18 @@ impl R {
     }
 }
 
-#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 enum Var {
     /// (module, the declaring name's offset)
     Local(u32, u32),
     /// (module, item)
     Global(u32, u32),
+    /// The elements of a local `int[]` (module, the declaring name's offset), and of every local
+    /// it's assigned to or from (one array, shared).
+    Elems(u32, u32),
 }
 
+#[derive(Clone, Copy)]
 enum Def {
     /// `x = e` / its initializer (module, expression).
     Expr(u32, ExprId),
@@ -153,6 +161,7 @@ impl<'c, 'a> Gen<'c, 'a> {
                 }
             }
         }
+        self.array_defs(&mut defs);
         let mut vars: FxMap<Var, R> = defs.keys().map(|&v| (v, R::Bot)).collect();
         // (anything from the start: changed where it isn't known how)
         let mut forced: FxSet<Var> = FxSet::default();
@@ -167,6 +176,7 @@ impl<'c, 'a> Gen<'c, 'a> {
                     ItemKind::Const { name, .. } => Some((m, name)),
                     _ => None,
                 },
+                Var::Elems(..) => None,
             };
             let global = matches!(v, Var::Global(..));
             if name.is_some_and(|(m, s)| unknown.contains(&(m, s)) || (global && unknown.iter().any(|&(_, u)| u == s))) || defs[&v].iter().any(|d| matches!(d, Def::Top)) {
@@ -228,48 +238,253 @@ impl<'c, 'a> Gen<'c, 'a> {
                 }
             }
         }
-        // A counter: given only small values (within 2^32 of zero) and otherwise only stepped by
-        // one (`flips++`, `n -= 1`). Getting 2^62 past where it started takes 2^62 steps, decades
-        // of them, so that's as far as it goes, and its own steps never overflow.
-        const SMALL: i128 = 1 << 32;
-        const STEPS: i128 = 1 << 62;
-        for &v in &keys {
-            if forced.contains(&v) {
-                continue;
+        // Counters and the like: variables (and array elements) only ever given small values
+        // (within 2^48 of zero, as lengths and indexes are) or one of their own values moved by at
+        // most one (`flips++`, `d = Math.min(prev[i]! + 1, curr[i - 1]! + cost)`). After N such
+        // steps none is more than N past 2^48; 2^62 steps take decades, so that's as far as they go.
+        let mut cand: FxSet<Var> = keys.iter().copied().filter(|v| !forced.contains(v)).collect();
+        loop {
+            let before = cand.len();
+            let keep: Vec<Var> = cand
+                .iter()
+                .copied()
+                .filter(|v| {
+                    defs[v].iter().all(|d| match *d {
+                        Def::Step(1 | -1) => true,
+                        Def::Op(m, BinOp::Add | BinOp::Sub, e) => self.unit(&vars, m, e),
+                        Def::Expr(m, e) => self.step_of(&vars, &cand, m, e).is_some_and(|k| k <= 1),
+                        _ => false,
+                    })
+                })
+                .collect();
+            cand = keep.into_iter().collect();
+            if cand.len() == before {
+                break;
             }
-            let mut start = R::Bot;
-            let mut steps = false;
-            let counter = defs[&v].iter().all(|d| match *d {
-                Def::Step(1 | -1) => {
-                    steps = true;
-                    true
-                }
-                Def::Op(m, BinOp::Add | BinOp::Sub, e) if matches!(self.ast(m).expr(e).kind, ExprKind::Int(1)) => {
-                    steps = true;
-                    true
-                }
-                Def::Expr(m, e) => match self.eval_range(&vars, m, e) {
-                    r @ R::In(lo, hi) if lo >= -SMALL && hi <= SMALL => {
-                        start = start.join(r);
-                        true
-                    }
-                    _ => false,
-                },
-                _ => false,
-            });
-            if counter
-                && steps
-                && let R::In(lo, hi) = start
-            {
-                vars.insert(v, R::In(lo - STEPS, hi + STEPS));
+        }
+        for &v in &keys {
+            if cand.contains(&v) && !defs[&v].iter().all(|d| matches!(*d, Def::Expr(m, e) if self.small(&vars, m, e))) {
+                vars.insert(v, R::In(-SMALL - STEPS, SMALL + STEPS));
             }
         }
         Ranges { vars }
     }
 
+    /// `e` is within 2^48 of zero.
+    fn small(&self, vars: &FxMap<Var, R>, m: u32, e: ExprId) -> bool {
+        matches!(self.eval_range(vars, m, e), R::In(lo, hi) if lo >= -SMALL && hi <= SMALL)
+    }
+
+    /// `e` is -1, 0 or 1.
+    fn unit(&self, vars: &FxMap<Var, R>, m: u32, e: ExprId) -> bool {
+        matches!(self.eval_range(vars, m, e), R::In(lo, hi) if lo >= -1 && hi <= 1)
+    }
+
+    /// How far `e` can be from a value of the variables `of` (or small): at most the number of
+    /// ones it adds along a path, `None` if it isn't such an expression.
+    fn step_of(&self, vars: &FxMap<Var, R>, of: &FxSet<Var>, m: u32, e: ExprId) -> Option<u32> {
+        if self.small(vars, m, e) {
+            return Some(0);
+        }
+        let ast = self.ast(m);
+        match &ast.expr(e).kind {
+            ExprKind::Paren(x) | ExprKind::NonNull(x) => self.step_of(vars, of, m, *x),
+            ExprKind::Ident(_) => self.var_of(m, e).filter(|v| of.contains(v)).map(|_| 0),
+            ExprKind::Index { obj, .. } => match self.var_of(m, *obj) {
+                Some(Var::Local(am, k)) if of.contains(&Var::Elems(am, k)) => Some(0),
+                _ => None,
+            },
+            ExprKind::Binary(BinOp::Add, a, b) if self.unit(vars, m, *b) => self.step_of(vars, of, m, *a).map(|k| k + 1),
+            ExprKind::Binary(BinOp::Add, a, b) if self.unit(vars, m, *a) => self.step_of(vars, of, m, *b).map(|k| k + 1),
+            ExprKind::Binary(BinOp::Sub, a, b) if self.unit(vars, m, *b) => self.step_of(vars, of, m, *a).map(|k| k + 1),
+            ExprKind::Cond(_, a, b) => Some(self.step_of(vars, of, m, *a)?.max(self.step_of(vars, of, m, *b)?)),
+            ExprKind::Call { callee, args, .. } if matches!(self.facts(m).calls.get(&e).map(|c| &c.callee), Some(Callee::Builtin { .. })) => {
+                let ExprKind::Member { obj, name, .. } = &ast.expr(*callee).kind else { return None };
+                if !matches!(ast.expr(*obj).kind, ExprKind::Ident(o) if self.sym(o) == "Math") || !matches!(self.sym(*name), "min" | "max") || args.is_empty() {
+                    return None;
+                }
+                let mut k = 0;
+                for a in args {
+                    if matches!(ast.expr(a.expr).kind, ExprKind::Spread(_)) {
+                        return None;
+                    }
+                    k = k.max(self.step_of(vars, of, m, a.expr)?);
+                }
+                Some(k)
+            }
+            _ => None,
+        }
+    }
+
+    /// The elements of local `int[]`s that stay in their function: what's pushed and stored, and
+    /// `Top` if the array is used any other way (passed, stored, returned, captured...).
+    fn array_defs(&self, defs: &mut FxMap<Var, Vec<Def>>) {
+        // (the arrays, joined where one is assigned to another)
+        let mut parent: FxMap<(u32, u32), (u32, u32)> = FxMap::default();
+        fn find(p: &mut FxMap<(u32, u32), (u32, u32)>, x: (u32, u32)) -> (u32, u32) {
+            let mut r = x;
+            while p[&r] != r {
+                r = p[&r];
+            }
+            p.insert(x, r);
+            r
+        }
+        let n = self.c.modules.len() as u32;
+        let mut found: Vec<((u32, u32), Def)> = Vec::new();
+        let mut joins: Vec<((u32, u32), (u32, u32))> = Vec::new();
+        let mut escaped: FxSet<(u32, u32)> = FxSet::default();
+        for m in 0..n {
+            let ast = self.ast(m);
+            let facts = self.facts(m);
+            for (si, s) in ast.stmts.iter().enumerate() {
+                if let StmtKind::Let { name_span, .. } = &s.kind
+                    && let Some(&t) = facts.bindings.get(&(si as StmtId))
+                    && matches!(self.tget(t), Ty::Array(INT))
+                {
+                    parent.insert((m, name_span.start), (m, name_span.start));
+                }
+            }
+        }
+        if parent.is_empty() {
+            return;
+        }
+        let tracked = |m: u32, e: ExprId| match (&self.ast(m).expr(e).kind, self.facts(m).idents.get(&e)) {
+            (ExprKind::Ident(_), Some(IdentFact::Local(k))) if parent.contains_key(&(m, *k)) => Some((m, *k)),
+            _ => None,
+        };
+        for m in 0..n {
+            let ast = self.ast(m);
+            let mut allowed: FxSet<ExprId> = FxSet::default();
+            // `xs = [..]`, `xs = ys`: elements, or one array
+            let given = |a: (u32, u32), v: ExprId, allowed: &mut FxSet<ExprId>, found: &mut Vec<((u32, u32), Def)>, joins: &mut Vec<_>, escaped: &mut FxSet<(u32, u32)>| match &ast.expr(v).kind {
+                ExprKind::Array(xs) => {
+                    for &x in xs {
+                        if matches!(ast.expr(x).kind, ExprKind::Spread(_)) {
+                            escaped.insert(a);
+                        } else {
+                            found.push((a, Def::Expr(m, x)));
+                        }
+                    }
+                }
+                _ => match tracked(m, v) {
+                    Some(b) => {
+                        allowed.insert(v);
+                        joins.push((a, b));
+                    }
+                    None => {
+                        escaped.insert(a);
+                    }
+                },
+            };
+            for s in ast.stmts.iter() {
+                match &s.kind {
+                    StmtKind::Let { name_span, init, .. } if parent.contains_key(&(m, name_span.start)) => {
+                        if let Some(i) = init {
+                            given((m, name_span.start), *i, &mut allowed, &mut found, &mut joins, &mut escaped);
+                        }
+                    }
+                    StmtKind::ForOf { iter, .. } => {
+                        allowed.insert(*iter);
+                    }
+                    _ => {}
+                }
+            }
+            for e in ast.exprs.iter() {
+                match &e.kind {
+                    ExprKind::Index { obj, .. } => {
+                        allowed.insert(*obj);
+                    }
+                    ExprKind::Member { obj, name, .. } if matches!(self.sym(*name), "length" | "pop" | "shift" | "sort" | "reverse" | "at" | "includes" | "indexOf" | "lastIndexOf" | "join" | "slice" | "map" | "filter" | "forEach" | "reduce" | "some" | "every" | "find" | "findIndex" | "findLast" | "findLastIndex" | "push" | "unshift") => {
+                        allowed.insert(*obj);
+                    }
+                    _ => {}
+                }
+                let target = |t: ExprId| match &ast.expr(t).kind {
+                    ExprKind::Index { obj, .. } => tracked(m, *obj),
+                    ExprKind::Paren(x) | ExprKind::NonNull(x) => match &ast.expr(*x).kind {
+                        ExprKind::Index { obj, .. } => tracked(m, *obj),
+                        _ => None,
+                    },
+                    _ => None,
+                };
+                match &e.kind {
+                    ExprKind::Assign(op, t, v) => {
+                        if let Some(a) = target(*t) {
+                            found.push((a, match (op, assign_bin(*op)) {
+                                (AssignOp::Assign, _) => Def::Expr(m, *v),
+                                (_, Some(b)) => Def::Op(m, b, *v),
+                                _ => Def::Top,
+                            }));
+                        } else if let (AssignOp::Assign, Some(a)) = (op, tracked(m, *t)) {
+                            allowed.insert(*t);
+                            given(a, *v, &mut allowed, &mut found, &mut joins, &mut escaped);
+                        }
+                    }
+                    ExprKind::Update { target: t, inc, .. } => {
+                        if let Some(a) = target(*t) {
+                            found.push((a, Def::Step(if *inc { 1 } else { -1 })));
+                        }
+                    }
+                    ExprKind::Call { callee, args, .. } => {
+                        if let ExprKind::Member { obj, name, .. } = &ast.expr(*callee).kind
+                            && matches!(self.sym(*name), "push" | "unshift")
+                            && let Some(a) = tracked(m, *obj)
+                        {
+                            for x in args {
+                                if matches!(ast.expr(x.expr).kind, ExprKind::Spread(_)) {
+                                    escaped.insert(a);
+                                } else {
+                                    found.push((a, Def::Expr(m, x.expr)));
+                                }
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            // every other use: anything can happen to the elements
+            for (ei, _) in ast.exprs.iter().enumerate() {
+                if let Some(a) = tracked(m, ei as ExprId)
+                    && !allowed.contains(&(ei as ExprId))
+                {
+                    escaped.insert(a);
+                }
+            }
+        }
+        for (a, b) in joins {
+            let (ra, rb) = (find(&mut parent, a), find(&mut parent, b));
+            if ra != rb {
+                parent.insert(ra, rb);
+            }
+        }
+        let mut class_defs: FxMap<(u32, u32), Vec<Def>> = FxMap::default();
+        for (a, d) in found {
+            let r = find(&mut parent, a);
+            class_defs.entry(r).or_default().push(d);
+        }
+        for a in escaped {
+            let r = find(&mut parent, a);
+            class_defs.entry(r).or_default().push(Def::Top);
+        }
+        let members: Vec<(u32, u32)> = parent.keys().copied().collect();
+        for a in members {
+            let r = find(&mut parent, a);
+            let ds = class_defs.get(&r).map(|ds| ds.to_vec()).unwrap_or_default();
+            defs.insert(Var::Elems(a.0, a.1), ds);
+        }
+    }
+
     fn eval_range(&self, vars: &FxMap<Var, R>, m: u32, e: ExprId) -> R {
         let ast = self.ast(m);
         let facts = self.facts(m);
+        // `xs[i]!`: an element (`xs[i]` alone may be `undefined`)
+        if let ExprKind::NonNull(x) = ast.expr(e).kind
+            && let ExprKind::Index { obj, .. } = ast.expr(x).kind
+            && let Some(Var::Local(am, k)) = self.var_of(m, obj)
+            && let Some(&r) = vars.get(&Var::Elems(am, k))
+        {
+            return r;
+        }
         let ty = facts.expr_ty.get(e as usize).copied().unwrap_or(ERROR);
         let sized = match self.tget(ty) {
             Ty::U8 => Some((0, u8::MAX as i128)),
@@ -312,6 +527,10 @@ impl<'c, 'a> Gen<'c, 'a> {
                 None => R::Top,
             },
             ExprKind::Member { name, .. } if self.sym(*name) == "length" => R::In(0, MAX_LEN),
+            ExprKind::Index { obj, .. } => match self.var_of(m, *obj) {
+                Some(Var::Local(am, k)) => vars.get(&Var::Elems(am, k)).copied().unwrap_or(R::Top),
+                _ => R::Top,
+            },
             ExprKind::Call { callee, args, .. } => {
                 let callee_name = |c: ExprId| match &ast.expr(c).kind {
                     ExprKind::Ident(s) => Some((None, self.sym(*s))),

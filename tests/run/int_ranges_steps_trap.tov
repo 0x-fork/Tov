@@ -1,0 +1,10 @@
+// An array whose elements a function can change (it's passed on) keeps its overflow checks.
+function poison(xs: int[]) { xs[0] = 9223372036854775807 }
+
+function main() {
+  const a: int[] = [0]
+  a[0] = a[0]! + 1
+  console.log(a[0]!)
+  poison(a)
+  console.log(a[0]! + 1)
+}
