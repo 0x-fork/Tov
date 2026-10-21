@@ -4248,9 +4248,11 @@ impl<'c, 'a> Gen<'c, 'a> {
                     return Val::plain(format!("((tv_int)(({ut})({}) % ({ut})({})))", lv.code, rv.code), INT);
                 }
                 // (no overflow check where the operands' values can't overflow)
-                if matches!(op, Add | Sub | Mul) && ty == INT && lv.ty == INT && rv.ty == INT && self.cannot_overflow(op, l, r) {
+                // (`h * 31 + bytes[i]`: smaller integer types widen to `int` exactly)
+                if matches!(op, Add | Sub | Mul) && ty == INT && self.c.types.is_int(lv.ty) && self.c.types.is_int(rv.ty) && lv.ty != U64 && rv.ty != U64 && self.cannot_overflow(op, l, r) {
                     let o = match op { Add => "+", Sub => "-", _ => "*" };
-                    return Val::plain(format!("({} {o} {})", lv.code, rv.code), INT);
+                    let wide = |v: &Val| if v.ty == INT { v.code.clone() } else { format!("((tv_int)({}))", v.code) };
+                    return Val::plain(format!("({} {o} {})", wide(&lv), wide(&rv)), INT);
                 }
                 self.js_mul_operand = has_mul(self.ast(self.cur_m()), l) || has_mul(self.ast(self.cur_m()), r);
                 self.arith(op, lv, rv, ty, span)
