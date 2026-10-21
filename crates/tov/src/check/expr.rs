@@ -73,7 +73,8 @@ impl<'a> Checker<'a> {
     }
 
     pub(super) fn printable(&self, t: TyId) -> bool {
-        !matches!(self.types.get(t), Ty::Func(..) | Ty::Namespace(_) | Ty::BuiltinNs(_) | Ty::Expect(_) | Ty::Void | Ty::Never)
+        // (`never`: code that can't run, `e instanceof Error ? e.message : String(e)`)
+        t == NEVER || !matches!(self.types.get(t), Ty::Func(..) | Ty::Namespace(_) | Ty::BuiltinNs(_) | Ty::Expect(_) | Ty::Void | Ty::Never)
     }
 
     pub(super) fn expr(&mut self, e: ExprId, exp: Option<TyId>) -> TyId {

@@ -1,4 +1,5 @@
-// Class-to-interface conformance must preserve declared and inferred method errors.
+// Class-to-interface conformance: an interface method that declares what it throws must cover
+// what the class's method throws; one that declares nothing may throw anything, as in TypeScript.
 
 class Big extends Error {}
 class Small extends Error {}

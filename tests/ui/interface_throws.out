@@ -1,29 +1,8 @@
-error[T0809] interface_throws.tov:14:27: class `Declared` doesn't implement `Checker`
-   14 | class Declared implements Checker {
-  problems: `check` has type `(int) => int throws Big`, expected `(int) => int`
-
-error[T0809] interface_throws.tov:21:27: class `Inferred` doesn't implement `Checker`
-   21 | class Inferred implements Checker {
-  problems: `check` has type `(int) => int throws Big`, expected `(int) => int`
-
-error[T0809] interface_throws.tov:48:46: class `Inherited` doesn't implement `Checker`
-   48 | class Inherited extends Base<int> implements Checker {}
-  problems: `check` has type `(int) => int throws Big`, expected `(int) => int`
-
-error[T0809] interface_throws.tov:51:29: class `WrongError` doesn't implement `SmallChecker`
-   51 | class WrongError implements SmallChecker {
+error[T0809] interface_throws.tov:52:29: class `WrongError` doesn't implement `SmallChecker`
+   52 | class WrongError implements SmallChecker {
   problems: `check` has type `(int) => int throws Big`, expected `(int) => int throws Small`
 
-error[T0001] interface_throws.tov:58:29: expected `Checker`, found `Structural`
-   58 |   const declared: Checker = new Structural()
+error[T0001] interface_throws.tov:62:31: expected `SmallChecker`, found `Structural`
+   62 |   const wrong: SmallChecker = new Structural()
 
-error[T0001] interface_throws.tov:59:29: expected `Checker`, found `InferredStructural`
-   59 |   const inferred: Checker = new InferredStructural()
-
-error[T0001] interface_throws.tov:60:30: expected `Checker`, found `StructuralInherited`
-   60 |   const inherited: Checker = new StructuralInherited()
-
-error[T0001] interface_throws.tov:61:31: expected `SmallChecker`, found `Structural`
-   61 |   const wrong: SmallChecker = new Structural()
-
-8 error(s)
+2 error(s)

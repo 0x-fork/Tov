@@ -759,7 +759,7 @@ impl<'a> Checker<'a> {
                 && let ExprKind::Member { obj, name, .. } = &ast.expr(*t).kind
                 && matches!(ast.expr(*obj).kind, ExprKind::This)
             {
-                self.check_this_uses(*v, &assigned, &pending);
+                self.check_this_uses(c, *v, &assigned, &pending);
                 pending.retain(|n| n != name);
                 assigned.push(*name);
                 continue;
@@ -767,7 +767,7 @@ impl<'a> Checker<'a> {
             let mut exprs = Vec::new();
             ctor_stmt_exprs(ast, s, &mut exprs);
             for e in exprs {
-                self.check_this_uses(e, &assigned, &pending);
+                self.check_this_uses(c, e, &assigned, &pending);
             }
             // Assignments nested in control flow count once they're unconditional; keep it simple.
         }
@@ -799,7 +799,7 @@ impl<'a> Checker<'a> {
     }
 
     /// Reports uses of `this` other than reading already-assigned fields while fields are pending.
-    fn check_this_uses(&mut self, e: ExprId, assigned: &[Sym], pending: &[Sym]) {
+    fn check_this_uses(&mut self, c: u32, e: ExprId, assigned: &[Sym], pending: &[Sym]) {
         if pending.is_empty() {
             return;
         }
@@ -811,6 +811,22 @@ impl<'a> Checker<'a> {
                 bad = Some(span);
             }
         });
+        // (TypeScript lets methods run first; where the unassigned fields read as their defaults
+        // (numbers, strings, collections, or `undefined`), nothing worse than JavaScript happens)
+        if bad.is_some() && matches!(self.modules[self.cur as usize].path.extension().and_then(|e| e.to_str()), Some("ts" | "tsx" | "mts" | "cts")) {
+            let safe = {
+                let fields = self.classes[c as usize].fields.clone();
+                pending.iter().all(|n| {
+                    fields.iter().find(|f| f.name == *n).is_some_and(|f| {
+                        let t = f.ty;
+                        self.types.has_undefined(t) || self.types.is_numeric(t) || self.types.is_string(t) || t == BOOL || matches!(self.types.get(t), Ty::Array(_) | Ty::Map(..) | Ty::Set(_))
+                    })
+                })
+            };
+            if safe {
+                return;
+            }
+        }
         if let Some(span) = bad {
             let names: Vec<String> = pending.iter().map(|&n| format!("`{}`", self.name(n))).collect();
             self.report(
@@ -884,6 +900,14 @@ impl<'a> Checker<'a> {
                                 if !self.assignable(t, f.ty) {
                                     if t == INT && self.types.is_float(f.ty) {
                                         self.blame_int_fields(c, Some(f.name));
+                                    }
+                                    // (a method that throws, an interface's that says nothing of it:
+                                    // that may throw, as in TypeScript)
+                                    if let (Ty::Func(_, _, ta), Ty::Func(_, _, tb)) = (*self.types.get(t), *self.types.get(f.ty))
+                                        && ta != NEVER
+                                        && tb == NEVER
+                                    {
+                                        self.blame_fn_type(f.ty);
                                     }
                                     problems.push(format!("`{}` has type `{}`, expected `{}`", self.name(f.name), self.show(t), self.show(f.ty)));
                                 }
@@ -1138,7 +1162,9 @@ impl<'a> Checker<'a> {
             // Cycles only through frozen edges can't form at run time.
             let Some(&(a, _, _, owner, fname)) = internal.iter().find(|e| !e.2) else { continue };
             let comp_classes: Vec<u32> = comp.iter().filter_map(|&i| self.class_of(nodes[i]).map(|(c, _)| c)).collect();
-            let cyclic = comp_classes.iter().any(|&c| self.classes[c as usize].cyclic);
+            // (TypeScript has no `cyclic`: its classes are collected when they can form cycles)
+            let ts = |c: u32| matches!(self.modules[self.classes[c as usize].module as usize].path.extension().and_then(|e| e.to_str()), Some("ts" | "tsx" | "mts" | "cts"));
+            let cyclic = comp_classes.iter().any(|&c| self.classes[c as usize].cyclic || ts(c));
             if cyclic {
                 // Every class on a possible cycle takes part in cycle collection.
                 for c in comp_classes {

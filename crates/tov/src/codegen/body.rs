@@ -3693,6 +3693,20 @@ impl<'c, 'a> Gen<'c, 'a> {
             }
             _ => {}
         }
+        // (an object where a string is wanted, in code a narrowing left unreachable:
+        // `${e instanceof Error ? e.message : e}`): its `String(x)`, as JavaScript's
+        if to == STR && matches!(self.tget(from), Ty::Class(..)) {
+            let sbv = self.fresh("sb");
+            self.line(format!("tv_sb {sbv} = {{0}};"));
+            self.line("{");
+            self.bump(1);
+            self.line(format!("tv_sb *sb = &{sbv};"));
+            let c = self.string_code(from, &v.code);
+            self.line(format!("{c};"));
+            self.bump(-1);
+            self.line("}");
+            return self.tmp(STR, &format!("tv_str_from_sb(&{sbv})"), true);
+        }
         // (a float where `int | undefined` is wanted: an index, `s.slice(0, n / 2)`, as JavaScript's
         // ToIntegerOrInfinity reads it)
         if self.c.types.is_float(from) && !self.c.types.members(to).iter().any(|&m| self.c.types.is_float(m)) && self.c.types.members(to).contains(&INT) {

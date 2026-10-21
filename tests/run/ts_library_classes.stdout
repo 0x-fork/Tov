@@ -1,0 +1,15 @@
+ok: ann borrows Dune
+fail: bob borrows Dune -> Dune already borrowed by Ann
+ok: bob borrows Arrival
+fail: bob borrows Alien -> Bob reached limit
+ok: ann borrows Alien
+ok: ann returns Dune
+ok: bob returns Arrival
+ok: bob borrows Dune
+BK-001 "Dune" (1965) out 21 by Herbert
+BK-002 "Neuromancer" (1984) in 21 by Gibson
+DV-003 "Arrival" (2016) in 3 dvd
+DV-004 "Alien" (1979) out 7 dvd
+Ann: Alien
+Bob: Dune
+1960s: Dune; 1970s: Alien; 1980s: Neuromancer; 2010s: Arrival
