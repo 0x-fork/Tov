@@ -3076,9 +3076,12 @@ impl<'c, 'a> Gen<'c, 'a> {
                 if self.c.types.without_undefined(ot) == JS
                     && let Some(v) = self.js_try_fuse(e, ty, span)
                 {
+                    if self.facts(self.cur_m()).throwing.contains(&e) {
+                        self.error_check();
+                    }
                     return v;
                 }
-                self.index(*obj, *index, *optional, ty, span)
+                self.index(e, *obj, *index, *optional, ty, span)
             }
             ExprKind::Object(fields) => {
                 let target = self.c.unfold(ty);
@@ -4392,11 +4395,14 @@ impl<'c, 'a> Gen<'c, 'a> {
         let ot = self.ty(obj);
         if self.c.types.without_undefined(ot) == JS {
             if let Some(v) = self.js_try_fuse(e, ty, span) {
+                if self.facts(m).throwing.contains(&e) {
+                    self.error_check();
+                }
                 return v;
             }
             let base = self.expr(obj);
             let base = self.js_of(base);
-            return self.js_member(base, name, optional, ty, span);
+            return self.js_member(e, base, name, optional, ty, span);
         }
         match self.facts(m).members.get(&e).copied() {
             Some(MemberFact::NsFn(fm, fi)) => {
@@ -4571,13 +4577,13 @@ impl<'c, 'a> Gen<'c, 'a> {
         }
     }
 
-    fn index(&mut self, obj: ExprId, index: ExprId, optional: bool, ty: TyId, span: Span) -> Val {
+    fn index(&mut self, e: ExprId, obj: ExprId, index: ExprId, optional: bool, ty: TyId, span: Span) -> Val {
         let ot = self.ty(obj);
         if self.c.types.without_undefined(ot) == JS {
             let base = self.expr(obj);
             let base = self.js_of(base);
             let iv = self.expr(index);
-            return self.js_index(base, iv, optional, ty, span);
+            return self.js_index(e, base, iv, optional, ty, span);
         }
         let _ = (optional, span);
         let a = self.expr(obj);

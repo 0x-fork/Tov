@@ -24,6 +24,8 @@ pub(crate) struct JsGen {
     convs: FxMap<(TyId, bool), String>,
     /// String literal constants by text.
     lits: FxMap<String, String>,
+    /// `tvg_err_to_js` (and `_kept`) were emitted.
+    err_to_js: bool,
 }
 
 impl<'c, 'a> Gen<'c, 'a> {
@@ -40,14 +42,39 @@ impl<'c, 'a> Gen<'c, 'a> {
 
     /// The C name of the prelude's `__jsError(name, message, value)`.
     fn js_error_factory(&mut self) -> String {
+        self.prelude_fn("__jsError")
+    }
+
+    /// The C name of a function in the prelude (one called by generated code).
+    fn prelude_fn(&mut self, name: &str) -> String {
         let b = self.c.modules.iter().position(|m| m.builtin).expect("prelude") as u32;
         let ast = &self.c.modules[b as usize].ast;
         let item = ast
             .items
             .iter()
-            .position(|it| matches!(&it.kind, crate::ast::ItemKind::Function(f) if self.c.interner.get(f.name) == "__jsError"))
-            .expect("__jsError in the prelude") as u32;
+            .position(|it| matches!(&it.kind, crate::ast::ItemKind::Function(f) if self.c.interner.get(f.name) == name))
+            .unwrap_or_else(|| panic!("{name} in the prelude")) as u32;
         self.instance(b, item, FxMap::default())
+    }
+
+    /// `tvg_err_to_js(e)`: the JavaScript exception for an error a Tov closure passes on to
+    /// JavaScript (what JavaScript threw, for a `JsError`; else an `Error` with its name and
+    /// message); takes the error. `tvg_err_to_js_kept(e)` leaves it (a rejected promise's).
+    fn err_to_js_fn(&mut self) {
+        if self.js.err_to_js {
+            return;
+        }
+        self.js.err_to_js = true;
+        let (is_js, value, name, message) = (self.prelude_fn("__isJsError"), self.prelude_fn("__jsErrorValue"), self.prelude_fn("__errorName"), self.prelude_fn("__errorMessage"));
+        let err = self.c.error_class();
+        let ct = self.ctype(err);
+        // (`v` stays alive on the stack, where the collector scans, until JavaScriptCore takes it)
+        self.helpers_after.push(format!(
+            "static JSValueRef tvg_err_to_js(void *e) {{\n    JSValueRef v;\n    if ({is_js}(({ct})e)) {{\n        v = {value}(({ct})e);\n        tv_js_release(v);\n    }} else {{\n        tv_str n = {name}(({ct})e), m = {message}(({ct})e);\n        v = tv_js_error_value(n, m);\n        tv_str_release(n);\n        tv_str_release(m);\n    }}\n    tvg_obj_release(e);\n    return v;\n}}\n"
+        ));
+        let _ = writeln!(self.protos, "static JSValueRef tvg_err_to_js(void *e);");
+        self.helpers_after.push("static JSValueRef tvg_err_to_js_kept(void *e) { tvg_obj_retain(e); return tvg_err_to_js(e); }\n".to_string());
+        let _ = writeln!(self.protos, "static JSValueRef tvg_err_to_js_kept(void *e);");
     }
 
     /// A property name constant (`&kN`, a `tv_js_name`).
@@ -218,9 +245,22 @@ impl<'c, 'a> Gen<'c, 'a> {
                 }
                 b.push_str("    default: return tv_js_undefined();\n    }\n");
             }
-            Ty::Func(ps, r, _) => {
+            Ty::Promise(pv, _) => {
+                // settled from Tov's side (tv_js_promise_of): the value converted when it's there
+                self.err_to_js_fn();
+                let vf = self.fresh("tvg_jspv");
+                let conv = if pv == VOID || pv == UNDEFINED || self.is_unit(pv) {
+                    "tv_js_undefined()".to_string()
+                } else {
+                    let vct = self.ctype(pv);
+                    self.js_to_code(pv, &format!("(*(const {vct} *)x)"))
+                };
+                let _ = writeln!(self.helpers, "static JSValueRef {vf}(const void *x) {{\n    (void)x;\n    return {conv};\n}}");
+                let _ = writeln!(b, "    return tv_js_promise_of(v, {vf}, tvg_err_to_js_kept);");
+            }
+            Ty::Func(ps, r, th) => {
                 let ps = self.c.types.params(ps).to_vec();
-                let tramp = self.js_tramp(&ps, r);
+                let tramp = self.js_tramp(&ps, r, th != NEVER);
                 let _ = writeln!(b, "    return tv_js_function(v, {tramp});");
             }
             _ => b.push_str("    return tv_js_undefined();\n"),
@@ -228,21 +268,34 @@ impl<'c, 'a> Gen<'c, 'a> {
         b
     }
 
-    /// A trampoline calling a Tov closure of this signature with JavaScript arguments.
-    fn js_tramp(&mut self, ps: &[FnParam], ret: TyId) -> String {
+    /// A trampoline calling a Tov closure of this signature with JavaScript arguments. An error
+    /// the closure passes on (`throws`) is thrown into JavaScript (`*exc`, and NULL: JavaScriptCore
+    /// needs both), before its result is converted: that result is a default value then, holding
+    /// nothing to release.
+    fn js_tramp(&mut self, ps: &[FnParam], ret: TyId, throws: bool) -> String {
         let f = self.fresh("tvg_jstramp");
         let fp = self.fn_ptr_type_pub(ps, ret);
         let args: Vec<String> = (0..ps.len()).map(|i| format!(", n > {i} ? a[{i}] : tv_js_undefined()")).collect();
         let call = format!("(({fp})fn->fn)(fn->env{})", args.concat());
-        let body = if ret == VOID || self.is_unit(ret) {
-            format!("    {call};\n    return tv_js_undefined();\n")
+        let mut b = String::from(if throws { "    (void)n; (void)a;\n" } else { "    (void)n; (void)a; (void)exc;\n" });
+        // (an error left over from code that dropped one is never reported as this call's, nor
+        // carried through a closure that can't throw to be reported by a later call)
+        b.push_str("    if (__builtin_expect(tvg_err != NULL, 0)) { tvg_obj_release(tvg_err); tvg_err = NULL; }\n");
+        let thrown = if throws {
+            self.err_to_js_fn();
+            "    if (tvg_err) { void *e = tvg_err; tvg_err = NULL; *exc = tvg_err_to_js(e); return NULL; }\n"
+        } else {
+            ""
+        };
+        if ret == VOID || self.is_unit(ret) {
+            let _ = write!(b, "    {call};\n{thrown}    return tv_js_undefined();\n");
         } else {
             let rct = self.ctype(ret);
             let conv = self.js_to_code(ret, "r");
             let rel = self.release_code(ret, "r");
-            format!("    {rct} r = {call};\n    JSValueRef out = {conv};\n    {rel};\n    return out;\n")
-        };
-        let _ = writeln!(self.helpers, "static JSValueRef {f}(const tv_fn *fn, size_t n, const JSValueRef *a) {{\n    (void)n; (void)a;\n{body}}}");
+            let _ = write!(b, "    {rct} r = {call};\n{thrown}    JSValueRef out = {conv};\n    {rel};\n    return out;\n");
+        }
+        let _ = writeln!(self.helpers, "static JSValueRef {f}(const tv_fn *fn, size_t n, const JSValueRef *a, JSValueRef *exc) {{\n{b}}}");
         f
     }
 
@@ -380,12 +433,18 @@ impl<'c, 'a> Gen<'c, 'a> {
 
     // ------------------------------------------------------------ access and calls
 
-    /// `obj.name` on a JavaScript value.
-    pub(crate) fn js_member(&mut self, obj: Val, name: Sym, optional: bool, ty: TyId, span: Span) -> Val {
+    /// `obj.name` on a JavaScript value (`e`): a trap if its getter throws, or, where the error can
+    /// pass on (`e` among the throwing expressions), a JsError.
+    pub(crate) fn js_member(&mut self, e: ExprId, obj: Val, name: Sym, optional: bool, ty: TyId, span: Span) -> Val {
         let text = self.sym(name).to_string();
         let key = self.js_key(&text);
         let loc = self.loc(span);
         let t = self.fresh("j");
+        let m = self.cur_m();
+        if self.facts(m).throwing.contains(&e) {
+            let get = format!("tv_js_name_get({}, {key}, &{{x}})", obj.code);
+            return self.js_read_exc(&get, &obj, optional, ty);
+        }
         if optional {
             self.line(format!("JSValueRef {t} = tv_js_is_nullish({o}) ? tv_js_undefined() : tv_js_get_or_trap({o}, {key}, {loc});", o = obj.code));
         } else {
@@ -394,8 +453,20 @@ impl<'c, 'a> Gen<'c, 'a> {
         self.coerce(Val::plain(t, JS), ty)
     }
 
-    /// `obj[index]` on a JavaScript value.
-    pub(crate) fn js_index(&mut self, obj: Val, index: Val, optional: bool, ty: TyId, span: Span) -> Val {
+    /// `obj[index]` on a JavaScript value (`e`): as `js_member`.
+    pub(crate) fn js_index(&mut self, e: ExprId, obj: Val, index: Val, optional: bool, ty: TyId, span: Span) -> Val {
+        let m = self.cur_m();
+        if self.facts(m).throwing.contains(&e) {
+            let get = match self.tget(index.ty) {
+                Ty::Str | Ty::StrLit(_) => {
+                    let iv = self.coerce(index, STR);
+                    format!("tv_js_key_exc({}, {}, &{{x}})", obj.code, iv.code)
+                }
+                Ty::Js => format!("tv_js_key_exc({o}, tv_js_to_str({i}), &{{x}})", o = obj.code, i = index.code),
+                _ => format!("tv_js_at_exc({}, (double)({}), &{{x}})", obj.code, index.code),
+            };
+            return self.js_read_exc(&get, &obj, optional, ty);
+        }
         let loc = self.loc(span);
         let get = match self.tget(index.ty) {
             Ty::Str | Ty::StrLit(_) => {
@@ -411,6 +482,19 @@ impl<'c, 'a> Gen<'c, 'a> {
         } else {
             self.line(format!("JSValueRef {t} = {get};"));
         }
+        self.coerce(Val::plain(t, JS), ty)
+    }
+
+    /// A read whose error passes on: `get` (with `{x}` for the exception's slot) gives NULL and the
+    /// exception when the getter throws, which becomes `tvg_err` (a JsError), checked here.
+    fn js_read_exc(&mut self, get: &str, obj: &Val, optional: bool, ty: TyId) -> Val {
+        self.js_used();
+        let (x, t) = (self.fresh("jx"), self.fresh("j"));
+        let get = get.replace("{x}", &x);
+        let get = if optional { format!("tv_js_is_nullish({}) ? tv_js_undefined() : {get}", obj.code) } else { get };
+        self.line(format!("JSValueRef {x} = NULL; JSValueRef {t} = {get};"));
+        self.line(format!("if (!{t}) {{ tvg_err = tvg_js_make_error({x}); {t} = tv_js_undefined(); }}"));
+        self.error_check();
         self.coerce(Val::plain(t, JS), ty)
     }
 
@@ -531,17 +615,12 @@ impl<'c, 'a> Gen<'c, 'a> {
         let (x, r) = (self.fresh("jx"), self.fresh("jr"));
         let src = c_string(f.src.as_bytes());
         self.line(format!("JSValueRef {x} = NULL; JSValueRef {r} = tv_js_thunk(&{slot}, {src}, {}, {argv}, &{x});", f.params.len()));
-        if f.calls {
+        // (a tree with a call in it, or whose own read can pass its error on, gives the error back;
+        // the caller checks it: `call()`'s wrapper in calls.rs, the `new`, member and index cases
+        // in body.rs, each when its expression is among the throwing ones)
+        let m = self.cur_m();
+        if f.calls || self.facts(m).throwing.contains(&e) {
             self.line(format!("if (!{r}) {{ tvg_err = tvg_js_make_error({x}); {r} = tv_js_undefined(); }}"));
-            // (a call or `new` is among the throwing expressions, so it's checked by its own path:
-            // `call()`'s wrapper in calls.rs, the `new` case in body.rs. A read fused with the call
-            // it reads from, `ctx().params`, isn't: the checker recorded the call inside it. If
-            // reads ever become throwing expressions themselves, this stops firing for them, and
-            // the member and index cases in body.rs must check after `js_try_fuse` instead.)
-            let m = self.cur_m();
-            if !self.facts(m).throwing.contains(&e) {
-                self.error_check();
-            }
         } else {
             let loc = self.loc(span);
             self.line(format!("if (!{r}) tv_js_throw_trap({x}, {loc});"));

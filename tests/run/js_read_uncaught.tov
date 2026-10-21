@@ -1,0 +1,10 @@
+// A JavaScript read that throws and that nothing catches ends the program as an uncaught error
+// (exit status 1), as a JavaScript call's error does.
+import { runInThisContext } from "node:vm"
+
+function main() {
+  const o = runInThisContext("({ get bad() { throw new TypeError('bad getter') } })")
+  console.log("before")
+  console.log(o.bad)
+  console.log("never: after the read")
+}

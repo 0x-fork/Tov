@@ -1551,6 +1551,7 @@ impl<'a> Checker<'a> {
                 let s = self.ast().expr(index).span;
                 self.report(Diagnostic::new("T0902", s, format!("a JavaScript property key must be a number or a string, found `{shown}`")));
             }
+            self.js_read_throw(e, span);
             return JS;
         }
         // `m[1]` on a match: `m.items[1]`
@@ -1689,7 +1690,8 @@ impl<'a> Checker<'a> {
             return ERROR;
         }
         if self.types.without_undefined(t) == JS {
-            // a JavaScript property (`undefined` if there's none)
+            // a JavaScript property (`undefined` if there's none; a getter can throw)
+            self.js_read_throw(e, span);
             return JS;
         }
         // `req.params` in a `routes` handler: `{ id: string }` for "/users/:id".
@@ -3252,6 +3254,19 @@ impl<'a> Checker<'a> {
 
     // ------------------------------------------------------------ JavaScript values (npm)
 
+    /// A JavaScript read (`o.x`, `o[k]`), whose getter or Proxy can throw: like a JavaScript call
+    /// where errors can pass on or a `try { }` block catches them. Where they can't (a closure
+    /// whose type doesn't throw, a module constant's initializer), it stays a trap and nothing is
+    /// reported, so `xs.map((x: Js) => x.name)` compiles; a JavaScript call there is refused.
+    fn js_read_throw(&mut self, e: ExprId, span: Span) {
+        let Some(frame) = self.fcx.last().and_then(|f| f.frames.last()) else { return };
+        if frame.try_frames.is_empty() && (!frame.can_throw || frame.module_init) {
+            return;
+        }
+        let err = self.builtin_class("JsError");
+        self.on_throw(err, span, Some("this JavaScript read"), Some(e));
+    }
+
     /// Can a Tov value of type `t` go to JavaScript? It's converted on the way: numbers,
     /// strings, booleans, `undefined`, arrays, records and unions of these, `Js` itself, and
     /// functions whose parameters are `Js` (JavaScript calls them back).
@@ -3260,6 +3275,8 @@ impl<'a> Checker<'a> {
             Ty::Js | Ty::Error | Ty::Never | Ty::Str | Ty::StrLit(_) | Ty::Bool | Ty::Undefined | Ty::Null | Ty::Void => true,
             Ty::Int | Ty::F64 | Ty::F32 | Ty::I8 | Ty::I16 | Ty::I32 | Ty::U8 | Ty::U16 | Ty::U32 | Ty::U64 => true,
             Ty::Array(e) => self.js_convertible(e),
+            // (a JavaScript promise, settled when this one is)
+            Ty::Promise(v, _) => self.js_convertible(v),
             Ty::Record(fs) => {
                 let fs = self.types.fields(fs).to_vec();
                 fs.iter().all(|f| self.js_convertible(f.ty))
@@ -3268,9 +3285,10 @@ impl<'a> Checker<'a> {
                 let ms = self.types.tys(ms).to_vec();
                 ms.iter().all(|&m| self.js_convertible(m))
             }
-            Ty::Func(ps, r, th) => {
+            // (an error the function passes on is thrown into JavaScript)
+            Ty::Func(ps, r, _) => {
                 let ps = self.types.params(ps).to_vec();
-                th == NEVER && ps.iter().all(|p| p.ty == JS && !p.inout) && self.js_convertible(r)
+                ps.iter().all(|p| p.ty == JS && !p.inout) && self.js_convertible(r)
             }
             _ => false,
         }
@@ -3327,11 +3345,29 @@ impl<'a> Checker<'a> {
                     crate::ast::ArrowBody::Block(b) if !super::returns_value(self.ast(), b) => VOID,
                     _ => JS,
                 };
-                Some(self.types.func(ps, ret))
+                // (it may pass errors on: they're thrown into JavaScript)
+                let err = self.error_class();
+                Some(self.types.func_throws(ps, ret, err))
             }
             _ => Some(JS),
         };
-        let t = self.expr(x, exp);
+        let mut t = self.expr(x, exp);
+        // A named function passed by name keeps its `throws` here, so the trampoline throws its
+        // errors into JavaScript. (Function values elsewhere don't carry it yet.)
+        if let ExprKind::Ident(sym) = self.ast().expr(x).kind
+            && self.lookup(sym).is_none()
+            && let Some(Decl::Fn(fm, fi)) = self.scopes[self.cur as usize].values.get(&sym).map(|d| d.0)
+            && let Some(sig) = self.fn_sig(fm, fi)
+            && sig.throws != NEVER
+            && let Ty::Func(ps, r, _) = *self.types.get(t)
+        {
+            let throws = if sig.throws == UNKNOWN { self.error_class() } else { sig.throws };
+            let ps = self.types.params(ps).to_vec();
+            t = self.types.func_throws(ps, r, throws);
+            if let Some(f) = self.facts_mut() {
+                f.expr_ty[x as usize] = t;
+            }
+        }
         if !self.js_convertible(t) {
             let shown = self.show(t);
             let s = self.ast().expr(x).span;

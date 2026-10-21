@@ -1,0 +1,38 @@
+// A JavaScript read whose getter throws passes a JsError on, like a JavaScript call: caught by
+// `try { }`, or passed on to the caller (issue #20).
+import { runInThisContext } from "node:vm"
+
+function name(o: Js): Js {
+  return o.bad
+}
+
+function main() {
+  const o = runInThisContext("({ ok: 1, get bad() { throw new TypeError('bad getter') }, arr: new Proxy([], { get(t, k) { throw new RangeError('bad index ' + String(k)) } }) })")
+  try {
+    console.log("never:", o.bad)
+  } catch (e) {
+    console.log("member: caught", e.name, e.message)
+  }
+  try {
+    console.log("never:", o["bad"])
+  } catch (e) {
+    console.log("key: caught", e.name, e.message)
+  }
+  try {
+    console.log("never:", o.arr[2])
+  } catch (e) {
+    console.log("index: caught", e.name, e.message)
+  }
+  try {
+    console.log("never:", o?.bad)
+  } catch (e) {
+    console.log("optional: caught", e.name)
+  }
+  try {
+    console.log("never:", name(o))
+  } catch (e) {
+    console.log("from a function: caught", e.name, e.message)
+  }
+  // and nothing is left over
+  console.log("afterwards:", o.ok, o["ok"])
+}

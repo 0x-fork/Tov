@@ -1502,6 +1502,40 @@ JSObjectRef tv_js_deferred_new(tv_js_deferred **out) {
     return p;
 }
 
+/* A Tov promise as a JavaScript one (a Tov async function called from JavaScript): settled
+ * when the Tov promise is, with its value converted by `value`, or rejected with `err(error)`
+ * (the error stays the promise's). */
+typedef struct {
+    tv_js_deferred *d;
+    tv_promise *p;
+    JSValueRef (*value)(const void *);
+    JSValueRef (*err)(void *);
+} tv_js_promise_link;
+
+static void tv_js_promise_settled(void *a, void *b) {
+    (void)b;
+    tv_js_promise_link *l = a;
+    tv_promise *p = l->p;
+    if (p->state == TV_FULFILLED) {
+        tv_js_settle(l->d, l->value(p->value), true);
+    } else {
+        tv_js_settle(l->d, l->err(p->err), false);
+    }
+    tv_promise_release(p);
+    tv_free(l);
+}
+
+JSValueRef tv_js_promise_of(tv_promise *p, JSValueRef (*value)(const void *), JSValueRef (*err)(void *)) {
+    tv_js_promise_link *l = tv_alloc(sizeof *l);
+    JSObjectRef jp = tv_js_deferred_new(&l->d);
+    l->p = p;
+    l->value = value;
+    l->err = err;
+    tv_promise_retain(p);
+    tv_promise_on(p, tv_js_promise_settled, l, NULL);
+    return jp;
+}
+
 void tv_js_settle(tv_js_deferred *d, JSValueRef value, bool ok) {
     JSContextRef ctx = tv_js_ctx;
     JSObjectCallAsFunction(ctx, ok ? d->resolve : d->reject, NULL, 1, &value, NULL);
@@ -1661,6 +1695,29 @@ JSValueRef tv_js_at_or_trap(JSValueRef obj, double i, const char *loc) {
     return r;
 }
 
+/* tv_js_at_or_trap and tv_js_key_or_trap with the exception given back (NULL and *exc) instead,
+ * for a read whose error can pass on as a JsError */
+JSValueRef tv_js_at_exc(JSValueRef obj, double i, JSValueRef *exc) {
+    JSContextRef ctx = tv_js();
+    JSObjectRef o = JSValueToObject(ctx, obj, exc);
+    if (!o) return NULL;
+    JSValueRef r;
+    if (i >= 0 && i < 4294967295.0 && i == (double)(uint32_t)i) {
+        r = JSObjectGetPropertyAtIndex(ctx, o, (unsigned)i, exc);
+    } else {
+        r = JSObjectGetPropertyForKey(ctx, o, JSValueMakeNumber(ctx, i), exc);
+    }
+    return *exc ? NULL : r;
+}
+
+JSValueRef tv_js_key_exc(JSValueRef obj, tv_str key, JSValueRef *exc) {
+    JSContextRef ctx = tv_js();
+    JSObjectRef o = JSValueToObject(ctx, obj, exc);
+    if (!o) return NULL;
+    JSValueRef r = JSObjectGetPropertyForKey(ctx, o, tv_js_from_str(key), exc);
+    return *exc ? NULL : r;
+}
+
 JSValueRef tv_js_key_or_trap(JSValueRef obj, tv_str key, const char *loc) {
     JSContextRef ctx = tv_js();
     JSValueRef exc = NULL;
@@ -1724,9 +1781,9 @@ static void tv_js_release_dead(void) {
 }
 
 static JSValueRef tv_js_closure_call(JSContextRef ctx, JSObjectRef f, JSObjectRef self, size_t n, const JSValueRef a[], JSValueRef *exc) {
-    (void)ctx; (void)self; (void)exc;
+    (void)ctx; (void)self;
     tv_js_closure *c = JSObjectGetPrivate(f);
-    return c->tramp(&c->fn, n, a);
+    return c->tramp(&c->fn, n, a, exc);
 }
 
 static void tv_js_closure_finalize(JSObjectRef f) {
@@ -1741,6 +1798,18 @@ static void tv_js_closure_finalize(JSObjectRef f) {
         tv_js_dead_envs[tv_js_ndead++] = c->fn.env;
     }
     free(c);
+}
+
+JSValueRef tv_js_error_value(tv_str name, tv_str message) {
+    JSContextRef ctx = tv_js();
+    JSValueRef m = tv_js_from_str(message);
+    JSValueRef failed = NULL;
+    JSObjectRef e = JSObjectMakeError(ctx, 1, &m, &failed);
+    /* (an exception must be a value: if the Error can't be made, its message is thrown) */
+    if (!e) return m;
+    static JSStringRef kname;
+    JSObjectSetProperty(ctx, e, tv_js_key(&kname, "name"), tv_js_from_str(name), kJSPropertyAttributeDontEnum, NULL);
+    return e;
 }
 
 JSValueRef tv_js_function(tv_fn fn, tv_js_tramp tramp) {
@@ -1892,7 +1961,8 @@ JSValueRef tv_js_name_get(JSValueRef obj, tv_js_name *k, JSValueRef *exc) {
      * words it, by way of the compiled reader below) */
     if (!JSValueIsUndefined(ctx, obj) && !JSValueIsNull(ctx, obj)) {
         if (!k->id) k->id = TVPropertyName(ctx, k->text);
-        return TVGetProperty(ctx, obj, k->id, exc);
+        JSValueRef r = TVGetProperty(ctx, obj, k->id, exc);
+        return *exc ? NULL : r;
     }
 #endif
     if (!k->get) {
