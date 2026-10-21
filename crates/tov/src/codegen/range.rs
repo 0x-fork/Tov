@@ -154,6 +154,8 @@ impl<'c, 'a> Gen<'c, 'a> {
             }
         }
         let mut vars: FxMap<Var, R> = defs.keys().map(|&v| (v, R::Bot)).collect();
+        // (anything from the start: changed where it isn't known how)
+        let mut forced: FxSet<Var> = FxSet::default();
         for (&v, r) in vars.iter_mut() {
             let name = match v {
                 Var::Local(m, k) => self.ast(m).stmts.iter().find_map(|s| match s.kind {
@@ -169,6 +171,7 @@ impl<'c, 'a> Gen<'c, 'a> {
             let global = matches!(v, Var::Global(..));
             if name.is_some_and(|(m, s)| unknown.contains(&(m, s)) || (global && unknown.iter().any(|&(_, u)| u == s))) || defs[&v].iter().any(|d| matches!(d, Def::Top)) {
                 *r = R::Top;
+                forced.insert(v);
             }
         }
         let keys: Vec<Var> = defs.keys().copied().collect();
@@ -223,6 +226,42 @@ impl<'c, 'a> Gen<'c, 'a> {
                     let new = eval_defs(self, &vars, v);
                     vars.insert(v, new);
                 }
+            }
+        }
+        // A counter: given only small values (within 2^32 of zero) and otherwise only stepped by
+        // one (`flips++`, `n -= 1`). Getting 2^62 past where it started takes 2^62 steps, decades
+        // of them, so that's as far as it goes, and its own steps never overflow.
+        const SMALL: i128 = 1 << 32;
+        const STEPS: i128 = 1 << 62;
+        for &v in &keys {
+            if forced.contains(&v) {
+                continue;
+            }
+            let mut start = R::Bot;
+            let mut steps = false;
+            let counter = defs[&v].iter().all(|d| match *d {
+                Def::Step(1 | -1) => {
+                    steps = true;
+                    true
+                }
+                Def::Op(m, BinOp::Add | BinOp::Sub, e) if matches!(self.ast(m).expr(e).kind, ExprKind::Int(1)) => {
+                    steps = true;
+                    true
+                }
+                Def::Expr(m, e) => match self.eval_range(&vars, m, e) {
+                    r @ R::In(lo, hi) if lo >= -SMALL && hi <= SMALL => {
+                        start = start.join(r);
+                        true
+                    }
+                    _ => false,
+                },
+                _ => false,
+            });
+            if counter
+                && steps
+                && let R::In(lo, hi) = start
+            {
+                vars.insert(v, R::In(lo - STEPS, hi + STEPS));
             }
         }
         Ranges { vars }

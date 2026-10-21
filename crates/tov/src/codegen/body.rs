@@ -2991,7 +2991,8 @@ impl<'c, 'a> Gen<'c, 'a> {
                     self.line(format!("{lv} = {f}({old}, tv_dec_from_int(1));"));
                     return Val::plain(if *prefix { lv } else { old }, p.ty);
                 }
-                let nowrap = matches!(self.ident_fact(m, *target), Some(IdentFact::Local(k)) if Some(k) == self.b().nowrap_step || self.b().nowrap_locals.contains(&k));
+                let nowrap = matches!(self.ident_fact(m, *target), Some(IdentFact::Local(k)) if Some(k) == self.b().nowrap_step || self.b().nowrap_locals.contains(&k))
+                    || (p.ty == INT && matches!(self.int_range(*target), super::range::R::In(lo, hi) if if *inc { hi < i64::MAX as i128 } else { lo > i64::MIN as i128 }));
                 let new = if self.c.types.is_float(p.ty) || nowrap {
                     format!("{old} {} 1", if *inc { "+" } else { "-" })
                 } else {
@@ -3882,6 +3883,9 @@ impl<'c, 'a> Gen<'c, 'a> {
                     // Literal: fold the sign (INT64_MIN is written as a literal too).
                     let ct = self.ctype(ty);
                     Val::plain(format!("(({ct})(-{}))", v.code), ty)
+                } else if ty == INT && matches!(self.int_range(x), super::range::R::In(lo, _) if lo > i64::MIN as i128) {
+                    // (never `INT64_MIN`: negating can't overflow)
+                    Val::plain(format!("(-{})", v.code), ty)
                 } else {
                     let ct = self.ctype(ty);
                     let loc = self.loc(span);
