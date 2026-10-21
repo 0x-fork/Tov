@@ -2184,7 +2184,10 @@ impl<'c, 'a> Gen<'c, 'a> {
             let (d, ect) = (self.desc(et), self.ctype(et));
             let zero = self.default_value(et);
             let loc = self.loc(span);
-            return self.tmp(ty, &format!("tv_arr_make({d}, {n}, &({ect}){{{zero}}}, {loc})"), true);
+            // (the fill value in a variable: a compound literal can't hold a compound literal)
+            let z = self.fresh("z");
+            self.line(format!("{ect} {z} = {zero};"));
+            return self.tmp(ty, &format!("tv_arr_make({d}, {n}, &{z}, {loc})"), true);
         }
         let src = self.spread_array(a.expr);
         self.convert_array(src, ty)

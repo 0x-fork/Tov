@@ -1417,6 +1417,14 @@ impl<'a> Parser<'a> {
         self.mk_stmt(StmtKind::Block(stmts), span)
     }
 
+    /// `f(args)`; `Array(n)` / `Array<T>(n)` is `new Array(n)`, as in JavaScript.
+    fn call_or_new(&mut self, callee: ExprId, type_args: Vec<TypeId>, args: Vec<Arg>, span: Span) -> ExprId {
+        if matches!(self.ast.exprs[callee as usize].kind, ExprKind::Ident(s) if self.interner.get(s) == "Array") {
+            return self.mk_expr(ExprKind::New { callee, type_args, args }, span);
+        }
+        self.mk_expr(ExprKind::Call { callee, type_args, args, optional: false }, span)
+    }
+
     fn local_function(&mut self, start: Span, is_async: bool) -> StmtId {
         let Some(f) = self.function() else { return self.mk_stmt(StmtKind::Error, start) };
         let span = start.to(self.prev_span());
@@ -2317,7 +2325,7 @@ impl<'a> Parser<'a> {
                 Tok::LParen if !self.tok().nl_before => {
                     let args = self.args();
                     let span = start.to(self.prev_span());
-                    e = self.mk_expr(ExprKind::Call { callee: e, type_args: Vec::new(), args, optional: false }, span);
+                    e = self.call_or_new(e, Vec::new(), args, span);
                 }
                 Tok::LBracket if !self.tok().nl_before => {
                     self.bump();
@@ -2361,7 +2369,7 @@ impl<'a> Parser<'a> {
                     let Some(type_args) = targs else { return e };
                     let args = self.args();
                     let span = start.to(self.prev_span());
-                    e = self.mk_expr(ExprKind::Call { callee: e, type_args, args, optional: false }, span);
+                    e = self.call_or_new(e, type_args, args, span);
                 }
                 _ => return e,
             }
