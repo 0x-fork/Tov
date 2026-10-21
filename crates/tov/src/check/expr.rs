@@ -1179,13 +1179,14 @@ impl<'a> Checker<'a> {
         })
     }
 
-    /// The storage at path `e` (`xs`, `p.items`, `ps[0].x`'s object) is in an array, map or set,
-    /// or is one: an object every reference shares, as in JavaScript.
+    /// The storage at path `e` (`xs`, `p.items`, `ps[0].x`'s object) is in an array, map, set or
+    /// recursive alias's box, or is one: an object every reference shares, as in JavaScript.
     pub(super) fn inside_shared(&mut self, e: ExprId) -> bool {
         let mut cur = e;
         loop {
             if let Some(t) = self.path_ty(cur)
-                && self.flat_members(t).iter().any(|&m| matches!(self.types.get(m), Ty::Array(_) | Ty::Map(..) | Ty::Set(_)))
+                && (self.types.members(t).into_iter().any(|m| matches!(self.types.get(m), Ty::Rec(..)))
+                    || self.flat_members(t).iter().any(|&m| matches!(self.types.get(m), Ty::Array(_) | Ty::Map(..) | Ty::Set(_))))
             {
                 return true;
             }

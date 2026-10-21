@@ -1,0 +1,27 @@
+type Node = { val: number; next: Node | undefined };
+let head: Node | undefined = undefined;
+for (let i = 0; i < 5; i++) head = { val: i, next: head };
+const alias = head!;
+alias.val = 100;
+let tail = head!;
+while (tail.next) tail = tail.next;
+tail.next = { val: -1, next: undefined };
+let s = "";
+for (let n = head; n; n = n.next) s += n.val + " ";
+console.log(s);
+type Tree = { v: number; kids: Tree[] };
+const root: Tree = { v: 1, kids: [] };
+const child: Tree = { v: 2, kids: [] };
+root.kids.push(child);
+child.v = 20;
+child.kids.push({ v: 3, kids: [] });
+console.log(JSON.stringify(root));
+function bump(n: Node) { n.val += 1; if (n.next) bump(n.next); }
+function append(n: Node, v: number) { let t = n; while (t.next) t = t.next; t.next = { val: v, next: undefined }; }
+const h2: Node = { val: 1, next: { val: 2, next: undefined } };
+bump(h2);
+append(h2, 9);
+for (let n: Node | undefined = h2; n; n = n.next) console.log(n.val);
+const lit = { val: 5, next: undefined };
+bump({ val: 7, next: h2 });
+console.log(h2.val, lit.val);

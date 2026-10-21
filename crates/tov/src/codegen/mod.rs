@@ -576,8 +576,7 @@ impl<'c, 'a> Gen<'c, 'a> {
     }
 
     /// Recursive-alias boxes that can be shared: those reachable from a retained type. Retaining
-    /// a record or union retains its members; a shared box may be cloned (copy-on-write), which
-    /// retains its contents.
+    /// a record or union retains its members (and, to be safe, a box counts its contents too).
     fn shared_boxes(&mut self) -> FxSet<TyId> {
         let mut seen = FxSet::default();
         let mut stack: Vec<TyId> = self.rc_roots.iter().copied().collect();
@@ -2018,7 +2017,7 @@ static inline void tvg_make_unique(tv_arr *a, const tv_type *t) {
     else { T bmp_s = bmp_v; *bmp_a = tvg_push_slow(*bmp_a, (desc), &bmp_s); (capv) = bmp_a->p->cap; } } while (0)
 /* Push with capacity reserved for it before the loop (reserve_for_pushes). */
 #define TVG_PUSH_X(T, arr, val) do { tv_arr *bmp_a = (arr); ((T *)(void *)tv_arrbuf_data(bmp_a->p))[bmp_a->p->len++] = (val); } while (0)
-/* Mutable element access: copy-on-write, then a bounds-checked pointer. */
+/* Mutable element access: a bounds-checked pointer (a placeholder empty array made real first). */
 static inline void *tvg_at_mut(tv_arr *a, const tv_type *t, size_t size, tv_int i, const char *loc) {
     tvg_make_unique(a, t);
     return tv_arr_at(*a, size, i, loc);

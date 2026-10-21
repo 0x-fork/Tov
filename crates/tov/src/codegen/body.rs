@@ -4747,7 +4747,7 @@ impl<'c, 'a> Gen<'c, 'a> {
                 }
                 let p = self.place(*obj);
                 let p = self.project_place(p, narrowed);
-                // Through a recursive alias: unbox (copy-on-write) to reach the record.
+                // Through a recursive alias: unbox to reach the record.
                 let p = if matches!(self.tget(p.ty), Ty::Rec(..)) {
                     let inner = self.c.unfold(p.ty);
                     self.project_place(p, inner)
@@ -4882,18 +4882,9 @@ impl<'c, 'a> Gen<'c, 'a> {
             return p;
         }
         if matches!(self.tget(p.ty), Ty::Rec(..)) {
-            // Copy-on-write through the box.
+            // Through the box, which is shared (as JavaScript's objects are).
             let inner = self.c.unfold(p.ty);
-            let bn = self.box_name(p.ty);
-            let bp = self.fresh("bp");
-            // Only a shared box is ever cloned, and a shared box's contents count as retained
-            // anyway (see `shared_boxes`), so this retain doesn't make them shared by itself.
-            self.rc_helper_depth += 1;
-            let clone_inner = if self.is_rc(inner) { format!("{};", self.retain_code(inner, &format!("{bp}n->v"))) } else { String::new() };
-            self.rc_helper_depth -= 1;
-            self.line(format!("{bn} **{bp} = &{};", p.lv));
-            self.line(format!("if (RC_{bn}(*{bp}) > 1) {{ {bn} *{bp}n = tvg_alloc_small(sizeof({bn})); RC_{bn}({bp}n) = 1; {bp}n->v = (*{bp})->v; {clone_inner} RC_{bn}(*{bp})--; *{bp} = {bp}n; }}"));
-            return self.project_place(Place { lv: format!("(*{bp})->v"), ty: inner, weak: false }, to);
+            return self.project_place(Place { lv: format!("({})->v", p.lv), ty: inner, weak: false }, to);
         }
         if let Some(k) = self.tag_of(p.ty, to) {
             return Place { lv: self.u_payload(&p.lv, p.ty, k), ty: to, weak: false };
