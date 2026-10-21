@@ -1590,6 +1590,51 @@ impl<'c, 'a> Gen<'c, 'a> {
 
     /// `for (let i = a; i < n; i++)` where `n` has `i`'s integer type and nothing in the loop
     /// assigns `i` but the step: every step starts from `i < n <= MAX`, so `i++` can't overflow.
+    /// `while (i < n && ...) { ...; i++; ... }`: the one `i++` (a statement of the body's own,
+    /// nothing else changing `i`) comes after `i < n` held, so it can't overflow.
+    fn guarded_counter(&self, cond: ExprId, body: StmtId) -> Option<u32> {
+        let m = self.cur_m();
+        let ast = self.ast(m);
+        let facts = self.facts(m);
+        let local = |e: ExprId| match (&ast.expr(e).kind, facts.idents.get(&e)) {
+            (ExprKind::Ident(_), Some(IdentFact::Local(k))) => Some(*k),
+            _ => None,
+        };
+        let mut first = cond;
+        loop {
+            match &ast.expr(first).kind {
+                ExprKind::Paren(x) => first = *x,
+                ExprKind::Binary(BinOp::And, l, _) => first = *l,
+                _ => break,
+            }
+        }
+        let ExprKind::Binary(BinOp::Lt, l, r) = &ast.expr(first).kind else { return None };
+        let k = local(*l)?;
+        if facts.expr_ty.get(*l as usize) != Some(&INT) || facts.expr_ty.get(*r as usize) != Some(&INT) {
+            return None;
+        }
+        let top: Vec<StmtId> = match &ast.stmt(body).kind {
+            StmtKind::Block(ss) => ss.clone(),
+            _ => vec![body],
+        };
+        let is_step = |s: StmtId| matches!(&ast.stmt(s).kind, StmtKind::Expr(x) if matches!(&ast.expr(*x).kind, ExprKind::Update { inc: true, target, .. } if local(*target) == Some(k)));
+        if top.iter().filter(|&&s| is_step(s)).count() != 1 {
+            return None;
+        }
+        let mut all = Vec::new();
+        collect_exprs_stmt(ast, body, &mut all);
+        collect_exprs_expr(ast, cond, &mut all);
+        let changes = all
+            .iter()
+            .filter(|&&e| match &ast.expr(e).kind {
+                ExprKind::Assign(_, t, _) | ExprKind::Update { target: t, .. } => local(*t) == Some(k),
+                ExprKind::Call { args, .. } => args.iter().any(|a| a.by_ref.is_some() && local(a.expr) == Some(k)),
+                _ => false,
+            })
+            .count();
+        (changes == 1).then_some(k)
+    }
+
     fn step_cannot_overflow(&self, init: Option<StmtId>, cond: Option<ExprId>, step: Option<ExprId>, body: StmtId) -> Option<u32> {
         let m = self.cur_m();
         let ast = self.ast(m);
@@ -2011,9 +2056,16 @@ impl<'c, 'a> Gen<'c, 'a> {
                     self.b().indent += 1;
                 }
                 let cont = self.fresh("cont");
+                let counter = self.guarded_counter(*c, *body);
                 self.open("for (;;) {");
                 self.cond_break(*c);
+                if let Some(k) = counter {
+                    self.b().nowrap_locals.push(k);
+                }
                 self.loop_body(*body, &cont);
+                if counter.is_some() {
+                    self.b().nowrap_locals.pop();
+                }
                 self.line(format!("{cont}:;"));
                 self.close("}");
                 if plan.is_some() {
