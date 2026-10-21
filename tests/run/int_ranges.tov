@@ -1,0 +1,29 @@
+// Arithmetic on values known to be small (remainders, masks, bytes) runs without overflow
+// checks; the results are the same.
+const IM = 139968
+let seed = 42
+function next(): int {
+  seed = (seed * 3877 + 29573) % IM
+  return seed
+}
+
+let hash = 0
+function mix(bytes: u8[]) {
+  let h = hash
+  for (let i = 0; i < bytes.length; i++) h = (h * 31 + int(bytes[i]!)) & 0xffffff
+  hash = h
+}
+
+function main() {
+  let sum = 0
+  for (let i = 0; i < 1000; i++) sum += next()
+  console.log(seed, sum)
+  const line: u8[] = []
+  for (let i = 0; i < 60; i++) line.push(65 + (i % 26))
+  for (let k = 0; k < 100; k++) mix(line)
+  console.log(hash)
+  // (a remainder by 1000 times a large constant: still in range)
+  let r = 0
+  for (let i = 0; i < 10; i++) r = (r * 3 + i) % 1000
+  console.log(r * 9223372036854775)
+}

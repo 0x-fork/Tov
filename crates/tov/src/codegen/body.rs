@@ -3871,6 +3871,11 @@ impl<'c, 'a> Gen<'c, 'a> {
                         return Val::plain(format!("TVG_REM_BY({}, {}, {dv}, {loc})", lv.code, rv.code), INT);
                     }
                 }
+                // (no overflow check where the operands' values can't overflow)
+                if matches!(op, Add | Sub | Mul) && ty == INT && lv.ty == INT && rv.ty == INT && self.cannot_overflow(op, l, r) {
+                    let o = match op { Add => "+", Sub => "-", _ => "*" };
+                    return Val::plain(format!("({} {o} {})", lv.code, rv.code), INT);
+                }
                 self.arith(op, lv, rv, ty, span)
             }
             BitAnd | BitOr | BitXor | Shl | Shr | UShr => {

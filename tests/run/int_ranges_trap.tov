@@ -1,0 +1,13 @@
+// A variable that's small everywhere but one assignment from a parameter can be anything there:
+// its product keeps its overflow check.
+let level = 0
+function reset(to: int) { level = to }
+function bump() { level = (level + 1) % 10 }
+
+function main() {
+  bump()
+  console.log(level * 1000)
+  reset(9223372036854775807)
+  console.log("before")
+  console.log(level * 2)
+}

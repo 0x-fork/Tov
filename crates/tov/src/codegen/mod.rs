@@ -20,6 +20,7 @@ pub(crate) mod class;
 mod iface;
 mod js;
 mod json;
+mod range;
 
 use crate::ast::{self, ExprId, ExprKind, ItemKind, StmtKind};
 use crate::check::{Callee, Checker, IdentFact, ModuleFacts};
@@ -257,6 +258,8 @@ pub(crate) struct Gen<'c, 'a> {
     /// The local an arrow being emitted initializes (its key), when the arrow refers to it: the
     /// closure itself, not a capture.
     pub(crate) self_closure: Option<u32>,
+    /// What `int` variables can hold (see `range`), worked out when first asked.
+    pub(crate) ranges: Option<range::Ranges>,
     /// The awaited calls embedded in the async body just emitted: (union member, frame type).
     pub(crate) last_children: Vec<(String, String)>,
     /// Frame structs of async functions.
@@ -338,6 +341,7 @@ impl<'c, 'a> Gen<'c, 'a> {
             needs_uncaught: false,
             pending_async: None,
             self_closure: None,
+            ranges: None,
             last_children: Vec::new(),
             pending_tre: None,
             uses_tls: false,
