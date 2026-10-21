@@ -7,7 +7,7 @@
 
 use super::*;
 
-const RESIZING: &[&str] = &["push", "pop", "shift", "unshift", "splice"];
+pub(crate) const RESIZING: &[&str] = &["push", "pop", "shift", "unshift", "splice"];
 
 impl<'c, 'a> Gen<'c, 'a> {
     /// Something among `exprs` (of module `m`) may resize an array other than through the locals

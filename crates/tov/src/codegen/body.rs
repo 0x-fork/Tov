@@ -1684,6 +1684,8 @@ impl<'c, 'a> Gen<'c, 'a> {
         }
         let m = self.cur_m();
         let mut out = FxMap::default();
+        // (the loops that fill arrays: their pushes don't count against them)
+        let mut fills: FxSet<ExprId> = FxSet::default();
         if let Some(root) = self.b().root {
             let ast = self.ast(m);
             let span = ast.stmt(root).span;
@@ -1758,6 +1760,7 @@ impl<'c, 'a> Gen<'c, 'a> {
             let mut exprs = Vec::new();
             collect_exprs_stmt(ast, root, &mut exprs);
             exprs.retain(|e| !skip.contains(e));
+            fills = skip;
             if !self.may_resize(m, &exprs, &[]) {
                 for (k, n, from) in filled {
                     out.insert(k, (n, from));
@@ -1778,6 +1781,48 @@ impl<'c, 'a> Gen<'c, 'a> {
                     if let Some(n) = n {
                         out.insert(name_span.start, (n, 0));
                     }
+                }
+            }
+        }
+        if let Some(root) = self.b().root {
+            let m = self.cur_m();
+            let mut exprs = Vec::new();
+            collect_exprs_stmt(self.ast(m), root, &mut exprs);
+            exprs.retain(|e| !fills.contains(e));
+            // (`may_resize` lets a function resize the arrays it makes: these it mustn't, by
+            // a push, a length, or a write past the end, which appends)
+            let ast = self.ast(m);
+            let facts = self.facts(m);
+            let mut resized: Vec<(u32, Option<ExprId>)> = Vec::new();
+            for &e in &exprs {
+                match &ast.expr(e).kind {
+                    ExprKind::Call { callee, .. } => {
+                        if let ExprKind::Member { obj, name, .. } = &ast.expr(*callee).kind
+                            && super::resize::RESIZING.contains(&self.sym(*name))
+                            && let (ExprKind::Ident(_), Some(IdentFact::Local(k))) = (&ast.expr(*obj).kind, facts.idents.get(obj))
+                        {
+                            resized.push((*k, None));
+                        }
+                    }
+                    ExprKind::Assign(_, t, _) | ExprKind::Update { target: t, .. } => {
+                        let plain = matches!(ast.expr(e).kind, ExprKind::Assign(AssignOp::Assign, ..));
+                        let (obj, index) = match &ast.expr(*t).kind {
+                            ExprKind::Member { obj, name, .. } if self.sym(*name) == "length" => (*obj, None),
+                            ExprKind::Index { obj, index, .. } if plain => (*obj, Some(*index)),
+                            _ => continue,
+                        };
+                        if let (ExprKind::Ident(_), Some(IdentFact::Local(k))) = (&ast.expr(obj).kind, facts.idents.get(&obj)) {
+                            resized.push((*k, index));
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            for (k, index) in resized {
+                let Some(&(n, _)) = out.get(&k) else { continue };
+                let inside = index.is_some_and(|i| matches!(self.int_range(i), super::range::R::In(lo, hi) if lo >= 0 && hi < n as i128));
+                if !inside {
+                    out.remove(&k);
                 }
             }
         }
