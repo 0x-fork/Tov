@@ -1,0 +1,9 @@
+// A parameter takes what its calls pass: one call with a large value keeps the check.
+function next(x: int): int {
+  return x + 1
+}
+
+function main() {
+  console.log(next(5))
+  console.log(next(9223372036854775807))
+}

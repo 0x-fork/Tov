@@ -161,6 +161,7 @@ impl<'c, 'a> Gen<'c, 'a> {
                 }
             }
         }
+        self.param_defs(&mut defs);
         self.array_defs(&mut defs);
         let mut vars: FxMap<Var, R> = defs.keys().map(|&v| (v, R::Bot)).collect();
         // (anything from the start: changed where it isn't known how)
@@ -313,6 +314,69 @@ impl<'c, 'a> Gen<'c, 'a> {
                 Some(k)
             }
             _ => None,
+        }
+    }
+
+    /// Parameters of module functions only ever called directly: what their calls pass (a
+    /// function used as a value, or called with a spread or a different count, can get anything).
+    fn param_defs(&self, defs: &mut FxMap<Var, Vec<Def>>) {
+        let n = self.c.modules.len() as u32;
+        let mut args: FxMap<(u32, u32), Vec<Option<Vec<(u32, ExprId)>>>> = FxMap::default();
+        let mut valued: FxSet<(u32, u32)> = FxSet::default();
+        for m in 0..n {
+            let ast = self.ast(m);
+            let facts = self.facts(m);
+            let mut callees: FxSet<ExprId> = FxSet::default();
+            for (ei, e) in ast.exprs.iter().enumerate() {
+                if let ExprKind::Call { callee, args: xs, .. } = &e.kind
+                    && let Some(Callee::Fn(fm, fi)) = facts.calls.get(&(ei as ExprId)).map(|c| &c.callee)
+                {
+                    let mut c = *callee;
+                    while let ExprKind::Paren(x) = ast.expr(c).kind {
+                        c = x;
+                    }
+                    callees.insert(c);
+                    let given = (!xs.iter().any(|a| a.by_ref.is_some() || matches!(ast.expr(a.expr).kind, ExprKind::Spread(_)))).then(|| xs.iter().map(|a| (m, a.expr)).collect());
+                    args.entry((*fm, *fi)).or_default().push(given);
+                }
+            }
+            for (&e, f) in &facts.idents {
+                if let IdentFact::Fn(fm, fi) = f
+                    && !callees.contains(&e)
+                {
+                    valued.insert((*fm, *fi));
+                }
+            }
+            for (&e, f) in &facts.members {
+                if let crate::check::MemberFact::NsFn(fm, fi) = f
+                    && !callees.contains(&e)
+                {
+                    valued.insert((*fm, *fi));
+                }
+            }
+        }
+        for m in 0..n {
+            for (ii, item) in self.ast(m).items.iter().enumerate() {
+                let ItemKind::Function(f) = &item.kind else { continue };
+                let key = (m, ii as u32);
+                let calls = args.get(&key);
+                for (pi, p) in f.params.iter().enumerate() {
+                    if p.rest || p.optional || p.inout {
+                        continue;
+                    }
+                    let ds: Vec<Def> = match calls {
+                        Some(cs) if !valued.contains(&key) => cs
+                            .iter()
+                            .map(|c| match c {
+                                Some(xs) if xs.len() == f.params.len() => Def::Expr(xs[pi].0, xs[pi].1),
+                                _ => Def::Top,
+                            })
+                            .collect(),
+                        _ => vec![Def::Top],
+                    };
+                    defs.entry(Var::Local(m, p.span.start)).or_default().extend(ds);
+                }
+            }
         }
     }
 
