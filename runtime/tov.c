@@ -2922,6 +2922,20 @@ void tv_inspect_record(tv_sb *sb, int depth, size_t n, const char *const *names,
     tv_reduce_to_single_string(sb, &out, "{", "}", false, depth + 1, false);
 }
 
+void tv_inspect_tuple(tv_sb *sb, int depth, size_t n, const tv_type *const *types, const void *const *fields) {
+    if (!tv_inspect_enter(sb, depth, "[Array]")) return;
+    tv_pieces out = {0};
+    bool numbers = true;
+    for (size_t i = 0; i < n; i++) {
+        tv_ictx.indent += 2;
+        tv_inspect_value(&out.text, types[i], fields[i], depth + 1);
+        tv_ictx.indent -= 2;
+        tv_pieces_mark(&out);
+        numbers &= tv_is_number_type(types[i]);
+    }
+    tv_reduce_to_single_string(sb, &out, "[", "]", true, depth + 1, numbers);
+}
+
 void tv_inspect_object(tv_sb *sb, int depth, const char *cls, size_t n, const char *const *names, const tv_type *const *types,
                        const void *const *fields) {
     size_t cl = strlen(cls);

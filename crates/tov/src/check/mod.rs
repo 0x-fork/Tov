@@ -247,10 +247,13 @@ struct Syms {
     main: Sym,
     u: Sym,
     number: Sym,
+    /// `0`, `1`, ...: the fields of tuples the checker makes (`map.entries()`'s `[K, V]`).
+    digits: [Sym; 4],
 }
 
 fn intern_syms(interner: &mut Interner) -> Syms {
-    Syms { kind: interner.intern("kind"), main: interner.intern("main"), u: interner.intern("U"), number: interner.intern("number") }
+    let digits = [interner.intern("0"), interner.intern("1"), interner.intern("2"), interner.intern("3")];
+    Syms { kind: interner.intern("kind"), main: interner.intern("main"), u: interner.intern("U"), number: interner.intern("number"), digits }
 }
 
 /// Checking runs in two phases. Phase A (one thread) resolves everything that forms a module's
@@ -2250,6 +2253,15 @@ impl<'a> Checker<'a> {
             }
         }
         None
+    }
+
+    /// The tuple type `[a, b, ...]` (up to 4 elements).
+    pub(crate) fn tuple_ty(&mut self, elems: &[TyId]) -> TyId {
+        let fields: Vec<Field> = elems.iter().zip(self.syms.digits).map(|(&ty, name)| Field { name, ty, optional: false }).collect();
+        let order: Vec<Sym> = fields.iter().map(|f| f.name).collect();
+        let t = self.types.record(fields);
+        self.types.note_field_order(t, order);
+        t
     }
 
     /// Would TypeScript share this value between two variables (objects, arrays, maps, sets)?

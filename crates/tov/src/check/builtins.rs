@@ -148,7 +148,7 @@ pub(super) fn is_builtin_type(name: &str) -> bool {
 }
 
 pub(super) fn is_builtin_ns(name: &str) -> bool {
-    matches!(name, "Math" | "console" | "JSON" | "process" | "Date" | "performance" | "Promise" | "BigInt" | "Array" | "Number" | "String")
+    matches!(name, "Math" | "console" | "JSON" | "process" | "Date" | "performance" | "Promise" | "BigInt" | "Array" | "Number" | "String" | "Object")
 }
 
 pub(super) fn is_builtin_fn(name: &str) -> bool {
@@ -214,13 +214,13 @@ pub(super) fn property(types: &Types, ty: TyId, name: &str) -> Option<TyId> {
 
 const ARRAY_METHODS: &[&str] = &[
     "push", "pop", "shift", "unshift", "map", "filter", "forEach", "reduce", "some", "every", "find", "findIndex", "indexOf", "lastIndexOf", "includes", "join", "slice", "concat",
-    "reverse", "sort", "at", "flatMap", "fill",
+    "reverse", "sort", "at", "flatMap", "fill", "entries", "keys",
 ];
 const STRING_METHODS: &[&str] = &[
     "chars", "slice", "includes", "startsWith", "endsWith", "indexOf", "lastIndexOf", "split", "trim", "trimStart", "trimEnd", "toUpperCase", "toLowerCase", "replace",
     "replaceAll", "repeat", "padStart", "padEnd", "toString", "charAt", "charCodeAt", "codePointAt", "at", "substring", "substr", "concat",
 ];
-const MAP_METHODS: &[&str] = &["get", "set", "has", "delete", "clear", "keys", "values", "forEach"];
+const MAP_METHODS: &[&str] = &["get", "set", "has", "delete", "clear", "keys", "values", "entries", "forEach"];
 const SET_METHODS: &[&str] = &["add", "has", "delete", "clear", "values", "forEach"];
 const NUMBER_METHODS: &[&str] = &["toFixed", "toString"];
 
@@ -343,6 +343,15 @@ pub(super) fn method(c: &mut Checker, base: TyId, name: &str) -> Option<MethodSi
                     mk(sig(vec![(cmp, "compare")], arr), true)
                 }
                 "at" => mk(sig(vec![(p(INT), "index")], opt_e), false),
+                "entries" => {
+                    let t = c.tuple_ty(&[INT, e]);
+                    let a = c.types.array(t);
+                    mk(sig(vec![], a), false)
+                }
+                "keys" => {
+                    let a = c.types.array(INT);
+                    mk(sig(vec![], a), false)
+                }
                 "fill" => {
                     let (a, b) = (opt(c, INT), opt(c, INT));
                     mk(sig(vec![(p(e), "value"), (a, "start"), (b, "end")], arr), true)
@@ -405,6 +414,11 @@ pub(super) fn method(c: &mut Checker, base: TyId, name: &str) -> Option<MethodSi
                 }
                 "values" => {
                     let a = c.types.array(v);
+                    mk(sig(vec![], a), false)
+                }
+                "entries" => {
+                    let t = c.tuple_ty(&[k, v]);
+                    let a = c.types.array(t);
                     mk(sig(vec![], a), false)
                 }
                 "forEach" => {
@@ -675,6 +689,48 @@ impl<'a> Checker<'a> {
                 self.array_lit(&elems, exp, span)
             }
             "Array" if name == "from" => self.array_from(args, exp, span),
+            "Object" => {
+                // `Object.keys/values/entries(m)` of a `Record<string, V>` (a map), or of a record
+                if !matches!(name, "keys" | "values" | "entries") || args.len() != 1 {
+                    self.check_args_loose(args);
+                    self.unknown_ns_member("Object", name, &["keys", "values", "entries"], name_span);
+                    return ERROR;
+                }
+                let t = self.expr(args[0].expr, None);
+                let base = self.types.without_undefined(t);
+                match *self.types.get(base) {
+                    Ty::Map(k, v) => match name {
+                        "keys" => self.types.array(k),
+                        "values" => self.types.array(v),
+                        _ => {
+                            let e = self.tuple_ty(&[k, v]);
+                            self.types.array(e)
+                        }
+                    },
+                    Ty::Record(fs) if name == "keys" => {
+                        let _ = fs;
+                        self.types.array(STR)
+                    }
+                    Ty::Record(fs) => {
+                        // (every field of one type)
+                        let tys: Vec<TyId> = self.types.fields(fs).iter().map(|f| f.ty).collect();
+                        let v = self.types.union(&tys);
+                        if name == "values" {
+                            self.types.array(v)
+                        } else {
+                            let e = self.tuple_ty(&[STR, v]);
+                            self.types.array(e)
+                        }
+                    }
+                    Ty::Error => ERROR,
+                    _ => {
+                        let shown = self.show(t);
+                        let s = self.ast().expr(args[0].expr).span;
+                        self.report(Diagnostic::new("T0001", s, format!("`Object.{name}` takes a record or a `Record<string, V>`, found `{shown}`")));
+                        ERROR
+                    }
+                }
+            }
             "Array" => {
                 if name != "isArray" {
                     self.check_args_loose(args);

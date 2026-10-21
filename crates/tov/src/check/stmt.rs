@@ -253,15 +253,8 @@ impl<'a> Checker<'a> {
                     Ty::Error => ERROR,
                     // a string's characters (code points), as in JavaScript
                     Ty::Str | Ty::StrLit(_) => STR,
-                    Ty::Map(..) => {
-                        let text = self.src(ispan).to_string();
-                        self.report(
-                            Diagnostic::new("X0038", ispan, "iterate a map through `keys()` or `values()`")
-                                .fix(Applicability::Maybe, format!("iterate keys: `{text}.keys()`"), ispan, format!("{text}.keys()"))
-                                .fix(Applicability::Maybe, format!("iterate values: `{text}.values()`"), ispan, format!("{text}.values()")),
-                        );
-                        ERROR
-                    }
+                    // a map's entries, `[key, value]`, as in JavaScript
+                    Ty::Map(k, v) => self.tuple_ty(&[k, v]),
                     // a JavaScript iterable (an array, a Set, a generator...)
                     Ty::Js => JS,
                     _ => {

@@ -79,6 +79,21 @@ impl<'c, 'a> Gen<'c, 'a> {
                     "    tv_int i = 0; void *kp, *vp; bool first = true;\n    tv_sb_add_char(sb, '{{');\n    while (tv_map_next(*v, {kd}, {vd}, &i, &kp, &vp)) {{\n        if ({skip}) continue;\n        if (!first) tv_sb_add_char(sb, ',');\n        first = false;\n        tvg_js_nl(sb, ind, lvl + 1);\n        tv_json_quote(sb, *({kct} *)kp);\n        if (ind.p->len) tv_sb_add(sb, \": \", 2); else tv_sb_add_char(sb, ':');\n        {w}(sb, ({vct} *)vp, ind, lvl + 1);\n    }}\n    if (!first) tvg_js_nl(sb, ind, lvl);\n    tv_sb_add_char(sb, '}}');\n"
                 )
             }
+            Ty::Record(_) if self.tuple_of(t).is_some() => {
+                // a tuple is written as an array
+                let fs = self.tuple_of(t).unwrap();
+                let mut b = String::from("    tv_sb_add_char(sb, '[');\n");
+                for (i, f) in fs.iter().enumerate() {
+                    let w = self.json_writer(f.ty);
+                    let ct = self.ctype(f.ty);
+                    if i > 0 {
+                        b.push_str("    tv_sb_add_char(sb, ',');\n");
+                    }
+                    let _ = writeln!(b, "    tvg_js_nl(sb, ind, lvl + 1);\n    {w}(sb, (const {ct} *)&v->f_{}, ind, lvl + 1);", self.sym(f.name));
+                }
+                b.push_str("    tvg_js_nl(sb, ind, lvl);\n    tv_sb_add_char(sb, ']');\n");
+                b
+            }
             Ty::Record(_) => {
                 let fields = self.c.types.fields_in_order(t);
                 let parts: Vec<(String, TyId, String)> = fields.iter().filter(|f| !matches!(self.tget(f.ty), Ty::Func(..))).map(|f| (self.sym(f.name).to_string(), f.ty, format!("v->f_{}", self.sym(f.name)))).collect();
@@ -242,6 +257,20 @@ impl<'c, 'a> Gen<'c, 'a> {
                 format!(
                     "    if (!tv_jp_char(p, '{{')) return false;\n    tv_map m = TV_EMPTY_MAP;\n    if (!tv_jp_try_char(p, '}}')) {{\n        do {{\n            tv_str k;\n            if (!tv_jp_string(p, &k)) {{ tv_map_release(m, {kd}, {vd}); return false; }}\n            if (!tv_jp_char(p, ':')) {{ tv_str_release(k); tv_map_release(m, {kd}, {vd}); return false; }}\n            {vct} x = {dv};\n            if (!{pv}(p, &x)) {{ tv_str_release(k); {rel_v}; tv_map_release(m, {kd}, {vd}); return false; }}\n            tv_map_set(&m, {kd}, {vd}, &k, &x);\n        }} while (tv_jp_try_char(p, ','));\n        if (!tv_jp_char(p, '}}')) {{ tv_map_release(m, {kd}, {vd}); return false; }}\n    }}\n    {rel};\n    *out = m;\n    return true;\n"
                 )
+            }
+            Ty::Record(_) if self.tuple_of(t).is_some() => {
+                // a tuple is read from an array of exactly its length
+                let fs = self.tuple_of(t).unwrap();
+                let mut b = String::from("    if (!tv_jp_char(p, '[')) return false;\n");
+                for (i, f) in fs.iter().enumerate() {
+                    let pf = self.json_parser(f.ty);
+                    if i > 0 {
+                        b.push_str("    if (!tv_jp_char(p, ',')) return false;\n");
+                    }
+                    let _ = writeln!(b, "    if (!{pf}(p, &out->f_{})) return false;", self.sym(f.name));
+                }
+                b.push_str("    if (!tv_jp_char(p, ']')) return false;\n    return true;\n");
+                b
             }
             Ty::Record(fs) => {
                 let fs = self.c.types.fields(fs).to_vec();

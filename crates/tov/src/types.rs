@@ -14,6 +14,22 @@ pub struct Field {
     pub optional: bool,
 }
 
+/// A tuple `[A, B]` is a record whose fields are `0`, `1`, ...: its fields in that order.
+pub fn tuple_fields(fields: &[Field], interner: &Interner) -> Option<Vec<Field>> {
+    if fields.is_empty() {
+        return None;
+    }
+    let mut out: Vec<Option<Field>> = vec![None; fields.len()];
+    for f in fields {
+        let i: usize = interner.get(f.name).parse().ok()?;
+        if i >= fields.len() || out[i].is_some() || interner.get(f.name) != i.to_string() {
+            return None;
+        }
+        out[i] = Some(*f);
+    }
+    out.into_iter().collect()
+}
+
 #[derive(Copy, Clone, PartialEq, Eq, Hash, Debug)]
 pub struct FnParam {
     pub ty: TyId,
@@ -653,6 +669,20 @@ impl Display<'_> {
                 let fields = self.types.fields(fields);
                 if fields.is_empty() {
                     out.push_str("{}");
+                    return;
+                }
+                if let Some(elems) = tuple_fields(fields, self.interner) {
+                    out.push('[');
+                    for (i, f) in elems.iter().enumerate() {
+                        if i > 0 {
+                            out.push_str(", ");
+                        }
+                        self.write(f.ty, out, false);
+                        if f.optional {
+                            out.push('?');
+                        }
+                    }
+                    out.push(']');
                     return;
                 }
                 out.push_str("{ ");

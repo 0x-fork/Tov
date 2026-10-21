@@ -15,7 +15,7 @@ pub fn parse(src: &str, file: FileId, interner: &mut Interner) -> (Ast, Vec<Diag
             lexed.tokens[i].kind = Tok::Ident;
         }
     }
-    let mut p = Parser { src, toks: lexed.tokens, strings: lexed.strings, pos: 0, file, interner, ast: Ast::default(), diags, script_stmts: Vec::new(), defaults: Vec::new(), more_stmts: Vec::new() };
+    let mut p = Parser { src, toks: lexed.tokens, strings: lexed.strings, pos: 0, file, interner, ast: Ast::default(), diags, script_stmts: Vec::new(), defaults: Vec::new(), more_stmts: Vec::new(), hidden: 0, prologue: Vec::new() };
     p.module();
     (p.ast, p.diags)
 }
@@ -37,6 +37,27 @@ struct Parser<'a> {
     /// `let a = 1, b = 2`: the declarations after the first, for the statement list that the
     /// statement is in.
     more_stmts: Vec<StmtId>,
+    /// Hidden variables made so far (`__d1`, ... for destructuring).
+    hidden: u32,
+    /// Statements destructuring the parameters of the list just parsed, for its body.
+    prologue: Vec<StmtId>,
+}
+
+/// A destructuring pattern (desugared into `let`s).
+enum Pat {
+    Name(Sym, Span),
+    /// Elements (holes are `None`), each with its default, and `...rest`.
+    Array(Vec<Option<(Pat, Option<ExprId>)>>, Option<Box<Pat>>, Span),
+    /// (field, its span, pattern, default).
+    Object(Vec<(Sym, Span, Pat, Option<ExprId>)>, Span),
+}
+
+impl Pat {
+    fn span(&self) -> Span {
+        match self {
+            Pat::Name(_, s) | Pat::Array(_, _, s) | Pat::Object(_, s) => *s,
+        }
+    }
 }
 
 impl<'a> Parser<'a> {
@@ -208,13 +229,14 @@ impl<'a> Parser<'a> {
 
     /// Runs `f`; if it fails or reports errors, rewinds as if it never ran.
     fn speculate<T>(&mut self, f: impl FnOnce(&mut Self) -> Option<T>) -> Option<T> {
-        let (pos, nd, ne, ns, nt, ndf) = (self.pos, self.diags.len(), self.ast.exprs.len(), self.ast.stmts.len(), self.ast.types.len(), self.defaults.len());
+        let (pos, nd, ne, ns, nt, ndf, npr) = (self.pos, self.diags.len(), self.ast.exprs.len(), self.ast.stmts.len(), self.ast.types.len(), self.defaults.len(), self.prologue.len());
         let r = f(self);
         if r.is_some() && self.diags.len() == nd {
             return r;
         }
         self.pos = pos;
         self.defaults.truncate(ndf);
+        self.prologue.truncate(npr);
         self.diags.truncate(nd);
         self.ast.exprs.truncate(ne);
         self.ast.stmts.truncate(ns);
@@ -575,7 +597,7 @@ impl<'a> Parser<'a> {
         if self.at(Tok::LParen) || self.at(Tok::Lt) {
             let tparams = self.tparams();
             let params = self.params();
-            let defaults = std::mem::take(&mut self.defaults);
+            let defaults = (std::mem::take(&mut self.defaults), std::mem::take(&mut self.prologue));
             let ret = if self.eat(Tok::Colon) { Some(self.ty()) } else { None };
             let throws = self.effects_clause();
             let body = if self.at(Tok::LBrace) {
@@ -748,14 +770,25 @@ impl<'a> Parser<'a> {
         let mut out = Vec::new();
         self.expect(Tok::LParen, "to start the parameter list");
         while !self.at(Tok::RParen) && !self.at(Tok::Eof) {
-            let start = self.cur_span();
             let rest = self.eat(Tok::DotDotDot);
             if self.at(Tok::LBrace) || self.at(Tok::LBracket) {
-                self.err("U0006", start, "destructuring parameters are not supported yet; take the value and read its fields");
-                self.skip_balanced();
-                if self.eat(Tok::Colon) {
-                    self.ty();
+                // `({ x, y }: P) =>`: a hidden parameter, destructured as the body starts
+                let pat = self.pattern();
+                let optional = self.eat(Tok::Question);
+                let ty = if self.eat(Tok::Colon) { Some(self.ty()) } else { None };
+                let tmp = self.fresh_name();
+                let pspan = pat.span();
+                let mut init = self.mk_expr(ExprKind::Ident(tmp), pspan);
+                let mut optional = optional;
+                if self.eat(Tok::Eq) {
+                    let d = self.assign();
+                    init = self.mk_expr(ExprKind::Binary(BinOp::Nullish, init, d), pspan);
+                    optional = true;
                 }
+                let mut stmts = Vec::new();
+                self.destructure(&pat, false, None, init, &mut stmts);
+                self.prologue.extend(stmts);
+                out.push(Param { name: tmp, span: pspan, ty, inout: false, optional, prop: None, rest });
                 if !self.eat(Tok::Comma) {
                     break;
                 }
@@ -840,9 +873,10 @@ impl<'a> Parser<'a> {
     }
 
     /// Starts `body` with `let x: T = x ?? default` for each parameter with a default (the
-    /// `let` declared at the default, so it's a variable of its own).
-    fn with_defaults(&mut self, defaults: Vec<(Sym, Span, Option<TypeId>, ExprId)>, body: StmtId) -> StmtId {
-        if defaults.is_empty() {
+    /// `let` declared at the default, so it's a variable of its own), then the parameters'
+    /// destructuring.
+    fn with_defaults(&mut self, (defaults, prologue): (Vec<(Sym, Span, Option<TypeId>, ExprId)>, Vec<StmtId>), body: StmtId) -> StmtId {
+        if defaults.is_empty() && prologue.is_empty() {
             return body;
         }
         let mut stmts = Vec::new();
@@ -852,6 +886,7 @@ impl<'a> Parser<'a> {
             let init = self.mk_expr(ExprKind::Binary(BinOp::Nullish, a, d), name_span.to(ds));
             stmts.push(self.mk_stmt(StmtKind::Let { mutable: true, name, name_span: ds, ty, init: Some(init) }, name_span.to(ds)));
         }
+        stmts.extend(prologue);
         let span = self.ast.stmts[body as usize].span;
         if let StmtKind::Block(ss) = &self.ast.stmts[body as usize].kind {
             stmts.extend(ss.iter().copied());
@@ -886,7 +921,7 @@ impl<'a> Parser<'a> {
         let (name, name_span) = self.ident("a function name")?;
         let tparams = self.tparams();
         let params = self.params();
-        let defaults = std::mem::take(&mut self.defaults);
+        let defaults = (std::mem::take(&mut self.defaults), std::mem::take(&mut self.prologue));
         let ret = if self.eat(Tok::Colon) { Some(self.ty()) } else { None };
         let throws = self.effects_clause();
         if !self.at(Tok::LBrace) {
@@ -1069,6 +1104,8 @@ impl<'a> Parser<'a> {
                     && self.toks.get(close + 1).map(|t| t.kind) == Some(Tok::Arrow) {
                         let params = self.params();
                         self.defaults.clear();
+                    self.prologue.clear();
+                        self.prologue.clear();
                         self.expect(Tok::Arrow, "in the function type");
                         let ret = self.ty();
                         let throws = if self.at_word("throws") {
@@ -1120,10 +1157,32 @@ impl<'a> Parser<'a> {
                 self.mk_ty(TypeExprKind::Error, span)
             }
             Tok::LBracket => {
-                self.err("U0008", start, "tuple types are not supported yet; use a record type with named fields");
-                self.skip_balanced();
+                // `[A, B]`: a tuple, a record whose fields are `0`, `1`, ...
+                self.bump();
+                let mut fields = Vec::new();
+                while !self.at(Tok::RBracket) && !self.at(Tok::Eof) {
+                    let fstart = self.cur_span();
+                    if self.at(Tok::DotDotDot) {
+                        self.err("U0008", fstart, "rest elements in tuple types are not supported yet");
+                        self.bump();
+                    }
+                    // (a labelled element: `[x: number, y: number]`)
+                    if matches!(self.kind(), Tok::Ident) && matches!(self.nth(1), Tok::Colon | Tok::Question) && !matches!(self.nth(2), Tok::Comma | Tok::RBracket) {
+                        self.bump();
+                    }
+                    let optional = self.eat(Tok::Question);
+                    self.eat(Tok::Colon);
+                    let ty = self.ty();
+                    let optional = optional || self.eat(Tok::Question);
+                    let name = self.interner.intern(&fields.len().to_string());
+                    fields.push(FieldTy { name, name_span: fstart, optional, ty });
+                    if !self.eat(Tok::Comma) {
+                        break;
+                    }
+                }
+                self.expect(Tok::RBracket, "to close the tuple type");
                 let span = start.to(self.prev_span());
-                self.mk_ty(TypeExprKind::Error, span)
+                self.mk_ty(TypeExprKind::Record(fields), span)
             }
             Tok::Ident => {
                 let t = self.bump();
@@ -1195,6 +1254,7 @@ impl<'a> Parser<'a> {
                     }
                     let params = self.params();
                     self.defaults.clear();
+                    self.prologue.clear();
                     self.expect(Tok::Colon, "before the method return type");
                     let ret = self.ty();
                     let throws = self.effects_clause();
@@ -1374,6 +1434,25 @@ impl<'a> Parser<'a> {
                     self.terminator();
                 }
                 let span = start.to(self.prev_span());
+                // `[a, b] = [b, a]`: the value in a hidden variable, then each assigned
+                if let ExprKind::Assign(AssignOp::Assign, target, value) = self.ast.exprs[e as usize].kind
+                    && let ExprKind::Array(elems) = &self.ast.exprs[target as usize].kind
+                {
+                    let elems = elems.clone();
+                    let tmp = self.fresh_name();
+                    let tspan = self.expr_span(target);
+                    let mut out = vec![self.mk_stmt(StmtKind::Let { mutable: false, name: tmp, name_span: tspan, ty: None, init: Some(value) }, span)];
+                    for (i, &x) in elems.iter().enumerate() {
+                        let xs = self.expr_span(x);
+                        let t = self.mk_expr(ExprKind::Ident(tmp), xs);
+                        let idx = self.mk_expr(ExprKind::Int(i as u64), xs);
+                        let at = self.mk_expr(ExprKind::Index { obj: t, index: idx, optional: false }, xs);
+                        let v = self.mk_expr(ExprKind::NonNull(at), xs);
+                        let a = self.mk_expr(ExprKind::Assign(AssignOp::Assign, x, v), xs);
+                        out.push(self.mk_stmt(StmtKind::Expr(a), xs));
+                    }
+                    return self.mk_stmt(StmtKind::Block(out), span);
+                }
                 self.mk_stmt(StmtKind::Expr(e), span)
             }
         }
@@ -1392,10 +1471,21 @@ impl<'a> Parser<'a> {
         };
         self.bump();
         if self.at(Tok::LBrace) || self.at(Tok::LBracket) {
-            let span = self.cur_span();
-            self.err("U0006", span, "destructuring is not supported yet; bind the value, then read its fields");
-            self.recover_line();
-            return self.mk_stmt(StmtKind::Error, start);
+            // `const [a, b] = e`, `let { x, y } = e`: a hidden variable, then one per name
+            let pat = self.pattern();
+            let ty = if self.eat(Tok::Colon) { Some(self.ty()) } else { None };
+            if !self.at(Tok::Eq) {
+                let span = self.cur_span();
+                self.err("P0001", span, "a destructuring declaration needs a value: `const [a, b] = e`");
+                return self.mk_stmt(StmtKind::Error, start);
+            }
+            self.bump();
+            let init = self.assign();
+            let mut out = Vec::new();
+            self.destructure(&pat, mutable, ty, init, &mut out);
+            let first = out.remove(0);
+            self.more_stmts.extend(out);
+            return first;
         }
         let Some((name, name_span)) = self.ident("a variable name") else {
             self.recover_line();
@@ -1421,6 +1511,117 @@ impl<'a> Parser<'a> {
         first
     }
 
+    /// A hidden variable for destructuring (`__d1`, ...).
+    fn fresh_name(&mut self) -> Sym {
+        self.hidden += 1;
+        let n = format!("__d{}", self.hidden);
+        self.interner.intern(&n)
+    }
+
+    /// A destructuring pattern: `[a, , b = 1, ...rest]`, `{ x, y: py, z = 0, inner: { w } }`.
+    fn pattern(&mut self) -> Pat {
+        let start = self.cur_span();
+        if self.eat(Tok::LBracket) {
+            let mut elems = Vec::new();
+            let mut rest = None;
+            while !self.at(Tok::RBracket) && !self.at(Tok::Eof) {
+                if self.at(Tok::Comma) {
+                    self.bump();
+                    elems.push(None);
+                    continue;
+                }
+                if self.eat(Tok::DotDotDot) {
+                    rest = Some(Box::new(self.pattern()));
+                    break;
+                }
+                let p = self.pattern();
+                let d = if self.eat(Tok::Eq) { Some(self.assign()) } else { None };
+                elems.push(Some((p, d)));
+                if !self.eat(Tok::Comma) {
+                    break;
+                }
+            }
+            self.expect(Tok::RBracket, "to close the pattern");
+            return Pat::Array(elems, rest, start);
+        }
+        if self.eat(Tok::LBrace) {
+            let mut props = Vec::new();
+            while !self.at(Tok::RBrace) && !self.at(Tok::Eof) {
+                if self.at(Tok::DotDotDot) {
+                    let span = self.cur_span();
+                    self.err("U0006", span, "rest properties in destructuring are not supported yet; read the fields you need");
+                    self.bump();
+                    self.pattern();
+                    break;
+                }
+                let Some((key, kspan)) = self.ident("a field name") else { break };
+                let p = if self.eat(Tok::Colon) { self.pattern() } else { Pat::Name(key, kspan) };
+                let d = if self.eat(Tok::Eq) { Some(self.assign()) } else { None };
+                props.push((key, kspan, p, d));
+                if !self.eat(Tok::Comma) {
+                    break;
+                }
+            }
+            self.expect(Tok::RBrace, "to close the pattern");
+            return Pat::Object(props, start);
+        }
+        match self.ident("a variable name") {
+            Some((n, s)) => Pat::Name(n, s),
+            None => Pat::Name(self.fresh_name(), start),
+        }
+    }
+
+    /// `let <pat>: ty = init` as one `let` per name (the value in a hidden variable first).
+    fn destructure(&mut self, pat: &Pat, mutable: bool, ty: Option<TypeId>, init: ExprId, out: &mut Vec<StmtId>) {
+        let ispan = self.expr_span(init);
+        let (tmp, tspan) = match pat {
+            Pat::Name(n, s) => {
+                out.push(self.mk_stmt(StmtKind::Let { mutable, name: *n, name_span: *s, ty, init: Some(init) }, s.to(ispan)));
+                return;
+            }
+            Pat::Array(_, _, s) | Pat::Object(_, s) => (self.fresh_name(), *s),
+        };
+        out.push(self.mk_stmt(StmtKind::Let { mutable: false, name: tmp, name_span: tspan, ty, init: Some(init) }, tspan.to(ispan)));
+        let read = |p: &mut Self| p.mk_expr(ExprKind::Ident(tmp), tspan);
+        match pat {
+            Pat::Array(elems, rest, _) => {
+                for (i, e) in elems.iter().enumerate() {
+                    let Some((sub, d)) = e else { continue };
+                    let span = sub.span();
+                    let t = read(self);
+                    let idx = self.mk_expr(ExprKind::Int(i as u64), span);
+                    let at = self.mk_expr(ExprKind::Index { obj: t, index: idx, optional: false }, span);
+                    let v = match d {
+                        Some(d) => self.mk_expr(ExprKind::Binary(BinOp::Nullish, at, *d), span),
+                        None => self.mk_expr(ExprKind::NonNull(at), span),
+                    };
+                    self.destructure(sub, mutable, None, v, out);
+                }
+                if let Some(r) = rest {
+                    let span = r.span();
+                    let t = read(self);
+                    let slice = self.interner.intern("slice");
+                    let callee = self.mk_expr(ExprKind::Member { obj: t, name: slice, name_span: span, optional: false }, span);
+                    let from = self.mk_expr(ExprKind::Int(elems.len() as u64), span);
+                    let v = self.mk_expr(ExprKind::Call { callee, type_args: Vec::new(), args: vec![Arg { expr: from, by_ref: None }], optional: false }, span);
+                    self.destructure(r, mutable, None, v, out);
+                }
+            }
+            Pat::Object(props, _) => {
+                for (key, kspan, sub, d) in props {
+                    let t = read(self);
+                    let at = self.mk_expr(ExprKind::Member { obj: t, name: *key, name_span: *kspan, optional: false }, *kspan);
+                    let v = match d {
+                        Some(d) => self.mk_expr(ExprKind::Binary(BinOp::Nullish, at, *d), *kspan),
+                        None => at,
+                    };
+                    self.destructure(sub, mutable, None, v, out);
+                }
+            }
+            Pat::Name(..) => {}
+        }
+    }
+
     /// A statement where one is expected (`if (c) stmt`): declarations of several variables
     /// become a block.
     fn single_stmt(&mut self) -> StmtId {
@@ -1439,6 +1640,37 @@ impl<'a> Parser<'a> {
         self.bump(); // for
         let is_await = self.eat(Tok::Await);
         self.expect(Tok::LParen, "after `for`");
+        // `for (const [k, v] of xs)`: each element in a hidden variable, destructured in the body
+        if matches!(self.kind(), Tok::Const | Tok::Let | Tok::Var) && matches!(self.nth(1), Tok::LBracket | Tok::LBrace) && !is_await {
+            let save = self.pos;
+            let mutable = !self.at(Tok::Const);
+            self.bump();
+            let close = {
+                let p = self.pos;
+                self.skip_balanced();
+                let c = self.pos;
+                self.pos = p;
+                c
+            };
+            if self.toks.get(close).map(|t| t.kind == Tok::Ident && self.text(*t) == "of").unwrap_or(false) {
+                let pat = self.pattern();
+                self.bump(); // of
+                let iter = self.expr();
+                self.expect(Tok::RParen, "to close the `for` header");
+                let body = self.single_stmt();
+                let span = start.to(self.prev_span());
+                let tmp = self.fresh_name();
+                let pspan = pat.span();
+                let elem = self.mk_expr(ExprKind::Ident(tmp), pspan);
+                let mut stmts = Vec::new();
+                self.destructure(&pat, mutable, None, elem, &mut stmts);
+                stmts.push(body);
+                let bspan = self.ast.stmts[body as usize].span;
+                let body = self.mk_stmt(StmtKind::Block(stmts), bspan);
+                return self.mk_stmt(StmtKind::ForOf { mutable: false, name: tmp, name_span: pspan, iter, body }, span);
+            }
+            self.pos = save;
+        }
         if matches!(self.kind(), Tok::Const | Tok::Let | Tok::Var) && self.nth(1) == Tok::Ident {
             let is_of = self.toks.get(self.pos + 2).map(|t| t.kind == Tok::Ident && self.text(*t) == "of").unwrap_or(false);
             let is_in = self.nth(2) == Tok::In;
@@ -2044,9 +2276,9 @@ impl<'a> Parser<'a> {
     }
 
     fn arrow_body(&mut self, start: Span, params: Vec<Param>, ret: Option<TypeId>, throws: Option<TypeId>) -> ExprId {
-        let defaults = std::mem::take(&mut self.defaults);
+        let defaults = (std::mem::take(&mut self.defaults), std::mem::take(&mut self.prologue));
         let body = if self.at(Tok::LBrace) { ArrowBody::Block(self.block()) } else { ArrowBody::Expr(self.assign()) };
-        let body = if defaults.is_empty() {
+        let body = if defaults.0.is_empty() && defaults.1.is_empty() {
             body
         } else {
             let block = match body {
@@ -2300,7 +2532,7 @@ impl<'a> Parser<'a> {
             self.tparams();
         }
         let params = self.params();
-        let defaults = std::mem::take(&mut self.defaults);
+        let defaults = (std::mem::take(&mut self.defaults), std::mem::take(&mut self.prologue));
         let ret = if self.eat(Tok::Colon) { Some(self.ty()) } else { None };
         if !self.at(Tok::LBrace) {
             let msg = format!("expected `{{` to start the method body, found {}", self.found());

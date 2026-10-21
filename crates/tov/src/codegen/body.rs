@@ -2097,6 +2097,19 @@ impl<'c, 'a> Gen<'c, 'a> {
                         self.open(&format!("for (uint32_t {idx} = 0; {idx} < {n}; {idx}++) {{"));
                         self.line(format!("JSValueRef {var} = tv_js_at_or_trap({arr}, (double){idx}, {loc});"));
                     }
+                    Ty::Map(k, v) => {
+                        // `[key, value]` entries (borrowed)
+                        let (kd, vd, kct, vct) = (self.desc(k), self.desc(v), self.ctype(k), self.ctype(v));
+                        let f = self.tuple_of(elem).unwrap_or_default();
+                        let (f0, f1) = match f.as_slice() {
+                            [a, b] => (self.sym(a.name).to_string(), self.sym(b.name).to_string()),
+                            _ => ("0".into(), "1".into()),
+                        };
+                        let cur = self.fresh("i");
+                        self.line(format!("tv_int {cur} = 0; void *{cur}k, *{cur}v;"));
+                        self.open(&format!("while (tv_map_next({sn}, {kd}, {vd}, &{cur}, &{cur}k, &{cur}v)) {{"));
+                        self.line(format!("{ect} {var} = ({ect}){{ .f_{f0} = *({kct} *){cur}k, .f_{f1} = *({vct} *){cur}v }};"));
+                    }
                     Ty::Set(_) => {
                         let kd = self.desc(elem);
                         let cur = self.fresh("i");
@@ -2716,6 +2729,29 @@ impl<'c, 'a> Gen<'c, 'a> {
                 if name == "Array" || crate::check::typed_array_elem(&name).is_some() {
                     return self.new_array(args, ty, span);
                 }
+                if name == "Map" && !args.is_empty() {
+                    // entries `[key, value]`: set one by one
+                    let Ty::Map(k, v) = self.tget(ty) else { return Val::plain("TV_EMPTY_MAP", ty) };
+                    let arr = self.expr(args[0].expr);
+                    let Ty::Array(et) = self.tget(arr.ty) else { return Val::plain("TV_EMPTY_MAP", ty) };
+                    let f = self.tuple_of(et).unwrap_or_default();
+                    if f.len() != 2 {
+                        return Val::plain("TV_EMPTY_MAP", ty);
+                    }
+                    let (f0, f1) = (self.sym(f[0].name).to_string(), self.sym(f[1].name).to_string());
+                    let res = self.tmp(ty, "TV_EMPTY_MAP", true);
+                    let (kd, vd, kct, vct, ect) = (self.desc(k), self.desc(v), self.ctype(k), self.ctype(v), self.ctype(et));
+                    let i = self.fresh("i");
+                    self.open(&format!("for (tv_int {i} = 0; {i} < tv_arr_len({}); {i}++) {{", arr.code));
+                    self.line(format!("{ect} *{i}e = &(({ect} *)tv_arr_data({}))[{i}];", arr.code));
+                    let (kx, vx) = (Val::plain(format!("{i}e->f_{f0}"), f[0].ty), Val::plain(format!("{i}e->f_{f1}"), f[1].ty));
+                    let (kx, vx) = (self.coerce(kx, k), self.coerce(vx, v));
+                    let (rk, rv) = (self.retain_code(k, &format!("{i}k")), self.retain_code(v, &format!("{i}v")));
+                    self.line(format!("{kct} {i}k = {}; {rk}; {vct} {i}v = {}; {rv};", kx.code, vx.code));
+                    self.line(format!("tv_map_set(&{}, {kd}, {vd}, &{i}k, &{i}v);", res.code));
+                    self.close("}");
+                    return res;
+                }
                 if name == "Set" && !args.is_empty() {
                     let Ty::Set(elem) = self.tget(ty) else { return Val::plain("TV_EMPTY_MAP", ty) };
                     let arr = self.expr(args[0].expr);
@@ -2798,6 +2834,19 @@ impl<'c, 'a> Gen<'c, 'a> {
                     return self.coerce(v, ty);
                 }
                 v
+            }
+            ExprKind::Array(elems) if self.tuple_of(ty).is_some() => {
+                // `[a, b]` as a tuple: the record of its elements
+                let fields = self.tuple_of(ty).unwrap();
+                let mut parts = Vec::new();
+                for (&x, f) in elems.iter().zip(&fields) {
+                    let v = self.expr(x);
+                    let v = self.coerce(v, f.ty);
+                    let code = self.consume(v);
+                    parts.push(format!(".f_{} = {code}", self.sym(f.name)));
+                }
+                let ct = self.ctype(ty);
+                self.tmp(ty, &format!("({ct}){{ {} }}", parts.join(", ")), true)
             }
             ExprKind::Array(elems) => {
                 let Ty::Array(et) = self.tget(ty) else {
@@ -4123,6 +4172,14 @@ impl<'c, 'a> Gen<'c, 'a> {
         } else {
             a
         };
+        // a tuple's element: its field
+        if let Some(fields) = self.tuple_of(a.ty)
+            && let ExprKind::Int(i) = self.ast(self.cur_m()).expr(index).kind
+            && let Some(f) = fields.get(i as usize)
+        {
+            let v = Val { code: format!("({}).f_{}", a.code, self.sym(f.name)), ty: f.ty, owned: false };
+            return self.project(v, ty);
+        }
         let (et, len, elem) = match self.tget(a.ty) {
             Ty::Array(et) => (et, format!("tv_arr_len({})", a.code), None),
             Ty::Str | Ty::StrLit(_) => {
@@ -4882,5 +4939,13 @@ pub(crate) fn collect_exprs_expr(ast: &ast::Ast, e: ExprId, out: &mut Vec<ExprId
             ArrowBody::Block(b) => collect_exprs_stmt(ast, *b, out),
         },
         _ => {}
+    }
+}
+
+impl Gen<'_, '_> {
+    /// A tuple type's elements (`[A, B]`: a record with fields `0`, `1`), in order.
+    pub(crate) fn tuple_of(&self, t: TyId) -> Option<Vec<crate::types::Field>> {
+        let Ty::Record(fs) = *self.c.types.get(t) else { return None };
+        crate::types::tuple_fields(self.c.types.fields(fs), self.c.interner)
     }
 }

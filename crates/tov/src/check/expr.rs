@@ -1401,6 +1401,23 @@ impl<'a> Checker<'a> {
                 self.index_type(index);
                 self.types.optional(STR)
             }
+            Ty::Record(fields) if self.tuple_of(base).is_some() => {
+                // `t[0]`: a tuple's element (the index is a constant)
+                let elems = self.tuple_of(base).unwrap();
+                match self.ast().expr(index).kind {
+                    ExprKind::Int(i) if (i as usize) < elems.len() => {
+                        let _ = fields;
+                        self.expr(index, Some(INT));
+                        return elems[i as usize].ty;
+                    }
+                    _ => {
+                        self.expr(index, None);
+                        let shown = self.show(base);
+                        self.report(Diagnostic::new("T0110", span, format!("a tuple `{shown}` is indexed with a constant from 0 to {}", elems.len() - 1)));
+                        return ERROR;
+                    }
+                }
+            }
             Ty::Record(fields) => {
                 if let ExprKind::Str(key) = self.ast().expr(index).kind {
                     let key = &self.name(key).to_string();
@@ -1941,6 +1958,19 @@ impl<'a> Checker<'a> {
     }
 
     pub(super) fn array_lit(&mut self, elems: &[ExprId], exp: Option<TyId>, span: Span) -> TyId {
+        // `[lo, hi]` where a tuple `[number, number]` is expected
+        if let Some(t) = exp.and_then(|e| self.flat_members(e).into_iter().find(|&m| self.tuple_of(m).is_some_and(|f| f.len() == elems.len())))
+            && !elems.iter().any(|&x| matches!(self.ast().expr(x).kind, ExprKind::Spread(_)))
+        {
+            let fields = self.tuple_of(t).unwrap();
+            for (&x, f) in elems.iter().zip(&fields) {
+                let ft = f.ty;
+                let et = self.expr(x, Some(ft));
+                let s = self.ast().expr(x).span;
+                self.expect_assignable(et, ft, s, None);
+            }
+            return t;
+        }
         let elem_exp = exp.and_then(|e| {
             self.flat_members(e).into_iter().find_map(|m| match self.types.get(m) {
                 Ty::Array(t) => Some(*t),
@@ -2259,17 +2289,55 @@ impl<'a> Checker<'a> {
         let from_exp = |c: &mut Self, pick: &dyn Fn(&Ty) -> bool| exp.and_then(|e| c.flat_members(e).into_iter().find(|&m| pick(c.types.get(m))));
         match name.as_str() {
             "Map" => {
-                for a in args {
-                    self.expr(a.expr, None);
+                let mut kv = if targs.len() == 2 {
+                    Some((targs[0], targs[1]))
+                } else {
+                    from_exp(self, &|t| matches!(t, Ty::Map(..))).and_then(|t| match *self.types.get(t) {
+                        Ty::Map(k, v) => Some((k, v)),
+                        _ => None,
+                    })
+                };
+                // `new Map([["a", 1], ...])` or `new Map(pairs)`: entries `[key, value]`
+                if let Some(a) = args.first() {
+                    if kv.is_none()
+                        && let ExprKind::Array(rows) = &self.ast().expr(a.expr).kind
+                        && !rows.is_empty()
+                        && rows.iter().all(|&r| matches!(&self.ast().expr(r).kind, ExprKind::Array(xs) if xs.len() == 2))
+                    {
+                        let (mut ks, mut vs) = (Vec::new(), Vec::new());
+                        for &r in rows.clone().iter() {
+                            let ExprKind::Array(xs) = &self.ast().expr(r).kind else { continue };
+                            let (x0, x1) = (xs[0], xs[1]);
+                            let k = self.expr(x0, None);
+                            ks.push(self.types.widen(k));
+                            let v = self.expr(x1, None);
+                            vs.push(self.types.widen(v));
+                        }
+                        kv = Some((self.types.union(&ks), self.types.union(&vs)));
+                    }
+                    let hint = kv.map(|(k, v)| {
+                        let e = self.tuple_ty(&[k, v]);
+                        self.types.array(e)
+                    });
+                    let t = self.expr(a.expr, hint);
+                    let s = self.ast().expr(a.expr).span;
+                    match (hint, *self.types.get(t)) {
+                        (Some(h), _) => {
+                            self.expect_assignable(t, h, s, Some("the entries".into()));
+                        }
+                        (None, Ty::Array(e)) if self.tuple_of(e).is_some_and(|f| f.len() == 2) => {
+                            let f = self.tuple_of(e).unwrap();
+                            kv = Some((f[0].ty, f[1].ty));
+                        }
+                        (_, Ty::Error) => {}
+                        _ => {
+                            let shown = self.show(t);
+                            self.report(Diagnostic::new("T0001", s, format!("`new Map(...)` takes `[key, value]` entries, found `{shown}`")));
+                        }
+                    }
                 }
-                if !args.is_empty() {
-                    self.report(Diagnostic::new("U0017", span, "`new Map(entries)` is not supported yet; create an empty map and `set` entries"));
-                }
-                if targs.len() == 2 {
-                    return self.types.intern(Ty::Map(targs[0], targs[1]));
-                }
-                if let Some(t) = from_exp(self, &|t| matches!(t, Ty::Map(..))) {
-                    return t;
+                if let Some((k, v)) = kv {
+                    return self.types.intern(Ty::Map(k, v));
                 }
                 self.report(Diagnostic::new("T0301", span, "can't infer the key and value types of this map").note("instead", "`new Map<string, int>()`, or annotate the binding"));
                 ERROR
@@ -3609,5 +3677,11 @@ impl<'a> Checker<'a> {
     /// Element types `new Array(n)` can fill with an empty value (numbers, booleans, strings).
     fn has_default(&self, t: TyId) -> bool {
         self.types.is_numeric(t) || matches!(*self.types.get(t), Ty::Bool | Ty::Str)
+    }
+
+    /// A tuple type's elements (`[A, B]`: a record with fields `0`, `1`), in order.
+    pub(super) fn tuple_of(&self, t: TyId) -> Option<Vec<Field>> {
+        let Ty::Record(fs) = *self.types.get(t) else { return None };
+        crate::types::tuple_fields(self.types.fields(fs), self.interner)
     }
 }

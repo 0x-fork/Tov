@@ -1092,6 +1092,28 @@ impl<'c, 'a> Gen<'c, 'a> {
                 let o = self.coerce(o, ty);
                 self.tmp(ty, &format!("tv_arr_concat({}, {}, {d})", arr.code, o.code), true)
             }
+            "entries" | "keys" => {
+                // `[index, element]` pairs, or the indexes
+                let Ty::Array(rt) = self.tget(ty) else { return Val::plain("TV_EMPTY_ARR", ty) };
+                let (rd, rct) = (self.desc(rt), self.ctype(rt));
+                let out = self.tmp(ty, &format!("tv_arr_with_capacity({rd}, tv_arr_len({}))", arr.code), true);
+                let i = self.fresh("i");
+                self.open(&format!("for (tv_int {i} = 0; {i} < tv_arr_len({}); {i}++) {{", arr.code));
+                if name == "keys" {
+                    self.line(format!("TVG_PUSH(tv_int, &{}, {rd}, {i});", out.code));
+                } else {
+                    let f = self.tuple_of(rt).unwrap_or_default();
+                    let x = self.fresh("x");
+                    let r = self.retain_code(et, &x);
+                    self.line(format!("{ect} {x} = {}; {r};", elem(&i).code));
+                    if f.len() == 2 {
+                        let (f0, f1) = (self.sym(f[0].name).to_string(), self.sym(f[1].name).to_string());
+                        self.line(format!("TVG_PUSH({rct}, &{}, {rd}, (({rct}){{ .f_{f0} = {i}, .f_{f1} = {x} }}));", out.code));
+                    }
+                }
+                self.close("}");
+                out
+            }
             "at" => {
                 let i = self.expr(args[0].expr);
                 let i = self.int_code(i);
@@ -1184,6 +1206,7 @@ impl<'c, 'a> Gen<'c, 'a> {
             }
             "keys" => self.tmp(ty, &format!("tv_map_keys({}, {kd}, {vd})", mv.code), true),
             "values" => self.tmp(ty, &format!("tv_map_values({}, {kd}, {vd})", mv.code), true),
+            "entries" => self.map_entries(mv, k, v, ty),
             "forEach" => {
                 let cb = self.prepare_callback(args[0].expr);
                 let (kct, cur) = (self.ctype(k), self.fresh("i"));
@@ -1547,6 +1570,50 @@ impl<'c, 'a> Gen<'c, 'a> {
             (None, "BigInt") => {
                 let v = self.expr(args[0].expr);
                 self.to_bigint(v)
+            }
+            (Some("Object"), "keys" | "values" | "entries") => {
+                let v = self.expr(args[0].expr);
+                let base = self.c.types.without_undefined(v.ty);
+                match self.tget(base) {
+                    Ty::Map(k, val) => {
+                        let (kd, vd) = (self.desc(k), self.desc(val));
+                        match name {
+                            "keys" => self.tmp(ty, &format!("tv_map_keys({}, {kd}, {vd})", v.code), true),
+                            "values" => self.tmp(ty, &format!("tv_map_values({}, {kd}, {vd})", v.code), true),
+                            _ => self.map_entries(v, k, val, ty),
+                        }
+                    }
+                    Ty::Record(_) => {
+                        // a record's fields, in their declared order
+                        let fields = self.c.types.fields_in_order(base);
+                        let Ty::Array(rt) = self.tget(ty) else { return Val::plain("TV_EMPTY_ARR", ty) };
+                        let (rd, rct) = (self.desc(rt), self.ctype(rt));
+                        let out = self.tmp(ty, &format!("tv_arr_with_capacity({rd}, {})", fields.len()), true);
+                        let tf = self.tuple_of(rt);
+                        for f in &fields {
+                            let key = self.lit(self.sym(f.name).to_string().as_bytes());
+                            let fv = Val::plain(format!("({}).f_{}", v.code, self.sym(f.name)), f.ty);
+                            let item = match name {
+                                "keys" => key,
+                                "values" => {
+                                    let x = self.coerce(fv, rt);
+                                    let x = self.own(x);
+                                    self.consume(x)
+                                }
+                                _ => {
+                                    let Some(tf) = &tf else { continue };
+                                    let x = self.coerce(fv, tf[1].ty);
+                                    let x = self.own(x);
+                                    let x = self.consume(x);
+                                    format!("(({rct}){{ .f_{} = {key}, .f_{} = {x} }})", self.sym(tf[0].name), self.sym(tf[1].name))
+                                }
+                            };
+                            self.line(format!("TVG_PUSH({rct}, &{}, {rd}, {item});", out.code));
+                        }
+                        out
+                    }
+                    _ => Val::plain("TV_EMPTY_ARR", ty),
+                }
             }
             (Some("Array"), "of") => {
                 let elems: Vec<ExprId> = args.iter().map(|a| a.expr).collect();
@@ -2102,6 +2169,29 @@ impl<'c, 'a> Gen<'c, 'a> {
                 self.convert_array(xs, ty)
             }
         }
+    }
+
+    /// A map's `[key, value]` entries, as an array of tuples.
+    pub(crate) fn map_entries(&mut self, mv: Val, k: TyId, v: TyId, ty: TyId) -> Val {
+        let Ty::Array(rt) = self.tget(ty) else { return Val::plain("TV_EMPTY_ARR", ty) };
+        let (kd, vd, rd) = (self.desc(k), self.desc(v), self.desc(rt));
+        let (kct, vct, rct) = (self.ctype(k), self.ctype(v), self.ctype(rt));
+        let f = self.tuple_of(rt).unwrap_or_default();
+        if f.len() != 2 {
+            return Val::plain("TV_EMPTY_ARR", ty);
+        }
+        let (f0, f1) = (self.sym(f[0].name).to_string(), self.sym(f[1].name).to_string());
+        let m = self.fresh("m");
+        self.line(format!("tv_map {m} = {};", mv.code));
+        let out = self.tmp(ty, &format!("tv_arr_with_capacity({rd}, tv_map_size({m}))"), true);
+        let i = self.fresh("i");
+        self.line(format!("tv_int {i} = 0; void *{i}k, *{i}v;"));
+        self.open(&format!("while (tv_map_next({m}, {kd}, {vd}, &{i}, &{i}k, &{i}v)) {{"));
+        let (rk, rv) = (self.retain_code(k, &format!("{i}x")), self.retain_code(v, &format!("{i}y")));
+        self.line(format!("{kct} {i}x = *({kct} *){i}k; {rk}; {vct} {i}y = *({vct} *){i}v; {rv};"));
+        self.line(format!("TVG_PUSH({rct}, &{}, {rd}, (({rct}){{ .f_{f0} = {i}x, .f_{f1} = {i}y }}));", out.code));
+        self.close("}");
+        out
     }
 
     /// `...x` as an array: an array itself, a set's values, a string's characters.

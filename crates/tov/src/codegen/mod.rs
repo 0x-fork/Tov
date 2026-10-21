@@ -1038,6 +1038,25 @@ impl<'c, 'a> Gen<'c, 'a> {
                 let _ = writeln!(self.protos, "static void {fname}({sig});");
                 let mut b = String::new();
                 match self.tget(t) {
+                    Ty::Record(_) if self.tuple_of(t).is_some() => {
+                        let fs = self.tuple_of(t).unwrap();
+                        let descs: Vec<String> = fs.iter().map(|f| self.desc(f.ty)).collect();
+                        let ptrs: Vec<String> = fs.iter().map(|f| format!("&x->f_{}", self.sym(f.name))).collect();
+                        if inspect {
+                            let _ = writeln!(b, "    const tv_type *const types[] = {{ {} }};", descs.join(", "));
+                            let _ = writeln!(b, "    const void *const fields[] = {{ {} }};", ptrs.join(", "));
+                            let _ = writeln!(b, "    tv_inspect_tuple(sb, depth, {}, types, fields);", fs.len());
+                        } else {
+                            // String([a, b]) is "a,b"
+                            for (i, f) in fs.iter().enumerate() {
+                                if i > 0 {
+                                    b.push_str("    tv_sb_push_char(sb, ',');\n");
+                                }
+                                let e = self.string_code(f.ty, &format!("x->f_{}", self.sym(f.name)));
+                                let _ = writeln!(b, "    {e};");
+                            }
+                        }
+                    }
                     Ty::Record(_) => {
                         if !inspect {
                             b.push_str("    tv_sb_push_cstr(sb, \"[object Object]\");\n");

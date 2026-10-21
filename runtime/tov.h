@@ -369,6 +369,7 @@ void tv_inspect_str(tv_sb *sb, tv_str s, int depth);   /* depth 0 = top level: u
 void tv_inspect_arr(tv_sb *sb, tv_arr a, const tv_type *t, int depth);
 /* console.log formatting of a record: fields in declaration order. */
 void tv_inspect_record(tv_sb *sb, int depth, size_t n, const char *const *names, const tv_type *const *types, const void *const *fields);
+void tv_inspect_tuple(tv_sb *sb, int depth, size_t n, const tv_type *const *types, const void *const *fields);   /* [A, B]: as an array */
 /* A class instance: `Name { a: 1 }` (`[Name]` past the depth limit). */
 void tv_inspect_object(tv_sb *sb, int depth, const char *cls, size_t n, const char *const *names, const tv_type *const *types, const void *const *fields);
 void tv_to_str_arr(tv_sb *sb, tv_arr a, const tv_type *t);   /* JS String([1,2]) == "1,2" */
