@@ -47,9 +47,9 @@ pub(crate) struct Spec {
     pub(crate) floats: HashSet<Site>,
     /// Bodies that throw without a `throw` of their own: (module, body).
     pub(crate) throwing: HashSet<(u32, StmtId)>,
-    /// Module variables `let x = 0` that a float is stored into: `f64`s. (module, item)
     /// Module variables (module, item) and class fields (`field_key`) initialized with an
-    /// integer and given a float: `f64`s.
+    /// integer and given a float: `f64`s. Also interfaces (module, item) given a class
+    /// instance: kept interfaces rather than records (see `collect`).
     pub(crate) float_globals: HashSet<(u32, u32)>,
 }
 

@@ -1049,9 +1049,11 @@ impl<'a> Parser<'a> {
             self.skip_decl();
             return;
         }
+        let body_start = self.cur_span();
         let members = self.record_fields();
+        let body = self.mk_ty(TypeExprKind::Record(members.clone()), body_start.to(self.prev_span()));
         let span = start.to(self.prev_span());
-        self.ast.items.push(Item { kind: ItemKind::Interface { name, name_span, tparams, members }, span, exported });
+        self.ast.items.push(Item { kind: ItemKind::Interface { name, name_span, tparams, members, body }, span, exported });
     }
 
     fn const_item(&mut self, start: Span, exported: bool) {

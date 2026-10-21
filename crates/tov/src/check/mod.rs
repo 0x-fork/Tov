@@ -334,7 +334,8 @@ pub struct Checker<'a> {
     spec_hits: Vec<spec::Site>,
     /// Bodies found to throw though their signatures were taken not to: (module, body).
     throw_hits: Vec<(u32, StmtId)>,
-    /// Module variables `let x = 0` a float is stored into: (module, item).
+    /// Module variables `let x = 0` a float is stored into, and interfaces made records that a
+    /// class instance is given to: (module, item).
     global_hits: Vec<(u32, u32)>,
     spec_flow: Vec<Vec<spec::Site>>,
     spec_srcs_base: Arc<HashMap<Span, Vec<spec::Site>>>,
@@ -749,6 +750,20 @@ impl<'a> Checker<'a> {
 
     fn collect(&mut self) {
         let modules = self.modules;
+        // An interface no class implements holds only object literals: it's a record type (an
+        // alias of its members), as fast as one and changed in place like one.
+        let mut implemented = HashSet::default();
+        for module in modules.iter() {
+            for item in &module.ast.items {
+                if let ItemKind::Class(cd) = &item.kind {
+                    for &te in &cd.implements {
+                        if let TypeExprKind::Named { name, .. } = &module.ast.ty(te).kind {
+                            implemented.insert(*name);
+                        }
+                    }
+                }
+            }
+        }
         for (mi, module) in modules.iter().enumerate() {
             let mi = mi as u32;
             let mut scope = ModScope::default();
@@ -758,6 +773,11 @@ impl<'a> Checker<'a> {
                     ItemKind::Function(f) => (f.name, f.name_span, Decl::Fn(mi, ii), false),
                     ItemKind::Const { name, name_span, .. } => (*name, *name_span, Decl::Const(mi, ii), false),
                     ItemKind::TypeAlias { name, name_span, .. } => {
+                        Arc::make_mut(&mut self.aliases).push(AliasInfo { module: mi, item: ii, params: Vec::new(), recursive: false, body: None, resolving: false });
+                        Arc::make_mut(&mut self.alias_names).push(self.interner.get(*name).to_string());
+                        (*name, *name_span, Decl::Alias(self.aliases.len() as u32 - 1), true)
+                    }
+                    ItemKind::Interface { name, name_span, .. } if !implemented.contains(name) && !self.spec.float_globals.contains(&(mi, ii)) => {
                         Arc::make_mut(&mut self.aliases).push(AliasInfo { module: mi, item: ii, params: Vec::new(), recursive: false, body: None, resolving: false });
                         Arc::make_mut(&mut self.alias_names).push(self.interner.get(*name).to_string());
                         (*name, *name_span, Decl::Alias(self.aliases.len() as u32 - 1), true)
@@ -955,9 +975,9 @@ impl<'a> Checker<'a> {
         let mut edges: Vec<Vec<usize>> = vec![Vec::new(); n];
         for (ai, info) in self.aliases.iter().enumerate() {
             let ast = &self.modules[info.module as usize].ast;
-            let ItemKind::TypeAlias { ty, .. } = &ast.items[info.item as usize].kind else { continue };
+            let Some((_, _, _, ty)) = alias_item(&ast.items[info.item as usize].kind) else { continue };
             let mut refs = Vec::new();
-            collect_type_refs(ast, *ty, &mut refs);
+            collect_type_refs(ast, ty, &mut refs);
             for (ns, name) in refs {
                 let decl = match ns {
                     None => self.scopes[info.module as usize].types.get(&name).map(|d| d.0),
@@ -1006,7 +1026,7 @@ impl<'a> Checker<'a> {
         for (ii, item) in ast.items.iter().enumerate() {
             let ii = ii as u32;
             match &item.kind {
-                ItemKind::TypeAlias { name, .. } => {
+                ItemKind::TypeAlias { name, .. } | ItemKind::Interface { name, .. } if matches!(item.kind, ItemKind::TypeAlias { .. }) || matches!(self.scopes[m as usize].types.get(name).map(|d| d.0), Some(Decl::Alias(_))) => {
                     if let Some(Decl::Alias(a)) = self.scopes[m as usize].types.get(name).map(|d| d.0)
                         && self.aliases[a as usize].item == ii
                         && self.aliases[a as usize].module == m
@@ -1014,6 +1034,7 @@ impl<'a> Checker<'a> {
                         self.alias_body(a);
                     }
                 }
+                ItemKind::TypeAlias { .. } => {}
                 ItemKind::Interface { name, .. } => {
                     if let Some(Decl::Iface(i)) = self.scopes[m as usize].types.get(name).map(|d| d.0)
                         && self.ifaces[i as usize].item == ii
@@ -1536,7 +1557,7 @@ impl<'a> Checker<'a> {
             return b;
         }
         let (m, ii) = (self.aliases[a as usize].module, self.aliases[a as usize].item);
-        let ItemKind::TypeAlias { name, name_span, tparams, ty } = &self.modules[m as usize].ast.items[ii as usize].kind else { return ERROR };
+        let Some((name, name_span, tparams, ty)) = alias_item(&self.modules[m as usize].ast.items[ii as usize].kind) else { return ERROR };
         if self.aliases[a as usize].resolving {
             let n = self.name(*name).to_string();
             self.done.push(Diagnostic::new("N0007", *name_span, format!("type `{n}` refers to itself without a record or array in between")));
@@ -1553,7 +1574,7 @@ impl<'a> Checker<'a> {
                     params.push(id);
                 }
                 Arc::make_mut(&mut c.aliases)[a as usize].params = params;
-                let body = c.resolve_type(*ty, &tscope);
+                let body = c.resolve_type(ty, &tscope);
                 if tparams.is_empty() && !c.types.has_name(body) && matches!(c.types.get(body), Ty::Record(_) | Ty::Union(_)) {
                     let n = c.name(*name).to_string();
                     c.types.set_name(body, n);
@@ -1922,13 +1943,10 @@ impl<'a> Checker<'a> {
             Some(Decl::Npm(..)) => JS,
             Some(Decl::Alias(a)) => {
                 let (am, ai) = (self.aliases[a as usize].module, self.aliases[a as usize].item);
-                let arity = match &self.modules[am as usize].ast.items[ai as usize].kind {
-                    ItemKind::TypeAlias { tparams, .. } => tparams.len(),
-                    _ => 0,
-                };
+                let arity = alias_item(&self.modules[am as usize].ast.items[ai as usize].kind).map_or(0, |a| a.2.len());
                 let mut targs = targs;
                 if targs.len() < arity {
-                    let ItemKind::TypeAlias { tparams, .. } = &self.modules[am as usize].ast.items[ai as usize].kind else { unreachable!() };
+                    let Some((_, _, tparams, _)) = alias_item(&self.modules[am as usize].ast.items[ai as usize].kind) else { unreachable!() };
                     let defaults: Vec<Option<crate::ast::TypeId>> = tparams[targs.len()..].iter().map(|tp| tp.default).collect();
                     if defaults.iter().all(|d| d.is_some()) {
                         for d in defaults.into_iter().flatten() {
@@ -2318,6 +2336,56 @@ impl<'a> Checker<'a> {
         })
     }
 
+    /// A class instance given where an interface made a record is expected (see `collect`):
+    /// that interface is checked again as an interface, which classes satisfy structurally.
+    fn class_to_record(&mut self, found: TyId, expected: TyId) {
+        fn walk(c: &mut Checker, t: TyId, depth: u32, f: &mut dyn FnMut(&mut Checker, TyId)) {
+            if depth > 8 {
+                return;
+            }
+            f(c, t);
+            let inner: Vec<TyId> = match *c.types.get(t) {
+                Ty::Array(e) | Ty::Set(e) | Ty::Promise(e, _) => vec![e],
+                Ty::Map(k, v) => vec![k, v],
+                Ty::Union(ms) => c.types.tys(ms).to_vec(),
+                Ty::Record(fs) => c.types.fields(fs).iter().map(|f| f.ty).collect(),
+                Ty::Func(ps, r, _) => c.types.params(ps).iter().map(|p| p.ty).chain([r]).collect(),
+                _ => Vec::new(),
+            };
+            for t in inner {
+                walk(c, t, depth + 1, f);
+            }
+        }
+        // (or another interface, or a record with more fields: TypeScript's structural typing)
+        let mut object = false;
+        walk(self, found, 0, &mut |c, t| object |= matches!(c.types.get(t), Ty::Class(..) | Ty::Interface(..) | Ty::Record(_) | Ty::Rec(..)));
+        if !object {
+            return;
+        }
+        // (the interfaces whose members are a record's fields, or whose recursive alias it is)
+        let mut shapes: Vec<(u32, Vec<Sym>, u32, u32)> = Vec::new();
+        for (a, info) in self.aliases.iter().enumerate() {
+            if let ItemKind::Interface { members, .. } = &self.modules[info.module as usize].ast.items[info.item as usize].kind {
+                let mut names: Vec<Sym> = members.iter().map(|f| f.name).collect();
+                names.sort();
+                shapes.push((a as u32, names, info.module, info.item));
+            }
+        }
+        if shapes.is_empty() {
+            return;
+        }
+        let mut hits = Vec::new();
+        walk(self, expected, 0, &mut |c, t| match *c.types.get(t) {
+            Ty::Rec(a, _) => hits.extend(shapes.iter().filter(|s| s.0 == a).map(|s| (s.2, s.3))),
+            Ty::Record(fs) => {
+                let names: Vec<Sym> = c.types.fields(fs).iter().map(|f| f.name).collect();
+                hits.extend(shapes.iter().filter(|s| s.1 == names).map(|s| (s.2, s.3)));
+            }
+            _ => {}
+        });
+        self.global_hits.extend(hits);
+    }
+
     /// Can values of these types ever be equal?
     fn comparable(&mut self, a: TyId, b: TyId) -> bool {
         if a == ERROR || b == ERROR || a == UNKNOWN || b == UNKNOWN || a == JS || b == JS {
@@ -2356,6 +2424,7 @@ impl<'a> Checker<'a> {
 
     fn mismatch(&mut self, found: TyId, expected: TyId, span: Span, context: Option<String>) -> Diagnostic {
         self.spec_mismatch(found, expected, span);
+        self.class_to_record(found, expected);
         let (fs, es) = (self.show(found), self.show(expected));
         let mut d = Diagnostic::new("T0001", span, format!("expected `{es}`, found `{fs}`"));
         if let Some(c) = context {
@@ -2640,6 +2709,15 @@ impl<'a> Checker<'a> {
 
     fn local(&self, id: LocalId) -> &Local {
         &self.fcx.last().unwrap().locals[id]
+    }
+}
+
+/// A type alias, or an interface made one (see `collect`): (name, name span, parameters, body).
+fn alias_item(k: &ItemKind) -> Option<(&Sym, &Span, &Vec<ast::TypeParam>, ast::TypeId)> {
+    match k {
+        ItemKind::TypeAlias { name, name_span, tparams, ty } => Some((name, name_span, tparams, *ty)),
+        ItemKind::Interface { name, name_span, tparams, body, .. } => Some((name, name_span, tparams, *body)),
+        _ => None,
     }
 }
 

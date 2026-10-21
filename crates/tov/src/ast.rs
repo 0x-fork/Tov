@@ -249,6 +249,7 @@ pub struct TypeExpr {
     pub span: Span,
 }
 
+#[derive(Clone)]
 pub struct FieldTy {
     pub name: Sym,
     pub name_span: Span,
@@ -352,7 +353,8 @@ pub enum ItemKind {
     Import(Import),
     Function(FnDecl),
     TypeAlias { name: Sym, name_span: Span, tparams: Vec<TypeParam>, ty: TypeId },
-    Interface { name: Sym, name_span: Span, tparams: Vec<TypeParam>, members: Vec<FieldTy> },
+    /// `body`: the members as a record type (what an interface no class implements is).
+    Interface { name: Sym, name_span: Span, tparams: Vec<TypeParam>, members: Vec<FieldTy>, body: TypeId },
     /// A module-level `const` (or `let`, with `mutable`).
     Const { name: Sym, name_span: Span, ty: Option<TypeId>, init: ExprId, mutable: bool },
     Test { name: String, name_span: Span, body: ExprId },
