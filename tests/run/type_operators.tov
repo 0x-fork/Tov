@@ -1,0 +1,28 @@
+// typeof, keyof, T["k"] and the utility types (checked against Node)
+interface Todo { id: number; title: string; done: boolean; priority: "low" | "high" }
+const defaults = { port: 8080, host: "localhost", tls: false }
+type Config = typeof defaults
+const cfg: Config = { ...defaults, port: 9000 }
+console.log(cfg)
+function make(id: number) { return { id, tags: ["a"] } }
+type Made = ReturnType<typeof make>
+const m: Made = make(3)
+console.log(m.tags.length)
+type Key = keyof Todo
+const keys: Key[] = ["id", "title"]
+function show(t: Todo, k: keyof Todo): string { return `${k}=${t[k]}` }
+const t: Todo = { id: 1, title: "x", done: false, priority: "high" }
+console.log(keys, show(t, "title"), show(t, "done"))
+const p: Todo["priority"] = "low"
+const counts: Record<Todo["priority"], number> = { low: 1, high: 2 }
+console.log(p, counts.high)
+type Draft = Partial<Todo>
+const d: Draft = { title: "draft" }
+type Summary = Pick<Todo, "id" | "title">
+const s: Summary = { id: 2, title: "y" }
+type NoId = Omit<Todo, "id">
+const n: NoId = { title: "z", done: true, priority: "low" }
+console.log(d, s, n)
+const maybe: string | null = null
+const sure: NonNullable<typeof maybe> = "ok"
+console.log(sure)

@@ -1495,6 +1495,9 @@ impl<'a> Checker<'a> {
                     }
                 }
             }
+            // `p[k]` with `k: keyof P` (a union of field names): the field it names (see
+            // `keyed_read`)
+            Ty::Record(_) | Ty::Interface(..) | Ty::Class(..) if !matches!(self.ast().expr(index).kind, ExprKind::Str(_)) => return self.keyed_read(e, obj, index, base, span),
             Ty::Record(fields) => {
                 if let ExprKind::Str(key) = self.ast().expr(index).kind {
                     let key = &self.name(key).to_string();
@@ -1810,7 +1813,7 @@ impl<'a> Checker<'a> {
         out
     }
 
-    fn field_of(&mut self, ty: TyId, name: Sym) -> Option<TyId> {
+    pub(super) fn field_of(&mut self, ty: TyId, name: Sym) -> Option<TyId> {
         let n = self.name(name).to_string();
         match *self.types.get(ty) {
             Ty::Error => Some(ERROR),
@@ -1980,6 +1983,44 @@ impl<'a> Checker<'a> {
             self.report(d);
         }
         target_ty
+    }
+
+    /// `p[k]` where `k` is a union of p's field names: `k === "a" ? p.a : p.b` (see `rewrite`),
+    /// of the union of their types.
+    fn keyed_read(&mut self, e: ExprId, obj: ExprId, index: ExprId, base: TyId, span: Span) -> TyId {
+        let it = self.expr(index, None);
+        if it == ERROR {
+            return ERROR;
+        }
+        let mut keys = Vec::new();
+        let mut tys = Vec::new();
+        for m in self.flat_members(it) {
+            let name = match *self.types.get(m) {
+                Ty::StrLit(n) => n,
+                _ => {
+                    let (shown, bs) = (self.show(it), self.show(base));
+                    self.report(
+                        Diagnostic::new("X0017", span, format!("`{bs}` can't be indexed with `{shown}`"))
+                            .note("instead", "use `.field`, give the key a type of the field names (`keyof T`), or use a `Map<K, V>` for dynamic keys"),
+                    );
+                    return ERROR;
+                }
+            };
+            let Some(ft) = self.field_of(base, name) else {
+                let (n, bs) = (self.name(name).to_string(), self.show(base));
+                self.report(Diagnostic::new("T0102", span, format!("`{bs}` has no field `{n}`")));
+                return ERROR;
+            };
+            keys.push(name);
+            tys.push(ft);
+        }
+        let pure = |c: &Self, x: ExprId| super::stmt::place_path(c.ast(), x) || matches!(c.ast().expr(x).kind, ExprKind::Str(_));
+        if !pure(self, obj) || !pure(self, index) {
+            self.report(Diagnostic::new("U0011", span, "indexing with a key of several fields needs a variable on both sides yet").note("instead", "put the object and the key in `const`s first"));
+            return ERROR;
+        }
+        self.rewrites.keyed.push((self.cur, e, keys));
+        self.types.union(&tys)
     }
 
     /// `{ ...a, y: 3 }`: the literal with a's fields written out (`{ x: a.x, y: 3 }`, see

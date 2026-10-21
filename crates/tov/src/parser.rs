@@ -1240,11 +1240,18 @@ impl<'a> Parser<'a> {
             return self.postfix_ty();
         }
         let mut t = self.primary_ty();
-        while self.at(Tok::LBracket) && self.nth(1) == Tok::RBracket && !self.tok().nl_before {
+        while self.at(Tok::LBracket) && !self.tok().nl_before {
             self.bump();
-            self.bump();
+            if self.eat(Tok::RBracket) {
+                let span = start.to(self.prev_span());
+                t = self.mk_ty(TypeExprKind::Array(t), span);
+                continue;
+            }
+            // `T["k"]`
+            let key = self.ty();
+            self.expect(Tok::RBracket, "to close the indexed access type");
             let span = start.to(self.prev_span());
-            t = self.mk_ty(TypeExprKind::Array(t), span);
+            t = self.mk_ty(TypeExprKind::Access(t, key), span);
         }
         t
     }
@@ -1313,10 +1320,9 @@ impl<'a> Parser<'a> {
             }
             Tok::Typeof => {
                 self.bump();
-                self.push(Diagnostic::new("X0016", start, "`typeof` in type position is not supported").note("instead", "name the type explicitly"));
-                self.postfix_expr_no_call();
+                let x = self.postfix_expr_no_call();
                 let span = start.to(self.prev_span());
-                self.mk_ty(TypeExprKind::Error, span)
+                self.mk_ty(TypeExprKind::Typeof(x), span)
             }
             Tok::LBracket => {
                 // `[A, B]`: a tuple, a record whose fields are `0`, `1`, ...
@@ -1349,11 +1355,10 @@ impl<'a> Parser<'a> {
             Tok::Ident => {
                 let t = self.bump();
                 let word = self.text(t);
-                if word == "keyof" {
-                    self.push(Diagnostic::new("X0016", start, "`keyof` is not supported").note("instead", "use a union of string literals"));
-                    self.postfix_ty();
+                if word == "keyof" && matches!(self.kind(), Tok::Ident | Tok::Typeof | Tok::LParen) {
+                    let inner = self.postfix_ty();
                     let span = start.to(self.prev_span());
-                    return self.mk_ty(TypeExprKind::Error, span);
+                    return self.mk_ty(TypeExprKind::Keyof(inner), span);
                 }
                 let mut name = self.interner.intern(word);
                 let mut name_span = start;
@@ -2317,12 +2322,17 @@ impl<'a> Parser<'a> {
         self.mk_expr(ExprKind::Unary(op, e), span)
     }
 
-    fn postfix_expr_no_call(&mut self) {
-        self.primary();
+    /// A name and its fields (`cfg.server`), for `typeof` in a type.
+    fn postfix_expr_no_call(&mut self) -> ExprId {
+        let start = self.cur_span();
+        let mut e = self.primary();
         while self.at(Tok::Dot) {
             self.bump();
-            self.prop_name();
+            let Some((name, name_span)) = self.prop_name() else { break };
+            let span = start.to(self.prev_span());
+            e = self.mk_expr(ExprKind::Member { obj: e, name, name_span, optional: false }, span);
         }
+        e
     }
 
     fn postfix(&mut self) -> ExprId {

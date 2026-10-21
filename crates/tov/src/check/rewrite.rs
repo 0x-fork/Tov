@@ -31,11 +31,13 @@ pub struct Rewrites {
     pub(crate) keys: Vec<(u32, ExprId)>,
     /// `{ ...a, y: 3 }`: (module, the literal, each spread's fields), as `{ x: a.x, y: 3 }`.
     pub(crate) spreads: Vec<(u32, ExprId, Vec<Vec<crate::intern::Sym>>)>,
+    /// `p[k]`, `k` one of these field names: (module, the index), as `k === "a" ? p.a : p.b`.
+    pub(crate) keyed: Vec<(u32, ExprId, Vec<crate::intern::Sym>)>,
 }
 
 impl Rewrites {
     pub fn is_empty(&self) -> bool {
-        self.params.is_empty() && self.args.is_empty() && self.consts.is_empty() && self.items.is_empty() && self.awaits.is_empty() && self.calls.is_empty() && self.elems.is_empty() && self.keys.is_empty() && self.spreads.is_empty()
+        self.params.is_empty() && self.args.is_empty() && self.consts.is_empty() && self.items.is_empty() && self.awaits.is_empty() && self.calls.is_empty() && self.elems.is_empty() && self.keys.is_empty() && self.spreads.is_empty() && self.keyed.is_empty()
     }
 
     pub(crate) fn extend(&mut self, o: Rewrites) {
@@ -48,6 +50,7 @@ impl Rewrites {
         self.elems.extend(o.elems);
         self.keys.extend(o.keys);
         self.spreads.extend(o.spreads);
+        self.keyed.extend(o.keyed);
     }
 }
 
@@ -219,6 +222,31 @@ pub fn apply(modules: &mut [Module], rw: &Rewrites) -> bool {
         ast.exprs[*at as usize].kind = ExprKind::Object(out);
         changed = true;
     }
+    for (m, at, keys) in &rw.keyed {
+        let ast = &mut modules[*m as usize].ast;
+        let ExprKind::Index { obj, index, .. } = ast.exprs[*at as usize].kind else { continue };
+        let span = ast.exprs[*at as usize].span;
+        let field = |ast: &mut crate::ast::Ast, name| {
+            let o = clone_path(ast, obj);
+            ast.exprs.push(crate::ast::Expr { kind: ExprKind::Member { obj: o, name, name_span: span, optional: false }, span });
+            ast.exprs.len() as ExprId - 1
+        };
+        let Some((&last, rest)) = keys.split_last() else { continue };
+        let mut e = field(ast, last);
+        for &k in rest.iter().rev() {
+            let key = clone_path(ast, index);
+            ast.exprs.push(crate::ast::Expr { kind: ExprKind::Str(k), span });
+            let lit = ast.exprs.len() as ExprId - 1;
+            ast.exprs.push(crate::ast::Expr { kind: ExprKind::Binary(crate::ast::BinOp::Eq, key, lit), span });
+            let test = ast.exprs.len() as ExprId - 1;
+            let then = field(ast, k);
+            ast.exprs.push(crate::ast::Expr { kind: ExprKind::Cond(test, then, e), span });
+            e = ast.exprs.len() as ExprId - 1;
+        }
+        let kind = std::mem::replace(&mut ast.exprs[e as usize].kind, ExprKind::Error);
+        ast.exprs[*at as usize].kind = kind;
+        changed = true;
+    }
     for &(m, at) in &rw.keys {
         let ast = &mut modules[m as usize].ast;
         let ExprKind::Member { obj, name, name_span, optional } = ast.exprs[at as usize].kind else { continue };
@@ -258,6 +286,7 @@ fn clone_path(ast: &mut crate::ast::Ast, x: ExprId) -> ExprId {
         ExprKind::NonNull(i) => ExprKind::NonNull(clone_path(ast, i)),
         ExprKind::Member { obj, name, name_span, optional } => ExprKind::Member { obj: clone_path(ast, obj), name, name_span, optional },
         ExprKind::Index { obj, index, optional } => ExprKind::Index { obj: clone_path(ast, obj), index, optional },
+        ExprKind::Str(s) => ExprKind::Str(s),
         _ => return x,
     };
     ast.exprs.push(crate::ast::Expr { kind, span });

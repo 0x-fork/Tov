@@ -1685,12 +1685,124 @@ impl<'a> Checker<'a> {
         }
     }
 
+    /// `typeof x` in a type: what the variable, function or field path `x` holds.
+    fn typeof_type(&mut self, x: ExprId, span: Span) -> TyId {
+        let t = match self.ast().expr(x).kind {
+            ast::ExprKind::Ident(s) => match self.lookup(s) {
+                Some((_, t)) => Some(t),
+                None => match self.scopes[self.cur as usize].values.get(&s).map(|d| d.0) {
+                    Some(Decl::Const(m, i)) => Some(self.const_type(m, i)),
+                    Some(Decl::Fn(m, i)) => self.fn_sig(m, i).map(|sig| {
+                        let (params, _) = sig.call_params(&self.types);
+                        self.types.func_throws(params, sig.ret, if sig.throws == UNKNOWN { NEVER } else { sig.throws })
+                    }),
+                    _ => None,
+                },
+            },
+            ast::ExprKind::Member { obj, name, .. } => {
+                let o = self.typeof_type(obj, span);
+                if o == ERROR {
+                    return ERROR;
+                }
+                let o = self.types.without_undefined(o);
+                self.field_of(o, name)
+            }
+            _ => None,
+        };
+        match t {
+            Some(t) => self.types.widen(t),
+            None => {
+                let text = self.src(self.ast().expr(x).span).to_string();
+                self.report(Diagnostic::new("X0016", span, format!("`typeof {text}`: only a variable, a function or a field path has a type here")));
+                ERROR
+            }
+        }
+    }
+
+    /// The fields of a record, interface or class type, in order (`None`: not one of those).
+    fn type_fields(&mut self, t: TyId) -> Option<Vec<Field>> {
+        match *self.types.get(t) {
+            Ty::Record(_) => Some(self.types.fields_in_order(t)),
+            Ty::Interface(i, args) => {
+                let args = self.types.tys(args).to_vec();
+                Some(self.iface_fields_inst(i, &args))
+            }
+            Ty::Class(c, _) => {
+                self.resolve_class(c);
+                let fs = self.classes[c as usize].fields.clone();
+                Some(fs.iter().filter(|f| f.vis == ast::Visibility::Public).map(|f| Field { name: f.name, ty: f.ty, optional: f.optional }).collect())
+            }
+            _ => None,
+        }
+    }
+
+    /// `keyof T`: T's field names, as a union of string literals.
+    fn keyof_type(&mut self, t: TyId, span: Span) -> TyId {
+        if t == ERROR {
+            return ERROR;
+        }
+        if matches!(self.types.get(t), Ty::Map(..)) {
+            return STR;
+        }
+        match self.type_fields(t) {
+            Some(fs) => {
+                let lits: Vec<TyId> = fs.iter().map(|f| self.types.str_lit(f.name)).collect();
+                if lits.is_empty() { NEVER } else { self.types.union(&lits) }
+            }
+            None => {
+                let shown = self.show(t);
+                self.report(Diagnostic::new("X0016", span, format!("`keyof {shown}`: only records, interfaces and classes have known keys")));
+                ERROR
+            }
+        }
+    }
+
+    /// `T["k"]` (a union of keys gives the union of their types), `T[number]` (an element).
+    fn access_type(&mut self, t: TyId, k: TyId, span: Span) -> TyId {
+        if t == ERROR || k == ERROR {
+            return ERROR;
+        }
+        if self.types.is_numeric(k)
+            && let Ty::Array(e) = *self.types.get(t)
+        {
+            return e;
+        }
+        let mut out = Vec::new();
+        for key in self.flat_members(k) {
+            let Ty::StrLit(name) = *self.types.get(key) else {
+                let shown = self.show(k);
+                self.report(Diagnostic::new("X0016", span, format!("can't index a type with `{shown}`")).note("supported", "`T[\"field\"]`, a union of field names, `T[number]` for arrays"));
+                return ERROR;
+            };
+            match self.field_of(t, name) {
+                Some(ft) => out.push(ft),
+                None => {
+                    let (shown, n) = (self.show(t), self.name(name).to_string());
+                    self.report(Diagnostic::new("T0102", span, format!("`{shown}` has no field `{n}`")));
+                    return ERROR;
+                }
+            }
+        }
+        self.types.union(&out)
+    }
+
     fn resolve_type(&mut self, te: ast::TypeId, tscope: &[(Sym, TyId)]) -> TyId {
         let ast = self.ast();
         let node = ast.ty(te);
         let span = node.span;
         match &node.kind {
             TypeExprKind::Error => ERROR,
+            TypeExprKind::Typeof(x) => self.typeof_type(*x, span),
+            TypeExprKind::Keyof(t) => {
+                let t = self.resolve_type(*t, tscope);
+                self.keyof_type(t, span)
+            }
+            TypeExprKind::Access(t, k) => {
+                let (t, k) = (*t, *k);
+                let t = self.resolve_type(t, tscope);
+                let k = self.resolve_type(k, tscope);
+                self.access_type(t, k, span)
+            }
             TypeExprKind::Undefined => UNDEFINED,
             TypeExprKind::Void => VOID,
             TypeExprKind::Null => NULL,
@@ -1964,10 +2076,92 @@ impl<'a> Checker<'a> {
                     ERROR
                 }
             }),
+            "ReturnType" | "Awaited" | "NonNullable" | "Readonly" | "Partial" | "Required" => {
+                if !arity(self, 1) {
+                    return Some(ERROR);
+                }
+                let t = targs[0];
+                if t == ERROR {
+                    return Some(ERROR);
+                }
+                Some(match text {
+                    "ReturnType" => match *self.types.get(t) {
+                        Ty::Func(_, r, _) => r,
+                        _ => {
+                            let shown = self.show(t);
+                            self.report(Diagnostic::new("T0010", span, format!("`ReturnType` takes a function type, found `{shown}`")));
+                            ERROR
+                        }
+                    },
+                    "Awaited" => match *self.types.get(t) {
+                        Ty::Promise(v, _) => v,
+                        _ => t,
+                    },
+                    "NonNullable" => self.types.without_nullish(t),
+                    "Readonly" => t,
+                    _ => match self.type_fields(t) {
+                        Some(fs) => {
+                            // (an optional field's type has `undefined`, as `x?: T` does)
+                            let partial = text == "Partial";
+                            let fs: Vec<Field> = fs
+                                .into_iter()
+                                .map(|f| {
+                                    let ty = if partial { self.types.optional(f.ty) } else if f.optional { self.types.without_undefined(f.ty) } else { f.ty };
+                                    Field { optional: partial, ty, ..f }
+                                })
+                                .collect();
+                            let order: Vec<Sym> = fs.iter().map(|f| f.name).collect();
+                            let r = self.types.record(fs);
+                            self.types.note_field_order(r, order);
+                            r
+                        }
+                        None => {
+                            let shown = self.show(t);
+                            self.report(Diagnostic::new("T0010", span, format!("`{text}` takes a record or interface type, found `{shown}`")));
+                            ERROR
+                        }
+                    },
+                })
+            }
+            "Pick" | "Omit" => {
+                if !arity(self, 2) {
+                    return Some(ERROR);
+                }
+                let (t, k) = (targs[0], targs[1]);
+                if t == ERROR || k == ERROR {
+                    return Some(ERROR);
+                }
+                let keys: Vec<Sym> = self.flat_members(k).into_iter().filter_map(|m| match *self.types.get(m) {
+                    Ty::StrLit(s) => Some(s),
+                    _ => None,
+                }).collect();
+                let Some(fs) = self.type_fields(t) else {
+                    let shown = self.show(t);
+                    self.report(Diagnostic::new("T0010", span, format!("`{text}` takes a record or interface type, found `{shown}`")));
+                    return Some(ERROR);
+                };
+                let keep = text == "Pick";
+                let fs: Vec<Field> = fs.into_iter().filter(|f| keys.contains(&f.name) == keep).collect();
+                let order: Vec<Sym> = fs.iter().map(|f| f.name).collect();
+                let r = self.types.record(fs);
+                self.types.note_field_order(r, order);
+                Some(r)
+            }
             // `Record<string, V>` is a string-keyed `Map` that object literals can build.
             "Record" => {
                 if !arity(self, 2) {
                     return Some(ERROR);
+                }
+                // `Record<"low" | "high", V>`: a record with those fields
+                let lits: Vec<Sym> = self.flat_members(targs[0]).into_iter().filter_map(|m| match *self.types.get(m) {
+                    Ty::StrLit(s) => Some(s),
+                    _ => None,
+                }).collect();
+                if !lits.is_empty() && lits.len() == self.flat_members(targs[0]).len() {
+                    let fs: Vec<Field> = lits.iter().map(|&name| Field { name, ty: targs[1], optional: false }).collect();
+                    let r = self.types.record(fs);
+                    self.types.note_field_order(r, lits);
+                    return Some(r);
                 }
                 if targs[0] != STR && targs[0] != ERROR {
                     self.report(

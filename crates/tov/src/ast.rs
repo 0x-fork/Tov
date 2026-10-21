@@ -263,6 +263,12 @@ pub enum TypeExprKind {
     Undefined,
     Null,
     Void,
+    /// `typeof x` (a value's type: a variable, a function, a field path).
+    Typeof(ExprId),
+    /// `keyof T`: the union of T's field names.
+    Keyof(TypeId),
+    /// `T["k"]`, `T[number]`: a field's type, an element's.
+    Access(TypeId, TypeId),
     Error,
 }
 
