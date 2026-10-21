@@ -8,10 +8,6 @@ error[X0001] typescript_habits.tov:3:35: `any` is not supported
   instead: use the precise type, a union, a generic `<T>`, or `unknown` with narrowing
   fix[maybe]: use `unknown`
 
-error[X0005] typescript_habits.tov:7:1: `enum` is not supported
-    7 | enum Color { Red, Green }
-  instead: use a union of string literals: `type Color = "red" | "green"`
-
 error[X0002] typescript_habits.tov:9:64: `null` is not supported; Tov has one "absent" value, `undefined`
     9 | function habits(items: string[], count: number, name: string | null) {
   fix[safe]: use `undefined`
@@ -45,4 +41,4 @@ error[T0120] typescript_habits.tov:15:15: `items[0]` may be `undefined`
   fix[maybe]: optional chaining: `items[0]?.length`
   fix[maybe]: assert defined (traps if not): `items[0]!.length`
 
-10 error(s)
+9 error(s)
