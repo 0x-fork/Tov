@@ -879,6 +879,9 @@ impl<'a> Checker<'a> {
                     }
                     if !problems.is_empty() {
                         let shown = self.show(it);
+                        let mut sites = self.iface_sites(i);
+                        sites.extend(self.class_sites(c));
+                        self.blame(&sites);
                         self.done.push(Diagnostic::new("T0809", span, format!("class `{n}` doesn't implement `{shown}`")).note("problems", problems.join("; ")));
                     }
                 }

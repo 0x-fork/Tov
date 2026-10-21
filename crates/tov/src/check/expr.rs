@@ -19,6 +19,8 @@ pub(super) struct Place {
     pub root: Option<LocalId>,
     /// The speculated `number`s its type came from (see `spec`).
     pub sites: Vec<super::spec::Site>,
+    /// The place is this module variable: (module, item).
+    pub global: Option<(u32, u32)>,
 }
 
 pub(super) enum Root {
@@ -1049,6 +1051,16 @@ impl<'a> Checker<'a> {
 
     /// `let x = 0; x += 0.5` — records that `x` should be an `f64` and re-checks the function.
     fn try_promote(&mut self, place: &Place, value: TyId) -> bool {
+        // `let total = 0` at a module's top level, given a float: an `f64` (checked again)
+        if let Some((m, ii)) = place.global
+            && place.ty == INT
+            && self.types.is_float(value)
+            && let ItemKind::Const { mutable: true, ty: None, init, .. } = &self.modules[m as usize].ast.items[ii as usize].kind
+            && matches!(self.modules[m as usize].ast.expr(*init).kind, ExprKind::Int(_))
+        {
+            self.global_hits.push((m, ii));
+            return true;
+        }
         let Some(local) = place.local else { return false };
         let l = self.local(local);
         if l.promotable && l.ty == INT && self.types.is_float(value) {
@@ -1180,7 +1192,7 @@ impl<'a> Checker<'a> {
                     }
                     let _ = ty;
                     let sites = self.local(id).sites.clone();
-                    return Some(Place { ty: declared, local: Some(id), root: Some(id), sites });
+                    return Some(Place { ty: declared, local: Some(id), root: Some(id), sites, global: None });
                 }
                 let n = self.name(*sym).to_string();
                 match self.scopes[self.cur as usize].values.get(sym).map(|d| d.0) {
@@ -1214,7 +1226,7 @@ impl<'a> Checker<'a> {
                             .then(|| self.fcx().locals.iter().position(|l| l.global == Some((cm, ci))))
                             .flatten();
                         let sites = self.const_sites(cm, ci);
-                        Some(Place { ty, local, root: local, sites })
+                        Some(Place { ty, local, root: local, sites, global: Some((cm, ci)) })
                     }
                     Some(Decl::Fn(..)) => {
                         self.report(Diagnostic::new("V0105", span, format!("can't assign to function `{n}`")));
@@ -1247,7 +1259,7 @@ impl<'a> Checker<'a> {
                 let ft = self.member_of(t, *name, *name_span, span, *obj)?;
                 let root = self.check_mutable_root(*obj, span)?;
                 let sites = self.member_sites_of(t, *name);
-                Some(Place { ty: ft, local: None, root: Some(root), sites })
+                Some(Place { ty: ft, local: None, root: Some(root), sites, global: None })
             }
             ExprKind::Index { obj, index, optional } => {
                 if *optional {
@@ -1277,7 +1289,7 @@ impl<'a> Checker<'a> {
                 };
                 let root = self.check_mutable_root(*obj, span)?;
                 let sites = self.sources(self.ast().expr(*obj).span);
-                Some(Place { ty: elem, local: None, root: Some(root), sites })
+                Some(Place { ty: elem, local: None, root: Some(root), sites, global: None })
             }
             _ => {
                 self.expr(e, None);
@@ -1304,7 +1316,7 @@ impl<'a> Checker<'a> {
                     }
                 }
                 let sites = self.class_field_sites(&f);
-                Some(Place { ty: f.ty, local: None, root: None, sites })
+                Some(Place { ty: f.ty, local: None, root: None, sites, global: None })
             }
             Some(super::class::ClassMemberRef::Getter(_)) => {
                 self.report(Diagnostic::new("U0019", name_span, format!("`{n}` is a getter; setters are not supported yet")));

@@ -1,0 +1,18 @@
+// Interfaces implemented by classes whose methods return floats, and a script-level total.
+interface Shape { area(): number; name: string }
+class Circle implements Shape {
+  name = "circle"
+  constructor(private r: number) {}
+  area() { return Math.PI * this.r * this.r }
+  get diameter() { return this.r * 2 }
+  static unit() { return new Circle(1) }
+}
+class Square implements Shape {
+  name = "square"
+  constructor(public side: number) {}
+  area() { return this.side ** 2 }
+}
+const shapes: Shape[] = [new Circle(2), new Square(3), Circle.unit()]
+let total = 0
+for (const s of shapes) total += s.area()
+console.log(total.toFixed(2), new Circle(5).diameter, shapes.map(s => s.name).join(","))

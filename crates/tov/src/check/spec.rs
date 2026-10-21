@@ -34,7 +34,7 @@ pub(crate) fn next_round(floats: &mut HashSet<Site>, hits: &[Site], failed: bool
 /// What a round of checking leaves for the next: (as for `number`) function bodies that
 /// throw only by calling something that does. Their signatures were taken not to throw, so
 /// their callers are checked again (a few rounds at most: each adds callers one level up).
-pub(crate) fn more_throwing(throwing: &mut HashSet<(u32, StmtId)>, hits: &[(u32, StmtId)]) -> bool {
+pub(crate) fn more_throwing<T: Copy + Eq + std::hash::Hash>(throwing: &mut HashSet<T>, hits: &[T]) -> bool {
     let before = throwing.len();
     throwing.extend(hits.iter().copied());
     throwing.len() > before
@@ -47,6 +47,8 @@ pub(crate) struct Spec {
     pub(crate) floats: HashSet<Site>,
     /// Bodies that throw without a `throw` of their own: (module, body).
     pub(crate) throwing: HashSet<(u32, StmtId)>,
+    /// Module variables `let x = 0` that a float is stored into: `f64`s. (module, item)
+    pub(crate) float_globals: HashSet<(u32, u32)>,
 }
 
 impl<'a> Checker<'a> {
@@ -173,6 +175,11 @@ impl<'a> Checker<'a> {
             }
             (Ty::Set(a), Ty::Set(b)) => self.spec_diff(a, b, out, depth + 1),
             (Ty::Promise(a, _), Ty::Promise(b, _)) => self.spec_diff(a, b, out, depth + 1),
+            // a class that doesn't fit an interface: either side's numbers
+            (Ty::Class(c, _), Ty::Interface(i, _)) | (Ty::Interface(i, _), Ty::Class(c, _)) => {
+                out.extend(self.iface_sites(i));
+                out.extend(self.class_sites(c));
+            }
             (Ty::Union(a), Ty::Union(b)) => {
                 let (a, b) = (self.types.tys(a).to_vec(), self.types.tys(b).to_vec());
                 for &x in &a {
@@ -384,6 +391,40 @@ impl<'a> Checker<'a> {
             } else {
                 self.field_sites(m, name, &mut out);
             }
+        }
+        out
+    }
+
+    /// Every speculated `number` in an interface's members.
+    pub(super) fn iface_sites(&self, i: u32) -> Vec<Site> {
+        let (m, ii) = (self.ifaces[i as usize].module, self.ifaces[i as usize].item);
+        let mut out = Vec::new();
+        if let ItemKind::Interface { members, .. } = &self.modules[m as usize].ast.items[ii as usize].kind {
+            for f in members {
+                out.extend(self.type_sites(m, f.ty));
+            }
+        }
+        out
+    }
+
+    /// Every speculated `number` in a class's fields and methods (its own, and its bases').
+    pub(super) fn class_sites(&self, c: u32) -> Vec<Site> {
+        let mut out = Vec::new();
+        let mut k = Some(c);
+        while let Some(cls) = k {
+            let m = self.classes[cls as usize].module;
+            for mem in &self.class_decl(cls).members {
+                match &mem.kind {
+                    ast::MemberKind::Field { ty: Some(t), .. } => out.extend(self.type_sites(m, *t)),
+                    ast::MemberKind::Method(f) | ast::MemberKind::Getter(f) | ast::MemberKind::Constructor(f) => {
+                        let (ps, r) = self.decl_sites(m, f);
+                        out.extend(ps.into_iter().flatten());
+                        out.extend(r);
+                    }
+                    _ => {}
+                }
+            }
+            k = self.classes[cls as usize].base.and_then(|b| self.class_of(b)).map(|(b, _)| b);
         }
         out
     }

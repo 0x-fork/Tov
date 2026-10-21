@@ -326,6 +326,8 @@ pub struct Checker<'a> {
     spec_hits: Vec<spec::Site>,
     /// Bodies found to throw though their signatures were taken not to: (module, body).
     throw_hits: Vec<(u32, StmtId)>,
+    /// Module variables `let x = 0` a float is stored into: (module, item).
+    global_hits: Vec<(u32, u32)>,
     spec_flow: Vec<Vec<spec::Site>>,
     spec_srcs_base: Arc<HashMap<Span, Vec<spec::Site>>>,
     spec_srcs: HashMap<Span, Vec<spec::Site>>,
@@ -388,6 +390,7 @@ fn new_checker<'a>(modules: &'a [Module], interner: &'a Interner, sm: &'a Source
         spec_used: false,
         spec_hits: Vec::new(),
         throw_hits: Vec::new(),
+        global_hits: Vec::new(),
         spec_flow: Vec::new(),
         spec_srcs_base: Arc::default(),
         spec_srcs: HashMap::default(),
@@ -406,10 +409,11 @@ pub fn check_for_build<'a>(modules: &'a [Module], interner: &'a mut Interner, sm
     let interner: &'a Interner = interner;
     let mut floats: HashSet<spec::Site> = HashSet::default();
     let mut throwing: HashSet<(u32, StmtId)> = HashSet::default();
+    let mut float_globals: HashSet<(u32, u32)> = HashSet::default();
     let (mut on, mut rounds) = (true, 0);
     loop {
         rounds += 1;
-        let mut c = new_checker(modules, interner, sm, syms, Arc::new(spec::Spec { on, floats: floats.clone(), throwing: throwing.clone() }));
+        let mut c = new_checker(modules, interner, sm, syms, Arc::new(spec::Spec { on, floats: floats.clone(), throwing: throwing.clone(), float_globals: float_globals.clone() }));
         c.facts = Some(modules.iter().map(|m| ModuleFacts::new(m.ast.exprs.len())).collect());
         c.collect();
         c.resolve_imports();
@@ -426,7 +430,7 @@ pub fn check_for_build<'a>(modules: &'a [Module], interner: &'a mut Interner, sm
         }
         let mut out = std::mem::take(&mut c.done);
         out.extend(std::mem::take(&mut c.diags));
-        if spec::more_throwing(&mut throwing, &c.throw_hits) {
+        if spec::more_throwing(&mut throwing, &c.throw_hits) | spec::more_throwing(&mut float_globals, &c.global_hits) {
             continue;
         }
         if on && c.spec_used && std::env::var("TOV_TRACE").is_ok() {
@@ -461,11 +465,12 @@ pub fn check_program_rewrites(modules: &[Module], interner: &mut Interner, sm: &
     let interner = &*interner;
     let mut floats: HashSet<spec::Site> = HashSet::default();
     let mut throwing: HashSet<(u32, StmtId)> = HashSet::default();
+    let mut float_globals: HashSet<(u32, u32)> = HashSet::default();
     let (mut on, mut rounds) = (true, 0);
     loop {
         rounds += 1;
-        let (out, used, hits, throws, rw) = check_program_once(modules, interner, sm, threads, syms, Arc::new(spec::Spec { on, floats: floats.clone(), throwing: throwing.clone() }));
-        if spec::more_throwing(&mut throwing, &throws) {
+        let (out, used, hits, (throws, globals), rw) = check_program_once(modules, interner, sm, threads, syms, Arc::new(spec::Spec { on, floats: floats.clone(), throwing: throwing.clone(), float_globals: float_globals.clone() }));
+        if spec::more_throwing(&mut throwing, &throws) | spec::more_throwing(&mut float_globals, &globals) {
             continue;
         }
         if on
@@ -481,7 +486,7 @@ pub fn check_program_rewrites(modules: &[Module], interner: &mut Interner, sm: &
 
 /// One check of the whole program; also returns whether speculation was used and its hits.
 #[allow(clippy::type_complexity)]
-fn check_program_once(modules: &[Module], interner: &Interner, sm: &SourceMap, threads: Option<usize>, syms: Syms, spec: Arc<spec::Spec>) -> (Vec<Diagnostic>, bool, Vec<spec::Site>, Vec<(u32, StmtId)>, rewrite::Rewrites) {
+fn check_program_once(modules: &[Module], interner: &Interner, sm: &SourceMap, threads: Option<usize>, syms: Syms, spec: Arc<spec::Spec>) -> (Vec<Diagnostic>, bool, Vec<spec::Site>, (Vec<(u32, StmtId)>, Vec<(u32, u32)>), rewrite::Rewrites) {
     let mut c = new_checker(modules, interner, sm, syms, spec);
     c.collect();
     c.resolve_imports();
@@ -499,6 +504,7 @@ fn check_program_once(modules: &[Module], interner: &Interner, sm: &SourceMap, t
     let mut used = c.spec_used;
     let mut hits = std::mem::take(&mut c.spec_hits);
     let mut throws = std::mem::take(&mut c.throw_hits);
+    let mut globals = std::mem::take(&mut c.global_hits);
     let mut rw = std::mem::take(&mut c.rewrites);
     // Freeze phase-A results.
     c.checked_bodies = Arc::new(std::mem::take(&mut c.checked_local));
@@ -527,9 +533,9 @@ fn check_program_once(modules: &[Module], interner: &Interner, sm: &SourceMap, t
         }
         let mut d = std::mem::take(&mut w.done);
         d.extend(w.diags);
-        (d, w.spec_used, w.spec_hits, w.throw_hits, w.rewrites)
+        (d, w.spec_used, w.spec_hits, (w.throw_hits, w.global_hits), w.rewrites)
     };
-    let results: Vec<(Vec<Diagnostic>, bool, Vec<spec::Site>, Vec<(u32, StmtId)>, rewrite::Rewrites)> = if threads == 1 {
+    let results: Vec<(Vec<Diagnostic>, bool, Vec<spec::Site>, (Vec<(u32, StmtId)>, Vec<(u32, u32)>), rewrite::Rewrites)> = if threads == 1 {
         vec![run(base.clone())]
     } else {
         std::thread::scope(|scope| {
@@ -543,11 +549,12 @@ fn check_program_once(modules: &[Module], interner: &Interner, sm: &SourceMap, t
             handles.into_iter().map(|h| h.join().expect("checker thread panicked")).collect()
         })
     };
-    for (r, u, h, t, w) in results {
+    for (r, u, h, (t, g), w) in results {
         out.extend(r);
         used |= u;
         hits.extend(h);
         throws.extend(t);
+        globals.extend(g);
         rw.extend(w);
     }
     if std::env::var("TOV_TRACE").is_ok() {
@@ -555,7 +562,7 @@ fn check_program_once(modules: &[Module], interner: &Interner, sm: &SourceMap, t
     }
     out.sort_by(|a, b| (a.span.file, a.span.start, a.code).cmp(&(b.span.file, b.span.start, b.code)));
     out.dedup_by(|a, b| a.span == b.span && a.code == b.code && a.message == b.message);
-    (out, used, hits, throws, rw)
+    (out, used, hits, (throws, globals), rw)
 }
 
 impl<'a> Checker<'a> {
@@ -621,6 +628,7 @@ impl<'a> Checker<'a> {
             spec_used: false,
             spec_hits: Vec::new(),
             throw_hits: Vec::new(),
+            global_hits: Vec::new(),
             spec_flow: Vec::new(),
             spec_srcs_base: self.spec_srcs_base.clone(),
             spec_srcs: HashMap::default(),
@@ -1115,8 +1123,10 @@ impl<'a> Checker<'a> {
                     None => {
                         let found = c.expr(init, None);
                         let t = c.check_inferred_binding(found, c.ast().expr(init).span);
-                        // `let s = ""` holds any string later, as in TypeScript
-                        if mutable { c.types.widen(t) } else { t }
+                        // `let s = ""` holds any string later, as in TypeScript; `let x = 0`
+                        // that's given a float is an `f64`
+                        let t = if mutable { c.types.widen(t) } else { t };
+                        if t == INT && c.spec.float_globals.contains(&(m, ii)) { F64 } else { t }
                     }
                 };
                 let throws = !c.fcx.last().unwrap().frames[0].thrown.is_empty();
