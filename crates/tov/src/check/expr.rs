@@ -1089,6 +1089,45 @@ impl<'a> Checker<'a> {
         }
     }
 
+    /// `m.get(k)` (or `m.get(k)!`) on a map: `m`.
+    pub(super) fn map_get_of(&self, e: ExprId) -> Option<ExprId> {
+        match &self.ast().expr(e).kind {
+            ExprKind::Paren(x) | ExprKind::NonNull(x) => self.map_get_of(*x),
+            ExprKind::Call { callee, args, .. } if args.len() == 1 => match &self.ast().expr(*callee).kind {
+                ExprKind::Member { obj, name, optional: false, .. } if self.name(*name) == "get" && self.is_map_expr(*obj) => Some(*obj),
+                _ => None,
+            },
+            _ => None,
+        }
+    }
+
+    /// A value that's part of another, reached through a call: `m.get(k)` on a map, `xs.find(f)`,
+    /// `xs.findLast(f)` or `xs.at(i)` on an array (with `!`): `m` / `xs`.
+    pub(super) fn view_of(&self, e: ExprId) -> Option<ExprId> {
+        if let Some(m) = self.map_get_of(e) {
+            return Some(m);
+        }
+        match &self.ast().expr(e).kind {
+            ExprKind::Paren(x) | ExprKind::NonNull(x) => self.view_of(*x),
+            ExprKind::Call { callee, args, .. } if args.len() == 1 => match &self.ast().expr(*callee).kind {
+                ExprKind::Member { obj, name, optional: false, .. } if matches!(self.name(*name), "find" | "findLast" | "at") && self.is_array_expr(*obj) => Some(*obj),
+                _ => None,
+            },
+            _ => None,
+        }
+    }
+
+    fn is_array_expr(&self, e: ExprId) -> bool {
+        let t = match self.facts.as_ref() {
+            Some(f) => f[self.cur as usize].expr_ty.get(e as usize).copied(),
+            None => match self.ast().expr(e).kind {
+                ExprKind::Ident(s) => self.lookup(s).map(|(_, t)| t),
+                _ => None,
+            },
+        };
+        t.is_some_and(|t| matches!(self.types.get(t), Ty::Array(_)))
+    }
+
     /// `e` (already checked) is a map.
     fn is_map_expr(&self, e: ExprId) -> bool {
         let t = match self.facts.as_ref() {
@@ -1152,6 +1191,18 @@ impl<'a> Checker<'a> {
             Root::ModuleConst(m, i) => {
                 if let Some(f) = self.facts_mut() {
                     f.mutated_globals.insert((m, i));
+                }
+                // (a script's top-level binding: its local, for the copy checks)
+                let mut base = e;
+                while let ExprKind::Paren(x) | ExprKind::NonNull(x) | ExprKind::Member { obj: x, .. } | ExprKind::Index { obj: x, .. } = self.ast().expr(base).kind {
+                    base = x;
+                }
+                if let ExprKind::Ident(s) = self.ast().expr(base).kind
+                    && let Some((id, _)) = self.lookup(s)
+                    && self.local(id).global == Some((m, i))
+                {
+                    let depth = super::stmt::path_depth(self.ast(), e);
+                    self.fcx().mutations.push((id, span, depth));
                 }
                 None
             }

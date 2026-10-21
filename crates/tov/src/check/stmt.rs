@@ -148,6 +148,38 @@ impl<'a> Checker<'a> {
                     let kind = if mutable { LocalKind::Let } else { LocalKind::Const };
                     let id = self.declare(name, t, kind, name_span, None, false);
                     self.fcx().locals[id].global = Some((m, *ii));
+                    // `const row = grid[0]` at the top level: a copy of part of another (for the
+                    // copy checks, as in a function)
+                    let init = match &self.modules[m as usize].ast.items[*ii as usize].kind {
+                        ItemKind::Const { init, .. } => *init,
+                        _ => unreachable!(),
+                    };
+                    if !matches!(self.ast().expr(init).kind, ExprKind::Ident(_))
+                        && (place_path(self.ast(), init) || self.view_of(init).is_some())
+                        && self.shared_in_ts(t)
+                    {
+                        let mut base = init;
+                        loop {
+                            match self.ast().expr(base).kind {
+                                ExprKind::Paren(x) | ExprKind::NonNull(x) | ExprKind::Member { obj: x, .. } | ExprKind::Index { obj: x, .. } => base = x,
+                                _ => match self.view_of(base) {
+                                    Some(mo) => base = mo,
+                                    None => break,
+                                },
+                            }
+                        }
+                        let ispan = self.ast().expr(init).span;
+                        if let ExprKind::Ident(src) = self.ast().expr(base).kind
+                            && let Some((src_id, _)) = self.lookup(src)
+                            && src_id != id
+                        {
+                            let depth = match self.view_of(init) {
+                                Some(v) => 1 + path_depth(self.ast(), v),
+                                None => path_depth(self.ast(), init),
+                            };
+                            self.fcx().aliases.push((id, src_id, ispan.end, depth, ispan));
+                        }
+                    }
                 }
                 if self.const_throws.contains(&(m, *ii)) {
                     let err = self.error_class();
@@ -223,13 +255,18 @@ impl<'a> Checker<'a> {
                 // `const row = grid[0]!`, `const xs = this.items`: a copy of part of another value.
                 if let Some(i) = init
                     && !matches!(self.ast().expr(*i).kind, crate::ast::ExprKind::Ident(_))
-                    && place_path(self.ast(), *i)
+                    && (place_path(self.ast(), *i) || self.view_of(*i).is_some())
                     && self.shared_in_ts(t)
                 {
                     let ispan = self.ast().expr(*i).span;
-                    match self.root_of(*i) {
+                    // (`m.get(k)!`, `xs.find(f)`: one step into `m`, `xs`)
+                    let view = self.view_of(*i);
+                    match self.root_of(view.unwrap_or(*i)) {
                         super::expr::Root::Local(src) if src != id => {
-                            let depth = path_depth(self.ast(), *i);
+                            let depth = match view {
+                                Some(v) => 1 + path_depth(self.ast(), v),
+                                None => path_depth(self.ast(), *i),
+                            };
                             self.fcx().aliases.push((id, src, ispan.end, depth, ispan));
                         }
                         super::expr::Root::Heap | super::expr::Root::ModuleConst(..) => self.fcx().heap_links.push((id, ispan.end, ispan)),

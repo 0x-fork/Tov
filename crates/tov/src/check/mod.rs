@@ -2285,7 +2285,7 @@ impl<'a> Checker<'a> {
             // copy came from — not replacing it or other parts — then reading the copy)
             let hit = after(copy, pos, 0).find(|&&(_, sp, _)| read_after(src, sp)).map(|&(_, sp, _)| (sp, copy, src)).or_else(|| after(src, pos, depth).find(|&&(_, sp, _)| read_after(copy, sp)).map(|&(_, sp, _)| (sp, src, copy)));
             if let Some((sp, changed, other)) = hit {
-                copies.push((sp, fcx.locals[changed].name, fcx.locals[other].name, fcx.locals[copy].name, init));
+                copies.push((sp, fcx.locals[changed].name, fcx.locals[other].name, fcx.locals[copy].name, init, matches!(self.types.get(fcx.locals[copy].ty), Ty::Array(_))));
             }
         }
         let mut stored = Vec::new();
@@ -2300,13 +2300,24 @@ impl<'a> Checker<'a> {
                 heap.push((sp, fcx.locals[l].name, place));
             }
         }
-        for (sp, changed, other, copy, init) in copies {
+        for (sp, changed, other, copy, init, is_array) in copies {
             let (c, o, cp, sr) = (self.name(changed).to_string(), self.name(other).to_string(), self.name(copy).to_string(), self.src(init).to_string());
+            let copy_note = if is_array { format!("say so explicitly: `{cp} = {sr}.slice()`") } else { "say so explicitly: build a new value".to_string() };
+            // (`xs.find(f)` / `xs.at(i)`: an element, changed where it is through its index)
+            let found = [".find(", ".findLast(", ".at("].iter().find_map(|m| sr.find(m).map(|at| (&sr[..at], &sr[at + 1..])));
+            let one_note = match found {
+                Some((xs, call)) if call.starts_with("at(") => format!("modify `{xs}[i]` directly instead of going through `{cp}`"),
+                Some((xs, call)) => {
+                    let index = if call.starts_with("findLast(") { call.replacen("findLast(", "findLastIndex(", 1) } else { call.replacen("find(", "findIndex(", 1) };
+                    format!("find its index (`const i = {xs}.{index}`) and modify `{xs}[i]` directly")
+                }
+                None => format!("modify `{sr}` directly instead of going through `{cp}`"),
+            };
             self.report(
                 Diagnostic::new("V0120", sp, format!("this changes `{c}`, but `{o}` is a separate copy (TypeScript would change both)"))
                     .note("why", format!("`{cp}` was initialized from `{sr}`: Tov arrays, records and maps are values, so assignment copies"))
-                    .note("if you meant a copy", format!("say so explicitly: `{cp} = {sr}.slice()` (arrays) or build a new value"))
-                    .note("if you meant one value", format!("modify `{sr}` directly instead of going through `{cp}`")),
+                    .note("if you meant a copy", copy_note)
+                    .note("if you meant one value", one_note),
             );
         }
         for (sp, value, container) in stored {

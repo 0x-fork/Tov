@@ -10,7 +10,7 @@ error[V0104] mutation.tov:24:5: can't modify loop variable `p`: it is a copy of 
 error[V0120] mutation.tov:34:3: this changes `row`, but `grid` is a separate copy (TypeScript would change both)
    34 |   row[1] = 5
   why: `row` was initialized from `grid[0]!`: Tov arrays, records and maps are values, so assignment copies
-  if you meant a copy: say so explicitly: `row = grid[0]!.slice()` (arrays) or build a new value
+  if you meant a copy: say so explicitly: `row = grid[0]!.slice()`
   if you meant one value: modify `grid[0]!` directly instead of going through `row`
 
 error[V0120] mutation.tov:44:3: this changes `c`, but `cells` holds a separate copy of it (TypeScript would change both)
