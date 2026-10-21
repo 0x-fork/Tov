@@ -25,8 +25,12 @@ export function leaky(s: string): int {
   return 1
 }
 
+function each(xs: string[], f: (h: string) => int): int[] {
+  return xs.map(f)
+}
+
 function inClosure(xs: string[]): int[] {
-  return xs.map((h) => try connect(h))
+  return each(xs, (h) => try connect(h))
 }
 
 function badThrow(): int {

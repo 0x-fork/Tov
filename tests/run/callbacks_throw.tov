@@ -1,0 +1,36 @@
+// Callbacks given to built-in methods can throw: the method stops and passes the error on
+// (checked against Node)
+class ParseError extends Error {}
+function num(s: string): number {
+  const n = Number(s)
+  if (Number.isNaN(n)) throw new ParseError(`bad number: ${s}`)
+  return n
+}
+function total(parts: string[]): number {
+  return parts.map((p) => num(p)).reduce((a, b) => a + b, 0)
+}
+function firstBig(parts: string[]): string | undefined {
+  return parts.find((p) => num(p) > 10)
+}
+function main(): void {
+  console.log(total(["1", "2", "3"]))
+  try {
+    console.log(total(["1", "x", "3"]))
+  } catch (e) {
+    console.log(e instanceof ParseError, (e as Error).message)
+  }
+  console.log(firstBig(["5", "50"]))
+  const seen: string[] = []
+  try {
+    ["a", "1", "b"].forEach((s) => { seen.push(s); num(s) })
+  } catch (e) {
+    console.log("stopped after", seen)
+  }
+  try {
+    console.log(["3", "1", "z"].sort((a, b) => num(a) - num(b)))
+  } catch (e) {
+    console.log("sort:", (e as Error).message)
+  }
+  console.log(["1", "22"].filter((s) => num(s) > 5), ["4"].some((s) => num(s) === 4))
+}
+main()

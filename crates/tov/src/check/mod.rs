@@ -347,6 +347,9 @@ pub struct Checker<'a> {
     want_optional: bool,
     /// Checking a built-in method's arguments: an integer parameter takes a number (truncated).
     float_args: bool,
+    /// What callbacks given to built-in methods throw (`xs.map((x) => parse(x))`), as their
+    /// arrows are checked: the method call passes it on.
+    cb_throws: Vec<TyId>,
 }
 
 /// `threads`: phase-B worker count (default: all cores). Results don't depend on it.
@@ -408,6 +411,7 @@ fn new_checker<'a>(modules: &'a [Module], interner: &'a Interner, sm: &'a Source
         rewrites: rewrite::Rewrites::default(),
         want_optional: false,
         float_args: false,
+        cb_throws: Vec::new(),
     }
 }
 
@@ -648,6 +652,7 @@ impl<'a> Checker<'a> {
             rewrites: rewrite::Rewrites::default(),
             want_optional: false,
             float_args: false,
+            cb_throws: Vec::new(),
         }
     }
 

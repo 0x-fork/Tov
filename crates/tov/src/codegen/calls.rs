@@ -16,6 +16,8 @@ pub(crate) struct Callback {
     value: String,
     params: Vec<FnParam>,
     ret: TyId,
+    /// It can throw: checked after each call.
+    throws: bool,
 }
 
 impl<'c, 'a> Gen<'c, 'a> {
@@ -318,9 +320,10 @@ impl<'c, 'a> Gen<'c, 'a> {
 
     pub(crate) fn prepare_callback(&mut self, arg: ExprId) -> Callback {
         let fty = self.ty(arg);
-        let Ty::Func(ps, ret, _) = self.tget(fty) else {
-            return Callback { direct: None, value: "((tv_fn){NULL, NULL})".into(), params: Vec::new(), ret: VOID };
+        let Ty::Func(ps, ret, th) = self.tget(fty) else {
+            return Callback { direct: None, value: "((tv_fn){NULL, NULL})".into(), params: Vec::new(), ret: VOID, throws: false };
         };
+        let throws = th != NEVER;
         let params = self.c.types.params(ps).to_vec();
         let m = self.cur_m();
         let is_arrow = matches!(self.ast(m).expr(arg).kind, ExprKind::Arrow(_));
@@ -341,12 +344,12 @@ impl<'c, 'a> Gen<'c, 'a> {
                 self.line(format!("{} {ev} = {{ {{-1, NULL}}, {} }};", info.env_type, ptrs.join(", ")));
                 format!("(tv_env *)&{ev}")
             };
-            return Callback { direct: Some((info.cname, env)), value: String::new(), params, ret };
+            return Callback { direct: Some((info.cname, env)), value: String::new(), params, ret, throws };
         }
         let v = self.expr(arg);
         let fvn = self.fresh("cb");
         self.line(format!("tv_fn {fvn} = {};", v.code));
-        Callback { direct: None, value: fvn, params, ret }
+        Callback { direct: None, value: fvn, params, ret, throws }
     }
 
     /// Calls a prepared callback with (borrowed) arguments; extra arguments are dropped.
@@ -371,9 +374,16 @@ impl<'c, 'a> Gen<'c, 'a> {
         };
         if cb.ret == VOID {
             self.line(format!("{call};"));
+            if cb.throws {
+                self.error_check();
+            }
             return Val::plain("0", VOID);
         }
-        self.tmp(cb.ret, &call, true)
+        let v = self.tmp(cb.ret, &call, true);
+        if cb.throws {
+            self.error_check();
+        }
+        v
     }
 
     /// `(a, b) => a - b`, `b - a`, `a.k - b.k` (f64 or int keys): a stable radix sort.
@@ -508,6 +518,8 @@ impl<'c, 'a> Gen<'c, 'a> {
                 format!("((double)((({cast})((tv_fn *)ctx)->fn)(((tv_fn *)ctx)->env, (x), (y))))")
             }
         };
+        // (a comparator that threw: the rest compare equal, and the caller passes the error on)
+        let cmp = if cb.throws { format!("(tvg_err ? 0.0 : {cmp})") } else { cmp };
         let code = format!(
             r#"static void {name}({ect} *a, tv_int n, void *ctx) {{
 #define CMP(x, y) {cmp}
@@ -844,6 +856,9 @@ impl<'c, 'a> Gen<'c, 'a> {
                         };
                         let ect = self.ctype(et);
                         self.line(format!("tvg_make_unique(&{lv}, {d}); {sorter}(({ect} *)tv_arr_data({lv}), tv_arr_len({lv}), (void *)({ctx}));"));
+                        if cb.throws {
+                            self.error_check();
+                        }
                     }
                 }
                 let v = Val::plain(lv.to_string(), recv);

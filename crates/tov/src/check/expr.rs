@@ -1,6 +1,7 @@
 use super::*;
 use crate::ast::{Arg, ArrowBody, ArrowFn, AssignOp, BinOp, ExprKind, UnOp};
 
+#[derive(Clone)]
 pub(super) struct CallSig {
     pub tparams: Vec<u32>,
     pub params: Vec<FnParam>,
@@ -2198,6 +2199,7 @@ impl<'a> Checker<'a> {
             let span = self.ast().ty(te).span;
             self.check_throws_type(t, span);
         }
+        let wild = exp_throws == ERROR;
         let exp_throws = declared_throws.unwrap_or(exp_throws);
         let fcx = self.fcx.last_mut().unwrap();
         // A test's body can throw (an uncaught error fails the test); other closures only when
@@ -2298,6 +2300,9 @@ impl<'a> Checker<'a> {
             None if test_body || frame.thrown.is_empty() => NEVER,
             None => self.types.union(&frame.thrown),
         };
+        if wild && thrown != NEVER && !is_async {
+            self.cb_throws.push(thrown);
+        }
         if is_async {
             let p = self.types.promise(body_ty, thrown);
             return self.types.func(params, p);
@@ -2818,7 +2823,21 @@ impl<'a> Checker<'a> {
                     let saved = std::mem::replace(&mut self.wrap_store, wrap);
                     // (a built-in's integer parameters take numbers, truncated as JavaScript does)
                     let saved_f = std::mem::replace(&mut self.float_args, true);
-                    let r = self.call_sig(&ms.sig, &desc, type_args, args, exp, span);
+                    // (its callbacks may throw: the call then throws what they do)
+                    let sig = self.throwing_callbacks(&ms.sig);
+                    let mark = self.cb_throws.len();
+                    let r = self.call_sig(&sig, &desc, type_args, args, exp, span);
+                    let mut thrown: Vec<TyId> = self.cb_throws.drain(mark..).collect();
+                    for a in args {
+                        if !matches!(self.ast().expr(a.expr).kind, ExprKind::Arrow(_))
+                            && let Some(t) = self.fn_value_throws(a.expr)
+                        {
+                            thrown.push(t);
+                        }
+                    }
+                    for t in thrown {
+                        self.on_throw(t, span, Some(&desc), Some(e));
+                    }
                     self.wrap_store = saved;
                     self.float_args = saved_f;
                     if ms.mutates {
@@ -2849,6 +2868,46 @@ impl<'a> Checker<'a> {
         self.set_call_spec_from(callee);
         let r = self.call_value(t, &text, args, exp, span);
         if optional { self.types.optional(r) } else { r }
+    }
+
+    /// `sig` with its callback parameters allowed to throw (anything: `error` stands for that).
+    fn throwing_callbacks(&mut self, sig: &CallSig) -> CallSig {
+        let mut sig = sig.clone();
+        for p in sig.params.iter_mut() {
+            let members = self.flat_members(p.ty);
+            if !members.iter().any(|&m| matches!(self.types.get(m), Ty::Func(_, _, NEVER))) {
+                continue;
+            }
+            let lenient: Vec<TyId> = members
+                .into_iter()
+                .map(|m| match *self.types.get(m) {
+                    Ty::Func(ps, r, NEVER) => {
+                        let ps = self.types.params(ps).to_vec();
+                        self.types.func_throws(ps, r, ERROR)
+                    }
+                    _ => m,
+                })
+                .collect();
+            p.ty = self.types.union(&lenient);
+        }
+        sig
+    }
+
+    /// What a function value passed as a callback (a function's name, a variable) can throw.
+    fn fn_value_throws(&mut self, e: ExprId) -> Option<TyId> {
+        let ExprKind::Ident(s) = self.ast().expr(e).kind else { return None };
+        let t = match self.lookup(s) {
+            Some((_, t)) => t,
+            None => match self.scopes[self.cur as usize].values.get(&s).map(|d| d.0) {
+                Some(Decl::Fn(m, i)) => self.fn_sig(m, i)?.throws,
+                _ => return None,
+            },
+        };
+        match *self.types.get(t) {
+            Ty::Func(_, _, th) if th != NEVER && th != ERROR => Some(th),
+            _ if t != NEVER && t != ERROR && !matches!(self.types.get(t), Ty::Func(..)) && self.lookup(s).is_none() => Some(t),
+            _ => None,
+        }
     }
 
     /// `super(...)` in a derived class's constructor.
