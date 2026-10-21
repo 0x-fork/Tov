@@ -72,12 +72,16 @@ impl<'a> Checker<'a> {
             return (true, None);
         }
         let module = &self.modules[self.cur as usize];
-        let ts = matches!(module.path.extension().and_then(|e| e.to_str()), Some("ts" | "tsx" | "mts" | "cts"));
-        if !self.spec.on || !ts || module.std || module.npm.is_some() {
+        if !self.spec.on || !self.ts_module() || module.std || module.npm.is_some() {
             return (false, None);
         }
         self.spec_used = true;
         (false, Some(site))
+    }
+
+    /// The module being checked is TypeScript (`.ts`), where every number is JavaScript's.
+    pub(super) fn ts_module(&self) -> bool {
+        matches!(self.modules[self.cur as usize].path.extension().and_then(|e| e.to_str()), Some("ts" | "tsx" | "mts" | "cts"))
     }
 
     fn spec_site(&self, m: u32, te: ast::TypeId) -> bool {

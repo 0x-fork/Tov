@@ -615,6 +615,16 @@ impl<'a> Checker<'a> {
                 if tl == BIGINT || tr == BIGINT {
                     return self.bigint_arith(op, l, r, tl, tr, span);
                 }
+                // (`2 ** 70`, `2 ** -1` in TypeScript: a number that's no safe integer, a float)
+                if op == Pow
+                    && tl == INT
+                    && tr == INT
+                    && self.ts_module()
+                    && let (Some(a), Some(b)) = (self.const_int(l), self.const_int(r))
+                    && !(0..=u32::MAX as i128).contains(&b).then(|| a.checked_pow(b as u32)).flatten().is_some_and(|v| v.abs() <= 1 << 53)
+                {
+                    return F64;
+                }
                 self.arith(op, tl, tr, span)
             }
             Div => {
@@ -826,6 +836,16 @@ impl<'a> Checker<'a> {
             let hint = if self.types.is_num_like(tl) { Some(tl) } else { None };
             let tr = self.expr(r, hint);
             (tl, tr)
+        }
+    }
+
+    /// An integer literal, negated or not: its value.
+    fn const_int(&self, e: ExprId) -> Option<i128> {
+        match self.ast().expr(e).kind {
+            ExprKind::Int(v) => Some(v as i128),
+            ExprKind::Unary(crate::ast::UnOp::Neg, x) => self.const_int(x).map(|v| -v),
+            ExprKind::Paren(x) => self.const_int(x),
+            _ => None,
         }
     }
 
@@ -3197,6 +3217,11 @@ impl<'a> Checker<'a> {
                 {
                     if ms.mutates {
                         self.check_mutable_root_ext(obj, span, true);
+                    }
+                    if mtext == "toLocaleString"
+                        && let Err(at) = builtins::locale_digits(self.ast(), self.interner, args)
+                    {
+                        self.report(Diagnostic::new("U0017", at, "`toLocaleString` supports English (`\"en-US\"`) and integer `minimumFractionDigits`/`maximumFractionDigits` options written in place"));
                     }
                     let desc = format!("{}.{mtext}", builtins::type_label(&self.types, base));
                     self.rec_call(e, Callee::Method(base));

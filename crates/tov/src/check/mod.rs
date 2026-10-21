@@ -1,6 +1,6 @@
 //! Name resolution and type checking.
 
-mod builtins;
+pub(crate) mod builtins;
 pub(crate) mod class;
 mod expr;
 pub mod facts;

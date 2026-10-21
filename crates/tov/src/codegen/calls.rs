@@ -719,6 +719,17 @@ impl<'c, 'a> Gen<'c, 'a> {
                     let (d, present) = self.optional_int(&d);
                     self.tmp(STR, &format!("tv_f64_to_exponential({}, {d}, {present}, {loc})", x.code), true)
                 }
+                "toLocaleString" => {
+                    let (min, max) = crate::check::builtins::locale_digits(self.ast(self.cur_m()), self.c.interner, args).unwrap_or((0, 3));
+                    // (the arguments are literals: nothing to evaluate)
+                    if self.c.types.is_int(recv) {
+                        let x = self.int_code(rv);
+                        self.tmp(STR, &format!("tv_int_to_locale({x}, {min})"), true)
+                    } else {
+                        let x = self.coerce(rv, F64);
+                        self.tmp(STR, &format!("tv_f64_to_locale({}, {min}, {max})", x.code), true)
+                    }
+                }
                 "toFixed" => {
                     let d = self.expr(args[0].expr);
                     let d = self.int_code(d);
@@ -2135,6 +2146,8 @@ impl<'c, 'a> Gen<'c, 'a> {
         let f64s: Vec<String> = vals.iter().map(|v| self.coerce(v.clone(), F64).code).collect();
         let loc = self.loc(span);
         let code = match name {
+            "floor" | "ceil" | "trunc" if ty == F64 => format!("{name}({})", f64s[0]),
+            "round" if ty == F64 => format!("tv_math_round({})", f64s[0]),
             "floor" | "ceil" | "trunc" => format!("tv_f64_to_int({name}({}), \"Math.{name}\", {loc})", f64s[0]),
             "round" => format!("tv_f64_to_int(tv_math_round({}), \"Math.round\", {loc})", f64s[0]),
             "abs" => {

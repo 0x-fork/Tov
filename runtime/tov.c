@@ -1000,12 +1000,87 @@ static void tv_toFixed_check(tv_int digits, const char *loc) {
     if (digits < 0 || digits > 100) tv_trap("toFixed() digits argument must be between 0 and 100", loc);
 }
 
+static int tv_fixed_into(double v, int f, char *buf);
+
 tv_str tv_f64_to_fixed(double v, tv_int digits, const char *loc) {
     tv_toFixed_check(digits, loc);
     if (v != v || fabs(v) >= 1e21) return tv_str_from_f64(v);
     if (v == 0) v = 0.0; /* (-0).toFixed() is "0" */
-    int f = (int)digits;
     char buf[160];
+    int len = tv_fixed_into(v, (int)digits, buf);
+    return tv_str_from_ascii(buf, (size_t)len);
+}
+
+/* "1234567.5" (an optional '-') as "1,234,567.5", trailing fraction zeros past min_frac dropped */
+static tv_str tv_group_digits(const char *s, int len, int min_frac) {
+    const char *dot = memchr(s, '.', (size_t)len);
+    int end = len;
+    if (dot) {
+        int keep = (int)(dot - s) + 1 + min_frac;
+        while (end > keep && s[end - 1] == '0') end--;
+        if (end == (int)(dot - s) + 1) end--;
+    } else if (min_frac > 0) {
+        dot = s + len;
+    }
+    int neg = s[0] == '-';
+    int ilen = (int)((dot ? dot : s + len) - s) - neg;
+    char out[800];
+    int o = 0;
+    if (neg) out[o++] = '-';
+    for (int i = 0; i < ilen; i++) {
+        if (i > 0 && (ilen - i) % 3 == 0) out[o++] = ',';
+        out[o++] = s[neg + i];
+    }
+    if (dot && dot < s + len) {
+        memcpy(out + o, dot, (size_t)(s + end - dot));
+        o += (int)(s + end - dot);
+    } else if (min_frac > 0) {
+        out[o++] = '.';
+        for (int i = 0; i < min_frac; i++) out[o++] = '0';
+    }
+    return tv_str_from_ascii(out, (size_t)o);
+}
+
+/* Intl rounds the shortest decimal form of v (1.0005 → "1.001"), halves away from zero */
+tv_str tv_f64_to_locale(double v, int min_frac, int max_frac) {
+    if (v != v) return tv_str_from_ascii("NaN", 3);
+    if (isinf(v)) return v > 0 ? tv_str_from("\xe2\x88\x9e", 3) : tv_str_from("-\xe2\x88\x9e", 4);
+    char d[24] = {'0'};
+    int k = 1, n = 1;
+    if (v != 0) k = tv_shortest_digits(fabs(v), false, d, &n);
+    /* |v| = 0.d1..dk × 10^n; digit j of the result (ilen integer digits, then max_frac) is d[j + n - ilen] */
+    int ilen = n > 1 ? n : 1, total = ilen + max_frac;
+    char buf[512];
+    int len = 0;
+    if (signbit(v)) buf[len++] = '-';
+    char *digits = buf + len + 1; /* (room for a carry) */
+    for (int j = 0; j < total; j++) {
+        int i = j + n - ilen;
+        digits[j] = i >= 0 && i < k ? d[i] : '0';
+    }
+    int r = total + n - ilen;
+    if (r >= 0 && r < k && d[r] >= '5') {
+        int j = total - 1;
+        while (j >= 0 && digits[j] == '9') digits[j--] = '0';
+        if (j >= 0) digits[j]++;
+        else { digits--; digits[0] = '1'; ilen++; total++; }
+    }
+    if (digits != buf + len) memmove(buf + len, digits, (size_t)total);
+    memmove(buf + len + ilen + 1, buf + len + ilen, (size_t)max_frac);
+    buf[len + ilen] = '.';
+    len += total + 1;
+    if (max_frac == 0) len--;
+    return tv_group_digits(buf, len, min_frac);
+}
+
+tv_str tv_int_to_locale(tv_int v, int min_frac) {
+    char buf[32];
+    int len = snprintf(buf, sizeof buf, "%lld", (long long)v);
+    return tv_group_digits(buf, len, min_frac);
+}
+
+/* v (finite, |v| < 1e21) with f fraction digits, as toFixed: into buf, returning its length */
+static int tv_fixed_into(double v, int f, char *buf) {
     int len;
     /* printf rounds exact ties to even; JS rounds them away from zero. A tie happens exactly
      * when v = m × 2^-(f+1) with m odd; then "%.{f+1}f" is exact and ends in '5'. */
@@ -1019,7 +1094,7 @@ tv_str tv_f64_to_fixed(double v, tv_int digits, const char *loc) {
     if (be) mant |= UINT64_C(1) << 52;
     while (mant && !(mant & 1)) { mant >>= 1; e++; }
     if (mant && e == -(f + 1)) {
-        len = snprintf(buf, sizeof buf, "%.*f", f + 1, v);
+        len = snprintf(buf, 160, "%.*f", f + 1, v);
         buf[--len] = 0;                 /* drop the '5' */
         if (f == 0) buf[--len] = 0;     /* drop the '.' */
         int i = len - 1;
@@ -1036,9 +1111,9 @@ tv_str tv_f64_to_fixed(double v, tv_int digits, const char *loc) {
             break;
         }
     } else {
-        len = snprintf(buf, sizeof buf, "%.*f", f, v);
+        len = snprintf(buf, 160, "%.*f", f, v);
     }
-    return tv_str_from_ascii(buf, (size_t)len);
+    return len;
 }
 
 /* |v|'s first p significant digits into d, rounded as JavaScript does (exact ties away from

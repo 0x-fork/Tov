@@ -216,6 +216,8 @@ tv_str tv_f64_to_radix(double v, tv_int radix, const char *loc);   /* as Number.
 tv_str tv_str_from_bool(bool v);
 tv_str tv_f64_to_fixed(double v, tv_int digits, const char *loc); /* JS toFixed (round half up on exact ties); traps if digits ∉ 0..100 */
 tv_str tv_int_to_fixed(tv_int v, tv_int digits, const char *loc);
+tv_str tv_f64_to_locale(double v, int min_frac, int max_frac); /* Intl.NumberFormat("en-US"): grouped, fraction digits rounded as toFixed */
+tv_str tv_int_to_locale(tv_int v, int min_frac);
 tv_str tv_f64_to_precision(double v, tv_int digits, const char *loc); /* JS toPrecision; traps if digits ∉ 1..100 */
 tv_str tv_f64_to_exponential(double v, tv_int digits, bool has_digits, const char *loc); /* JS toExponential */
 tv_int tv_str_locale_compare(tv_str a, tv_str b); /* -1, 0, 1: letters in alphabetical order (case after), then code points */

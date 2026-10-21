@@ -227,7 +227,7 @@ const STRING_METHODS: &[&str] = &[
 ];
 const MAP_METHODS: &[&str] = &["get", "set", "has", "delete", "clear", "keys", "values", "entries", "forEach"];
 const SET_METHODS: &[&str] = &["add", "has", "delete", "clear", "values", "forEach"];
-const NUMBER_METHODS: &[&str] = &["toFixed", "toPrecision", "toExponential", "toString"];
+const NUMBER_METHODS: &[&str] = &["toFixed", "toPrecision", "toExponential", "toString", "toLocaleString"];
 
 fn methods_of(types: &Types, ty: TyId) -> &'static [&'static str] {
     match types.get(ty) {
@@ -511,10 +511,52 @@ pub(super) fn method(c: &mut Checker, base: TyId, name: &str) -> Option<MethodSi
                 let radix = opt(c, INT);
                 mk(sig(vec![(radix, "radix")], STR), false)
             }
+            // (English only, and the fraction digit options: see `Checker::locale_args`)
+            "toLocaleString" => {
+                let locales = opt(c, STR);
+                let fields: Vec<Field> = ["minimumFractionDigits", "maximumFractionDigits"].iter().filter_map(|n| c.interner.lookup(n)).map(|name| Field { name, ty: INT, optional: true }).collect();
+                let options = c.types.record(fields);
+                let options = opt(c, options);
+                mk(sig(vec![(locales, "locales"), (options, "options")], STR), false)
+            }
             _ => None,
         },
         _ => None,
     }
+}
+
+/// `n.toLocaleString(locales, options)`'s fraction digits (minimum, maximum), when Tov can
+/// format it as `Intl.NumberFormat` does: an English locale, and options (if any) an object
+/// literal of integer fraction digits.
+pub(crate) fn locale_digits(ast: &crate::ast::Ast, interner: &crate::intern::Interner, args: &[Arg]) -> Result<(u32, u32), Span> {
+    if let Some(a) = args.first() {
+        match &ast.expr(a.expr).kind {
+            ExprKind::Undefined => {}
+            ExprKind::Str(s) if matches!(interner.get(*s), "en" | "en-US") => {}
+            _ => return Err(ast.expr(a.expr).span),
+        }
+    }
+    let (mut min, mut max) = (None, None);
+    if let Some(a) = args.get(1) {
+        let ExprKind::Object(fields) = &ast.expr(a.expr).kind else { return Err(ast.expr(a.expr).span) };
+        for f in fields {
+            let ExprKind::Int(v) = ast.expr(f.value).kind else { return Err(ast.expr(f.value).span) };
+            if v > 100 {
+                return Err(ast.expr(f.value).span);
+            }
+            match interner.get(f.name) {
+                "minimumFractionDigits" => min = Some(v as u32),
+                "maximumFractionDigits" => max = Some(v as u32),
+                _ => return Err(f.name_span),
+            }
+        }
+    }
+    let min = min.unwrap_or(0);
+    let max = max.unwrap_or(min.max(3));
+    if min > max {
+        return Err(ast.expr(args[1].expr).span);
+    }
+    Ok((min, max))
 }
 
 const MATH_CONSTS: &[&str] = &["PI", "E", "LN2", "LN10", "LOG2E", "LOG10E", "SQRT2", "SQRT1_2"];
@@ -1025,7 +1067,22 @@ impl<'a> Checker<'a> {
             return self.call_sig(&cs, &desc, &[], args, exp, span);
         }
         if MATH_INT_FNS.contains(&name) {
-            let cs = CallSig { tparams: Vec::new(), params: vec![p(F64)], names: vec!["x".into()], rest: None, ret: INT, throws: NEVER };
+            // (`Math.ceil(-0.5)` in TypeScript: `-0`, which only a float holds)
+            let neg_zero = self.ts_module()
+                && args.len() == 1
+                && match self.ast().expr(args[0].expr).kind {
+                    ExprKind::Unary(crate::ast::UnOp::Neg, x) => match self.ast().expr(x).kind {
+                        ExprKind::Float(v) => match name {
+                            "ceil" | "trunc" => v < 1.0,
+                            "round" => v <= 0.5,
+                            _ => false,
+                        },
+                        _ => false,
+                    },
+                    _ => false,
+                };
+            let ret = if neg_zero { F64 } else { INT };
+            let cs = CallSig { tparams: Vec::new(), params: vec![p(F64)], names: vec!["x".into()], rest: None, ret, throws: NEVER };
             return self.call_sig(&cs, &desc, &[], args, exp, span);
         }
         match name {
