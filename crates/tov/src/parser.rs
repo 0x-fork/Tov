@@ -1904,11 +1904,7 @@ impl<'a> Parser<'a> {
         self.bump(); // (
         let mut out = Vec::new();
         while !self.at(Tok::RParen) && !self.at(Tok::Eof) {
-            if self.at(Tok::DotDotDot) {
-                let span = self.cur_span();
-                self.err("U0011", span, "spread arguments are not supported yet");
-                self.bump();
-            }
+            let spread = self.at(Tok::DotDotDot).then(|| self.bump()).map(|t| self.span_of(t));
             let by_ref = if self.at(Tok::Amp) {
                 let span = self.cur_span();
                 self.bump();
@@ -1917,6 +1913,13 @@ impl<'a> Parser<'a> {
                 None
             };
             let expr = self.assign();
+            let expr = match spread {
+                Some(s) => {
+                    let span = s.to(self.expr_span(expr));
+                    self.mk_expr(ExprKind::Spread(expr), span)
+                }
+                None => expr,
+            };
             out.push(Arg { expr, by_ref });
             if !self.eat(Tok::Comma) {
                 break;
@@ -2129,11 +2132,14 @@ impl<'a> Parser<'a> {
                         continue;
                     }
                     if self.at(Tok::DotDotDot) {
-                        let span = self.cur_span();
-                        self.err("U0011", span, "spread in array literals is not supported yet; use `concat`");
+                        let s = self.cur_span();
                         self.bump();
+                        let x = self.assign();
+                        let span = s.to(self.expr_span(x));
+                        elems.push(self.mk_expr(ExprKind::Spread(x), span));
+                    } else {
+                        elems.push(self.assign());
                     }
-                    elems.push(self.assign());
                     if !self.eat(Tok::Comma) {
                         break;
                     }
@@ -2344,7 +2350,7 @@ fn top_level_await(ast: &Ast, s: StmtId) -> bool {
         match &ast.expr(e).kind {
             ExprKind::Await(_) => true,
             ExprKind::Arrow(_) => false,
-            ExprKind::Unary(_, x) | ExprKind::Paren(x) | ExprKind::NonNull(x) | ExprKind::Typeof(x) | ExprKind::As(x, _) | ExprKind::Try(x) => expr(ast, *x),
+            ExprKind::Unary(_, x) | ExprKind::Paren(x) | ExprKind::NonNull(x) | ExprKind::Typeof(x) | ExprKind::Spread(x) | ExprKind::As(x, _) | ExprKind::Try(x) => expr(ast, *x),
             ExprKind::Update { target, .. } => expr(ast, *target),
             ExprKind::Binary(_, a, b) | ExprKind::Assign(_, a, b) | ExprKind::Index { obj: a, index: b, .. } => expr(ast, *a) || expr(ast, *b),
             ExprKind::Cond(a, b, c) => expr(ast, *a) || expr(ast, *b) || expr(ast, *c),

@@ -172,6 +172,11 @@ impl<'a> Checker<'a> {
             ExprKind::Index { obj, index, optional } => self.index(*obj, *index, *optional, span),
             ExprKind::Object(fields) => self.object(fields, exp, span),
             ExprKind::Array(elems) => self.array_lit(elems, exp, span),
+            ExprKind::Spread(x) => {
+                self.report(Diagnostic::new("P0001", span, "`...` spreads only into an array literal or a call's arguments"));
+                self.expr(*x, None);
+                ERROR
+            }
             ExprKind::Arrow(f) => self.arrow(f, exp, span),
             ExprKind::Cond(c, a, b) => {
                 let fx = super::stmt::effects_of_expr(self.ast(), *a).with(super::stmt::effects_of_expr(self.ast(), *b));
@@ -1909,8 +1914,11 @@ impl<'a> Checker<'a> {
         });
         if let Some(et) = elem_exp {
             for &x in elems {
-                let t = self.expr(x, Some(et));
                 let s = self.ast().expr(x).span;
+                let t = match self.ast().expr(x).kind {
+                    ExprKind::Spread(inner) => self.spread_elem(inner, Some(et)),
+                    _ => self.expr(x, Some(et)),
+                };
                 self.expect_assignable(t, et, s, None);
             }
             return self.types.array(et);
@@ -1927,7 +1935,10 @@ impl<'a> Checker<'a> {
         }
         let mut tys = Vec::new();
         for &x in elems {
-            let t = self.expr(x, None);
+            let t = match self.ast().expr(x).kind {
+                ExprKind::Spread(inner) => self.spread_elem(inner, None),
+                _ => self.expr(x, None),
+            };
             tys.push(self.types.widen(t));
         }
         if tys.iter().all(|&t| self.types.is_numeric(t)) && tys.iter().any(|&t| self.types.is_float(t)) && tys.iter().all(|&t| t == INT || t == F64) {
@@ -1935,6 +1946,25 @@ impl<'a> Checker<'a> {
         }
         let u = self.types.union(&tys);
         self.types.array(u)
+    }
+
+    /// `...x`: the type of the elements it spreads (of an array, a set, or a string's characters).
+    pub(super) fn spread_elem(&mut self, x: ExprId, elem: Option<TyId>) -> TyId {
+        let hint = elem.map(|e| self.types.array(e));
+        let t = self.expr(x, hint);
+        let base = self.types.without_undefined(t);
+        match *self.types.get(base) {
+            Ty::Array(e) | Ty::Set(e) => e,
+            Ty::Str | Ty::StrLit(_) => STR,
+            Ty::Js => JS,
+            Ty::Error => ERROR,
+            _ => {
+                let shown = self.show(t);
+                let s = self.ast().expr(x).span;
+                self.report(Diagnostic::new("T0402", s, format!("can't spread `{shown}`: `...` takes an array, a set or a string")));
+                ERROR
+            }
+        }
     }
 
     pub(super) fn arrow(&mut self, f: &ArrowFn, exp: Option<TyId>, span: Span) -> TyId {
@@ -2855,7 +2885,17 @@ impl<'a> Checker<'a> {
                 if self.spec.on {
                     self.spec_flow.push(Self::arg_sites(sites, i));
                 }
-                let mut t = self.expr(a.expr, hint);
+                let mut t = match self.ast().expr(a.expr).kind {
+                    // (`f(...xs)` spreads into the rest parameter)
+                    ExprKind::Spread(inner) if i >= cs.params.len() && cs.rest.is_some() => self.spread_elem(inner, hint),
+                    ExprKind::Spread(inner) => {
+                        let s = self.ast().expr(a.expr).span;
+                        self.report(Diagnostic::new("U0011", s, format!("`...` here would fill fixed parameters of `{desc}`; only a rest parameter (`...xs: T[]`) takes a spread")));
+                        self.spread_elem(inner, None);
+                        ERROR
+                    }
+                    _ => self.expr(a.expr, hint),
+                };
                 if is_arrow && literal_bound.iter().any(|u| map.get(u) == Some(&INT) && self.types.mentions(p.ty, &[*u])) {
                     let mut scratch = map.clone();
                     for u in &literal_bound {

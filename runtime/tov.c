@@ -1554,6 +1554,15 @@ tv_arr tv_arr_concat(tv_arr a, tv_arr b, const tv_type *t) {
     return (tv_arr){r, na + nb};
 }
 
+void tv_arr_extend(tv_arr *a, const tv_type *t, tv_arr b) {
+    int64_t nb = tv_arr_len(b);
+    if (nb == 0) return;
+    if (tv_arr_len(*a) == 0 && a->p == NULL) { tv_arr_retain(b); *a = b; return; }
+    unsigned char *w = tv_arr_reserve_tail(a, t, nb);
+    tv_copy_retain(w, b.p->data, nb, t);
+    a->len += nb;
+}
+
 static void tv_swap_bytes(unsigned char *x, unsigned char *y, size_t n) {
     unsigned char tmp[64];
     while (n) {

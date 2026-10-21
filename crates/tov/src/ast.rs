@@ -195,6 +195,8 @@ pub enum ExprKind {
     Try(ExprId),
     /// `await e`.
     Await(ExprId),
+    /// `...xs`: an array literal's elements, or a call's arguments, taken from a collection.
+    Spread(ExprId),
     Error,
 }
 

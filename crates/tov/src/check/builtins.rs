@@ -2,7 +2,7 @@
 
 use super::expr::CallSig;
 use super::*;
-use crate::ast::Arg;
+use crate::ast::{Arg, ExprKind};
 
 pub(super) const BUILTIN_TYPES: &[&str] = &[
     "int", "i64", "f64", "number", "f32", "i8", "i16", "i32", "u8", "u16", "u32", "u64", "bool", "boolean", "string", "never", "unknown", "Js", "undefined", "void", "Array", "Map",
@@ -622,7 +622,10 @@ impl<'a> Checker<'a> {
                     self.unknown_ns_member(ns, name, &known, name_span);
                 }
                 for a in args {
-                    let t = self.expr(a.expr, None);
+                    let t = match self.ast().expr(a.expr).kind {
+                        ExprKind::Spread(inner) => self.spread_elem(inner, None),
+                        _ => self.expr(a.expr, None),
+                    };
                     if !self.printable(t) {
                         let msg = format!("a value of type `{}` can't be printed", self.show(t));
                         let s = self.ast().expr(a.expr).span;
@@ -862,19 +865,26 @@ impl<'a> Checker<'a> {
                     return ERROR;
                 }
                 let mut tys = Vec::new();
+                let mut spread = false;
                 for a in args {
-                    let t = self.expr(a.expr, exp);
+                    let t = match self.ast().expr(a.expr).kind {
+                        ExprKind::Spread(inner) => {
+                            spread = true;
+                            self.spread_elem(inner, exp)
+                        }
+                        _ => self.expr(a.expr, exp),
+                    };
                     if t != ERROR && !self.types.is_numeric(t) {
                         let msg = format!("`{desc}` needs numbers, found `{}`", self.show(t));
                         let s = self.ast().expr(a.expr).span;
-                        let mut d = Diagnostic::new("T0001", s, msg);
-                        if matches!(self.types.get(t), Ty::Array(_)) {
-                            d = d.note("note", "spread is not supported; use `xs.reduce((a, b) => Math.max(a, b), xs[0]!)`");
-                        }
-                        self.report(d);
+                        self.report(Diagnostic::new("T0001", s, msg));
                         return ERROR;
                     }
                     tys.push(t);
+                }
+                // (spread from an empty array, `Math.max()` is -Infinity, as in JavaScript)
+                if spread && args.iter().all(|a| matches!(self.ast().expr(a.expr).kind, ExprKind::Spread(_))) {
+                    return F64;
                 }
                 if tys.iter().all(|&t| t == tys[0]) {
                     tys[0]

@@ -1,0 +1,43 @@
+// Spread in array literals and calls.
+function sum(...xs: number[]): number {
+  let s = 0
+  for (const x of xs) s += x
+  return s
+}
+function main1() {
+  const a = [1, 2, 3]
+  const b = [...a, 4, ...a]
+  const c: number[] = [0.5, ...a]
+  const set = new Set<string>(["x", "y"])
+  const names = [...set, "z"]
+  const m = new Map<string, number>()
+  m.set("k", 1)
+  const keys = [...m.keys()]
+  const copy = [...a]
+  copy.push(9)
+  console.log(b.join(","), c.join(","), names.join(","), keys.join(","), a.length, copy.length)
+  console.log(Math.max(...a), Math.min(...c), Math.max(...a, 10), Math.max(...([] as number[])), sum(...a), sum(1, ...b))
+  const out: number[] = []
+  out.push(...a, 7)
+  console.log(out.join(" "), [..."héllo"].length)
+}
+function main2() {
+  const xs = [1, "two"]
+  const out: number[] = []
+  const chunk = [1, 2, 3]
+  for (let i = 0; i < 1000; i++) {
+    out.push(i)
+    out.push(...chunk)
+  }
+  let s = 0
+  for (const v of out) s += v
+  console.log(out.length, s)
+  const ys: number[] = []
+  for (let i = 0; i < 100; i++) ys.push(...chunk)
+  console.log(ys.length)
+  console.log(...chunk)
+}
+function main() {
+  main1()
+  main2()
+}

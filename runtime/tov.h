@@ -252,6 +252,7 @@ bool tv_arr_shift(tv_arr *a, const tv_type *t, void *out);
 void tv_arr_unshift(tv_arr *a, const tv_type *t, void *elem);      /* moves elem */
 tv_arr tv_arr_slice(tv_arr a, const tv_type *t, tv_int start, tv_int end, bool has_start, bool has_end); /* JS semantics incl. negatives */
 tv_arr tv_arr_concat(tv_arr a, tv_arr b, const tv_type *t);
+void tv_arr_extend(tv_arr *a, const tv_type *t, tv_arr b);         /* appends b's elements (retained) */
 void tv_arr_reverse(tv_arr *a, const tv_type *t);
 /* Stable sort. cmp returns <0, 0, >0 like a JS comparator (a double). NULL cmp = JS default
  * (compare String(x) of each element). */

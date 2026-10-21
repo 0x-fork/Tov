@@ -251,6 +251,10 @@ impl<'c, 'a> Gen<'c, 'a> {
         if args.is_empty() {
             return "TV_EMPTY_ARR".into();
         }
+        let elems: Vec<ExprId> = args.iter().map(|a| a.expr).collect();
+        if elems.iter().any(|&x| matches!(self.ast(self.cur_m()).expr(x).kind, ExprKind::Spread(_))) {
+            return self.build_spread(&elems, arr_ty).code;
+        }
         let d = self.desc(elem);
         let ect = self.ctype(elem);
         let mut codes = Vec::new();
@@ -719,6 +723,25 @@ impl<'c, 'a> Gen<'c, 'a> {
             (Ty::Array(et), "push" | "unshift") => {
                 let d = self.desc(et);
                 let ect = self.ctype(et);
+                if args.iter().any(|a| matches!(self.ast(self.cur_m()).expr(a.expr).kind, ExprKind::Spread(_))) {
+                    // `xs.push(...ys)`: the arguments as one array, appended (or prepended)
+                    let arr = self.c.types.array(et);
+                    let elems: Vec<ExprId> = args.iter().map(|a| a.expr).collect();
+                    let all = self.build_spread(&elems, arr);
+                    if name == "push" {
+                        self.line(format!("tv_arr_extend(&{lv}, {d}, {});", all.code));
+                        // (a capacity cached for a loop's pushes)
+                        let b = self.b();
+                        let cap = b.unique.iter().copied().find(|k| b.locals.get(k).is_some_and(|l| l.access == lv)).and_then(|k| b.push_caps.get(&k).cloned());
+                        if let Some(cv) = cap {
+                            self.line(format!("{cv} = {lv}.p ? {lv}.p->cap : 0;"));
+                        }
+                    } else {
+                        let joined = self.fresh("j");
+                        self.line(format!("tv_arr {joined} = tv_arr_concat({}, {lv}, {d}); tv_arr_release({lv}, {d}); {lv} = {joined};", all.code));
+                    }
+                    return Val::plain(format!("tv_arr_len({lv})"), INT);
+                }
                 for a in args {
                     let v = self.expr(a.expr);
                     let v = self.coerce(v, et);
@@ -1242,6 +1265,43 @@ impl<'c, 'a> Gen<'c, 'a> {
                     _ => None,
                 };
                 let parts_vals = template.map(|(parts, exprs)| (parts, self.exprs_in_order(exprs)));
+                // (`console.log(...xs)`: the elements, as separate arguments)
+                let spread: Vec<bool> = args.iter().map(|a| matches!(ast.expr(a.expr).kind, ExprKind::Spread(_))).collect();
+                if spread.iter().any(|&s| s) {
+                    let sbv = self.fresh("sb");
+                    let sp = self.fresh("sp");
+                    self.line(format!("tv_sb {sbv} = {{0}}; bool {sp} = false;"));
+                    for a in args {
+                        let one = |g: &mut Self, v: &Val| {
+                            g.line(format!("if ({sp}) tv_sb_push_char(&{sbv}, ' ');"));
+                            g.line(format!("{sp} = true;"));
+                            g.line("{");
+                            g.line(format!("tv_sb *sb = &{sbv};"));
+                            let c = g.inspect_root(v.ty, &v.code, "0");
+                            g.line(format!("{c};"));
+                            g.line("}");
+                        };
+                        match ast.expr(a.expr).kind {
+                            ExprKind::Spread(inner) => {
+                                let xs = self.spread_array(inner);
+                                let Ty::Array(et) = self.tget(xs.ty) else { continue };
+                                let ect = self.ctype(et);
+                                let i = self.fresh("i");
+                                self.open(&format!("for (tv_int {i} = 0; {i} < tv_arr_len({}); {i}++) {{", xs.code));
+                                let v = Val::plain(format!("((({ect} *)tv_arr_data({}))[{i}])", xs.code), et);
+                                one(self, &v);
+                                self.close("}");
+                            }
+                            _ => {
+                                let v = self.expr(a.expr);
+                                one(self, &v);
+                            }
+                        }
+                    }
+                    let f = if matches!(name, "error" | "warn") { "tv_err_sb_line" } else { "tv_out_sb_line" };
+                    self.line(format!("{f}(&{sbv}); tv_sb_free(&{sbv});"));
+                    return Val::plain("0", VOID);
+                }
                 let arg_exprs: Vec<ExprId> = args.iter().map(|a| a.expr).collect();
                 let vals: Vec<Val> = if parts_vals.is_some() { Vec::new() } else { self.exprs_in_order(&arg_exprs) };
                 let sbv = self.fresh("sb");
@@ -1711,6 +1771,9 @@ impl<'c, 'a> Gen<'c, 'a> {
     }
 
     fn math(&mut self, name: &str, args: &[Arg], ty: TyId, span: Span) -> Val {
+        if matches!(name, "min" | "max") && args.iter().any(|a| matches!(self.ast(self.cur_m()).expr(a.expr).kind, ExprKind::Spread(_))) {
+            return self.min_max_spread(name, args, ty);
+        }
         let vals: Vec<Val> = args.iter().map(|a| self.expr(a.expr)).collect();
         let f64s: Vec<String> = vals.iter().map(|v| self.coerce(v.clone(), F64).code).collect();
         let loc = self.loc(span);
@@ -1748,6 +1811,118 @@ impl<'c, 'a> Gen<'c, 'a> {
             _ => format!("{name}({})", f64s[0]),
         };
         Val::plain(code, ty)
+    }
+
+    /// `Math.max(...xs, y)`: a loop over the spread elements.
+    fn min_max_spread(&mut self, name: &str, args: &[Arg], ty: TyId) -> Val {
+        let ct = self.ctype(ty);
+        let acc = self.fresh("m");
+        let float = self.c.types.is_float(ty);
+        let start = match (float, name) {
+            (true, "max") => "-INFINITY".to_string(),
+            (true, _) => "INFINITY".to_string(),
+            (false, "max") => "INT64_MIN".to_string(),
+            (false, _) => "INT64_MAX".to_string(),
+        };
+        self.line(format!("{ct} {acc} = {start};"));
+        let pick = |a: &str, b: &str| -> String {
+            if float {
+                format!("tv_{name}_f64({a}, {b})")
+            } else {
+                let op = if name == "min" { "<" } else { ">" };
+                format!("({a} {op} {b} ? {a} : {b})")
+            }
+        };
+        for a in args {
+            match self.ast(self.cur_m()).expr(a.expr).kind {
+                ExprKind::Spread(inner) => {
+                    let xs = self.spread_array(inner);
+                    let et = match self.tget(xs.ty) {
+                        Ty::Array(e) => e,
+                        _ => INT,
+                    };
+                    let ect = self.ctype(et);
+                    let i = self.fresh("i");
+                    self.open(&format!("for (tv_int {i} = 0; {i} < tv_arr_len({}); {i}++) {{", xs.code));
+                    let x = Val::plain(format!("((({ect} *)tv_arr_data({}))[{i}])", xs.code), et);
+                    let x = self.coerce(x, ty);
+                    let next = pick(&acc, &x.code);
+                    self.line(format!("{acc} = {next};"));
+                    self.close("}");
+                }
+                _ => {
+                    let v = self.expr(a.expr);
+                    let v = self.coerce(v, ty);
+                    let next = pick(&acc, &v.code);
+                    self.line(format!("{acc} = {next};"));
+                }
+            }
+        }
+        Val::plain(acc, ty)
+    }
+
+    /// An array literal (or rest arguments) with spreads: `[a, ...xs, b]`.
+    pub(crate) fn build_spread(&mut self, elems: &[ExprId], ty: TyId) -> Val {
+        let Ty::Array(et) = self.tget(ty) else { return Val::plain("TV_EMPTY_ARR", ty) };
+        let d = self.desc(et);
+        let ect = self.ctype(et);
+        let arr = self.tmp(ty, "TV_EMPTY_ARR", true);
+        for &x in elems {
+            match self.ast(self.cur_m()).expr(x).kind {
+                ExprKind::Spread(inner) => {
+                    let src = self.spread_array(inner);
+                    let src = if matches!(self.tget(src.ty), Ty::Array(e) if e == et) {
+                        src
+                    } else {
+                        // (elements of another type: converted one by one)
+                        let Ty::Array(se) = self.tget(src.ty) else { continue };
+                        let sct = self.ctype(se);
+                        let i = self.fresh("i");
+                        self.open(&format!("for (tv_int {i} = 0; {i} < tv_arr_len({}); {i}++) {{", src.code));
+                        let v = Val::plain(format!("((({sct} *)tv_arr_data({}))[{i}])", src.code), se);
+                        let v = self.coerce(v, et);
+                        let n = self.fresh("e");
+                        self.line(format!("{ect} {n} = {};", v.code));
+                        let r = self.retain_code(et, &n);
+                        if !r.is_empty() {
+                            self.line(format!("{r};"));
+                        }
+                        self.line(format!("tv_arr_push(&{}, {d}, &{n});", arr.code));
+                        self.close("}");
+                        continue;
+                    };
+                    self.line(format!("tv_arr_extend(&{}, {d}, {});", arr.code, src.code));
+                }
+                _ => {
+                    let v = self.expr(x);
+                    let v = self.coerce(v, et);
+                    let code = self.consume(v);
+                    let n = self.fresh("e");
+                    self.line(format!("{ect} {n} = {code};"));
+                    self.line(format!("tv_arr_push(&{}, {d}, &{n});", arr.code));
+                }
+            }
+        }
+        arr
+    }
+
+    /// `...x` as an array: an array itself, a set's values, a string's characters.
+    pub(crate) fn spread_array(&mut self, x: ExprId) -> Val {
+        let v = self.expr(x);
+        let base = self.c.types.without_undefined(v.ty);
+        match self.tget(base) {
+            Ty::Set(e) => {
+                let arr = self.c.types.array(e);
+                let code = format!("tv_map_keys({}, {}, &tv_type_undefined)", v.code, self.desc(e));
+                self.tmp(arr, &code, true)
+            }
+            Ty::Str | Ty::StrLit(_) => {
+                let arr = self.c.types.array(STR);
+                let s = self.coerce(v, STR);
+                self.tmp(arr, &format!("tv_str_chars({})", s.code), true)
+            }
+            _ => v,
+        }
     }
 
     // ------------------------------------------------------------ test matchers

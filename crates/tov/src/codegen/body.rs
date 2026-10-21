@@ -1689,7 +1689,7 @@ impl<'c, 'a> Gen<'c, 'a> {
                 StmtKind::Expr(e) => {
                     let ExprKind::Call { callee, args, .. } = &ast.expr(*e).kind else { return None };
                     let ExprKind::Member { obj, name, optional: false, .. } = &ast.expr(*callee).kind else { return None };
-                    if g.sym(*name) != "push" || args.len() != 1 {
+                    if g.sym(*name) != "push" || args.len() != 1 || matches!(ast.expr(args[0].expr).kind, ExprKind::Spread(_)) {
                         return None;
                     }
                     local(*obj)
@@ -2573,6 +2573,10 @@ impl<'c, 'a> Gen<'c, 'a> {
         let ty = self.ty(e);
         match &node.kind {
             ExprKind::Error => Val::plain("0", ERROR),
+            ExprKind::Spread(_) => {
+                self.unsupported(span, "`...` here");
+                Val::plain("0", ty)
+            }
             ExprKind::Int(v) if ty == DECIMAL => Val::plain(self.dec_lit(&v.to_string()), DECIMAL),
             ExprKind::Float(_) if ty == DECIMAL => {
                 let text = self.c.sm.get(span.file).text[span.start as usize..span.end as usize].to_string();
@@ -2782,6 +2786,9 @@ impl<'c, 'a> Gen<'c, 'a> {
                 };
                 if elems.is_empty() {
                     return Val::plain("TV_EMPTY_ARR", ty);
+                }
+                if elems.iter().any(|&x| matches!(self.ast(m).expr(x).kind, ExprKind::Spread(_))) {
+                    return self.build_spread(elems, ty);
                 }
                 // Evaluate the elements, then write them straight into reserved space: the length
                 // is a constant the C compiler can see.
@@ -4772,7 +4779,7 @@ pub(crate) fn collect_exprs_stmt(ast: &ast::Ast, s: StmtId, out: &mut Vec<ExprId
 pub(crate) fn collect_exprs_expr(ast: &ast::Ast, e: ExprId, out: &mut Vec<ExprId>) {
     out.push(e);
     match &ast.expr(e).kind {
-        ExprKind::Unary(_, x) | ExprKind::Paren(x) | ExprKind::NonNull(x) | ExprKind::Typeof(x) | ExprKind::As(x, _) | ExprKind::Try(x) | ExprKind::Await(x) => collect_exprs_expr(ast, *x, out),
+        ExprKind::Unary(_, x) | ExprKind::Paren(x) | ExprKind::NonNull(x) | ExprKind::Typeof(x) | ExprKind::Spread(x) | ExprKind::As(x, _) | ExprKind::Try(x) | ExprKind::Await(x) => collect_exprs_expr(ast, *x, out),
         ExprKind::Binary(_, l, r) | ExprKind::Assign(_, l, r) => {
             collect_exprs_expr(ast, *l, out);
             collect_exprs_expr(ast, *r, out);
