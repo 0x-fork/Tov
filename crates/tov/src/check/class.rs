@@ -717,15 +717,22 @@ impl<'a> Checker<'a> {
         let StmtKind::Block(stmts) = &ast.stmt(f.body).kind else { return };
         let mut rest: &[StmtId] = stmts;
         if info.base.is_some() {
-            let first_is_super = stmts.first().map(|&s| self.is_super_call_stmt(s)).unwrap_or(false);
-            if !first_is_super {
+            // (statements that don't touch `this` may come first, as TypeScript allows: a
+            // parameter's default, say)
+            let uses_this = |s: StmtId| {
+                let sp = ast.stmt(s).span;
+                ast.exprs.iter().any(|e| matches!(e.kind, ExprKind::This | ExprKind::Super) && e.span.file == sp.file && e.span.start >= sp.start && e.span.end <= sp.end)
+            };
+            let lead = stmts.iter().position(|&s| uses_this(s)).unwrap_or(stmts.len());
+            let first_is_super = stmts.get(lead).is_some_and(|&s| self.is_super_call_stmt(s));
+            if first_is_super {
+                rest = &stmts[lead + 1..];
+            } else {
                 let span = stmts.first().map(|&s| ast.stmt(s).span).unwrap_or(f.name_span);
                 self.report(
                     Diagnostic::new("T0814", span, "a derived class's constructor must start with `super(...)`")
                         .fix(Applicability::Placeholder, "call the base constructor first", span.empty_at_start(), "super(<args>)\n    "),
                 );
-            } else {
-                rest = &stmts[1..];
             }
         }
         for &s in rest {

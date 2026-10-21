@@ -1,0 +1,32 @@
+// Everyday TypeScript: read-only types, `as const`, `reduce` without a start, `Array(n)`,
+// unary `+`, defaults on parameter properties, regular expressions in callbacks (checked
+// against Bun)
+const dirs: readonly (readonly [number, number])[] = [[0, 1], [1, 0]]
+function sum(xs: readonly number[]): number {
+  return xs.reduce((a, b) => a + b, 0)
+}
+const names: ReadonlyArray<string> = ["a", "b"]
+const order = { high: 0, low: 1 } as const
+console.log(dirs.length, sum([1, 2, 3]), names.join("+"), order.low)
+
+console.log([3, 9, 4].reduce((a, b) => Math.max(a, b)), ["x", "y"].reduce((a, b) => a + b))
+console.log(Array<number>(3).fill(7), Array(2).fill("z"))
+console.log(+"42" + 1, +"x", +true, +"0x10")
+
+class Shape {
+  constructor(public kind: string) {}
+}
+class Box extends Shape {
+  constructor(public w: number, private h = 2, readonly label?: string) {
+    super(w > h ? "wide" : "tall")
+  }
+  area(): number {
+    return this.w * this.h
+  }
+}
+const b = new Box(3)
+console.log(b.kind, b.area(), b.label, new Box(1, 5, "x").area())
+
+const words: string[] = []
+;["a  b", "c   d e"].forEach((s) => words.push(...s.split(/\s+/)))
+console.log(words)

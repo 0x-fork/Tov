@@ -15,7 +15,7 @@ pub fn parse(src: &str, file: FileId, interner: &mut Interner) -> (Ast, Vec<Diag
             lexed.tokens[i].kind = Tok::Ident;
         }
     }
-    let mut p = Parser { src, toks: lexed.tokens, strings: lexed.strings, pos: 0, file, interner, ast: Ast::default(), diags, script_stmts: Vec::new(), defaults: Vec::new(), more_stmts: Vec::new(), hidden: 0, prologue: Vec::new(), index_sig: None, local_fns: Vec::new() };
+    let mut p = Parser { src, toks: lexed.tokens, strings: lexed.strings, pos: 0, file, interner, ast: Ast::default(), diags, script_stmts: Vec::new(), defaults: Vec::new(), more_stmts: Vec::new(), hidden: 0, prologue: Vec::new(), index_sig: None, local_fns: Vec::new(), prop_defaults: false, extra_members: Vec::new() };
     p.module();
     (p.ast, p.diags)
 }
@@ -45,6 +45,10 @@ struct Parser<'a> {
     index_sig: Option<(TypeId, TypeId, Span)>,
     /// Function declarations in bodies, as `const`s (to hoist).
     local_fns: Vec<StmtId>,
+    /// A parameter property in the list just parsed has a default value.
+    prop_defaults: bool,
+    /// Fields made from a constructor's parameter properties, for the class being parsed.
+    extra_members: Vec<ClassMember>,
 }
 
 /// A destructuring pattern (desugared into `let`s).
@@ -499,6 +503,9 @@ impl<'a> Parser<'a> {
                 self.bump();
             }
         }
+        // (fields made from parameter properties come first, as the parameters' own would)
+        let extra = std::mem::take(&mut self.extra_members);
+        members.splice(0..0, extra);
         self.expect(Tok::RBrace, "to close the class body");
         let span = start.to(self.prev_span());
         let decl = ClassDecl { name, name_span, tparams, is_abstract, cyclic, extends, implements, members };
@@ -594,8 +601,12 @@ impl<'a> Parser<'a> {
         }
         if self.at(Tok::LParen) || self.at(Tok::Lt) {
             let tparams = self.tparams();
-            let params = self.params();
+            self.prop_defaults = false;
+            let mut params = self.params();
             let defaults = (std::mem::take(&mut self.defaults), std::mem::take(&mut self.prologue));
+            let leading = defaults.0.len() + defaults.1.len();
+            let defaulted: Vec<Sym> = defaults.0.iter().map(|d| d.0).collect();
+            let prop_defaults = std::mem::take(&mut self.prop_defaults);
             let ret = if self.eat(Tok::Colon) { Some(self.ty()) } else { None };
             let throws = self.effects_clause();
             let body = if self.at(Tok::LBrace) {
@@ -611,6 +622,44 @@ impl<'a> Parser<'a> {
                 let span = self.prev_span();
                 self.mk_stmt(StmtKind::Block(Vec::new()), span)
             };
+            // `constructor(public limit = 2)`: as TypeScript defines it, a field `limit` and
+            // `this.limit = limit` once the defaults are in (and after `super(...)`)
+            if text == "constructor" && prop_defaults {
+                let mut assigns = Vec::new();
+                let bspan = self.ast.stmts[body as usize].span;
+                let at_body = Span::new(bspan.file, bspan.start, bspan.start);
+                for p in params.iter_mut() {
+                    let Some((pvis, preadonly)) = p.prop.take() else { continue };
+                    let fspan = at_body;
+                    self.extra_members.push(ClassMember {
+                        name: p.name,
+                        name_span: p.span,
+                        span: p.span,
+                        vis: pvis,
+                        is_static: false,
+                        readonly: preadonly,
+                        weak: false,
+                        is_abstract: false,
+                        kind: MemberKind::Field { ty: p.ty, init: None, optional: p.optional && !defaulted.contains(&p.name) },
+                    });
+                    let this = self.mk_expr(ExprKind::This, fspan);
+                    let target = self.mk_expr(ExprKind::Member { obj: this, name: p.name, name_span: fspan, optional: false }, fspan);
+                    let value = self.mk_expr(ExprKind::Ident(p.name), fspan);
+                    let assign = self.mk_expr(ExprKind::Assign(AssignOp::Assign, target, value), fspan);
+                    assigns.push(self.mk_stmt(StmtKind::Expr(assign), fspan));
+                }
+                let ss = match &self.ast.stmts[body as usize].kind {
+                    StmtKind::Block(ss) => ss.clone(),
+                    _ => Vec::new(),
+                };
+                let after_super = ss.iter().position(|&x| matches!(&self.ast.stmts[x as usize].kind, StmtKind::Expr(e) if matches!(&self.ast.exprs[*e as usize].kind, ExprKind::Call { callee, .. } if matches!(self.ast.exprs[*callee as usize].kind, ExprKind::Super))));
+                let at = after_super.map(|i| i + 1).unwrap_or(leading.min(ss.len()));
+                if let StmtKind::Block(ss) = &mut self.ast.stmts[body as usize].kind {
+                    for (k, st) in assigns.into_iter().enumerate() {
+                        ss.insert(at + k, st);
+                    }
+                }
+            }
             let fd = FnDecl { name, name_span, tparams, params, ret, throws, body, is_async };
             let kind = if text == "constructor" && accessor.is_none() {
                 MemberKind::Constructor(fd)
@@ -835,9 +884,12 @@ impl<'a> Parser<'a> {
                 self.bump();
                 let e = self.assign();
                 let s = s.to(self.expr_span(e));
-                if prop.is_some() || inout || rest {
+                if inout || rest {
                     self.err("U0005", s, "a default value for this parameter is not supported yet; make it optional (`x?: T`) and use `x ?? default`");
                 } else {
+                    if prop.is_some() {
+                        self.prop_defaults = true;
+                    }
                     // `x: T = d`: an optional parameter, and `let x: T = x ?? d` (shadowing it)
                     // starting the body.
                     if ty.is_none() {
