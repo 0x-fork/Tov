@@ -22,7 +22,7 @@ Status tags: **[M0]** checked today · **[Mn]** planned for milestone n.
 | Type | Meaning |
 |---|---|
 | `int` | 64-bit signed integer (overflow traps) |
-| `f64` (alias `number`), `f32` | IEEE floats |
+| `f64`, `f32` | IEEE floats (`number`: see below) |
 | `i8 i16 i32 u8 u16 u32 u64` | sized integers |
 | `bool` (alias `boolean`), `string` | UTF-8 immutable string |
 | `bigint` | arbitrary-precision integer, as in TS (`123n`) |
@@ -37,7 +37,7 @@ Status tags: **[M0]** checked today · **[Mn]** planned for milestone n.
 | `Promise<T>`, `Promise<T, E>` | a promise of a `T` that never rejects, or can reject with `E` (an `Error` class); see §7b |
 
 - Removed: `any`, `null` (use `undefined`), `object`, `symbol`, tuples [later], intersection `&`, conditional/mapped/indexed-access types, `keyof`, `typeof` in types, enums (use literal unions), namespaces, decorators.
-- `number` is exactly `f64`; `boolean` is exactly `bool`.
+- `boolean` is exactly `bool`. `number` is TypeScript's number: each `number` written in an annotation is an `int` when only integers ever reach it (from the program's own code: data parsed from JSON or received from JavaScript keeps it a float), and an `f64` otherwise. The program means the same either way, except that an integer past 2^63 traps where a float would round (as an `int`'s does); `fib(n: number): number` runs as fast as with `int`.
 
 ### Numbers
 - An integer literal is `int` unless context expects a float type. An unannotated `let x = 0` becomes `f64` if any later use in the function requires it (`x += 0.5`, `return x` from an `f64` function).

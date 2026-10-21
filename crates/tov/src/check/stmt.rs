@@ -45,9 +45,12 @@ impl<'a> Checker<'a> {
                     (Some(te), init) => {
                         let declared = self.resolve_type(*te, &tscope);
                         if let Some(i) = init {
-                            let found = self.expr(*i, Some(declared));
-                            let ispan = self.ast().expr(*i).span;
-                            self.expect_assignable(found, declared, ispan, None);
+                            let sites = self.type_sites(self.cur, *te);
+                            self.flow(sites, |c| {
+                                let found = c.expr(*i, Some(declared));
+                                let ispan = c.ast().expr(*i).span;
+                                c.expect_assignable(found, declared, ispan, None);
+                            });
                         } else if !*mutable {
                             self.report(Diagnostic::new("T0309", span, "a `const` needs a value"));
                         }
@@ -76,6 +79,14 @@ impl<'a> Checker<'a> {
                 };
                 self.rec_binding(s, t);
                 let id = self.declare(*name, t, kind, *name_span, if *mutable { None } else { Some(kw) }, promotable);
+                if self.spec.on {
+                    let sites = match (ty, init) {
+                        (Some(te), _) => self.type_sites(self.cur, *te),
+                        (None, Some(i)) => self.sources(self.ast().expr(*i).span),
+                        _ => Vec::new(),
+                    };
+                    self.fcx().locals[id].sites = sites;
+                }
                 // `let b = a` of a value TypeScript would share: remember for the copy-then-mutate check.
                 if let Some(i) = init
                     && let crate::ast::ExprKind::Ident(src) = self.ast().expr(*i).kind
@@ -240,7 +251,10 @@ impl<'a> Checker<'a> {
                 self.push_scope();
                 let kind = if *mutable { LocalKind::Let } else { LocalKind::LoopVar };
                 self.rec_binding(s, elem);
-                self.declare(*name, elem, kind, *name_span, None, false);
+                let id = self.declare(*name, elem, kind, *name_span, None, false);
+                if self.spec.on {
+                    self.fcx().locals[id].sites = self.sources(ispan);
+                }
                 self.reset_assigned(*body);
                 self.loop_body(*body);
                 self.pop_scope();
@@ -262,21 +276,22 @@ impl<'a> Checker<'a> {
                     (f.ret, f.name)
                 };
                 let who = fname.map(|n| format!("`{}`", self.name(n))).unwrap_or_else(|| "this function".to_string());
+                let ret_sites = self.fcx.last().unwrap().frames[frame_idx].ret_sites.clone();
                 match (ret, v) {
-                    (Some(r), Some(x)) => {
-                        let t = self.expr(*x, Some(r));
-                        let xspan = self.ast().expr(*x).span;
+                    (Some(r), Some(x)) => self.flow(ret_sites, |c| {
+                        let t = c.expr(*x, Some(r));
+                        let xspan = c.ast().expr(*x).span;
                         if r == VOID {
                             if t != VOID && t != UNDEFINED && t != ERROR {
-                                self.report(
+                                c.report(
                                     Diagnostic::new("T0001", xspan, format!("{who} returns `void`, so `return` takes no value"))
-                                        .note("found", format!("`{}`", self.show(t))),
+                                        .note("found", format!("`{}`", c.show(t))),
                                 );
                             }
                         } else {
-                            self.expect_assignable(t, r, xspan, Some(format!("return type of {who}")));
+                            c.expect_assignable(t, r, xspan, Some(format!("return type of {who}")));
                         }
-                    }
+                    }),
                     (Some(r), None) => {
                         if r != VOID && r != ERROR && !self.types.has_undefined(r) {
                             self.report(Diagnostic::new("T0001", span, format!("{who} must return a value of type `{}`", self.show(r))));

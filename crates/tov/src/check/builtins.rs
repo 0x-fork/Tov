@@ -771,6 +771,8 @@ impl<'a> Checker<'a> {
                     self.report(Diagnostic::new("T0840", span, format!("JSON can't be parsed into `{shown}`")).note("supported", "numbers, strings, booleans, arrays, records, unions of these and `Map<string, T>`"));
                     return ERROR;
                 }
+                // (the text may hold any number)
+                self.spec_poison(target);
                 let syntax = self.builtin_class("SyntaxError");
                 if syntax != ERROR {
                     self.on_throw(syntax, span, Some("JSON.parse"), call);

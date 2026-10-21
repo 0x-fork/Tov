@@ -17,6 +17,8 @@ pub(super) struct Place {
     pub local: Option<LocalId>,
     /// The local the place is rooted in (`x.a[i]` → `x`).
     pub root: Option<LocalId>,
+    /// The speculated `number`s its type came from (see `spec`).
+    pub sites: Vec<super::spec::Site>,
 }
 
 enum Root {
@@ -71,6 +73,9 @@ impl<'a> Checker<'a> {
 
     pub(super) fn expr(&mut self, e: ExprId, exp: Option<TyId>) -> TyId {
         let t = self.expr_inner(e, exp);
+        if self.spec.on {
+            self.derive_sites(e);
+        }
         if let Some(f) = self.facts_mut() {
             f.expr_ty[e as usize] = t;
         }
@@ -184,6 +189,12 @@ impl<'a> Checker<'a> {
                 let target = self.resolve_type(*te, &tscope);
                 // The target guides literal typing (`[] as int[]`), like an annotation would.
                 let src = self.expr(*x, Some(target));
+                if self.spec.on && (src == UNKNOWN || src == JS) {
+                    // (a value from outside the program may be any number)
+                    let sites = self.type_sites(self.cur, *te);
+                    self.blame(&sites);
+                    self.spec_poison(target);
+                }
                 if src == ERROR || target == ERROR || src == UNKNOWN || self.assignable(src, target) || self.assignable(target, src) {
                     return target;
                 }
@@ -268,6 +279,13 @@ impl<'a> Checker<'a> {
 
     fn ident(&mut self, e: ExprId, sym: Sym, span: Span) -> TyId {
         if let Some((id, ty)) = self.lookup(sym) {
+            if self.spec.on {
+                let sites = match self.local(id).global {
+                    Some((m, i)) => self.const_sites(m, i),
+                    None => self.local(id).sites.clone(),
+                };
+                self.note_sites(span, sites);
+            }
             // (a script-local standing in for a top-level `const`/`let`: still a global read)
             if let Some((m, i)) = self.local(id).global {
                 self.rec_ident(e, IdentFact::Const(m, i));
@@ -307,6 +325,10 @@ impl<'a> Checker<'a> {
                 return self.types.func(sig.params, sig.ret);
             }
             Some(Decl::Const(m, i)) => {
+                if self.spec.on {
+                    let sites = self.const_sites(m, i);
+                    self.note_sites(span, sites);
+                }
                 if let Some(t) = self.lookup_global((m, i)) {
                     return t;
                 }
@@ -944,9 +966,9 @@ impl<'a> Checker<'a> {
         let vspan = self.ast().expr(value).span;
         match op {
             AssignOp::Assign => {
-                let tv = self.expr(value, Some(place.ty));
+                let tv = self.flow(place.sites.clone(), |c| c.expr(value, Some(place.ty)));
                 if !self.try_promote(&place, tv) {
-                    self.expect_assignable(tv, place.ty, vspan, None);
+                    self.flow(place.sites.clone(), |c| c.expect_assignable(tv, place.ty, vspan, None));
                 }
                 if let Some(local) = place.local
                     && self.assignable(tv, place.ty) && matches!(self.types.get(self.local(local).ty), Ty::Union(_)) {
@@ -959,8 +981,8 @@ impl<'a> Checker<'a> {
                     self.report(Diagnostic::new("T0503", span, msg));
                 }
                 let inner = self.types.without_undefined(place.ty);
-                let tv = self.expr(value, Some(inner));
-                self.expect_assignable(tv, inner, vspan, None);
+                let tv = self.flow(place.sites.clone(), |c| c.expr(value, Some(inner)));
+                self.flow(place.sites.clone(), |c| c.expect_assignable(tv, inner, vspan, None));
                 if let Some(local) = place.local {
                     self.narrow(local, inner);
                 }
@@ -1004,6 +1026,7 @@ impl<'a> Checker<'a> {
                 };
                 if !self.try_promote(&place, result)
                     && result != ERROR && !self.assignable(result, place.ty) {
+                        self.blame(&place.sites);
                         let msg = format!("`{}=` produces `{}`, which can't be stored in `{}`", bop.as_str(), self.show(result), self.show(place.ty));
                         let mut d = Diagnostic::new("T0001", span, msg);
                         if self.types.is_int(place.ty) && self.types.is_float(result) {
@@ -1141,7 +1164,8 @@ impl<'a> Checker<'a> {
                         return None;
                     }
                     let _ = ty;
-                    return Some(Place { ty: declared, local: Some(id), root: Some(id) });
+                    let sites = self.local(id).sites.clone();
+                    return Some(Place { ty: declared, local: Some(id), root: Some(id), sites });
                 }
                 let n = self.name(*sym).to_string();
                 match self.scopes[self.cur as usize].values.get(sym).map(|d| d.0) {
@@ -1171,7 +1195,8 @@ impl<'a> Checker<'a> {
                         let local = (cm == self.cur)
                             .then(|| self.fcx().locals.iter().position(|l| l.global == Some((cm, ci))))
                             .flatten();
-                        Some(Place { ty, local, root: local })
+                        let sites = self.const_sites(cm, ci);
+                        Some(Place { ty, local, root: local, sites })
                     }
                     Some(Decl::Fn(..)) => {
                         self.report(Diagnostic::new("V0105", span, format!("can't assign to function `{n}`")));
@@ -1203,7 +1228,8 @@ impl<'a> Checker<'a> {
                 }
                 let ft = self.member_of(t, *name, *name_span, span, *obj)?;
                 let root = self.check_mutable_root(*obj, span)?;
-                Some(Place { ty: ft, local: None, root: Some(root) })
+                let sites = self.member_sites_of(t, *name);
+                Some(Place { ty: ft, local: None, root: Some(root), sites })
             }
             ExprKind::Index { obj, index, optional } => {
                 if *optional {
@@ -1232,7 +1258,8 @@ impl<'a> Checker<'a> {
                     }
                 };
                 let root = self.check_mutable_root(*obj, span)?;
-                Some(Place { ty: elem, local: None, root: Some(root) })
+                let sites = self.sources(self.ast().expr(*obj).span);
+                Some(Place { ty: elem, local: None, root: Some(root), sites })
             }
             _ => {
                 self.expr(e, None);
@@ -1258,7 +1285,8 @@ impl<'a> Checker<'a> {
                         );
                     }
                 }
-                Some(Place { ty: f.ty, local: None, root: None })
+                let sites = self.class_field_sites(&f);
+                Some(Place { ty: f.ty, local: None, root: None, sites })
             }
             Some(super::class::ClassMemberRef::Getter(_)) => {
                 self.report(Diagnostic::new("U0019", name_span, format!("`{n}` is a getter; setters are not supported yet")));
@@ -1503,6 +1531,10 @@ impl<'a> Checker<'a> {
             self.invalidate_heap();
         }
         let Some(ft) = self.member_of(base, name, name_span, span, obj) else { return ERROR };
+        if self.spec.on {
+            let sites = self.member_sites_of(base, name);
+            self.note_sites(span, sites);
+        }
         if !optional
             && let Some((target, _)) = self.target_of(obj)
             && target.global.is_none()
@@ -1771,10 +1803,14 @@ impl<'a> Checker<'a> {
             match tfields.iter().find(|tf| tf.name == f.name) {
                 Some(tf) => {
                     provided.insert(f.name);
-                    let t = self.expr(f.value, Some(tf.ty));
+                    let sites = self.record_field_sites(target_ty, f.name);
+                    let (fty, value) = (tf.ty, f.value);
                     let fname = self.name(f.name).to_string();
-                    let vspan = self.ast().expr(f.value).span;
-                    self.expect_assignable(t, tf.ty, vspan, Some(format!("field `{fname}`")));
+                    self.flow(sites, |c| {
+                        let t = c.expr(value, Some(fty));
+                        let vspan = c.ast().expr(value).span;
+                        c.expect_assignable(t, fty, vspan, Some(format!("field `{fname}`")));
+                    });
                 }
                 None => {
                     self.expr(f.value, None);
@@ -1987,9 +2023,25 @@ impl<'a> Checker<'a> {
         frame.is_async = is_async;
         fcx.frames.push(frame);
         fcx.scopes.push(Vec::new());
+        // (an unannotated parameter or result takes the sites of the context's function type)
+        let context_sites = self.spec_flow.last().cloned().unwrap_or_default();
+        let m = self.cur;
         for (p, fp) in f.params.iter().zip(&params) {
             let kind = if p.inout { LocalKind::Inout } else { LocalKind::Param };
-            self.declare(p.name, fp.ty, kind, p.span, None, false);
+            let id = self.declare(p.name, fp.ty, kind, p.span, None, false);
+            if self.spec.on {
+                self.fcx().locals[id].sites = match p.ty {
+                    Some(t) => self.type_sites(m, t),
+                    None => context_sites.clone(),
+                };
+            }
+        }
+        if self.spec.on {
+            let ret_sites = match f.ret {
+                Some(t) => self.type_sites(m, t),
+                None => context_sites.clone(),
+            };
+            self.fcx().frames.last_mut().unwrap().ret_sites = ret_sites;
         }
         // A `routes` handler: its request's `params` are typed from the route.
         if let (Some(key), Some(p0), Some(fp0)) = (self.route_key, f.params.first(), params.first())
@@ -2000,10 +2052,11 @@ impl<'a> Checker<'a> {
         }
         let body_ty = match &f.body {
             ArrowBody::Expr(x) => {
-                let t = self.expr(*x, ret);
+                let ret_sites = self.fcx().frames.last().unwrap().ret_sites.clone();
+                let t = self.flow(ret_sites.clone(), |c| c.expr(*x, ret));
                 if let Some(r) = declared_ret {
                     let s = self.ast().expr(*x).span;
-                    self.expect_assignable(t, r, s, None);
+                    self.flow(ret_sites, |c| c.expect_assignable(t, r, s, None));
                     r
                 } else if let Some(r) = exp_ret {
                     if self.assignable(t, r) { r } else { t }
@@ -2207,6 +2260,8 @@ impl<'a> Checker<'a> {
                     let cs = CallSig { tparams: info.params.clone(), params: info.ctor.params.clone(), names, rest: None, ret: info.this_ty, throws };
                     self.rec_call(e, Callee::New(c));
                     self.pending_call = Some(e);
+                    let sites = self.ctor_sites(c);
+                    self.set_call_spec((sites, Vec::new()));
                     let desc = format!("new {name}");
                     let t = self.call_sig(&cs, &desc, type_args, args, exp, span);
                     let _ = targs;
@@ -2251,6 +2306,8 @@ impl<'a> Checker<'a> {
                         let cs = CallSig { tparams: sig.tparams, params: fixed, names: sig.param_names.iter().map(|&p| self.name(p).to_string()).collect(), rest, ret: sig.ret, throws: sig.throws };
                         self.rec_call(e, Callee::Fn(m, i));
                         self.pending_call = Some(e);
+                        let sites = self.fn_item_sites(m, i);
+                        self.set_call_spec(sites);
                         return self.call_sig(&cs, &text, type_args, args, exp, span);
                     }
                     Some(_) => {}
@@ -2278,6 +2335,8 @@ impl<'a> Checker<'a> {
                                     let desc = format!("{}.{mtext}", self.name(s));
                                     self.rec_call(e, Callee::Fn(fm, fi));
                                     self.pending_call = Some(e);
+                                    let sites = self.fn_item_sites(fm, fi);
+                                    self.set_call_spec(sites);
                                     return self.call_sig(&cs, &desc, type_args, args, exp, span);
                                 }
                             }
@@ -2307,6 +2366,8 @@ impl<'a> Checker<'a> {
                                 let cs = CallSig { tparams: mm.tparams.clone(), params: mm.params.clone(), names, rest: None, ret, throws };
                                 self.rec_call(e, Callee::StaticMethod(c, mm.member));
                                 self.pending_call = Some(e);
+                                let sites = self.member_sites(mm.owner, mm.member);
+                                self.set_call_spec(sites);
                                 return self.call_sig(&cs, &format!("{cls}.{mtext}"), type_args, args, exp, span);
                             }
                             _ => {}
@@ -2358,8 +2419,14 @@ impl<'a> Checker<'a> {
                     let cs = CallSig { tparams: mm.tparams.clone(), params: mm.params.clone(), names, rest: None, ret, throws };
                     self.rec_call(e, Callee::ClassMethod { recv: base, name, sup: false });
                     self.pending_call = Some(e);
+                    let sites = self.member_sites(mm.owner, mm.member);
+                    self.set_call_spec(sites);
                     let cls = self.show(base);
                     let r = self.call_sig(&cs, &format!("{cls}.{mtext}"), type_args, args, exp, span);
+                    if self.spec.on && mtext == "json" && self.modules[self.classes[mm.owner as usize].module as usize].std {
+                        // (a body parsed as JSON may hold any number)
+                        self.spec_poison(r);
+                    }
                     return if mopt || optional { self.types.optional(r) } else { r };
                 }
                 let fm = self.flat_members(base);
@@ -2392,6 +2459,7 @@ impl<'a> Checker<'a> {
                     let desc = format!("{}.{mtext}", builtins::type_label(&self.types, base));
                     self.rec_call(e, Callee::Method(base));
                     self.pending_call = Some(e);
+                    self.set_call_spec_from(obj);
                     self.call_sig(&ms.sig, &desc, type_args, args, exp, span)
                 } else {
                     self.member_of(base, name, name_span, span, obj);
@@ -2413,6 +2481,7 @@ impl<'a> Checker<'a> {
         }
         self.rec_call(e, Callee::Value);
         self.pending_call = Some(e);
+        self.set_call_spec_from(callee);
         let r = self.call_value(t, &text, args, exp, span);
         if optional { self.types.optional(r) } else { r }
     }
@@ -2438,6 +2507,8 @@ impl<'a> Checker<'a> {
         let cs = CallSig { tparams: Vec::new(), params, names, rest: None, ret: VOID, throws };
         self.rec_call(e, Callee::SuperCtor(base));
         self.pending_call = Some(e);
+        let sites = self.ctor_sites(b);
+        self.set_call_spec((sites, Vec::new()));
         self.call_sig(&cs, "super", &[], args, None, span)
     }
 
@@ -2467,6 +2538,8 @@ impl<'a> Checker<'a> {
                 let cs = CallSig { tparams: Vec::new(), params: mm.params.clone(), names, rest: None, ret, throws };
                 self.rec_call(e, Callee::ClassMethod { recv: base, name, sup: true });
                 self.pending_call = Some(e);
+                let sites = self.member_sites(mm.owner, mm.member);
+                self.set_call_spec(sites);
                 self.call_sig(&cs, &format!("super.{mtext}"), type_args, args, exp, span)
             }
             _ => {
@@ -2633,6 +2706,37 @@ impl<'a> Checker<'a> {
     }
 
     pub(super) fn call_sig(&mut self, cs: &CallSig, desc: &str, type_args: &[crate::ast::TypeId], args: &[Arg], exp: Option<TyId>, span: Span) -> TyId {
+        let (mut params, mut ret) = self.call_spec.take().unwrap_or_default();
+        if !self.spec.on {
+            return self.call_sig_inner(cs, desc, type_args, args, exp, span, &[]);
+        }
+        // A generic call links its arguments with its type arguments and with where its result
+        // goes (the expected type can fix a type parameter).
+        if !cs.tparams.is_empty() {
+            let mut linked: Vec<super::spec::Site> = type_args.iter().flat_map(|&t| self.type_sites(self.cur, t)).collect();
+            linked.extend(self.spec_flow.last().cloned().unwrap_or_default());
+            if !linked.is_empty() {
+                if params.is_empty() {
+                    params.push(Vec::new());
+                }
+                for p in &mut params {
+                    p.extend_from_slice(&linked);
+                }
+                ret.extend(linked);
+            }
+        }
+        let t = self.call_sig_inner(cs, desc, type_args, args, exp, span, &params);
+        self.note_sites(span, ret);
+        t
+    }
+
+    /// The sites of the parameter argument `i` goes to.
+    fn arg_sites(params: &[Vec<super::spec::Site>], i: usize) -> Vec<super::spec::Site> {
+        params.get(i).or(params.last()).cloned().unwrap_or_default()
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn call_sig_inner(&mut self, cs: &CallSig, desc: &str, type_args: &[crate::ast::TypeId], args: &[Arg], exp: Option<TyId>, span: Span, sites: &[Vec<super::spec::Site>]) -> TyId {
         let call_expr = self.pending_call.take();
         let required = cs.params.iter().filter(|p| !p.optional).count();
         let max = if cs.rest.is_some() { usize::MAX } else { cs.params.len() };
@@ -2741,6 +2845,9 @@ impl<'a> Checker<'a> {
                 let hint = if is_arrow || !self.types.mentions(pty, &unhinted) { Some(pty) } else { None };
                 self.infer_free = still_free;
                 let marks = self.diags.len();
+                if self.spec.on {
+                    self.spec_flow.push(Self::arg_sites(sites, i));
+                }
                 let mut t = self.expr(a.expr, hint);
                 if is_arrow && literal_bound.iter().any(|u| map.get(u) == Some(&INT) && self.types.mentions(p.ty, &[*u])) {
                     let mut scratch = map.clone();
@@ -2757,6 +2864,9 @@ impl<'a> Checker<'a> {
                         let pty = self.types.subst(p.ty, &map);
                         t = self.expr(a.expr, Some(pty));
                     }
+                }
+                if self.spec.on {
+                    self.spec_flow.pop();
                 }
                 arg_tys[i] = Some(t);
                 let free = self.infer_free.clone();
@@ -2819,8 +2929,10 @@ impl<'a> Checker<'a> {
                 (false, None) => {}
             }
             if !self.assignable(t, pty) {
-                let d = self.mismatch(t, pty, aspan, Some(format!("argument `{pname}` of `{desc}`")));
+                let d = self.flow(Self::arg_sites(sites, i), |c| c.mismatch(t, pty, aspan, Some(format!("argument `{pname}` of `{desc}`"))));
                 self.report(d);
+            } else if self.spec.on && t == JS {
+                self.flow(Self::arg_sites(sites, i), |c| c.spec_poison(pty));
             }
         }
         let unresolved: Vec<u32> = cs.tparams.iter().copied().filter(|p| !map.contains_key(p) && self.types.mentions(cs.ret, &[*p])).collect();

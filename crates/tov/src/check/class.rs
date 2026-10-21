@@ -676,15 +676,21 @@ impl<'a> Checker<'a> {
             fcx.frames.push(Frame::new(None, None, false, None));
             fcx.class = Some(c);
             if !is_static {
-                fcx.locals.push(Local { name: THIS_SYM, ty: info.this_ty, kind: LocalKind::Param, span: mem.name_span, kw_span: None, promotable: false, frame: 0, global: None });
+                fcx.locals.push(Local { name: THIS_SYM, ty: info.this_ty, kind: LocalKind::Param, span: mem.name_span, kw_span: None, promotable: false, frame: 0, global: None, sites: Vec::new() });
                 fcx.scopes[0].push((THIS_SYM, 0, None));
                 fcx.this_key = Some(mem.name_span.start);
                 fcx.ctor = true;
             }
             self.fcx.push(fcx);
-            let t = self.expr(*e, Some(fty));
-            let span = self.ast().expr(*e).span;
-            self.expect_assignable(t, fty, span, None);
+            let sites = match &mem.kind {
+                MemberKind::Field { ty: Some(te), .. } => self.type_sites(info.module, *te),
+                _ => Vec::new(),
+            };
+            self.flow(sites, |ck| {
+                let t = ck.expr(*e, Some(fty));
+                let span = ck.ast().expr(*e).span;
+                ck.expect_assignable(t, fty, span, None);
+            });
             self.check_shared_copies();
             self.fcx.pop();
         }

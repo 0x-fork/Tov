@@ -4,6 +4,7 @@ mod builtins;
 pub(crate) mod class;
 mod expr;
 pub mod facts;
+mod spec;
 mod stmt;
 
 pub use facts::{CallFact, Callee, IdentFact, MemberFact, ModuleFacts, NpmName};
@@ -138,12 +139,16 @@ struct Local {
     /// `let x = <int literal>` without annotation: may become `f64` from later uses.
     promotable: bool,
     frame: usize,
+    /// The speculated `number`s its type came from (see `spec`).
+    sites: Vec<spec::Site>,
 }
 
 type LocalId = usize;
 
 struct Frame {
     ret: Option<TyId>,
+    /// The return annotation's speculated `number`s.
+    ret_sites: Vec<spec::Site>,
     returns: Vec<TyId>,
     loops: u32,
     switches: u32,
@@ -166,7 +171,7 @@ struct Frame {
 
 impl Frame {
     fn new(ret: Option<TyId>, name: Option<Sym>, can_throw: bool, throws_decl: Option<TyId>) -> Frame {
-        Frame { ret, returns: Vec::new(), loops: 0, switches: 0, name, can_throw, throws_decl, thrown: Vec::new(), try_frames: Vec::new(), try_expr: 0, module_init: false, is_async: false }
+        Frame { ret, ret_sites: Vec::new(), returns: Vec::new(), loops: 0, switches: 0, name, can_throw, throws_decl, thrown: Vec::new(), try_frames: Vec::new(), try_expr: 0, module_init: false, is_async: false }
     }
 }
 
@@ -228,6 +233,11 @@ struct Syms {
     kind: Sym,
     main: Sym,
     u: Sym,
+    number: Sym,
+}
+
+fn intern_syms(interner: &mut Interner) -> Syms {
+    Syms { kind: interner.intern("kind"), main: interner.intern("main"), u: interner.intern("U"), number: interner.intern("number") }
 }
 
 /// Checking runs in two phases. Phase A (one thread) resolves everything that forms a module's
@@ -292,12 +302,24 @@ pub struct Checker<'a> {
     pub(crate) facts: Option<Vec<ModuleFacts>>,
     /// The call expression whose instantiated signature `call_sig` should record.
     pending_call: Option<ExprId>,
+    /// `number` checked as `int` (see `spec`): the sites known to be floats, and what this
+    /// checker found: sites a float reached, the destinations of the values being checked,
+    /// where expressions' types came from, and record fields' sites (frozen phase-A base, then
+    /// this checker's own).
+    spec: Arc<spec::Spec>,
+    spec_used: bool,
+    spec_hits: Vec<spec::Site>,
+    spec_flow: Vec<Vec<spec::Site>>,
+    spec_srcs_base: Arc<HashMap<Span, Vec<spec::Site>>>,
+    spec_srcs: HashMap<Span, Vec<spec::Site>>,
+    spec_fields_base: Arc<HashMap<(TyId, Sym), Vec<spec::Site>>>,
+    spec_fields: HashMap<(TyId, Sym), Vec<spec::Site>>,
+    /// Parameter and return sites of the callee `call_sig` is about to check.
+    call_spec: Option<(Vec<Vec<spec::Site>>, Vec<spec::Site>)>,
 }
 
 /// `threads`: phase-B worker count (default: all cores). Results don't depend on it.
-fn new_checker<'a>(modules: &'a [Module], interner: &'a mut Interner, sm: &'a SourceMap) -> Checker<'a> {
-    let syms = Syms { kind: interner.intern("kind"), main: interner.intern("main"), u: interner.intern("U") };
-    let interner = &*interner;
+fn new_checker<'a>(modules: &'a [Module], interner: &'a Interner, sm: &'a SourceMap, syms: Syms, spec: Arc<spec::Spec>) -> Checker<'a> {
     Checker {
         modules,
         interner,
@@ -339,36 +361,88 @@ fn new_checker<'a>(modules: &'a [Module], interner: &'a mut Interner, sm: &'a So
         syms,
         facts: None,
         pending_call: None,
+        spec,
+        spec_used: false,
+        spec_hits: Vec::new(),
+        spec_flow: Vec::new(),
+        spec_srcs_base: Arc::default(),
+        spec_srcs: HashMap::default(),
+        spec_fields_base: Arc::default(),
+        spec_fields: HashMap::default(),
+        call_spec: None,
     }
 }
 
 /// Checks the program and keeps everything code generation needs: one type table for the
 /// whole program and per-module facts. Single-threaded.
 pub fn check_for_build<'a>(modules: &'a [Module], interner: &'a mut Interner, sm: &'a SourceMap) -> (Vec<Diagnostic>, Checker<'a>) {
-    let mut c = new_checker(modules, interner, sm);
-    c.facts = Some(modules.iter().map(|m| ModuleFacts::new(m.ast.exprs.len())).collect());
-    c.collect();
-    c.resolve_imports();
-    c.bind_web_globals();
-    c.find_recursive_aliases();
-    for m in 0..modules.len() as u32 {
-        c.cur = m;
-        c.check_interface(m);
+    let syms = intern_syms(interner);
+    let interner: &'a Interner = interner;
+    let mut floats: HashSet<spec::Site> = HashSet::default();
+    let (mut on, mut rounds) = (true, 0);
+    loop {
+        rounds += 1;
+        let mut c = new_checker(modules, interner, sm, syms, Arc::new(spec::Spec { on, floats: floats.clone() }));
+        c.facts = Some(modules.iter().map(|m| ModuleFacts::new(m.ast.exprs.len())).collect());
+        c.collect();
+        c.resolve_imports();
+        c.bind_web_globals();
+        c.find_recursive_aliases();
+        for m in 0..modules.len() as u32 {
+            c.cur = m;
+            c.check_interface(m);
+        }
+        c.check_class_cycles();
+        for m in 0..modules.len() as u32 {
+            c.cur = m;
+            c.check_bodies(m);
+        }
+        let mut out = std::mem::take(&mut c.done);
+        out.extend(std::mem::take(&mut c.diags));
+        if on && c.spec_used && std::env::var("TOV_TRACE").is_ok() {
+            eprintln!("check: `number` as `int`, round {rounds}: {} new float site(s), {} error(s)", c.spec_hits.iter().filter(|s| !floats.contains(s)).count(), out.len());
+            for d in &out {
+                eprintln!("  {}", crate::diag::render_text(std::slice::from_ref(d), sm).lines().next().unwrap_or(""));
+            }
+        }
+        if on
+            && c.spec_used
+            && let Some(again) = spec::next_round(&mut floats, &c.spec_hits, !out.is_empty(), rounds)
+        {
+            on = again;
+            continue;
+        }
+        if std::env::var("TOV_TRACE").is_ok() && c.spec_used {
+            eprintln!("check: `number` as `int`: {}, {rounds} round(s), {} float site(s)", if on { "on" } else { "off" }, floats.len());
+        }
+        out.sort_by(|a, b| (a.span.file, a.span.start, a.code).cmp(&(b.span.file, b.span.start, b.code)));
+        out.dedup_by(|a, b| a.span == b.span && a.code == b.code && a.message == b.message);
+        return (out, c);
     }
-    c.check_class_cycles();
-    for m in 0..modules.len() as u32 {
-        c.cur = m;
-        c.check_bodies(m);
-    }
-    let mut out = std::mem::take(&mut c.done);
-    out.extend(std::mem::take(&mut c.diags));
-    out.sort_by(|a, b| (a.span.file, a.span.start, a.code).cmp(&(b.span.file, b.span.start, b.code)));
-    out.dedup_by(|a, b| a.span == b.span && a.code == b.code && a.message == b.message);
-    (out, c)
 }
 
 pub fn check_program(modules: &[Module], interner: &mut Interner, sm: &SourceMap, threads: Option<usize>) -> Vec<Diagnostic> {
-    let mut c = new_checker(modules, interner, sm);
+    let syms = intern_syms(interner);
+    let interner = &*interner;
+    let mut floats: HashSet<spec::Site> = HashSet::default();
+    let (mut on, mut rounds) = (true, 0);
+    loop {
+        rounds += 1;
+        let (out, used, hits) = check_program_once(modules, interner, sm, threads, syms, Arc::new(spec::Spec { on, floats: floats.clone() }));
+        if on
+            && used
+            && let Some(again) = spec::next_round(&mut floats, &hits, !out.is_empty(), rounds)
+        {
+            on = again;
+            continue;
+        }
+        return out;
+    }
+}
+
+/// One check of the whole program; also returns whether speculation was used and its hits.
+fn check_program_once(modules: &[Module], interner: &Interner, sm: &SourceMap, threads: Option<usize>, syms: Syms, spec: Arc<spec::Spec>) -> (Vec<Diagnostic>, bool, Vec<spec::Site>) {
+    let mut c = new_checker(modules, interner, sm, syms, spec);
     c.collect();
     c.resolve_imports();
     c.bind_web_globals();
@@ -382,11 +456,15 @@ pub fn check_program(modules: &[Module], interner: &mut Interner, sm: &SourceMap
     c.check_class_cycles();
     let mut out = std::mem::take(&mut c.done);
     out.extend(std::mem::take(&mut c.diags));
+    let mut used = c.spec_used;
+    let mut hits = std::mem::take(&mut c.spec_hits);
     // Freeze phase-A results.
     c.checked_bodies = Arc::new(std::mem::take(&mut c.checked_local));
     c.checked_members_base = Arc::new(std::mem::take(&mut c.checked_members));
     c.gparams_base = Arc::new(std::mem::take(&mut c.gparams));
     c.param_names_base = Arc::new(std::mem::take(&mut c.param_names));
+    c.spec_fields_base = Arc::new(std::mem::take(&mut c.spec_fields));
+    c.spec_srcs_base = Arc::new(std::mem::take(&mut c.spec_srcs));
     let base = Arc::new(std::mem::take(&mut c.types));
     let tb = std::time::Instant::now();
     // Phase B: modules are handed out dynamically; each is checked from a clean overlay.
@@ -407,9 +485,9 @@ pub fn check_program(modules: &[Module], interner: &mut Interner, sm: &SourceMap
         }
         let mut d = std::mem::take(&mut w.done);
         d.extend(w.diags);
-        d
+        (d, w.spec_used, w.spec_hits)
     };
-    let results: Vec<Vec<Diagnostic>> = if threads == 1 {
+    let results: Vec<(Vec<Diagnostic>, bool, Vec<spec::Site>)> = if threads == 1 {
         vec![run(base.clone())]
     } else {
         std::thread::scope(|scope| {
@@ -423,15 +501,17 @@ pub fn check_program(modules: &[Module], interner: &mut Interner, sm: &SourceMap
             handles.into_iter().map(|h| h.join().expect("checker thread panicked")).collect()
         })
     };
-    for r in results {
+    for (r, u, h) in results {
         out.extend(r);
+        used |= u;
+        hits.extend(h);
     }
     if std::env::var("TOV_TRACE").is_ok() {
         eprintln!("check: phase A {:?}, phase B {:?} ({threads} threads)", tb - ta, tb.elapsed());
     }
     out.sort_by(|a, b| (a.span.file, a.span.start, a.code).cmp(&(b.span.file, b.span.start, b.code)));
     out.dedup_by(|a, b| a.span == b.span && a.code == b.code && a.message == b.message);
-    out
+    (out, used, hits)
 }
 
 impl<'a> Checker<'a> {
@@ -492,6 +572,15 @@ impl<'a> Checker<'a> {
             syms: self.syms,
             facts: None,
             pending_call: None,
+            spec: self.spec.clone(),
+            spec_used: false,
+            spec_hits: Vec::new(),
+            spec_flow: Vec::new(),
+            spec_srcs_base: self.spec_srcs_base.clone(),
+            spec_srcs: HashMap::default(),
+            spec_fields_base: self.spec_fields_base.clone(),
+            spec_fields: HashMap::default(),
+            call_spec: None,
         }
     }
 
@@ -503,6 +592,7 @@ impl<'a> Checker<'a> {
         self.exhaustive.clear();
         self.checked_local.clear();
         self.checked_members.clear();
+        self.spec_fields.clear();
     }
 
     #[inline]
@@ -967,8 +1057,11 @@ impl<'a> Checker<'a> {
                 let t = match ty {
                     Some(te) => {
                         let declared = c.resolve_type(te, &[]);
-                        let found = c.expr(init, Some(declared));
-                        c.expect_assignable(found, declared, c.ast().expr(init).span, None);
+                        let sites = c.type_sites(m, te);
+                        c.flow(sites, |c| {
+                            let found = c.expr(init, Some(declared));
+                            c.expect_assignable(found, declared, c.ast().expr(init).span, None);
+                        });
                         declared
                     }
                     None => {
@@ -1311,17 +1404,19 @@ impl<'a> Checker<'a> {
             let decl = if sig.throws == UNKNOWN || (f.throws.is_none() && sig.throws == NEVER) { None } else { Some(sig.throws) };
             let mut frame = Frame::new(ret, Some(f.name), true, decl);
             frame.is_async = f.is_async;
+            let (param_sites, ret_sites) = self.decl_sites(m, f);
+            frame.ret_sites = ret_sites;
             fcx.frames.push(frame);
             fcx.class = class;
             if let Some(t) = &this {
-                fcx.locals.push(Local { name: THIS_SYM, ty: t.ty, kind: LocalKind::Param, span: f.name_span, kw_span: None, promotable: false, frame: 0, global: None });
+                fcx.locals.push(Local { name: THIS_SYM, ty: t.ty, kind: LocalKind::Param, span: f.name_span, kw_span: None, promotable: false, frame: 0, global: None, sites: Vec::new() });
                 fcx.scopes[0].push((THIS_SYM, fcx.locals.len() - 1, None));
                 fcx.this_key = Some(f.name_span.start);
                 fcx.ctor = t.ctor;
             }
-            for (p, fp) in f.params.iter().zip(&sig.params) {
+            for ((p, fp), sites) in f.params.iter().zip(&sig.params).zip(param_sites) {
                 let kind = if p.inout { LocalKind::Inout } else { LocalKind::Param };
-                fcx.locals.push(Local { name: p.name, ty: fp.ty, kind, span: p.span, kw_span: None, promotable: false, frame: 0, global: None });
+                fcx.locals.push(Local { name: p.name, ty: fp.ty, kind, span: p.span, kw_span: None, promotable: false, frame: 0, global: None, sites });
                 let id = fcx.locals.len() - 1;
                 fcx.scopes[0].push((p.name, id, None));
             }
@@ -1571,6 +1666,15 @@ impl<'a> Checker<'a> {
                 let order: Vec<Sym> = out.iter().map(|f| f.name).collect();
                 let t = self.types.record(out);
                 self.types.note_field_order(t, order);
+                if self.spec.on {
+                    let m = self.cur;
+                    for f in fields {
+                        let sites = self.type_sites(m, f.ty);
+                        if !sites.is_empty() {
+                            self.spec_fields.entry((t, f.name)).or_default().extend(sites);
+                        }
+                    }
+                }
                 t
             }
             TypeExprKind::Func(params, ret, throws) => {
@@ -1596,6 +1700,10 @@ impl<'a> Checker<'a> {
                     None => NEVER,
                 };
                 self.types.func_throws(ps, r, th)
+            }
+            TypeExprKind::Named { ns: None, name, args, .. } if *name == self.syms.number && args.is_empty() && self.spec_int(te) && !tscope.iter().any(|(s, _)| s == name) => {
+                self.spec_used = true;
+                INT
             }
             TypeExprKind::Named { ns, name, name_span, args } => self.resolve_named(*ns, *name, *name_span, args, span, tscope),
         }
@@ -1973,6 +2081,10 @@ impl<'a> Checker<'a> {
 
     fn expect_assignable(&mut self, found: TyId, expected: TyId, span: Span, context: Option<String>) -> bool {
         if self.assignable(found, expected) {
+            if found == JS && self.spec.on {
+                // (converted from JavaScript, where it may be any number)
+                self.spec_poison(expected);
+            }
             return true;
         }
         let d = self.mismatch(found, expected, span, context);
@@ -1981,6 +2093,7 @@ impl<'a> Checker<'a> {
     }
 
     fn mismatch(&mut self, found: TyId, expected: TyId, span: Span, context: Option<String>) -> Diagnostic {
+        self.spec_mismatch(found, expected, span);
         let (fs, es) = (self.show(found), self.show(expected));
         let mut d = Diagnostic::new("T0001", span, format!("expected `{es}`, found `{fs}`"));
         if let Some(c) = context {
@@ -2066,7 +2179,7 @@ impl<'a> Checker<'a> {
                 self.diags.push(Diagnostic::new("N0003", span, format!("`{n}` is already declared in this scope")).note("previous", format!("line {line}")));
             }
         let fcx = self.fcx.last_mut().unwrap();
-        fcx.locals.push(Local { name, ty, kind, span, kw_span, promotable, frame, global: None });
+        fcx.locals.push(Local { name, ty, kind, span, kw_span, promotable, frame, global: None, sites: Vec::new() });
         let id = fcx.locals.len() - 1;
         fcx.scopes.last_mut().unwrap().push((name, id, None));
         id
