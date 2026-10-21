@@ -4767,6 +4767,16 @@ impl<'c, 'a> Gen<'c, 'a> {
                 if self.c.class_of(nt).is_some() {
                     return self.class_field_place(*obj, *name, span);
                 }
+                if let Ty::Interface(..) = self.tget(nt) {
+                    let v = self.expr(*obj);
+                    let v = self.project(v, nt);
+                    let v = if self.heap_rooted(*obj) { self.own(v) } else { v };
+                    if let Some((lv, ty)) = self.iface_field_lv(&v, *name) {
+                        return Place { lv, ty, weak: false };
+                    }
+                    self.unsupported(span, "assigning to this member");
+                    return Place { lv: "tv__dummy".into(), ty: ERROR, weak: false };
+                }
                 let p = self.place(*obj);
                 let p = self.project_place(p, narrowed);
                 // Through a recursive alias: unbox to reach the record.

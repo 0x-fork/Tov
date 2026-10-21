@@ -201,21 +201,6 @@ struct FnCtx {
     /// Narrowings of module constants (`const port = process.env.PORT; if (port !== undefined)`);
     /// scope entries named `GLOBAL_SYM` point into it.
     global_table: Vec<((u32, u32), TyId)>,
-    /// For the copy-then-mutate check: `let b = a` bindings (copy, source, position),
-    /// in-place mutations (local, span, how many fields/elements deep) and reads (local,
-    /// position) of locals. An alias records how deep in its source it was taken.
-    aliases: Vec<(LocalId, LocalId, u32, u32, Span)>,
-    /// Values put in a collection or record: (container, value, position). Changing the value
-    /// afterwards changes the container in TypeScript, but not the copy Tov stored.
-    stored: Vec<(LocalId, LocalId, u32)>,
-    /// Locals copied from, or stored into, a class instance or module variable (position, the
-    /// place's span): TypeScript would share them with it.
-    heap_links: Vec<(LocalId, u32, Span)>,
-    mutations: Vec<(LocalId, Span, u32)>,
-    /// `let x = x ?? d` starting a body, for a parameter `x = d` (see `parser::with_defaults`):
-    /// such a local and the parameter's name.
-    default_shadows: Vec<LocalId>,
-    reads: Vec<(LocalId, u32)>,
     /// Names of locals assigned or changed (through a field, an element or a method call) inside a
     /// closure: never narrowed (the closure may run between the check and the use)...
     closure_mutated: HashSet<Sym>,
@@ -338,6 +323,8 @@ pub struct Checker<'a> {
     /// Module variables `let x = 0` a float is stored into, and interfaces made records that a
     /// class instance is given to: (module, item).
     global_hits: Vec<(u32, u32)>,
+    /// Inferred records' `int` fields from integer literals (`{ n: 0 }`): their `lit_key`s.
+    lit_fields: HashMap<(TyId, Sym), Vec<(u32, u32)>>,
     spec_flow: Vec<Vec<spec::Site>>,
     spec_srcs_base: Arc<HashMap<Span, Vec<spec::Site>>>,
     spec_srcs: HashMap<Span, Vec<spec::Site>>,
@@ -419,6 +406,7 @@ fn new_checker<'a>(modules: &'a [Module], interner: &'a Interner, sm: &'a Source
         spec_hits: Vec::new(),
         throw_hits: Vec::new(),
         global_hits: Vec::new(),
+        lit_fields: HashMap::default(),
         spec_flow: Vec::new(),
         spec_srcs_base: Arc::default(),
         spec_srcs: HashMap::default(),
@@ -665,6 +653,7 @@ impl<'a> Checker<'a> {
             spec_hits: Vec::new(),
             throw_hits: Vec::new(),
             global_hits: Vec::new(),
+            lit_fields: HashMap::default(),
             spec_flow: Vec::new(),
             spec_srcs_base: self.spec_srcs_base.clone(),
             spec_srcs: HashMap::default(),
@@ -692,6 +681,7 @@ impl<'a> Checker<'a> {
         self.checked_local.clear();
         self.checked_members.clear();
         self.spec_fields.clear();
+        self.lit_fields.clear();
     }
 
     #[inline]
@@ -1125,7 +1115,6 @@ impl<'a> Checker<'a> {
         self.fcx.push(FnCtx { closure_mutated, closure_assigned, test_body: true, ..Default::default() });
         self.fcx.last_mut().unwrap().scopes.push(Vec::new());
         let t = self.expr(body, Some(expected));
-        self.check_shared_copies();
         if !self.assignable(t, expected) {
             let span = self.ast().expr(body).span;
             let msg = format!("a test body must be `() => {{ ... }}`, found `{}`", self.show(t));
@@ -1552,8 +1541,7 @@ impl<'a> Checker<'a> {
                     }
                 }
             });
-            self.check_shared_copies();
-            let fcx = self.fcx.pop().unwrap();
+                let fcx = self.fcx.pop().unwrap();
             result = r;
             // A body that throws where its signature was taken not to (it only calls something
             // that throws): its callers are checked again knowing it can.
@@ -2629,79 +2617,6 @@ impl<'a> Checker<'a> {
         let t = self.types.record(fields);
         self.types.note_field_order(t, order);
         t
-    }
-
-    /// Would TypeScript share this value between two variables (objects, arrays, maps, sets)?
-    /// A copy of a value of `ty` would be shared in TypeScript but is its own in Tov: records
-    /// (arrays, maps, sets and recursive aliases' boxes are shared in Tov too).
-    fn shared_in_ts(&mut self, ty: TyId) -> bool {
-        self.types.members(ty).into_iter().any(|m| matches!(self.types.get(m), Ty::Record(_) | Ty::Interface(..)))
-    }
-
-    /// V0120: `const b = a; b.push(x); use(a)` — TypeScript shares `a` and `b`, Tov copies.
-    /// (Likewise `const row = grid[0]!`, a value put into a collection, and copies to or from
-    /// class instances and module variables, V0121.)
-    fn check_shared_copies(&mut self) {
-        let fcx = self.fcx.last().unwrap();
-        let after = |l: LocalId, pos: u32, depth: u32| fcx.mutations.iter().filter(move |&&(m, sp, d)| m == l && sp.start > pos && d >= depth);
-        let read_after = |l: LocalId, sp: Span| fcx.reads.iter().any(|&(r, at)| r == l && at > sp.end);
-        let mut copies = Vec::new();
-        for &(copy, src, pos, depth, init) in &fcx.aliases {
-            // (changing the copy, then reading the source; or changing the source where the
-            // copy came from — not replacing it or other parts — then reading the copy)
-            let hit = after(copy, pos, 0).find(|&&(_, sp, _)| read_after(src, sp)).map(|&(_, sp, _)| (sp, copy, src)).or_else(|| after(src, pos, depth).find(|&&(_, sp, _)| read_after(copy, sp)).map(|&(_, sp, _)| (sp, src, copy)));
-            if let Some((sp, changed, other)) = hit {
-                copies.push((sp, fcx.locals[changed].name, fcx.locals[other].name, fcx.locals[copy].name, init, matches!(self.types.get(fcx.locals[copy].ty), Ty::Array(_))));
-            }
-        }
-        let mut stored = Vec::new();
-        for &(container, value, pos) in &fcx.stored {
-            if let Some(&(_, sp, _)) = after(value, pos, 0).find(|&&(_, sp, _)| read_after(container, sp)) {
-                stored.push((sp, fcx.locals[value].name, fcx.locals[container].name));
-            }
-        }
-        let mut heap = Vec::new();
-        for &(l, pos, place) in &fcx.heap_links {
-            if let Some(&(_, sp, _)) = after(l, pos, 0).next() {
-                heap.push((sp, fcx.locals[l].name, place));
-            }
-        }
-        for (sp, changed, other, copy, init, is_array) in copies {
-            let (c, o, cp, sr) = (self.name(changed).to_string(), self.name(other).to_string(), self.name(copy).to_string(), self.src(init).to_string());
-            let copy_note = if is_array { format!("say so explicitly: `{cp} = {sr}.slice()`") } else { "say so explicitly: build a new value".to_string() };
-            // (`xs.find(f)` / `xs.at(i)`: an element, changed where it is through its index)
-            let found = [".find(", ".findLast(", ".at("].iter().find_map(|m| sr.find(m).map(|at| (&sr[..at], &sr[at + 1..])));
-            let one_note = match found {
-                Some((xs, call)) if call.starts_with("at(") => format!("modify `{xs}[i]` directly instead of going through `{cp}`"),
-                Some((xs, call)) => {
-                    let index = if call.starts_with("findLast(") { call.replacen("findLast(", "findLastIndex(", 1) } else { call.replacen("find(", "findIndex(", 1) };
-                    format!("find its index (`const i = {xs}.{index}`) and modify `{xs}[i]` directly")
-                }
-                None => format!("modify `{sr}` directly instead of going through `{cp}`"),
-            };
-            self.report(
-                Diagnostic::new("V0120", sp, format!("this changes `{c}`, but `{o}` is a separate copy (TypeScript would change both)"))
-                    .note("why", format!("`{cp}` was initialized from `{sr}`: Tov records (object literals) are values, so assignment copies"))
-                    .note("if you meant a copy", copy_note)
-                    .note("if you meant one value", one_note),
-            );
-        }
-        for (sp, value, container) in stored {
-            let (v, c) = (self.name(value).to_string(), self.name(container).to_string());
-            self.report(
-                Diagnostic::new("V0120", sp, format!("this changes `{v}`, but `{c}` holds a separate copy of it (TypeScript would change both)"))
-                    .note("why", format!("`{v}` was copied into `{c}`: Tov records (object literals) are values"))
-                    .note("instead", format!("finish changing `{v}` before storing it, change it through `{c}`, or make it a class instance (a reference)")),
-            );
-        }
-        for (sp, name, place) in heap {
-            let (n, p) = (self.name(name).to_string(), self.src(place).to_string());
-            self.report(
-                Diagnostic::new("V0121", sp, format!("this changes `{n}`, but `{p}` holds a separate copy (TypeScript would change both)"))
-                    .note("why", "Tov records (object literals) are values, so assignment copies")
-                    .note("instead", format!("change `{p}` directly, or make the shared value a class instance (a reference)")),
-            );
-        }
     }
 
     fn narrow(&mut self, local: LocalId, ty: TyId) {

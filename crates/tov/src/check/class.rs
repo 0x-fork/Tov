@@ -715,7 +715,6 @@ impl<'a> Checker<'a> {
                 let span = ck.ast().expr(*e).span;
                 ck.expect_assignable(t, fty, span, None);
             });
-            self.check_shared_copies();
             self.fcx.pop();
         }
     }
@@ -888,6 +887,9 @@ impl<'a> Checker<'a> {
                             Some(mr) => {
                                 let t = self.member_type(&mr);
                                 if !self.assignable(t, f.ty) {
+                                    if t == INT && self.types.is_float(f.ty) {
+                                        self.blame_int_fields(c, Some(f.name));
+                                    }
                                     problems.push(format!("`{}` has type `{}`, expected `{}`", self.name(f.name), self.show(t), self.show(f.ty)));
                                 }
                             }

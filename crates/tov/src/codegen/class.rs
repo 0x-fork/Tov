@@ -101,7 +101,7 @@ impl<'c, 'a> Gen<'c, 'a> {
     }
 
     /// An lvalue for field `f` (instantiated for `cls`) of the object `obj`.
-    fn field_lv_of(&mut self, obj: &str, cls: TyId, f: &CField) -> String {
+    pub(crate) fn field_lv_of(&mut self, obj: &str, cls: TyId, f: &CField) -> String {
         let fc = field_cname(self.sym(f.name));
         let owner = self.c.upcast_to(cls, f.owner).unwrap_or(cls);
         if owner == cls {
@@ -155,7 +155,7 @@ impl<'c, 'a> Gen<'c, 'a> {
     }
 
     /// The field named `name` of class type `cls`, instantiated.
-    fn class_field(&mut self, cls: TyId, name: Sym) -> Option<CField> {
+    pub(crate) fn class_field(&mut self, cls: TyId, name: Sym) -> Option<CField> {
         match self.c.class_member(cls, name)? {
             ClassMemberRef::Field(f) => Some(f),
             _ => None,

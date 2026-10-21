@@ -140,6 +140,9 @@ impl<'a> Checker<'a> {
     /// A value of type `found` (the expression at `span`) doesn't fit `expected`.
     pub(super) fn spec_mismatch(&mut self, found: TyId, expected: TyId, span: Span) {
         if !self.spec.on {
+            // (integers from literals and class fields `n = 0` still widen, as TypeScript has
+            // no `int`: see `blame_lits`)
+            self.spec_diff(found, expected, &mut Vec::new(), 0);
             return;
         }
         let mut hits = self.sources(span);
@@ -166,6 +169,9 @@ impl<'a> Checker<'a> {
                     {
                         self.field_sites(e, x.name, out);
                         self.field_sites(f, x.name, out);
+                        if y.ty == INT && self.types.is_float(x.ty) {
+                            self.blame_lits(f, x.name);
+                        }
                         self.spec_diff(y.ty, x.ty, out, depth + 1);
                     }
                 }
@@ -181,6 +187,27 @@ impl<'a> Checker<'a> {
             (Ty::Class(c, _), Ty::Interface(i, _)) | (Ty::Interface(i, _), Ty::Class(c, _)) => {
                 out.extend(self.iface_sites(i));
                 out.extend(self.class_sites(c));
+                self.blame_int_fields(c, None);
+            }
+            // a record given to an interface: its fields from integer literals
+            (Ty::Record(ff), Ty::Interface(i, args)) => {
+                out.extend(self.iface_sites(i));
+                let args = self.types.tys(args).to_vec();
+                for x in self.iface_fields_inst(i, &args) {
+                    if self.types.is_float(x.ty) && self.types.fields(ff).iter().any(|y| y.name == x.name && y.ty == INT) {
+                        self.blame_lits(f, x.name);
+                    }
+                }
+            }
+            // a class given to a record type: its numbers, and fields `n = 0` kept as integers
+            (Ty::Class(c, _), Ty::Record(ef)) => {
+                out.extend(self.class_sites(c));
+                for x in self.types.fields(ef).to_vec() {
+                    self.field_sites(e, x.name, out);
+                    if self.types.is_float(x.ty) {
+                        self.blame_int_fields(c, Some(x.name));
+                    }
+                }
             }
             (Ty::Union(a), Ty::Union(b)) => {
                 let (a, b) = (self.types.tys(a).to_vec(), self.types.tys(b).to_vec());
@@ -191,6 +218,31 @@ impl<'a> Checker<'a> {
                 }
             }
             _ => {}
+        }
+    }
+
+    /// The integer literals that gave `record` its `int` field `name` (`{ n: 0 }`): floats.
+    fn blame_lits(&mut self, record: TyId, name: Sym) {
+        if let Some(ks) = self.lit_fields.get(&(record, name)) {
+            self.global_hits.extend_from_slice(ks);
+        }
+    }
+
+    /// Class `c`'s (and its bases') fields `n = 0` kept as integers (only `name`, if given):
+    /// floats.
+    pub(super) fn blame_int_fields(&mut self, c: u32, name: Option<Sym>) {
+        let mut k = Some(c);
+        while let Some(cls) = k {
+            let m = self.classes[cls as usize].module;
+            for (mi, mem) in self.class_decl(cls).members.iter().enumerate() {
+                if !mem.is_static
+                    && name.is_none_or(|n| n == mem.name)
+                    && matches!(&mem.kind, ast::MemberKind::Field { ty: None, init: Some(i), .. } if matches!(self.modules[m as usize].ast.expr(*i).kind, ExprKind::Int(_)))
+                {
+                    self.global_hits.push(field_key(cls, mi as u32));
+                }
+            }
+            k = self.classes[cls as usize].base.and_then(|b| self.class_of(b)).map(|(b, _)| b);
         }
     }
 
@@ -397,6 +449,22 @@ impl<'a> Checker<'a> {
         out
     }
 
+    /// Class fields `name = <integer>` (kept as integers) become floats: set through an
+    /// interface, which may hold any number.
+    pub(super) fn widen_int_fields(&mut self, name: Sym) {
+        for c in 0..self.classes.len() as u32 {
+            let m = self.classes[c as usize].module;
+            for (mi, mem) in self.class_decl(c).members.iter().enumerate() {
+                if mem.name == name
+                    && !mem.is_static
+                    && matches!(&mem.kind, crate::ast::MemberKind::Field { ty: None, init: Some(i), .. } if matches!(self.modules[m as usize].ast.expr(*i).kind, ExprKind::Int(_)))
+                {
+                    self.global_hits.push(field_key(c, mi as u32));
+                }
+            }
+        }
+    }
+
     /// Every speculated `number` in an interface's members.
     pub(super) fn iface_sites(&self, i: u32) -> Vec<Site> {
         let (m, ii) = (self.ifaces[i as usize].module, self.ifaces[i as usize].item);
@@ -436,4 +504,10 @@ impl<'a> Checker<'a> {
 /// (module, item).
 pub(crate) fn field_key(class: u32, member: u32) -> (u32, u32) {
     (u32::MAX - class, member)
+}
+
+/// An integer literal's key among `float_globals` (a field of an inferred record literal,
+/// `{ n: 0 }`): (2^30 + module, expression), apart from the rest.
+pub(crate) fn lit_key(m: u32, e: ExprId) -> (u32, u32) {
+    (0x4000_0000 + m, e)
 }

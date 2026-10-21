@@ -43,6 +43,11 @@ impl<'c, 'a> Gen<'c, 'a> {
                     }
                 }
             }
+            // (then, per member, its address in the value for assigning through the interface;
+            // NULL for functions)
+            for k in 0..self.iface_members(t).len() {
+                let _ = write!(fields, " void *(*f{k})(void *);");
+            }
             let _ = writeln!(self.typedefs, "typedef struct {name} {{ tvg_itab h;{fields} }} {name};");
         }
         name
@@ -55,6 +60,11 @@ impl<'c, 'a> Gen<'c, 'a> {
         let itab = self.itab_for(src, to, m)?;
         let data = match self.tget(src) {
             Ty::Class(..) => {
+                let code = self.consume(v);
+                format!("(void *)({code})")
+            }
+            // (an object: itself, so identity holds through the interface)
+            Ty::Record(_) if self.is_obj(src) => {
                 let code = self.consume(v);
                 format!("(void *)({code})")
             }
@@ -91,9 +101,10 @@ impl<'c, 'a> Gen<'c, 'a> {
         self.itabs.insert((src, to), name.clone());
         let members = self.iface_members(to);
         let is_class = matches!(self.tget(src), Ty::Class(..));
+        let is_obj = self.is_obj(src);
         let sct = self.ctype(src);
         // How thunks reach the value: the object, or the boxed copy.
-        let (self_decl, value) = if is_class { (format!("{sct} x = self;"), "x".to_string()) } else {
+        let (self_decl, value) = if is_class || is_obj { (format!("{sct} x = self;"), "x".to_string()) } else {
             let bn = self.iface_box(src);
             (format!("{bn} *x = self;"), "x->v".to_string())
         };
@@ -101,6 +112,11 @@ impl<'c, 'a> Gen<'c, 'a> {
         // Retain / release / print.
         let (rt, rl) = if is_class {
             ("tvg_obj_retain".to_string(), self.class_release_code(src, "p").replace("(p)", ""))
+        } else if is_obj {
+            let rel = self.release_code(src, "o");
+            let _ = writeln!(out, "static void {name}_rt(void *p) {{ (({sct})p)->rc++; }}");
+            let _ = writeln!(out, "static void {name}_rl(void *p) {{ {sct} o = p; {rel}; }}");
+            (format!("{name}_rt"), format!("{name}_rl"))
         } else {
             let bn = self.iface_box(src);
             let rel = self.release_code(src, "b->v");
@@ -116,11 +132,11 @@ impl<'c, 'a> Gen<'c, 'a> {
         } else {
             (rt, rl)
         };
-        let place = if is_class { format!("(({sct})p)") } else { format!("(({} *)p)->v", self.iface_box(src)) };
+        let (decl, place) = if is_class || is_obj { (format!("{sct} o = p; "), "o".to_string()) } else { (String::new(), format!("(({} *)p)->v", self.iface_box(src))) };
         let ins = self.inspect_code(src, &place, "depth");
         let ts = self.string_code(src, &place);
-        let _ = writeln!(out, "static void {name}_in(tv_sb *sb, void *p, int depth) {{ (void)depth; {ins}; }}");
-        let _ = writeln!(out, "static void {name}_ts(tv_sb *sb, void *p) {{ {ts}; }}");
+        let _ = writeln!(out, "static void {name}_in(tv_sb *sb, void *p, int depth) {{ (void)depth; {decl}{ins}; }}");
+        let _ = writeln!(out, "static void {name}_ts(tv_sb *sb, void *p) {{ {decl}{ts}; }}");
         // Member thunks.
         let mut entries = Vec::new();
         for (k, f) in members.iter().enumerate() {
@@ -260,6 +276,43 @@ impl<'c, 'a> Gen<'c, 'a> {
             }
             entries.push(tname);
         }
+        // Field addresses.
+        for (k, f) in members.iter().enumerate() {
+            if matches!(self.tget(f.ty), Ty::Func(..)) {
+                entries.push("NULL".into());
+                continue;
+            }
+            let ct = self.ctype(f.ty);
+            let addr = match self.tget(src) {
+                Ty::Class(..) => match self.class_field(src, f.name) {
+                    Some(cf) if !cf.weak && self.ctype(cf.ty) == ct => Some(format!("&{}", self.field_lv_of("x", src, &cf))),
+                    _ => None,
+                },
+                Ty::Record(fs) => match self.c.types.fields(fs).iter().find(|x| x.name == f.name).copied() {
+                    Some(rf) if self.ctype(rf.ty) == ct => Some(format!("&{}", self.fld(src, &value, self.sym(f.name)))),
+                    _ => None,
+                },
+                Ty::Interface(..) => {
+                    let sm = self.iface_members(src);
+                    match sm.iter().position(|x| x.name == f.name) {
+                        Some(sk) if self.ctype(sm[sk].ty) == ct => {
+                            let sit = self.itab_type(src);
+                            Some(format!("((const {sit} *)({value}).t)->f{sk}(({value}).p)"))
+                        }
+                        _ => None,
+                    }
+                }
+                _ => None,
+            };
+            // (a getter, or a field of another representation: can't be assigned this way)
+            let body = match addr {
+                Some(a) => format!("{self_decl} return (void *){a};"),
+                None => "(void)self; __builtin_trap();".to_string(),
+            };
+            let tname = format!("{name}_f{k}");
+            let _ = writeln!(out, "static void *{tname}(void *self) {{ {body} }}");
+            entries.push(tname);
+        }
         let mut init = format!("{{ {rt}, {rl}, TVG_INS({name}_in), {name}_ts }}");
         for e in &entries {
             let _ = write!(init, ", {e}");
@@ -285,6 +338,17 @@ impl<'c, 'a> Gen<'c, 'a> {
         let it = self.itab_type(v.ty);
         let r = self.tmp(members[k].ty, &format!("((const {it} *)({0}).t)->m{k}(({0}).p)", v.code), true);
         Some(self.coerce(r, ty))
+    }
+
+    /// `v.name` on an interface value as an lvalue, through the member's address thunk.
+    pub(crate) fn iface_field_lv(&mut self, v: &Val, name: crate::intern::Sym) -> Option<(String, TyId)> {
+        let members = self.iface_members(v.ty);
+        let k = members.iter().position(|f| f.name == name)?;
+        if matches!(self.tget(members[k].ty), Ty::Func(..)) {
+            return None;
+        }
+        let (it, ct) = (self.itab_type(v.ty), self.ctype(members[k].ty));
+        Some((format!("(*({ct} *)((const {it} *)({0}).t)->f{k}(({0}).p))", v.code), members[k].ty))
     }
 
     /// `v.name(args)` on an interface value, for a function-typed member.

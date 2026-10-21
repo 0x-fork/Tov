@@ -1,0 +1,53 @@
+// Objects changed through interfaces and type parameters are shared, as in TypeScript; integers
+// from literals and class fields `n = 0` become floats where a float must fit.
+
+interface Shape { x: number }
+class Sq implements Shape { x = 1 }
+function move(s: Shape) { s.x += 1 }
+
+interface Item { n: number; label: string }
+class Box implements Item {
+  n = 1
+  label = "box"
+  show() { return `${this.label}:${this.n}` }
+}
+function touch(it: Item) { it.n += 0.5; it.label = it.label + "!" }
+
+type P = { x: number, y: number }
+function setX<T extends { x: number }>(p: T, v: number) { p.x = v }
+
+type W = { w: number }
+
+function main() {
+  // through a type parameter
+  const a: P = { x: 1, y: 2 }
+  const b = a
+  setX(b, 5)
+  console.log(a.x, b.x)
+
+  // through an interface: a parameter, a loop variable
+  const s = new Sq()
+  move(s)
+  const shapes: Shape[] = [s]
+  for (const q of shapes) q.x += 7
+  console.log(s.x)
+
+  // a class instance and a record behind one interface: changed in place, identity kept
+  const box = new Box()
+  const r = { n: 10, label: "rec" }
+  const items: Item[] = [box, r]
+  for (const it of items) touch(it)
+  touch(box)
+  console.log(box.show(), r.n, r.label, items[1]!.n)
+  const alias = r
+  console.log(alias === items[1], alias.label, items.indexOf(r))
+  let total = 0
+  for (const it of items) { it.n *= 2; total += it.n }
+  console.log(total, box.n, r.n)
+
+  // `{ w: 10 }` and `w = 1`, given where a float fits
+  const f: W = { w: 1.5 }
+  const lit = { w: 10 }
+  const ws: W[] = [f, lit, { w: -3 }]
+  console.log(ws.length, ws[1]!.w, ws[2]!.w, ws.map(v => v.w / 4).join(" "))
+}

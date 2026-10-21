@@ -1,19 +1,14 @@
-//! TypeScript code that changes a parameter in place: the caller sees the change, as it would
-//! share the object in TypeScript. Checking finds such parameters (V0101), arguments for `inout`
-//! parameters passed without `&` (V0110) and `const`s passed to them (V0001, V0102); the driver
-//! rewrites the program as if it said `inout`, `&` and `let`, and checks it again. A parameter the
-//! function reassigns stays as it is (TypeScript would rebind only its own variable), as do
-//! parameters of async functions (which can't be `inout`) and of arrow functions other than
-//! named ones (`const f = (...) => ...`, nested function declarations).
+//! TypeScript habits checking finds and the driver rewrites before checking again: arguments for
+//! `inout` parameters passed without `&` (V0110) and `const`s passed to them (V0001, V0102), as
+//! if the program said `&` and `let`; `return p` from async functions, RegExp string methods,
+//! match indexes, `Record` keys, spreads and keyed field reads.
 
 use super::*;
-use crate::ast::{Arg, ExprKind, MemberKind, StmtKind};
+use crate::ast::{Arg, ExprKind, StmtKind};
 
 /// What a check found to rewrite.
 #[derive(Default, Clone, Debug)]
 pub struct Rewrites {
-    /// Parameters changed in place: (module, the parameter's span start).
-    pub(crate) params: Vec<(u32, u32)>,
     /// Arguments to `inout` parameters given without `&`: (module, argument).
     pub(crate) args: Vec<(u32, ExprId)>,
     /// `const` locals (module, the name's span start) passed to `inout` parameters.
@@ -37,11 +32,10 @@ pub struct Rewrites {
 
 impl Rewrites {
     pub fn is_empty(&self) -> bool {
-        self.params.is_empty() && self.args.is_empty() && self.consts.is_empty() && self.items.is_empty() && self.awaits.is_empty() && self.calls.is_empty() && self.elems.is_empty() && self.keys.is_empty() && self.spreads.is_empty() && self.keyed.is_empty()
+        self.args.is_empty() && self.consts.is_empty() && self.items.is_empty() && self.awaits.is_empty() && self.calls.is_empty() && self.elems.is_empty() && self.keys.is_empty() && self.spreads.is_empty() && self.keyed.is_empty()
     }
 
     pub(crate) fn extend(&mut self, o: Rewrites) {
-        self.params.extend(o.params);
         self.args.extend(o.args);
         self.consts.extend(o.consts);
         self.items.extend(o.items);
@@ -57,80 +51,6 @@ impl Rewrites {
 /// Applies `rw` to the program; true if anything changed.
 pub fn apply(modules: &mut [Module], rw: &Rewrites) -> bool {
     let mut changed = false;
-    for &(m, start) in &rw.params {
-        let ast = &mut modules[m as usize].ast;
-        let mut bodies: Vec<(usize, Option<usize>)> = Vec::new();
-        for (ii, item) in ast.items.iter().enumerate() {
-            match &item.kind {
-                ItemKind::Function(_) => bodies.push((ii, None)),
-                ItemKind::Class(cd) => {
-                    for (mi, mem) in cd.members.iter().enumerate() {
-                        if matches!(mem.kind, MemberKind::Method(_) | MemberKind::Constructor(_)) {
-                            bodies.push((ii, Some(mi)));
-                        }
-                    }
-                }
-                _ => {}
-            }
-        }
-        for (ii, mi) in bodies {
-            let f = match (&ast.items[ii].kind, mi) {
-                (ItemKind::Function(f), None) => f,
-                (ItemKind::Class(cd), Some(mi)) => match &cd.members[mi].kind {
-                    MemberKind::Method(f) | MemberKind::Constructor(f) => f,
-                    _ => continue,
-                },
-                _ => continue,
-            };
-            let Some(pi) = f.params.iter().position(|p| p.span.start == start && !p.inout && !p.rest && p.prop.is_none()) else { continue };
-            if f.is_async {
-                continue;
-            }
-            let mut assigned = Vec::new();
-            stmt::collect_assigned_stmt(ast, f.body, &mut assigned);
-            if assigned.contains(&f.params[pi].name) {
-                continue;
-            }
-            let f = match (&mut ast.items[ii].kind, mi) {
-                (ItemKind::Function(f), None) => f,
-                (ItemKind::Class(cd), Some(mi)) => match &mut cd.members[mi].kind {
-                    MemberKind::Method(f) | MemberKind::Constructor(f) => f,
-                    _ => continue,
-                },
-                _ => continue,
-            };
-            f.params[pi].inout = true;
-            changed = true;
-        }
-        // a named local function (`function walk(acc: T[])` in a body, `const f = (...) => ...`)
-        let named: Vec<ExprId> = ast
-            .stmts
-            .iter()
-            .filter_map(|s| match s.kind {
-                StmtKind::Let { mutable: false, init: Some(i), .. } => Some(i),
-                _ => None,
-            })
-            .collect();
-        for i in named {
-            let ExprKind::Arrow(f) = &ast.exprs[i as usize].kind else { continue };
-            let Some(pi) = f.params.iter().position(|p| p.span.start == start && !p.inout && !p.rest && p.prop.is_none()) else { continue };
-            if f.is_async {
-                continue;
-            }
-            let mut assigned = Vec::new();
-            match f.body {
-                crate::ast::ArrowBody::Block(b) => stmt::collect_assigned_stmt(ast, b, &mut assigned),
-                crate::ast::ArrowBody::Expr(_) => continue,
-            }
-            if assigned.contains(&f.params[pi].name) {
-                continue;
-            }
-            if let ExprKind::Arrow(f) = &mut ast.exprs[i as usize].kind {
-                f.params[pi].inout = true;
-                changed = true;
-            }
-        }
-    }
     for &(m, arg) in &rw.args {
         let ast = &mut modules[m as usize].ast;
         let span = ast.exprs[arg as usize].span;

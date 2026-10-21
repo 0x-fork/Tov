@@ -102,7 +102,9 @@ impl<'a> Checker<'a> {
         match &node.kind {
             ExprKind::Error => ERROR,
             ExprKind::Int(v) => {
-                let t = self.numeric_hint(exp).unwrap_or(INT);
+                // (a float flows where this literal's record field goes: `f64`, see `lit_key`)
+                let lit = if self.spec.float_globals.contains(&super::spec::lit_key(self.cur, e)) { F64 } else { INT };
+                let t = self.numeric_hint(exp).unwrap_or(lit);
                 if let Some((lo, hi)) = int_range(t)
                     && (*v as i128) > hi {
                         let msg = format!("{v} doesn't fit in `{}` (range {lo}..={hi})", self.show(t));
@@ -311,7 +313,6 @@ impl<'a> Checker<'a> {
                 let key = self.local(id).span.start;
                 self.rec_ident(e, IdentFact::Local(key));
             }
-            self.fcx().reads.push((id, span.start));
             return ty;
         }
         match self.scopes[self.cur as usize].values.get(&sym).map(|d| d.0) {
@@ -967,9 +968,6 @@ impl<'a> Checker<'a> {
         match op {
             AssignOp::Assign => {
                 let tv = self.flow(place.sites.clone(), |c| c.expr(value, Some(place.ty)));
-                if !matches!(self.ast().expr(target).kind, ExprKind::Ident(_)) {
-                    self.note_stored(target, &[value], span.end);
-                }
                 if !self.try_promote(&place, tv) {
                     let wrap = self.is_elem_place(target);
                     self.flow(place.sites.clone(), |c| {
@@ -1109,18 +1107,6 @@ impl<'a> Checker<'a> {
         }
     }
 
-    /// `m.get(k)` (or `m.get(k)!`) on a map: `m`.
-    pub(super) fn map_get_of(&self, e: ExprId) -> Option<ExprId> {
-        match &self.ast().expr(e).kind {
-            ExprKind::Paren(x) | ExprKind::NonNull(x) => self.map_get_of(*x),
-            ExprKind::Call { callee, args, .. } if args.len() == 1 => match &self.ast().expr(*callee).kind {
-                ExprKind::Member { obj, name, optional: false, .. } if self.name(*name) == "get" && self.is_map_expr(*obj) => Some(*obj),
-                _ => None,
-            },
-            _ => None,
-        }
-    }
-
     /// A function declared `(p: A, ...): p is T`: (p's position, T).
     fn predicate_of(&mut self, callee: ExprId) -> Option<(usize, TyId)> {
         let ExprKind::Ident(s) = self.ast().expr(callee).kind else { return None };
@@ -1139,33 +1125,6 @@ impl<'a> Checker<'a> {
         let t = self.resolve_type(t, &[]);
         self.cur = saved;
         Some((pi, t))
-    }
-
-    /// A value that's part of another, reached through a call: `m.get(k)` on a map, `xs.find(f)`,
-    /// `xs.findLast(f)` or `xs.at(i)` on an array (with `!`): `m` / `xs`.
-    pub(super) fn view_of(&self, e: ExprId) -> Option<ExprId> {
-        if let Some(m) = self.map_get_of(e) {
-            return Some(m);
-        }
-        match &self.ast().expr(e).kind {
-            ExprKind::Paren(x) | ExprKind::NonNull(x) => self.view_of(*x),
-            ExprKind::Call { callee, args, .. } if args.len() == 1 => match &self.ast().expr(*callee).kind {
-                ExprKind::Member { obj, name, optional: false, .. } if matches!(self.name(*name), "find" | "findLast" | "at") && self.is_array_expr(*obj) => Some(*obj),
-                _ => None,
-            },
-            _ => None,
-        }
-    }
-
-    fn is_array_expr(&self, e: ExprId) -> bool {
-        let t = match self.facts.as_ref() {
-            Some(f) => f[self.cur as usize].expr_ty.get(e as usize).copied(),
-            None => match self.ast().expr(e).kind {
-                ExprKind::Ident(s) => self.lookup(s).map(|(_, t)| t),
-                _ => None,
-            },
-        };
-        t.is_some_and(|t| matches!(self.types.get(t), Ty::Array(_)))
     }
 
     /// `e` (already checked) is a map.
@@ -1191,7 +1150,7 @@ impl<'a> Checker<'a> {
         let mut cur = e;
         loop {
             if let Some(t) = self.path_ty(cur)
-                && (self.types.members(t).into_iter().any(|m| matches!(self.types.get(m), Ty::Rec(..)) || self.maybe_object(m))
+                && (self.types.members(t).into_iter().any(|m| matches!(self.types.get(m), Ty::Rec(..) | Ty::Param(_) | Ty::Interface(..)) || self.maybe_object(m))
                     || self.flat_members(t).iter().any(|&m| matches!(self.types.get(m), Ty::Array(_) | Ty::Map(..) | Ty::Set(_))))
             {
                 return true;
@@ -1240,76 +1199,19 @@ impl<'a> Checker<'a> {
 
     /// `allow_temp`: mutating a temporary (`xs.slice().sort()`) is fine for method calls.
     pub(super) fn check_mutable_root_ext(&mut self, e: ExprId, span: Span, allow_temp: bool) -> Option<LocalId> {
-        // (inside an array, map or set: shared, as in JavaScript, so changing it changes no variable)
+        // (inside an array, map, set, object or type parameter's value (a class instance or an
+        // object): shared, as in JavaScript, so changing it changes no variable)
         if self.inside_shared(e) {
             return None;
         }
         match self.root_of(e) {
             Root::Temp if allow_temp => None,
             Root::Heap => None,
-            Root::Local(id) => {
-                let (kind, name, lspan) = {
-                    let l = self.local(id);
-                    (l.kind, l.name, l.span)
-                };
-                let n = self.name(name).to_string();
-                match kind {
-                    LocalKind::Param => {
-                        // (TypeScript changes the caller's value: make it `inout`, see `rewrite`)
-                        self.rewrites.params.push((self.cur, lspan.start));
-                        self.report(
-                            Diagnostic::new("V0101", span, format!("can't modify parameter `{n}`: parameters are read-only"))
-                                .note("to change the caller's value", format!("declare `inout {n}` and call with `&arg`"))
-                                .note("to change a local copy", format!("`let copy = {n}` and modify `copy`"))
-                                .fix(Applicability::Maybe, format!("make `{n}` an `inout` parameter"), lspan.empty_at_start(), "inout "),
-                        );
-                        None
-                    }
-                    LocalKind::LoopVar => {
-                        self.report(
-                            Diagnostic::new("V0104", span, format!("can't modify loop variable `{n}`: it is a copy of the element"))
-                                .note("why", "changes to the copy would not reach the collection (a record element is a value in Tov)")
-                                .note("instead", "loop over indices and assign `xs[i] = ...`, or build a new array with `map`"),
-                        );
-                        None
-                    }
-                    // a parameter with a default, changed in place: TypeScript changes the
-                    // caller's value (when it passes one), which a copy can't do
-                    _ if self.fcx().default_shadows.contains(&id) && {
-                        let t = self.local(id).ty;
-                        self.shared_in_ts(t)
-                    } =>
-                    {
-                        self.report(
-                            Diagnostic::new("V0122", span, format!("this changes parameter `{n}`, which has a default value: TypeScript would change the caller's value too"))
-                                .note("why", "Tov records (object literals) are values: the function has its own copy")
-                                .note("instead", format!("drop the default and pass the value (`inout {n}` is then made for you), or return the changed value")),
-                        );
-                        None
-                    }
-                    _ => {
-                        let depth = super::stmt::path_depth(self.ast(), e);
-                        self.fcx().mutations.push((id, span, depth));
-                        Some(id)
-                    }
-                }
-            }
+            Root::Local(id) => Some(id),
             // Module state is mutable, as in TypeScript (`const` only fixes the binding).
             Root::ModuleConst(m, i) => {
                 if let Some(f) = self.facts_mut() {
                     f.mutated_globals.insert((m, i));
-                }
-                // (a script's top-level binding: its local, for the copy checks)
-                let mut base = e;
-                while let ExprKind::Paren(x) | ExprKind::NonNull(x) | ExprKind::Member { obj: x, .. } | ExprKind::Index { obj: x, .. } = self.ast().expr(base).kind {
-                    base = x;
-                }
-                if let ExprKind::Ident(s) = self.ast().expr(base).kind
-                    && let Some((id, _)) = self.lookup(s)
-                    && self.local(id).global == Some((m, i))
-                {
-                    let depth = super::stmt::path_depth(self.ast(), e);
-                    self.fcx().mutations.push((id, span, depth));
                 }
                 None
             }
@@ -1434,8 +1336,21 @@ impl<'a> Checker<'a> {
                 }
                 // (changed in place: an object, as JavaScript's are, if anything shares it)
                 self.note_mutated(t);
-                if let Ty::Param(_) = *self.types.get(self.types_without_undef(t)) {
-                    self.object_fields.insert(*name);
+                match *self.types.get(self.types_without_undef(t)) {
+                    Ty::Param(_) => {
+                        self.object_fields.insert(*name);
+                    }
+                    // (through an interface: whatever implements it, a class instance or an
+                    // object, changes; a class field kept as an integer takes the member's type)
+                    Ty::Interface(..) => {
+                        self.object_fields.insert(*name);
+                        if let Some(mt) = self.field_of(self.types_without_undef(t), *name)
+                            && mt != INT
+                        {
+                            self.widen_int_fields(*name);
+                        }
+                    }
+                    _ => {}
                 }
                 let ft = self.member_of(t, *name, *name_span, span, *obj)?;
                 let root = self.check_mutable_root(*obj, span);
@@ -2040,15 +1955,27 @@ impl<'a> Checker<'a> {
             }
             // No usable context: infer a record type, widening string literals as TS does.
             let mut out = Vec::new();
+            let mut lits = Vec::new();
             for f in fields {
                 let t = self.expr(f.value, None);
                 let t = self.types.widen(t);
                 out.push(Field { name: f.name, ty: t, optional: false });
+                // (`n: 0`, `n: -1`: an `int` a float may later need to fit)
+                let mut v = f.value;
+                if let ExprKind::Unary(crate::ast::UnOp::Neg, x) = self.ast().expr(v).kind {
+                    v = x;
+                }
+                if t == INT && matches!(self.ast().expr(v).kind, ExprKind::Int(_)) {
+                    lits.push((f.name, super::spec::lit_key(self.cur, v)));
+                }
             }
             out.dedup_by_key(|f| f.name);
             let order: Vec<Sym> = out.iter().map(|f| f.name).collect();
             let t = self.types.record(out);
             self.types.note_field_order(t, order);
+            for (name, k) in lits {
+                self.lit_fields.entry((t, name)).or_default().push(k);
+            }
             return t;
         };
         let mut provided = HashSet::default();
@@ -2785,15 +2712,6 @@ impl<'a> Checker<'a> {
                     self.set_call_spec((sites, Vec::new()));
                     let desc = format!("new {name}");
                     let t = self.call_sig(&cs, &desc, type_args, args, exp, span);
-                    // (the object may keep its arguments)
-                    for a in args {
-                        if let ExprKind::Ident(sym) = self.ast().expr(a.expr).kind
-                            && let Some((v, vt)) = self.lookup(sym)
-                            && self.shared_in_ts(vt)
-                        {
-                            self.fcx().heap_links.push((v, span.end, span));
-                        }
-                    }
                     let _ = targs;
                     return t;
                 }
@@ -3086,10 +3004,6 @@ impl<'a> Checker<'a> {
                     }
                     self.wrap_store = saved;
                     self.float_args = saved_f;
-                    if ms.mutates {
-                        let values: Vec<ExprId> = args.iter().map(|a| a.expr).collect();
-                        self.note_stored(obj, &values, span.end);
-                    }
                     r
                 } else {
                     self.member_of(base, name, name_span, span, obj);
@@ -3600,11 +3514,6 @@ impl<'a> Checker<'a> {
                                 self.report(Diagnostic::new("V0113", aspan, format!("`{n}` is passed as `inout` more than once in this call")).note("why", "each `inout` argument must be a separate value"));
                             }
                             refs.push((root, aspan));
-                            // The callee may change the value in place (for V0120).
-                            let depth = super::stmt::path_depth(self.ast(), a.expr);
-                            if let Some(f) = self.fcx.last_mut() {
-                                f.mutations.push((root, aspan, depth));
-                            }
                         }
                         if t != pty && t != ERROR && pty != ERROR {
                             let msg = format!("`inout` argument must be exactly `{}`, found `{}`", self.show(pty), self.show(t));
@@ -4162,28 +4071,6 @@ fn int_range(t: TyId) -> Option<(i128, i128)> {
         U64 => (0, u64::MAX as i128),
         _ => return None,
     })
-}
-
-impl<'a> Checker<'a> {
-    /// `values` (the variables among them) were put into the place `into` (`xs.push(v)`,
-    /// `p.next = v`): for the copy-then-mutate checks.
-    fn note_stored(&mut self, into: ExprId, values: &[ExprId], pos: u32) {
-        for &x in values {
-            let ExprKind::Ident(sym) = self.ast().expr(x).kind else { continue };
-            let Some((v, vt)) = self.lookup(sym) else { continue };
-            if !self.shared_in_ts(vt) {
-                continue;
-            }
-            match self.root_of(into) {
-                Root::Local(r) if r != v => self.fcx().stored.push((r, v, pos)),
-                Root::Heap | Root::ModuleConst(..) => {
-                    let place = self.ast().expr(into).span;
-                    self.fcx().heap_links.push((v, pos, place));
-                }
-                _ => {}
-            }
-        }
-    }
 }
 
 /// A sized integer as arithmetic sees it: `int` (all but `u64` fit).
