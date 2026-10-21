@@ -42,9 +42,10 @@ RESULTS_DIR = BENCH_DIR / "results"
 TOOLS_DIR = BENCH_DIR / ".tools"
 
 # `rust-checked` is Rust with integer overflow checks (Tov's default semantics); `tov-unchecked`
-# wraps on overflow (Rust release semantics).
-LANGS = ["c", "rust", "rust-checked", "node", "bun", "scriptc", "tov", "tov-unchecked"]
-SOURCE = {"c": "main.c", "rust": "main.rs", "rust-checked": "main.rs", "node": "main.ts", "bun": "main.ts", "scriptc": "main.ts", "tov": "main.tov", "tov-unchecked": "main.tov"}
+# wraps on overflow (Rust release semantics); `tov-ts` is Tov compiling the TypeScript that Node
+# and Bun run, unchanged.
+LANGS = ["c", "rust", "rust-checked", "node", "bun", "scriptc", "tov", "tov-unchecked", "tov-ts"]
+SOURCE = {"c": "main.c", "rust": "main.rs", "rust-checked": "main.rs", "node": "main.ts", "bun": "main.ts", "scriptc": "main.ts", "tov": "main.tov", "tov-unchecked": "main.tov", "tov-ts": "main.ts"}
 EXE_SUFFIX = ".exe" if os.name == "nt" else ""
 
 # Statuses that mean "we have timing numbers".
@@ -292,6 +293,7 @@ BUILDERS = {
     "scriptc": build_scriptc,
     "tov": build_tov,
     "tov-unchecked": lambda src, out, a: build_tov(src, out, a, unchecked=True),
+    "tov-ts": build_tov,
 }
 
 
@@ -307,6 +309,7 @@ def toolchain_versions() -> dict[str, str | None]:
         "tov": tool_version([str(tv), "version"]) if tv else None,
         "rust-checked": None,
         "tov-unchecked": None,
+        "tov-ts": None,
     }
 
 
