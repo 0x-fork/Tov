@@ -11,8 +11,8 @@ function main() {
   let bytes = 0
   let threes = 0
   for (const s of back) {
-    bytes += s.byteLength
+    bytes += s.length
     if (s.endsWith("-3")) threes++
   }
-  console.log(`${back.length} ${joined.byteLength} ${bytes} ${threes}`)
+  console.log(`${back.length} ${joined.length} ${bytes} ${threes}`)
 }

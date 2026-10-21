@@ -7,14 +7,13 @@ for (let i = 2; i <= N; i++) {
   f *= BigInt(i)
 }
 const s = f.toString()
-const digits = s.chars()
 let sum = 0
 let zeros = 0
-for (const c of digits) {
-  sum += "0123456789".indexOf(c)
+for (let i = 0; i < s.length; i++) {
+  sum += s.charCodeAt(i) - 48
 }
-for (let i = digits.length - 1; i >= 0 && digits[i]! === "0"; i--) {
+for (let i = s.length - 1; i >= 0 && s[i] === "0"; i--) {
   zeros++
 }
-console.log(`${N}! has ${s.byteLength} digits`)
+console.log(`${N}! has ${s.length} digits`)
 console.log(`digit sum ${sum}, trailing zeros ${zeros}`)

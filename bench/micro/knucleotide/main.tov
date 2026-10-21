@@ -31,7 +31,7 @@ function generate(n: int): string {
 
 function frequencies(seq: string, k: int): Map<string, int> {
   const counts = new Map<string, int>()
-  const n = seq.byteLength - k + 1
+  const n = seq.length - k + 1
   for (let i = 0; i < n; i++) {
     const key = seq.slice(i, i + k)
     counts.set(key, (counts.get(key) ?? 0) + 1)
@@ -47,7 +47,7 @@ function printFrequencies(seq: string, k: int) {
     if (d !== 0) return d
     return a < b ? -1 : 1
   })
-  const total = seq.byteLength - k + 1
+  const total = seq.length - k + 1
   for (const key of keys) {
     console.log(`${key} ${((100 * counts.get(key)!) / total).toFixed(3)}`)
   }
@@ -55,7 +55,7 @@ function printFrequencies(seq: string, k: int) {
 }
 
 function printCount(seq: string, fragment: string) {
-  const counts = frequencies(seq, fragment.byteLength)
+  const counts = frequencies(seq, fragment.length)
   console.log(`${counts.get(fragment) ?? 0}\t${fragment}`)
 }
 

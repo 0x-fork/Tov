@@ -10,7 +10,7 @@ function main() {
   let bytes = 0
   for (let round = 0; round < 5; round++) {
     const text = JSON.stringify(items)
-    bytes += text.byteLength
+    bytes += text.length
     const back: Item[] = try JSON.parse(text)
     total += back.length + back[back.length - 1]!.id
   }

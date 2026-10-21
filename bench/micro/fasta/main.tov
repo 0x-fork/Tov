@@ -42,7 +42,7 @@ function repeatFasta(header: string, src: string, n: int) {
   const head = new TextEncoder().encode(header)
   writeLine(head, 0, head.length)
   const s = new TextEncoder().encode(src + src.slice(0, WIDTH))
-  const len = src.byteLength
+  const len = src.length
   let pos = 0
   let left = n
   while (left > 0) {
