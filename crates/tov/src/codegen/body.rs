@@ -1498,7 +1498,9 @@ impl<'c, 'a> Gen<'c, 'a> {
         if self.may_resize(m, &all, &own) {
             return None;
         }
-        if !extra.is_empty() && self.may_resize(m, &all, &extra) {
+        // (the versioned arrays' writes are in bounds: they append to none)
+        let with_own: Vec<u32> = own.iter().chain(&extra).copied().collect();
+        if !extra.is_empty() && self.may_resize(m, &all, &with_own) {
             extra.clear();
         }
         Some(VersionPlan { ik, le, hi, arrays, extra })
@@ -2233,6 +2235,9 @@ impl<'c, 'a> Gen<'c, 'a> {
                 // `g = init_g();` here, in source order (a script's module variable); an
                 // initializer that awaits is evaluated right here, in the async script body.
                 let g = self.const_ref(m, *ii);
+                if self.literal_global(m, *ii) {
+                    return;
+                }
                 let ast::ItemKind::Const { init, .. } = &self.ast(m).items[*ii as usize].kind else { unreachable!() };
                 if super::asyncfn::has_await(self.ast(m), *init) {
                     self.push_temps();

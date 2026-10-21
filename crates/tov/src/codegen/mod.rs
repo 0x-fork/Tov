@@ -1756,8 +1756,8 @@ impl<'c, 'a> Gen<'c, 'a> {
         if self.consts_done.insert((m, item)) {
             let ct = self.ctype(ty);
             // A number or boolean literal: a C constant, which the C compiler folds into its uses
+            // (`x % IM` by a multiplication), a script's too
             if !mutable
-                && self.script_module != Some(m)
                 && let Some(lit) = self.literal_const(m, *init, ty)
             {
                 let _ = writeln!(self.protos, "static const {ct} {gname} = {lit};");
@@ -1817,6 +1817,12 @@ impl<'c, 'a> Gen<'c, 'a> {
 
     /// The C text of a module constant's initializer when it's a number or boolean literal
     /// (optionally negated) of the constant's own type.
+    /// Module variable (m, item) is a C constant (see `const_ref`).
+    pub(crate) fn literal_global(&self, m: u32, item: u32) -> bool {
+        let ItemKind::Const { init, mutable: false, .. } = &self.ast(m).items[item as usize].kind else { return false };
+        self.c.consts.get(&(m, item)).is_some_and(|&ty| self.literal_const(m, *init, ty).is_some())
+    }
+
     fn literal_const(&self, m: u32, init: ExprId, ty: TyId) -> Option<String> {
         let ast = self.ast(m);
         let (neg, e) = match &ast.expr(init).kind {
