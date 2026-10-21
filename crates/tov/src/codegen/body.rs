@@ -1139,8 +1139,9 @@ impl<'c, 'a> Gen<'c, 'a> {
         let mut allowed = FxSet::default();
         for &e in &all {
             match &ast.expr(e).kind {
-                // `i` must not change; `xs` itself neither (elements may).
+                // `i` must not change; `xs` itself neither (elements may), nor its length
                 ExprKind::Assign(_, t, _) | ExprKind::Update { target: t, .. } if local(*t) == Some(ik) || local(*t) == Some(xk) => return None,
+                ExprKind::Assign(_, t, _) | ExprKind::Update { target: t, .. } if matches!(&ast.expr(*t).kind, ExprKind::Member { name, .. } if self.sym(*name) == "length") => return None,
                 ExprKind::Call { args, .. } if args.iter().any(|a| a.by_ref.is_some() && (local(a.expr) == Some(ik) || local(a.expr) == Some(xk))) => return None,
                 ExprKind::Index { obj, .. } if local(*obj) == Some(xk) => {
                     allowed.insert(*obj);
@@ -1950,6 +1951,16 @@ impl<'c, 'a> Gen<'c, 'a> {
                 _ => None,
             }
         }
+        let index_written: FxSet<u32> = all
+            .iter()
+            .filter_map(|&e| match &ast.expr(e).kind {
+                ExprKind::Assign(_, t, _) => match &ast.expr(*t).kind {
+                    ExprKind::Index { obj, .. } => local(*obj),
+                    _ => None,
+                },
+                _ => None,
+            })
+            .collect();
         let mut pushed: Vec<u32> = ss.iter().filter_map(|&x| always_pushes(self, ast, &local, x)).collect();
         pushed.dedup();
         let mut push_counts: FxMap<u32, usize> = FxMap::default();
@@ -1986,8 +1997,10 @@ impl<'c, 'a> Gen<'c, 'a> {
             let pushes = push_counts.get(&xk).copied().unwrap_or(0);
             // (and nothing else can push onto it meanwhile: it may be shared)
             let alone = !self.may_resize(m, &all, &[xk]);
+            // (nor an index write: `xs[xs.length] = v` appends too)
+            let indexed = index_written.contains(&xk);
             let b = self.b();
-            let exact = alone && pushes == 1 && !b.boxed.contains(&xk) && !b.boxed.contains(&ik) && bound.is_none_or(|k| !b.mutated.contains(&k) && !b.boxed.contains(&k));
+            let exact = alone && !indexed && pushes == 1 && !b.boxed.contains(&xk) && !b.boxed.contains(&ik) && bound.is_none_or(|k| !b.mutated.contains(&k) && !b.boxed.contains(&k));
             if exact {
                 self.line(format!("if ({n} > {i}) {{ tv_int need_; if ((uint64_t){n} - (uint64_t){i} > (uint64_t)INT64_MAX || __builtin_add_overflow(tv_arr_len({xs}), (tv_int)((uint64_t){n} - (uint64_t){i}), &need_)) tv_trap(\"array too large\", NULL); if (need_ > {cv}) {{ {xs} = tvg_reserve({xs}, {d}, need_); {cv} = {xs}.p->cap; }} }}"));
                 self.b().exact_pushes.insert(xk);
@@ -4804,6 +4817,11 @@ impl<'c, 'a> Gen<'c, 'a> {
                 }
             },
             ExprKind::Member { obj, name, .. } => {
+                // `C.NAME = v`: the static field's global
+                if let Some(MemberFact::StaticField(c, mi)) = self.facts(m).members.get(&e).copied() {
+                    let g = self.static_field_ref(c, mi);
+                    return Place { lv: g.code, ty: g.ty, weak: false };
+                }
                 let narrowed = self.ty(*obj);
                 let nt = self.c.types.without_undefined(narrowed);
                 if self.c.class_of(nt).is_some() {
@@ -4889,31 +4907,6 @@ impl<'c, 'a> Gen<'c, 'a> {
     /// `xs` is a local that's grown with `push` (or `unshift`, `splice`) somewhere: its index
     /// writes don't append (code that pushes doesn't rely on `xs[xs.length] = v`), so they keep
     /// the plain bounds check, which leaves the array unchanged for loops around it.
-    fn grown_by_push(&mut self, xs: ExprId) -> bool {
-        let m = self.cur_m();
-        self.grown_by_push_in(m, xs)
-    }
-
-    pub(crate) fn grown_by_push_in(&mut self, m: u32, xs: ExprId) -> bool {
-        let Some(IdentFact::Local(k)) = self.ident_fact(m, xs) else { return false };
-        if !self.pushed.contains_key(&m) {
-            let ast = self.ast(m);
-            let facts = self.facts(m);
-            let mut set = FxSet::default();
-            for e in ast.exprs.iter() {
-                if let ExprKind::Call { callee, .. } = &e.kind
-                    && let ExprKind::Member { obj, name, .. } = &ast.expr(*callee).kind
-                    && matches!(self.c.interner.get(*name), "push" | "unshift" | "splice")
-                    && let Some(IdentFact::Local(pk)) = facts.idents.get(obj)
-                {
-                    set.insert(*pk);
-                }
-            }
-            self.pushed.insert(m, set);
-        }
-        self.pushed[&m].contains(&k)
-    }
-
     fn is_array(&mut self, e: ExprId) -> bool {
         let t = self.ty(e);
         let t = self.c.types.without_undefined(t);
@@ -5061,6 +5054,35 @@ impl<'c, 'a> Gen<'c, 'a> {
                 return self.js_assign(&js_op, target, value, ty, span);
             }
         }
+        // `xs.length = n` (`xs.length -= k`): drops the elements from n on
+        if let ExprKind::Member { obj, name, .. } = self.ast(m).expr(target).kind
+            && self.sym(name) == "length"
+            && self.is_array(obj)
+        {
+            let ap = self.place(obj);
+            let narrowed = self.ty(obj);
+            let ap = self.project_place(ap, narrowed);
+            let Ty::Array(et) = self.tget(ap.ty) else {
+                self.unsupported(span, "assigning this length");
+                return Val::plain("0", VOID);
+            };
+            let d = self.desc(et);
+            let v = match op {
+                AssignOp::Assign => {
+                    let v = self.expr(value);
+                    self.int_code(v)
+                }
+                AssignOp::Op(b) => {
+                    let cur = Val::plain(format!("tv_arr_len({})", ap.lv), INT);
+                    let rv = self.expr(value);
+                    let r = self.arith(b, cur, rv, INT, span);
+                    self.int_code(r)
+                }
+            };
+            let (n, loc) = (self.fresh("n"), self.loc(span));
+            self.line(format!("tv_int {n} = {v}; tv_arr_set_length(&{}, {d}, {n}, {loc});", ap.lv));
+            return Val::plain(n, INT);
+        }
         // `counts[w] = n` / `counts[w] += 1` on a map: set (after reading, for `+=`)
         let map_target = match self.ast(m).expr(target).kind {
             ExprKind::Index { obj, index, .. } => {
@@ -5117,7 +5139,7 @@ impl<'c, 'a> Gen<'c, 'a> {
                 v
             }
             // `xs[xs.length] = v`: appends, as in JavaScript (an index past that traps)
-            AssignOp::Assign if self.b().versioned.is_empty() && matches!(self.ast(m).expr(target).kind, ExprKind::Index { obj, optional: false, .. } if self.is_array(obj) && !self.grown_by_push(obj)) => {
+            AssignOp::Assign if self.b().versioned.is_empty() && matches!(self.ast(m).expr(target).kind, ExprKind::Index { obj, optional: false, .. } if self.is_array(obj)) => {
                 let ExprKind::Index { obj, index, .. } = self.ast(m).expr(target).kind else { unreachable!() };
                 let v = self.expr(value);
                 let ap = self.place(obj);
@@ -5136,6 +5158,11 @@ impl<'c, 'a> Gen<'c, 'a> {
                 let iv = self.int_code(iv);
                 let loc = self.loc(span);
                 let unique = matches!((&self.ast(m).expr(obj).kind, self.ident_fact(m, obj)), (ExprKind::Ident(_), Some(IdentFact::Local(k))) if self.b().unique.contains(&k));
+                // (an append moves the capacity a loop's pushes keep in a local)
+                let cap = match self.ident_fact(m, obj) {
+                    Some(IdentFact::Local(k)) => self.b().push_caps.get(&k).cloned(),
+                    _ => None,
+                };
                 if !self.is_rc(et) {
                     // (plain data: the append is the bounds check's slow path)
                     let (i, a) = (self.fresh("i"), ap.lv.clone());
@@ -5143,7 +5170,8 @@ impl<'c, 'a> Gen<'c, 'a> {
                     if !unique {
                         self.line(format!("tvg_make_unique(&{a}, {d});"));
                     }
-                    self.line(format!("if (__builtin_expect((uint64_t){i} >= (uint64_t)tv_arr_len({a}), 0)) {a} = tvg_put_grow({a}, {d}, sizeof({ect}), {i}, {loc});"));
+                    let recap = cap.as_ref().map(|c| format!(" {c} = {a}.p->cap;")).unwrap_or_default();
+                    self.line(format!("if (__builtin_expect((uint64_t){i} >= (uint64_t)tv_arr_len({a}), 0)) {{ {a} = tvg_put_grow({a}, {d}, sizeof({ect}), {i}, {loc});{recap} }}"));
                     let store = self.store(target, et, &format!("((({ect} *)tv_arr_data({a}))[{i}])"), &nv);
                     self.line(store);
                     return Val::plain(nv, et);
@@ -5152,6 +5180,9 @@ impl<'c, 'a> Gen<'c, 'a> {
                 self.line(format!("tv_int {i} = {iv}; tv_arr *{pa} = &{};", ap.lv));
                 self.open(&format!("if ({i} == tv_arr_len(*{pa})) {{"));
                 self.line(format!("TVG_PUSH({ect}, {pa}, {d}, {nv});"));
+                if let Some(c) = &cap {
+                    self.line(format!("{c} = {pa}->p->cap;"));
+                }
                 self.close("} else {");
                 self.b().indent += 1;
                 let ep = self.fresh("ep");

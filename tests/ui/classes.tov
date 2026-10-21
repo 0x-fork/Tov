@@ -75,6 +75,7 @@ class Child {
   weak bad: int = 0
 }
 
+// (a static field that isn't readonly is module state, as in TypeScript: no error)
 class Counter {
   static count = 0
 }

@@ -286,13 +286,6 @@ impl<'a> Checker<'a> {
                     };
                     let fty = if *optional { self.types.optional(fty) } else { fty };
                     if mem.is_static {
-                        if !mem.readonly {
-                            self.report(
-                                Diagnostic::new("T0816", mem.name_span, format!("static field `{n}` must be `static readonly`"))
-                                    .note("why", "mutable module-level state is not allowed")
-                                    .fix(Applicability::Maybe, "make it `static readonly`", mem.name_span.empty_at_start(), "readonly "),
-                            );
-                        }
                         if init.is_none() {
                             self.report(Diagnostic::new("T0309", mem.name_span, format!("static field `{n}` needs a value")));
                         }
@@ -300,7 +293,7 @@ impl<'a> Checker<'a> {
                             name: mem.name,
                             ty: fty,
                             optional: *optional,
-                            readonly: true,
+                            readonly: mem.readonly,
                             weak: false,
                             vis: mem.vis,
                             owner: c,

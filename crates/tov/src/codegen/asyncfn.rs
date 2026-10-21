@@ -483,7 +483,31 @@ impl<'c, 'a> Gen<'c, 'a> {
     /// evaluates operands left to right: `f(i, i++)` passes the old `i` first).
     pub(crate) fn expr_before(&mut self, e: ExprId, later: &[ExprId]) -> Val {
         let v = self.expr(e);
-        if later.iter().any(|&l| self.changes_in(l)) { self.snapshot(v) } else { v }
+        // (or calls something that may change what it reads: module state, a static field, a
+        // local a closure shares, or anything reached through an object: `f(g, bump())`)
+        let later_calls = later.iter().any(|&l| has_call(self.ast(self.cur_m()), l));
+        if later.iter().any(|&l| self.changes_in(l)) || (!v.owned && later_calls && self.reads_shared(e)) { self.snapshot(v) } else { v }
+    }
+
+    /// Can a call change what `e` reads (see `expr_before`)?
+    fn reads_shared(&mut self, e: ExprId) -> bool {
+        let m = self.cur_m();
+        let ast = self.ast(m);
+        match &ast.expr(e).kind {
+            ExprKind::Int(_) | ExprKind::Float(_) | ExprKind::Str(_) | ExprKind::BigInt(_) | ExprKind::Decimal(_) | ExprKind::Bool(_) | ExprKind::Null | ExprKind::Undefined | ExprKind::Arrow(_) => false,
+            ExprKind::Ident(_) => match self.ident_fact(m, e) {
+                Some(super::IdentFact::Local(k)) => self.b().boxed.contains(&k),
+                Some(super::IdentFact::Const(cm, ci)) => self.mutated_globals.contains(&(cm, ci)),
+                _ => false,
+            },
+            ExprKind::Paren(x) | ExprKind::NonNull(x) | ExprKind::Unary(_, x) | ExprKind::As(x, _) | ExprKind::Typeof(x) => self.reads_shared(*x),
+            ExprKind::Binary(_, a, b) => self.reads_shared(*a) || self.reads_shared(*b),
+            ExprKind::Cond(a, b, c) => self.reads_shared(*a) || self.reads_shared(*b) || self.reads_shared(*c),
+            ExprKind::Template(_, xs) | ExprKind::Array(xs) => xs.iter().any(|&x| self.reads_shared(x)),
+            // (their results are temporaries of their own)
+            ExprKind::Call { .. } | ExprKind::New { .. } | ExprKind::Await(_) => false,
+            _ => true,
+        }
     }
 
     /// Evaluates operands left to right (see `expr_before`).
@@ -503,6 +527,23 @@ impl<'c, 'a> Gen<'c, 'a> {
     pub(crate) fn spawn_call(&mut self, cname: &str, argv: &[String], ret: TyId, ty: TyId) -> Val {
         let v = self.tmp(ret, &format!("{cname}_spawn({})", argv.join(", ")), true);
         self.coerce(v, ty)
+    }
+}
+
+/// Does `e` call anything (or await) outside nested functions?
+pub(crate) fn has_call(ast: &ast::Ast, e: ExprId) -> bool {
+    let any = |xs: &[ExprId]| xs.iter().any(|&x| has_call(ast, x));
+    match &ast.expr(e).kind {
+        ExprKind::Call { .. } | ExprKind::New { .. } | ExprKind::Await(_) => true,
+        ExprKind::Arrow(_) => false,
+        ExprKind::Unary(_, x) | ExprKind::Paren(x) | ExprKind::NonNull(x) | ExprKind::Typeof(x) | ExprKind::Spread(x) | ExprKind::As(x, _) | ExprKind::Try(x) => has_call(ast, *x),
+        ExprKind::Binary(_, a, b) | ExprKind::Index { obj: a, index: b, .. } | ExprKind::Assign(_, a, b) => has_call(ast, *a) || has_call(ast, *b),
+        ExprKind::Update { target, .. } => has_call(ast, *target),
+        ExprKind::Cond(a, b, c) => has_call(ast, *a) || has_call(ast, *b) || has_call(ast, *c),
+        ExprKind::Member { obj, .. } => has_call(ast, *obj),
+        ExprKind::Template(_, xs) | ExprKind::Array(xs) | ExprKind::Seq(xs) => any(xs),
+        ExprKind::Object(fs) => fs.iter().any(|f| has_call(ast, f.value)),
+        _ => false,
     }
 }
 

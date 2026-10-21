@@ -1316,10 +1316,32 @@ impl<'a> Checker<'a> {
                     return None;
                 }
                 let n = self.name(*name).to_string();
+                // `C.NAME = v`: a static field (module state, as in TypeScript)
+                if let ExprKind::Ident(s) = self.ast().expr(*obj).kind
+                    && self.lookup(s).is_none()
+                    && let Some(Decl::Class(c)) = self.scopes[self.cur as usize].values.get(&s).map(|d| d.0)
+                {
+                    let ty = self.static_member(e, c, *name, *name_span);
+                    if ty == ERROR {
+                        return None;
+                    }
+                    let f = self.classes[c as usize].static_fields.iter().find(|f| f.name == *name).cloned()?;
+                    if f.readonly {
+                        self.report(Diagnostic::new("T0811", *name_span, format!("`{n}` is `readonly`")).note("why", "a `static readonly` field is set once, by its initializer"));
+                    }
+                    // (`static n = 0` given a float: an `f64`, as a field is)
+                    let int_field = f.member.filter(|&mi| {
+                        let decl = self.class_decl(c);
+                        let m = self.classes[c as usize].module;
+                        matches!(&decl.members[mi as usize].kind, crate::ast::MemberKind::Field { ty: None, init: Some(i), .. } if matches!(self.modules[m as usize].ast.expr(*i).kind, ExprKind::Int(_)))
+                    }).map(|mi| super::spec::field_key(c, mi));
+                    return Some(Place { ty, local: None, root: None, sites: Vec::new(), global: None, int_field });
+                }
                 let t = self.expr(*obj, None);
+                // `xs.length = n`: drops the elements from n on, as in JavaScript
                 if n == "length" && matches!(self.types.get(t), Ty::Array(_)) {
-                    self.report(Diagnostic::new("X0034", span, "assigning an array's `length` is not supported").note("instead", "reassign: `xs = []`, or `xs = xs.slice(0, n)`"));
-                    return None;
+                    let root = self.check_mutable_root(*obj, span);
+                    return Some(Place { ty: INT, local: None, root, sites: Vec::new(), global: None, int_field: None });
                 }
                 if let Some(cls) = self.class_of(self.types_without_undef(t)) {
                     if self.types.has_undefined(t) {
@@ -1721,7 +1743,7 @@ impl<'a> Checker<'a> {
         if optional { self.types.optional(ft) } else { ft }
     }
 
-    /// `C.NAME` for a static readonly field of class `c`.
+    /// `C.NAME` for a static field of class `c`.
     fn static_member(&mut self, e: ExprId, c: u32, name: Sym, name_span: Span) -> TyId {
         self.resolve_class(c);
         let info = self.classes[c as usize].clone();

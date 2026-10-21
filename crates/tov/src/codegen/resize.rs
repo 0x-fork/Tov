@@ -47,14 +47,20 @@ impl<'c, 'a> Gen<'c, 'a> {
                         return true;
                     }
                 }
-                // `ys[i] = v` may append (see `grown_by_push`)
+                // `ys.length = n` shrinks an array: even one of `own` (its users count on the
+                // length only growing)
+                ExprKind::Assign(_, t, _) | ExprKind::Update { target: t, .. }
+                    if matches!(&ast.expr(*t).kind, ExprKind::Member { obj, name, .. } if self.sym(*name) == "length" && self.is_array_expr(m, *obj) && !self.local_key(m, *obj).is_some_and(|k| fresh.contains(&k))) =>
+                {
+                    return true;
+                }
+                // `ys[i] = v` may append
                 ExprKind::Assign(crate::ast::AssignOp::Assign, t, _) => {
                     if let ExprKind::Index { obj, .. } = ast.expr(*t).kind
                         && self.is_array_expr(m, obj)
                     {
                         match self.local_key(m, obj) {
                             Some(k) if own.contains(&k) || fresh.contains(&k) => {}
-                            _ if self.grown_by_push_in(m, obj) => {}
                             _ => return true,
                         }
                     }

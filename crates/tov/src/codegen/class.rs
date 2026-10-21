@@ -244,6 +244,10 @@ impl<'c, 'a> Gen<'c, 'a> {
         match &ast.expr(e).kind {
             ExprKind::Paren(x) | ExprKind::NonNull(x) => self.heap_rooted(*x),
             ExprKind::Member { obj, name, .. } => {
+                // (a static field code assigns: a call may replace it while we borrow it)
+                if let Some(crate::check::MemberFact::StaticField(c, mi)) = self.facts(m).members.get(&e).copied() {
+                    return self.c.classes[c as usize].static_fields.iter().any(|f| f.member == Some(mi) && !f.readonly);
+                }
                 let ot = self.ty(*obj);
                 let ot = self.c.types.without_undefined(ot);
                 if self.c.class_of(ot).is_some() {

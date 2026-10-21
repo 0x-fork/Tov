@@ -261,8 +261,6 @@ pub(crate) struct Gen<'c, 'a> {
     pub(crate) self_closure: Option<u32>,
     /// What `int` variables can hold (see `range`), worked out when first asked.
     pub(crate) ranges: Option<range::Ranges>,
-    /// Per module: the locals grown with `push` somewhere (see `grown_by_push`).
-    pub(crate) pushed: FxMap<u32, FxSet<u32>>,
     /// Module functions that may resize an array they didn't make (see `resize`).
     pub(crate) resizers: FxMap<(u32, u32), bool>,
     /// Per module: `const` locals holding new arrays (see `resize`).
@@ -352,7 +350,6 @@ impl<'c, 'a> Gen<'c, 'a> {
             pending_async: None,
             self_closure: None,
             ranges: None,
-            pushed: FxMap::default(),
             resizers: FxMap::default(),
             fresh_arrays: FxMap::default(),
             rec_structs: FxMap::default(),

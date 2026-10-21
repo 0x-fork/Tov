@@ -2040,6 +2040,22 @@ bool tv_arr_pop(tv_arr *a, const tv_type *t, void *out) {
     return true;
 }
 
+void tv_arr_set_length(tv_arr *a, const tv_type *t, tv_int n, const char *loc) {
+    int64_t len = tv_arr_len(*a);
+    if (n == len) return;
+    if (n < 0 || n > len) {
+        if (n < 0) tv_trap("invalid array length", loc);
+        tv_trap("setting an array's length past its end (JavaScript would leave holes)", loc);
+    }
+    tv_arr_make_unique(a, t, 0);
+    size_t es = t->size;
+    if (es && t->release) {
+        unsigned char *data = tv_arrbuf_data(a->p);
+        for (int64_t i = n; i < len; i++) t->release(data + (size_t)i * es);
+    }
+    a->p->len = n;
+}
+
 bool tv_arr_shift(tv_arr *a, const tv_type *t, void *out) {
     int64_t len = tv_arr_len(*a);
     if (len == 0) return false;

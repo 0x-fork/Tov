@@ -380,6 +380,9 @@ static inline void tv_arr_push_fast(tv_arr *a, const tv_type *t, void *elem) {
     }
 }
 bool tv_arr_pop(tv_arr *a, const tv_type *t, void *out);          /* false if empty; out receives ownership */
+/* `xs.length = n`: drops the elements from n on (n past the length traps: JavaScript's holes
+ * have no value of the element type). */
+void tv_arr_set_length(tv_arr *a, const tv_type *t, tv_int n, const char *loc);
 bool tv_arr_shift(tv_arr *a, const tv_type *t, void *out);
 void tv_arr_unshift(tv_arr *a, const tv_type *t, void *elem);      /* moves elem */
 /* a.splice(start, del, ...items): the removed elements (JavaScript's clamping; del omitted: to the end) */

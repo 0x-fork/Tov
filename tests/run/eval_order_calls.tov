@@ -1,0 +1,35 @@
+// Operands are read left to right, as in JavaScript: a call later in the same expression can't
+// change what an earlier operand read (module state, a static field, an object's field, a local a
+// closure shares).
+let g = 1
+function bump(): int {
+  g += 1
+  return g
+}
+
+class Box {
+  static n = 10
+  v = 0
+  static next(): int {
+    Box.n += 1
+    return Box.n
+  }
+}
+
+function main() {
+  console.log(g, bump(), g)
+  console.log(g + bump(), [g, bump()])
+  console.log(Box.n, Box.next(), Box.n)
+  const b = new Box()
+  const set = (x: int): int => {
+    b.v = x
+    return x
+  }
+  console.log(b.v, set(5), b.v)
+  let c = 0
+  const inc = (): int => {
+    c += 1
+    return c
+  }
+  console.log(c, inc(), c + inc())
+}
