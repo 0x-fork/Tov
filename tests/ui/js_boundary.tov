@@ -1,0 +1,46 @@
+// Functions handed to JavaScript, and JavaScript reads that can throw: what the checker accepts
+// and what it refuses.
+import { EventEmitter } from "node:events"
+
+class Refused extends Error {}
+class NotFound extends Error {}
+
+function throwing(ctx: Js): Js {
+  return ctx.boom()
+}
+
+async function later(ctx: Js): Promise<Js> {
+  return ctx.ok
+}
+
+export function accepted(lib: Js): void throws JsError {
+  // a function may pass errors on to JavaScript: they're thrown there
+  lib.run((ctx: Js) => ctx.boom())
+  lib.run((ctx: Js) => ctx.params)
+  lib.run(throwing)
+  lib.run((ctx: Js): Js => { throw new Refused("no") })
+  // async functions: JavaScript gets a promise
+  lib.run(async (ctx: Js): Promise<Js> => ctx.ok)
+  lib.run(later)
+  // a read passes its error on like a call
+  const p = lib.params
+  const n = lib["name"]
+}
+
+// where errors can't pass on, a read stays a trap (nothing to report), while a call is refused
+const maxListeners = EventEmitter.defaultMaxListeners
+export function inClosures(lib: Js): void {
+  const read: (x: Js) => Js = (x: Js) => x.name
+  const call: (x: Js) => Js = (x: Js) => x.name()
+}
+
+// a declared `throws` must cover a read's JsError
+export function declared(lib: Js): Js throws NotFound {
+  return lib.params
+}
+
+export function refused(lib: Js): void throws JsError {
+  // only `Js` parameters and values JavaScript can hold cross the boundary
+  lib.run((n: int) => n)
+  lib.run((ctx: Js) => new Map<string, int>())
+}

@@ -1,0 +1,106 @@
+import { run, runAsync, runLater, runNested, serve } from "js-callback"
+
+// Tov functions called from JavaScript (issue #20): an error one passes on, and a JavaScript
+// exception inside it (a getter that throws, as a validating framework's `ctx.params` does), go
+// back to the JavaScript caller as JavaScript exceptions.
+
+class Refused extends Error {
+  constructor(message: string) {
+    super(message)
+    this.name = "Refused"
+  }
+}
+
+function named(ctx: Js): Js {
+  return ctx.boom()
+}
+
+function bare(ctx: Js): Js {
+  const p = ctx.params
+  return p.name
+}
+
+// a read two Tov calls below the callback: the frames in between don't go on after it
+function readParams(ctx: Js): Js {
+  return ctx.params
+}
+
+function middle(ctx: Js): Js {
+  console.log("middle before")
+  const p = readParams(ctx)
+  console.log("never: middle after")
+  return p
+}
+
+async function sleepJs(): Promise<void> {
+  await Promise.resolve(0)
+}
+
+// a named async function passed by name, whose sync helper's read throws before any `await`
+async function namedAsync(ctx: Js): Promise<Js> {
+  const p = readParams(ctx)
+  console.log("never: namedAsync went on with", p)
+  await sleepJs()
+  return p
+}
+
+function handler(ctx: Js, path: Js): Js {
+  if (path === "/boom") {
+    return ctx.boom()
+  }
+  if (path === "/params") {
+    return ctx.params
+  }
+  return ctx.ok
+}
+
+async function main() {
+  // a JavaScript call that throws: the same object reaches the JavaScript caller
+  console.log(run((ctx: Js) => ctx.boom()))
+  console.log(run(named))
+  // a Tov error: a JavaScript Error with its name and message
+  console.log(run((ctx: Js): Js => { throw new Refused("tov-side") }))
+  // no error, and none left over from the calls above
+  console.log(run((ctx: Js) => ctx.ok))
+  // called from a promise reaction
+  console.log(await runLater((ctx: Js) => ctx.boom()))
+  // JS -> Tov -> JS -> Tov: the inner JavaScript frame catches the inner error
+  console.log(runNested((call: Js) => call(), (ctx: Js) => ctx.boom()))
+  // a read that throws (the reporter's `ctx.params`): back to the JavaScript caller
+  console.log(run((ctx: Js) => ctx.params))
+  console.log(run(bare))
+  console.log(run((ctx: Js) => ctx.params.name))
+  console.log(run((ctx: Js) => ctx["params"]))
+  console.log(await runLater((ctx: Js) => ctx.params))
+  console.log(runNested((call: Js) => call(), (ctx: Js) => ctx.params))
+  console.log(run((ctx: Js) => ctx.ok))
+  // through Tov frames in between: none of them goes on after the read
+  console.log(run((ctx: Js): Js => {
+    const v = middle(ctx)
+    console.log("never: callback after")
+    return v
+  }))
+  // caught in Tov, like a call's error
+  console.log(run((ctx: Js): Js => {
+    try {
+      return ctx.params
+    } catch (e) {
+      return `tov caught ${e.name}: ${e.message}`
+    }
+  }))
+  // async functions passed to JavaScript: a promise, rejected with the original exception
+  console.log(await runAsync(async (ctx: Js): Promise<Js> => ctx.ok))
+  console.log(await runAsync(async (ctx: Js): Promise<Js> => {
+    await sleepJs()
+    return ctx.params
+  }))
+  console.log(await runAsync(async (ctx: Js): Promise<Js> => {
+    await sleepJs()
+    return readParams(ctx)
+  }))
+  console.log(await runAsync(async (ctx: Js): Promise<Js> => ctx.boom()))
+  console.log(await runAsync(async (ctx: Js): Promise<Js> => { throw new Refused("async tov-side") }))
+  console.log(await runAsync(namedAsync))
+  // a server: the failing request is a 500, and the next one is still answered
+  console.log(await serve(handler, ["/ok", "/boom", "/params", "/ok"]))
+}

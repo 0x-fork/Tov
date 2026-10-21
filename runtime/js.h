@@ -212,6 +212,9 @@ JSValueRef tv_js_import_as(const char *spec, int kind, const char *loc);
 JSValueRef tv_js_get_or_trap(JSValueRef obj, tv_js_name *key, const char *loc);
 JSValueRef tv_js_at_or_trap(JSValueRef obj, double i, const char *loc);
 JSValueRef tv_js_key_or_trap(JSValueRef obj, tv_str key, const char *loc);
+/* the same reads giving the exception back (NULL and *exc), for a read whose error passes on */
+JSValueRef tv_js_at_exc(JSValueRef obj, double i, JSValueRef *exc);
+JSValueRef tv_js_key_exc(JSValueRef obj, tv_str key, JSValueRef *exc);
 void tv_js_put_or_trap(JSValueRef obj, tv_js_name *key, JSValueRef value, const char *loc);
 /* A value from JavaScript that doesn't convert to the type `want` names: traps. */
 _Noreturn void tv_js_type_trap(JSValueRef v, const char *want, const char *loc);
@@ -234,8 +237,9 @@ JSValueRef tv_js_array(size_t n, const JSValueRef *items);
 JSValueRef tv_js_object(void);
 JSValueRef tv_js_lit(JSValueRef *slot, const char *s, size_t n);   /* a string literal, created once */
 /* A JavaScript function calling a Tov closure through `tramp` (generated per signature); the
- * closure's environment is held until the function is collected. */
-typedef JSValueRef (*tv_js_tramp)(const tv_fn *fn, size_t n, const JSValueRef *args);
+ * closure's environment is held until the function is collected. An error the closure passes on
+ * is thrown into JavaScript: `tramp` sets `*exc` and returns NULL. */
+typedef JSValueRef (*tv_js_tramp)(const tv_fn *fn, size_t n, const JSValueRef *args, JSValueRef *exc);
 JSValueRef tv_js_function(tv_fn fn, tv_js_tramp tramp);
 
 /* ------------------------------------------------------------------ bytes */
@@ -257,6 +261,10 @@ bool tv_js_as_u8s(JSValueRef v, tv_arr *out);
 typedef struct tv_js_deferred tv_js_deferred;
 JSObjectRef tv_js_deferred_new(tv_js_deferred **out);
 void tv_js_settle(tv_js_deferred *d, JSValueRef value, bool ok);   /* resolves (ok) or rejects; frees d */
+/* A Tov promise as a JavaScript promise: settled with `value(&its value)` or `err(its error)` */
+JSValueRef tv_js_promise_of(tv_promise *p, JSValueRef (*value)(const void *), JSValueRef (*err)(void *));
+/* A JavaScript Error with this name and message (or the message itself, if one can't be made) */
+JSValueRef tv_js_error_value(tv_str name, tv_str message);
 
 /* Tov awaiting a JavaScript value: a Tov promise (of Js) settled when `v` settles (now, if `v`
  * isn't a thenable). A rejection becomes a JsError holding the reason. */

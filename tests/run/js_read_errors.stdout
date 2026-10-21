@@ -1,0 +1,6 @@
+member: caught TypeError bad getter
+key: caught TypeError bad getter
+index: caught RangeError bad index 2
+optional: caught TypeError
+from a function: caught TypeError bad getter
+afterwards: 1 1
