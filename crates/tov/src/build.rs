@@ -212,7 +212,7 @@ fn apple_toolchain() -> Option<(String, String)> {
         return None;
     }
     let _ = std::fs::create_dir_all(cache_dir());
-    let tmp = file.with_extension(format!("tmp{}", std::process::id()));
+    let tmp = file.with_extension(format!("tmp{}", tmp_tag()));
     if std::fs::write(&tmp, format!("{clang}\n{sdk}\n")).is_ok() {
         let _ = std::fs::rename(&tmp, &file);
     }
@@ -300,7 +300,7 @@ pub fn build(paths: &[PathBuf], base: &Path, opts: &Options) -> Result<Built, Bu
         std::fs::create_dir_all(&c_dir).map_err(|e| BuildError::Message(format!("can't create {}: {e}", c_dir.display())))?;
         let path = c_dir.join(format!("npm-{}.blob", hash_hex(&[&blob])));
         if !cached(&path) {
-            let tmp = path.with_extension(format!("tmp{}", std::process::id()));
+            let tmp = path.with_extension(format!("tmp{}", tmp_tag()));
             std::fs::write(&tmp, &blob).and_then(|_| std::fs::rename(&tmp, &path)).map_err(|e| BuildError::Message(format!("can't write {}: {e}", path.display())))?;
         }
         native = b.native;
@@ -416,7 +416,7 @@ pub fn build(paths: &[PathBuf], base: &Path, opts: &Options) -> Result<Built, Bu
         }
         let rt_c = c_dir.join(format!("rt-{rt_key}.c"));
         std::fs::write(&rt_c, codegen::runtime_source()).map_err(|e| format!("can't write {}: {e}", rt_c.display()))?;
-        let tmp = c_dir.join(format!("rt-{rt_key}.tmp{}.o", std::process::id()));
+        let tmp = c_dir.join(format!("rt-{rt_key}.tmp{}.o", tmp_tag()));
         let mut cmd = Command::new(&cc);
         cmd.args(&flags).args(["-ffunction-sections", "-fdata-sections", "-c", "-o"]).arg(&tmp).arg(&rt_c);
         run_cc(cmd, &cc, &rt_c).map_err(message)?;
@@ -465,10 +465,10 @@ pub fn build(paths: &[PathBuf], base: &Path, opts: &Options) -> Result<Built, Bu
         flags.push(&include);
     }
     // Compile to a temporary name, then rename: concurrent builds never see a partial binary.
-    let tmp = bin_dir.join(format!("{key}.tmp{}", std::process::id()));
+    let tmp = bin_dir.join(format!("{key}.tmp{}", tmp_tag()));
     let ld = linker(&cc);
     let mut cmd = Command::new(&ld);
-    let obj = c_dir.join(format!("{key}.tmp{}.o", std::process::id()));
+    let obj = c_dir.join(format!("{key}.tmp{}.o", tmp_tag()));
     if ld == cc {
         cmd.args(&flags).arg("-o").arg(&tmp).arg(&c_path);
     } else {
@@ -554,7 +554,7 @@ fn js_objects(cc: &str, flags: &[String], c_dir: &Path, key: &str) -> Result<Vec
         return Ok(objs);
     }
     let fail = |what: String| BuildError::Message(format!("can't build the JavaScript bridge: {what}"));
-    let dir = c_dir.join(format!("js-{key}.tmp{}", std::process::id()));
+    let dir = c_dir.join(format!("js-{key}.tmp{}", tmp_tag()));
     std::fs::create_dir_all(&dir).map_err(|e| fail(e.to_string()))?;
     for (name, text) in [("tov.h", codegen::RUNTIME_H), ("js.h", codegen::JS_H), ("js.c", JS_C), ("node.c", NODE_C), ("node_tty.h", NODE_TTY_H), ("napi.c", NAPI_C)] {
         std::fs::write(dir.join(name), text).map_err(|e| fail(e.to_string()))?;
@@ -567,7 +567,7 @@ fn js_objects(cc: &str, flags: &[String], c_dir: &Path, key: &str) -> Result<Vec
             .map(|(src, obj)| {
                 let dir = &dir;
                 s.spawn(move || {
-                    let tmp = obj.with_extension(format!("tmp{}.o", std::process::id()));
+                    let tmp = obj.with_extension(format!("tmp{}.o", tmp_tag()));
                     let mut cmd = Command::new(cc);
                     cmd.args(flags).args(["-ffunction-sections", "-fdata-sections", "-c", "-o"]).arg(&tmp).arg(dir.join(src));
                     run_cc(cmd, cc, &dir.join(src))?;
@@ -669,7 +669,7 @@ fn with_blob(base: &Path, blob: &Path) -> Result<PathBuf, BuildError> {
     let out = base.with_file_name(format!("{name}-{blob_name}"));
     if !cached(&out) {
         use std::io::Write;
-        let tmp = out.with_file_name(format!("{name}-{blob_name}.tmp{}", std::process::id()));
+        let tmp = out.with_file_name(format!("{name}-{blob_name}.tmp{}", tmp_tag()));
         std::fs::copy(base, &tmp).map_err(fail)?;
         let js = std::fs::read(blob).map_err(fail)?;
         let mut f = std::fs::OpenOptions::new().append(true).open(&tmp).map_err(fail)?;
@@ -704,7 +704,7 @@ fn with_blob(base: &Path, blob: &Path) -> Result<PathBuf, BuildError> {
 /// addon is) rewritten in place, since it keeps the old file's signature.
 fn write_new(to: &Path, write: impl FnOnce(&Path) -> std::io::Result<()>) -> std::io::Result<()> {
     let name = to.file_name().map_or("tov".into(), |n| n.to_string_lossy().into_owned());
-    let tmp = to.with_file_name(format!(".{name}.tmp{}", std::process::id()));
+    let tmp = to.with_file_name(format!(".{name}.tmp{}", tmp_tag()));
     let done = write(&tmp).and_then(|_| std::fs::rename(&tmp, to));
     if done.is_err() {
         let _ = std::fs::remove_file(&tmp);
@@ -754,7 +754,7 @@ fn precompiled_header(cc: &str, flags: &[&str], c_dir: &Path, prefix: &str, rt_k
     if cached(&pch) && header.is_file() {
         return Some(header);
     }
-    let pid = std::process::id();
+    let pid = tmp_tag();
     let tmp_h = c_dir.join(format!("pre-{key}.tmp{pid}.h"));
     let tmp_p = c_dir.join(format!("pre-{key}.tmp{pid}.pch"));
     // The header goes to its final path first (the .pch records it; its content is fixed by the
@@ -840,7 +840,7 @@ impl TlsArchive {
         let vendor = c_dir.join(format!("vendor-{}.a", self.vendor_key));
         if !cached(&vendor) {
             if self.vendor_key == tls_files::VENDOR_ARCHIVE_KEY && !tls_files::VENDOR_ARCHIVE.is_empty() {
-                let tmp = c_dir.join(format!("vendor-{}.tmp{}.a", self.vendor_key, std::process::id()));
+                let tmp = c_dir.join(format!("vendor-{}.tmp{}.a", self.vendor_key, tmp_tag()));
                 std::fs::write(&tmp, tls_files::VENDOR_ARCHIVE).map_err(|e| fail(format!("{e}")))?;
                 std::fs::rename(&tmp, &vendor).map_err(|e| fail(format!("can't move it into the cache: {e}")))?;
             } else {
@@ -859,7 +859,7 @@ impl TlsArchive {
     fn compile(&self, cc: &str, c_dir: &Path, archive: &Path, pick: impl Fn(&str) -> bool) -> Result<(), BuildError> {
         let fail = |what: String| BuildError::Message(format!("can't build the TLS library: {what}"));
         let name = archive.file_stem().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
-        let dir = c_dir.join(format!("{name}.tmp{}", std::process::id()));
+        let dir = c_dir.join(format!("{name}.tmp{}", tmp_tag()));
         for (rel, bytes) in tls_files::TLS_FILES.iter().copied().chain([("runtime/tov.h", codegen::RUNTIME_H.as_bytes())]) {
             let path = dir.join(rel);
             std::fs::create_dir_all(path.parent().unwrap()).map_err(|e| fail(format!("{e}")))?;
@@ -892,7 +892,7 @@ impl TlsArchive {
         }
         // the toolchain's own archiver (next to the compiler we picked), else the one on PATH
         let ar = Path::new(cc).parent().map(|d| d.join("ar")).filter(|p| p.is_file()).map_or("ar".to_string(), |p| p.to_string_lossy().into_owned());
-        let tmp = c_dir.join(format!("{name}.tmp{}.a", std::process::id()));
+        let tmp = c_dir.join(format!("{name}.tmp{}.a", tmp_tag()));
         let objs: Vec<PathBuf> = (0..sources.len()).map(|i| dir.join(format!("{i}.o"))).collect();
         let out = Command::new(&ar).arg("rcs").arg(&tmp).args(&objs).output().map_err(|e| fail(format!("can't run `{ar}`: {e}")))?;
         let _ = std::fs::remove_dir_all(&dir);
@@ -909,6 +909,13 @@ impl TlsArchive {
 }
 
 /// A 128-bit content hash (two independent 64-bit lanes), hex-encoded. For cache keys, not security.
+/// A name for a temporary file no other build makes: the process, and a count within it (the
+/// threads of one process, `cargo test`'s say, build at once).
+pub(crate) fn tmp_tag() -> String {
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    format!("{}-{}", std::process::id(), NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed))
+}
+
 fn hash_hex(parts: &[&[u8]]) -> String {
     tls_flags::hash_hex(parts)
 }

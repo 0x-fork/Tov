@@ -788,7 +788,7 @@ fn transformed(src: &str, kind: &str, compute: impl FnOnce() -> Result<Transform
         return Ok(t);
     }
     let t = compute()?;
-    let tmp = path.with_extension(format!("tmp{}", std::process::id()));
+    let tmp = path.with_extension(format!("tmp{}", crate::build::tmp_tag()));
     if std::fs::write(&tmp, t.encode()).is_ok() {
         let _ = std::fs::rename(&tmp, &path);
     }
@@ -953,7 +953,7 @@ impl Pack {
             out.extend_from_slice(&(t.len() as u32).to_le_bytes());
             out.extend_from_slice(&t);
         }
-        let tmp = path.with_extension(format!("tmp{}", std::process::id()));
+        let tmp = path.with_extension(format!("tmp{}", crate::build::tmp_tag()));
         if std::fs::write(&tmp, &out).is_ok() {
             let _ = std::fs::rename(&tmp, path);
         }
