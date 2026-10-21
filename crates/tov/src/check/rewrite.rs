@@ -35,11 +35,14 @@ pub struct Rewrites {
     /// `{ [Color.Red]: v }` where a record type is expected (every key a string literal): (module,
     /// the `new Map(...)` it was written as, the field names), as `{ red: v }`.
     pub(crate) records: Vec<(u32, ExprId, Vec<crate::intern::Sym>)>,
+    /// A built-in function as a value (`xs.map(Number)`): (module, the name, a parameter name),
+    /// as `(v) => Number(v)`.
+    pub(crate) fn_values: Vec<(u32, ExprId, crate::intern::Sym)>,
 }
 
 impl Rewrites {
     pub fn is_empty(&self) -> bool {
-        self.args.is_empty() && self.prims.is_empty() && self.records.is_empty() && self.consts.is_empty() && self.items.is_empty() && self.awaits.is_empty() && self.calls.is_empty() && self.elems.is_empty() && self.keys.is_empty() && self.spreads.is_empty() && self.keyed.is_empty()
+        self.args.is_empty() && self.prims.is_empty() && self.records.is_empty() && self.fn_values.is_empty() && self.consts.is_empty() && self.items.is_empty() && self.awaits.is_empty() && self.calls.is_empty() && self.elems.is_empty() && self.keys.is_empty() && self.spreads.is_empty() && self.keyed.is_empty()
     }
 
     pub(crate) fn extend(&mut self, o: Rewrites) {
@@ -54,6 +57,7 @@ impl Rewrites {
         self.keyed.extend(o.keyed);
         self.prims.extend(o.prims);
         self.records.extend(o.records);
+        self.fn_values.extend(o.fn_values);
     }
 }
 
@@ -200,6 +204,20 @@ pub fn apply(modules: &mut [Module], rw: &Rewrites) -> bool {
         ast.exprs.push(crate::ast::Expr { kind: ExprKind::Str(name), span: name_span });
         let index = ast.exprs.len() as ExprId - 1;
         ast.exprs[at as usize].kind = ExprKind::Index { obj, index, optional };
+        changed = true;
+    }
+    for &(m, e, v) in &rw.fn_values {
+        let ast = &mut modules[m as usize].ast;
+        let span = ast.exprs[e as usize].span;
+        let name = std::mem::replace(&mut ast.exprs[e as usize].kind, ExprKind::Error);
+        ast.exprs.push(crate::ast::Expr { kind: name, span });
+        let callee = ast.exprs.len() as ExprId - 1;
+        ast.exprs.push(crate::ast::Expr { kind: ExprKind::Ident(v), span });
+        let arg = ast.exprs.len() as ExprId - 1;
+        ast.exprs.push(crate::ast::Expr { kind: ExprKind::Call { callee, type_args: Vec::new(), args: vec![Arg { expr: arg, by_ref: None }], optional: false }, span });
+        let call = ast.exprs.len() as ExprId - 1;
+        let param = crate::ast::Param { name: v, span, ty: None, inout: false, optional: false, prop: None, rest: false };
+        ast.exprs[e as usize].kind = ExprKind::Arrow(Box::new(crate::ast::ArrowFn { params: vec![param], ret: None, throws: None, body: crate::ast::ArrowBody::Expr(call), is_async: false }));
         changed = true;
     }
     for (m, e, names) in &rw.records {

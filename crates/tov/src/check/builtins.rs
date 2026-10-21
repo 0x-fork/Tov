@@ -157,7 +157,7 @@ pub(super) fn is_builtin_ns(name: &str) -> bool {
 }
 
 pub(super) fn is_builtin_fn(name: &str) -> bool {
-    matches!(name, "expect" | "String" | "Number" | "BigInt" | "decimal" | "parseInt" | "parseFloat" | "isNaN" | "isFinite" | "test")
+    matches!(name, "expect" | "String" | "Number" | "Boolean" | "BigInt" | "decimal" | "parseInt" | "parseFloat" | "isNaN" | "isFinite" | "test")
         || CONVERSIONS.contains(&name)
         || TIMER_FNS.contains(&name)
 }
@@ -337,6 +337,11 @@ pub(super) fn method(c: &mut Checker, base: TyId, name: &str) -> Option<MethodSi
                 "reduce/1" => {
                     let f = c.types.func(vec![p(e), p(e), FnParam { ty: INT, inout: false, optional: true }], e);
                     mk(sig(vec![(p(f), "fn")], e), false)
+                }
+                // (on integers, with a function of numbers: from the first element as one)
+                "reduce/1f" => {
+                    let f = c.types.func(vec![p(F64), p(F64), FnParam { ty: INT, inout: false, optional: true }], F64);
+                    mk(sig(vec![(p(f), "fn")], F64), false)
                 }
                 "some" | "every" => mk(sig(vec![(p(pred), "predicate")], BOOL), false),
                 "find" => mk(sig(vec![(p(pred), "predicate")], opt_e), false),
@@ -1100,6 +1105,14 @@ impl<'a> Checker<'a> {
                 Some(t) => self.types.intern(Ty::Expect(t)),
                 None => ERROR,
             },
+            // `Boolean(x)`: whether x is truthy
+            "Boolean" => {
+                if args.is_empty() {
+                    return Some(BOOL);
+                }
+                one(self);
+                BOOL
+            }
             "String" => {
                 if let Some(t) = one(self)
                     && !self.printable(t) {

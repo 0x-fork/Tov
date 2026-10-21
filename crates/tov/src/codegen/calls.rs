@@ -1116,7 +1116,8 @@ impl<'c, 'a> Gen<'c, 'a> {
                 } else {
                     let loc = self.loc(span);
                     self.line(format!("if (tv_arr_len({}) == 0) tv_trap(\"reduce of an empty array with no initial value\", {loc});", arr.code));
-                    let first = Val::plain(format!("((({act} *)tv_arr_data({}))[0])", arr.code), acc_ty);
+                    let first = elem("0");
+                    let first = self.coerce(first, acc_ty);
                     let code = self.consume(first);
                     self.line(format!("{act} {acc} = {code};"));
                     1
@@ -1652,6 +1653,12 @@ impl<'c, 'a> Gen<'c, 'a> {
                 let v = self.expr(args[0].expr);
                 let v = self.coerce(v, STR);
                 self.json_parse(v, ty)
+            }
+            (None, "Boolean") => {
+                let Some(a) = args.first() else { return Val::plain("false", BOOL) };
+                let v = self.expr(a.expr);
+                let t = self.js_truthy(v);
+                self.tmp(BOOL, &t, false)
             }
             (None, "String") => {
                 let v = self.expr(args[0].expr);

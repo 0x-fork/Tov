@@ -104,7 +104,14 @@ impl<'a> Checker<'a> {
             ExprKind::Error => ERROR,
             ExprKind::Int(v) => {
                 // (a float flows where this literal's record field goes: `f64`, see `lit_key`)
-                let lit = if self.spec.float_globals.contains(&super::spec::lit_key(self.cur, e)) { F64 } else { INT };
+                let mut lit = if self.spec.float_globals.contains(&super::spec::lit_key(self.cur, e)) { F64 } else { INT };
+                if lit == INT && self.numeric_hint(exp).is_none() {
+                    match self.lit_site(e) {
+                        (true, _) => lit = F64,
+                        (false, Some(site)) => self.note_sites(span, vec![site]),
+                        _ => {}
+                    }
+                }
                 // (one past what an `int` holds is a number, as in TypeScript: `12345678901234567890`)
                 let lit = if *v > i64::MAX as u64 && self.numeric_hint(exp).is_none() { F64 } else { lit };
                 let t = self.numeric_hint(exp).unwrap_or(lit);
@@ -145,6 +152,27 @@ impl<'a> Checker<'a> {
             ExprKind::Bool(_) => BOOL,
             ExprKind::Undefined => UNDEFINED,
             ExprKind::Null => NULL,
+            // `xs.map(Number)`: a built-in function as a value (rewritten as `(v) => Number(v)`)
+            ExprKind::Ident(sym)
+                if matches!(self.name(*sym), "Number" | "String" | "Boolean" | "parseFloat")
+                    && self.lookup(*sym).is_none()
+                    && !self.scopes[self.cur as usize].values.contains_key(sym)
+                    && let Some(v) = self.interner.lookup("v") =>
+            {
+                self.rewrites.fn_values.push((self.cur, e, v));
+                // (until then: a function of what's expected, returning what the call does)
+                let ret = match self.name(*sym) {
+                    "String" => STR,
+                    "Boolean" => BOOL,
+                    _ => F64,
+                };
+                let ps = exp.and_then(|t| self.flat_members(t).into_iter().find_map(|m| match *self.types.get(m) {
+                    Ty::Func(ps, _, _) => Some(self.types.params(ps).to_vec()),
+                    _ => None,
+                }));
+                let ps = ps.unwrap_or_else(|| vec![FnParam { ty: UNKNOWN, inout: false, optional: false }]);
+                self.types.func(ps, ret)
+            }
             ExprKind::Ident(sym) => self.ident(e, *sym, span),
             ExprKind::Paren(x) => {
                 self.want_optional = want;
@@ -2022,6 +2050,7 @@ impl<'a> Checker<'a> {
             // No usable context: infer a record type, widening string literals as TS does.
             let mut out = Vec::new();
             let mut lits = Vec::new();
+            let mut srcs = Vec::new();
             for f in fields {
                 let t = self.expr(f.value, None);
                 let t = self.types.widen(t);
@@ -2034,6 +2063,10 @@ impl<'a> Checker<'a> {
                 if t == INT && matches!(self.ast().expr(v).kind, ExprKind::Int(_)) {
                     lits.push((f.name, super::spec::lit_key(self.cur, v)));
                 }
+                if self.spec.on {
+                    let sites = self.sources(self.ast().expr(f.value).span);
+                    srcs.push((f.name, sites));
+                }
             }
             out.dedup_by_key(|f| f.name);
             let order: Vec<Sym> = out.iter().map(|f| f.name).collect();
@@ -2041,6 +2074,11 @@ impl<'a> Checker<'a> {
             self.types.note_field_order(t, order);
             for (name, k) in lits {
                 self.lit_fields.entry((t, name)).or_default().push(k);
+            }
+            for (name, sites) in srcs {
+                if !sites.is_empty() {
+                    self.spec_fields.entry((t, name)).or_default().extend(sites);
+                }
             }
             return t;
         };
@@ -3154,7 +3192,9 @@ impl<'a> Checker<'a> {
                     self.rec_call(e, Callee::Value);
                     self.pending_call = Some(e);
                     self.call_value(ft, &mtext, args, exp, span)
-                } else if let Some(ms) = builtins::method(self, base, if mtext == "reduce" && args.len() == 1 && matches!(self.types.get(base), Ty::Array(_)) { "reduce/1" } else { &mtext }) {
+                } else if let mname = if mtext == "reduce" && args.len() == 1 && matches!(self.types.get(base), Ty::Array(_)) { self.reduce_from_first(base, args[0].expr) } else { &mtext }
+                    && let Some(ms) = builtins::method(self, base, mname)
+                {
                     if ms.mutates {
                         self.check_mutable_root_ext(obj, span, true);
                     }
@@ -3207,6 +3247,29 @@ impl<'a> Checker<'a> {
         self.set_call_spec_from(callee);
         let r = self.call_value(t, &text, args, exp, span);
         if optional { self.types.optional(r) } else { r }
+    }
+
+    /// `xs.reduce(f)`: `reduce/1f` where `xs` holds integers and `f` (a named function) takes
+    /// floats, as TypeScript's one `number` allows; else `reduce/1`.
+    fn reduce_from_first(&mut self, base: TyId, f: ExprId) -> &'static str {
+        if *self.types.get(base) != Ty::Array(INT) || !matches!(self.ast().expr(f).kind, ExprKind::Ident(_)) {
+            return "reduce/1";
+        }
+        let ExprKind::Ident(sym) = self.ast().expr(f).kind else { return "reduce/1" };
+        let t = match self.lookup(sym) {
+            Some((_, t)) => t,
+            None => match self.scopes[self.cur as usize].values.get(&sym).map(|d| d.0) {
+                Some(Decl::Fn(m, i)) => match self.fn_sig(m, i) {
+                    Some(sig) => return if sig.params.first().is_some_and(|p| self.types.is_float(p.ty)) { "reduce/1f" } else { "reduce/1" },
+                    None => return "reduce/1",
+                },
+                _ => return "reduce/1",
+            },
+        };
+        match *self.types.get(t) {
+            Ty::Func(ps, _, _) if self.types.params(ps).first().is_some_and(|p| self.types.is_float(p.ty)) => "reduce/1f",
+            _ => "reduce/1",
+        }
     }
 
     /// `sig` with its callback parameters allowed to throw (anything: `error` stands for that).

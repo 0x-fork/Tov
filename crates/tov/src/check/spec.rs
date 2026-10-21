@@ -14,6 +14,11 @@ use crate::ast::{BinOp, ExprKind};
 /// A `number` in a type annotation: (module, type node).
 pub(crate) type Site = (u32, ast::TypeId);
 
+/// An integer literal written with no type to go by in a TypeScript module (`[1, 2]`,
+/// `{ n: 0 }`): the site `(module, LIT_SITE | expr)`, `f64` once a float flows where it goes,
+/// as TypeScript has one `number`.
+pub(crate) const LIT_SITE: u32 = 0x8000_0000;
+
 /// Rounds of checking with more floats before giving up on speculation.
 const MAX_ROUNDS: u32 = 8;
 
@@ -57,6 +62,22 @@ impl<'a> Checker<'a> {
     /// `te` (in the current module) is a `number` checked as `int`.
     pub(super) fn spec_int(&self, te: ast::TypeId) -> bool {
         self.spec_site(self.cur, te)
+    }
+
+    /// `e` (an integer literal with no type to go by) is checked as `f64`, or else its site
+    /// if a float may yet flow where it goes.
+    pub(super) fn lit_site(&mut self, e: ExprId) -> (bool, Option<Site>) {
+        let site = (self.cur, LIT_SITE | e);
+        if self.spec.floats.contains(&site) {
+            return (true, None);
+        }
+        let module = &self.modules[self.cur as usize];
+        let ts = matches!(module.path.extension().and_then(|e| e.to_str()), Some("ts" | "tsx" | "mts" | "cts"));
+        if !self.spec.on || !ts || module.std || module.npm.is_some() {
+            return (false, None);
+        }
+        self.spec_used = true;
+        (false, Some(site))
     }
 
     fn spec_site(&self, m: u32, te: ast::TypeId) -> bool {
@@ -389,7 +410,7 @@ impl<'a> Checker<'a> {
         let mut out = Vec::new();
         let from = |c: &Self, x: ExprId, out: &mut Vec<Site>| out.extend(c.sources(c.ast().expr(x).span));
         match &node.kind {
-            ExprKind::Paren(x) | ExprKind::NonNull(x) | ExprKind::Try(x) | ExprKind::Await(x) => from(self, *x, &mut out),
+            ExprKind::Paren(x) | ExprKind::NonNull(x) | ExprKind::Try(x) | ExprKind::Await(x) | ExprKind::Unary(crate::ast::UnOp::Neg, x) => from(self, *x, &mut out),
             ExprKind::Index { obj, .. } => from(self, *obj, &mut out),
             ExprKind::Cond(_, a, b) | ExprKind::Binary(BinOp::Nullish, a, b) => {
                 from(self, *a, &mut out);
