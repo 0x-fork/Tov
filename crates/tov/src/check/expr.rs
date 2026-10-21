@@ -104,6 +104,8 @@ impl<'a> Checker<'a> {
             ExprKind::Int(v) => {
                 // (a float flows where this literal's record field goes: `f64`, see `lit_key`)
                 let lit = if self.spec.float_globals.contains(&super::spec::lit_key(self.cur, e)) { F64 } else { INT };
+                // (one past what an `int` holds is a number, as in TypeScript: `12345678901234567890`)
+                let lit = if *v > i64::MAX as u64 && self.numeric_hint(exp).is_none() { F64 } else { lit };
                 let t = self.numeric_hint(exp).unwrap_or(lit);
                 if let Some((lo, hi)) = int_range(t)
                     && (*v as i128) > hi {
@@ -428,6 +430,9 @@ impl<'a> Checker<'a> {
                 if t == BOOL {
                     return INT;
                 }
+                if self.to_primitive(x, t) {
+                    return F64;
+                }
                 let shown = self.show(t);
                 self.report(Diagnostic::new("X0028", span, format!("unary `+` needs a number, a string or a boolean, found `{shown}`")));
                 ERROR
@@ -629,6 +634,17 @@ impl<'a> Checker<'a> {
                 BOOL
             }
         }
+    }
+
+    /// `x` (of type `t`) is a class instance with `valueOf()`: where a number is wanted, it's
+    /// read through that, as JavaScript converts it (rewritten as `x.valueOf()`).
+    pub(super) fn to_primitive(&mut self, x: ExprId, t: TyId) -> bool {
+        let Some(sym) = self.interner.lookup("valueOf") else { return false };
+        if self.class_of(t).is_none() || !matches!(self.class_member(t, sym), Some(super::class::ClassMemberRef::Method(ref mm)) if mm.params.iter().all(|p| p.optional)) {
+            return false;
+        }
+        self.rewrites.prims.push((self.cur, x, sym));
+        true
     }
 
     pub(super) fn cur_frame(&mut self) -> &mut Frame {
@@ -2786,6 +2802,11 @@ impl<'a> Checker<'a> {
                         let sites = self.fn_item_sites(m, i);
                         self.set_call_spec(sites);
                         return self.call_sig(&cs, &text, type_args, args, exp, span);
+                    }
+                    // `Big(x)`: a class standing in for an npm package's constructor function,
+                    // callable without `new` as the package's is
+                    Some(Decl::Class(c)) if self.modules[self.classes[c as usize].module as usize].std => {
+                        return self.new_expr(e, callee, type_args, args, exp, span);
                     }
                     Some(_) => {}
                     None => {

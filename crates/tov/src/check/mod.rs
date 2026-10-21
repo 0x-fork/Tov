@@ -932,7 +932,20 @@ impl<'a> Checker<'a> {
                     }
                     continue;
                 }
-                if let Some((name, span)) = imp.default {
+                // `import Big from "big.js"`, a package Tov has natively: its main export
+                let shim = modules[target as usize].std.then(|| crate::driver::NPM_SHIMS.iter().find(|s| s.0 == modules[target as usize].name)).flatten();
+                if let (Some((name, span)), Some(s)) = (imp.default, shim) {
+                    let ts = &self.scopes[target as usize];
+                    let main = self.interner.lookup(s.2);
+                    let value = main.and_then(|m| ts.values.get(&m)).map(|d| d.0);
+                    let ty = main.and_then(|m| ts.types.get(&m)).map(|d| d.0);
+                    if let Some(v) = value {
+                        self.bind_import(mi, name, span, v, false);
+                    }
+                    if let Some(t) = ty {
+                        self.bind_import(mi, name, span, t, true);
+                    }
+                } else if let Some((name, span)) = imp.default {
                     let n = self.interner.get(name).to_string();
                     self.done.push(
                         Diagnostic::new("X0011", span, "default imports are only for npm packages")

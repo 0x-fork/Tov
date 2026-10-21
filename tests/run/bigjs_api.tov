@@ -1,0 +1,7 @@
+// big.js's API as programs use it: Big(x) without new, JSON, Number(), unary +, templates.
+import Big from "big.js"
+const x = Big(123.4567)
+const y = new Big("0.1").plus(Big(0.2))
+console.log(x.round(2).toString(), y.toString(), `${Big(1).div(3)}`, Big.roundHalfEven, y.eq(0.3), JSON.stringify({ v: y }))
+Big.DP = 5
+console.log(Big(2).sqrt().toString(), Number(Big("1.5")), +Big("2.5"), String(Big("1e-9")))

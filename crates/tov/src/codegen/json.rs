@@ -100,6 +100,14 @@ impl<'c, 'a> Gen<'c, 'a> {
                 let parts: Vec<(String, TyId, String)> = fields.iter().filter(|f| !matches!(self.tget(f.ty), Ty::Func(..))).map(|f| (self.sym(f.name).to_string(), f.ty, self.fld(t, "*v", self.sym(f.name)))).collect();
                 self.json_write_object(&parts)
             }
+            // `toJSON()`: what it returns is written instead
+            Ty::Class(..) if let Some(r) = self.c.to_json_ret(t) => {
+                let sym = self.c.interner.lookup("toJSON").unwrap();
+                let call = self.method_call_code("(*v)", t, sym, false, Vec::new());
+                let (rct, w) = (self.ctype(r), self.json_writer(r));
+                let rel = if self.is_rc(r) { self.release_code(r, "j") } else { String::new() };
+                format!("    {rct} j = {call};\n    {w}(sb, &j, ind, lvl);\n    {rel};\n")
+            }
             Ty::Class(..) => {
                 let fields = self.c.class_as_fields(t);
                 let mut parts = Vec::new();

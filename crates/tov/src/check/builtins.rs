@@ -227,7 +227,7 @@ const STRING_METHODS: &[&str] = &[
 ];
 const MAP_METHODS: &[&str] = &["get", "set", "has", "delete", "clear", "keys", "values", "entries", "forEach"];
 const SET_METHODS: &[&str] = &["add", "has", "delete", "clear", "values", "forEach"];
-const NUMBER_METHODS: &[&str] = &["toFixed", "toPrecision", "toString"];
+const NUMBER_METHODS: &[&str] = &["toFixed", "toPrecision", "toExponential", "toString"];
 
 fn methods_of(types: &Types, ty: TyId) -> &'static [&'static str] {
     match types.get(ty) {
@@ -496,6 +496,10 @@ pub(super) fn method(c: &mut Checker, base: TyId, name: &str) -> Option<MethodSi
             "toPrecision" => {
                 let digits = opt(c, INT);
                 mk(sig(vec![(digits, "precision")], STR), false)
+            }
+            "toExponential" => {
+                let digits = opt(c, INT);
+                mk(sig(vec![(digits, "fractionDigits")], STR), false)
             }
             "toString" => {
                 let radix = opt(c, INT);
@@ -947,6 +951,15 @@ impl<'a> Checker<'a> {
     }
 
     /// Can values of this type go to and (`!allow_class`) come from JSON?
+    /// What a class's `toJSON()` (taking no arguments) returns, if it has one.
+    pub(crate) fn to_json_ret(&mut self, t: TyId) -> Option<TyId> {
+        let sym = self.interner.lookup("toJSON")?;
+        match self.class_member(t, sym)? {
+            super::class::ClassMemberRef::Method(mm) if mm.params.iter().all(|p| p.optional) => Some(self.method_ret(&mm)),
+            _ => None,
+        }
+    }
+
     pub(super) fn json_ok(&mut self, t: TyId, allow_class: bool) -> bool {
         let mut seen = Vec::new();
         self.json_ok_in(t, allow_class, &mut seen)
@@ -957,6 +970,7 @@ impl<'a> Checker<'a> {
             return true;
         }
         seen.push(t);
+        let json_ret = if matches!(self.types.get(t), Ty::Class(..)) { self.to_json_ret(t) } else { None };
         match *self.types.get(t) {
             Ty::Error | Ty::Int | Ty::F64 | Ty::F32 | Ty::I8 | Ty::I16 | Ty::I32 | Ty::U8 | Ty::U16 | Ty::U32 | Ty::U64 | Ty::Decimal | Ty::Bool | Ty::Str | Ty::StrLit(_) | Ty::Undefined | Ty::Null => true,
             // A generic `T`: the instantiated type is written (functions come out as `null`).
@@ -975,6 +989,8 @@ impl<'a> Checker<'a> {
                 let u = self.unfold(t);
                 self.json_ok_in(u, allow_class, seen)
             }
+            // (written as its `toJSON()` says, as in JavaScript)
+            Ty::Class(..) if let Some(r) = json_ret => self.json_ok_in(r, allow_class, seen),
             Ty::Class(..) if allow_class => {
                 let fields = self.class_as_fields(t);
                 fields.iter().filter(|f| !matches!(self.types.get(f.ty), Ty::Func(..))).map(|f| f.ty).collect::<Vec<_>>().into_iter().all(|ft| self.json_ok_in(ft, allow_class, seen))
@@ -1164,6 +1180,9 @@ impl<'a> Checker<'a> {
                     // (of a number: itself)
                     if name == "Number" && self.types.is_numeric(t) {
                         return Some(t);
+                    }
+                    if name == "Number" && self.to_primitive(args[0].expr, t) {
+                        return Some(F64);
                     }
                     // `Number(x)` also takes numbers (and `number | string`), as in JavaScript.
                     let number_ok = name == "Number" && self.flat_members(t).iter().all(|&m| self.types.is_string(m) || self.types.is_numeric(m));

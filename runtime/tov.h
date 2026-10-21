@@ -217,6 +217,7 @@ tv_str tv_str_from_bool(bool v);
 tv_str tv_f64_to_fixed(double v, tv_int digits, const char *loc); /* JS toFixed (round half up on exact ties); traps if digits ∉ 0..100 */
 tv_str tv_int_to_fixed(tv_int v, tv_int digits, const char *loc);
 tv_str tv_f64_to_precision(double v, tv_int digits, const char *loc); /* JS toPrecision; traps if digits ∉ 1..100 */
+tv_str tv_f64_to_exponential(double v, tv_int digits, bool has_digits, const char *loc); /* JS toExponential */
 tv_int tv_str_locale_compare(tv_str a, tv_str b); /* -1, 0, 1: letters in alphabetical order (case after), then code points */
 void tv_sb_push_int(tv_sb *sb, tv_int v);
 void tv_sb_push_f64(tv_sb *sb, double v);       /* same format as tv_str_from_f64 */

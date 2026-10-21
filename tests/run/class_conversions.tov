@@ -1,0 +1,24 @@
+// A class's valueOf() is what Number(x) and +x read, and its toJSON() what JSON.stringify writes,
+// as in JavaScript.
+class Money {
+  cents: number
+  constructor(cents: number) {
+    this.cents = cents
+  }
+  valueOf(): number {
+    return this.cents / 100
+  }
+  toJSON(): string {
+    return `$${(this.cents / 100).toFixed(2)}`
+  }
+  toString(): string {
+    return `${this.cents}c`
+  }
+}
+
+function main() {
+  const m = new Money(1999)
+  console.log(Number(m), +m, `${m}`, String(m))
+  console.log(JSON.stringify({ price: m, list: [new Money(5), m] }))
+  console.log(JSON.stringify(m))
+}

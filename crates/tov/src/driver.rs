@@ -18,6 +18,18 @@ const PRELUDE: &str = include_str!("prelude.tov");
 const STD_MODULES: &[(&str, &str, bool)] =
     &[("fs", include_str!("std/fs.tov"), true), ("path", include_str!("std/path.tov"), true), ("http", include_str!("std/http.tov"), false)];
 
+/// npm packages Tov has natively: (the import specifier, the Tov module standing in for the
+/// package's JavaScript, the export a default import names). `TOV_NPM_JS=1` runs the package's
+/// JavaScript instead.
+pub(crate) const NPM_SHIMS: &[(&str, &str, &str)] = &[("big.js", include_str!("std/big.tov"), "Big")];
+
+fn npm_shim(spec: &str) -> Option<&'static (&'static str, &'static str, &'static str)> {
+    if std::env::var_os("TOV_NPM_JS").is_some() {
+        return None;
+    }
+    NPM_SHIMS.iter().find(|s| s.0 == spec)
+}
+
 /// Globals that come from std/http, as in Bun.
 pub(crate) const WEB_GLOBALS: &[&str] =
     &["Bun", "Request", "Response", "Headers", "URL", "URLSearchParams", "fetch", "AbortController", "AbortSignal", "DOMException", "FetchError", "ReadableStream", "TextEncoder", "TextDecoder", "Blob", "File", "FormData", "Socket", "SocketError", "TCPSocketListener", "WebSocket", "ServerWebSocket", "WebSocketEvent", "MessageEvent", "CloseEvent"];
@@ -185,20 +197,24 @@ pub fn load(paths: &[PathBuf], base: &Path) -> Result<Loaded, String> {
                 }
                 None => {
                     let std_src = target.to_str().and_then(|p| p.strip_prefix("<std>/")).and_then(|n| STD_MODULES.iter().find(|m| m.0 == n));
-                    let text = match std_src {
-                        Some(m) => m.1.to_string(),
-                        None => std::fs::read_to_string(&target).map_err(|e| format!("can't read {}: {e}", target.display()))?,
+                    // (a package Tov has natively, by its own name)
+                    let shim = target.to_str().and_then(|p| p.strip_prefix("<std>/npm/")).and_then(|n| NPM_SHIMS.iter().find(|s| s.0 == n));
+                    let text = match (std_src, shim) {
+                        (Some(m), _) => m.1.to_string(),
+                        (None, Some(s)) => s.1.to_string(),
+                        _ => std::fs::read_to_string(&target).map_err(|e| format!("can't read {}: {e}", target.display()))?,
                     };
-                    let name = match std_src {
-                        Some(m) => format!("{}{}", if m.2 { "node:" } else { "std/" }, m.0),
-                        None => display_name(&target, &base),
+                    let name = match (std_src, shim) {
+                        (Some(m), _) => format!("{}{}", if m.2 { "node:" } else { "std/" }, m.0),
+                        (None, Some(s)) => s.0.to_string(),
+                        _ => display_name(&target, &base),
                     };
                     let file = sm.add(SourceFile::new(target.clone(), name.clone(), text));
                     let (ast, pd) = parser::parse(&sm.get(file).text, file, &mut interner);
                     diags.extend(pd);
                     let t = modules.len() as u32;
                     by_path.insert(target.clone(), t);
-                    modules.push(Module { file, path: target, name, ast, imports: HashMap::default(), builtin: false, std: std_src.is_some(), entry: false, npm: None });
+                    modules.push(Module { file, path: target, name, ast, imports: HashMap::default(), builtin: false, std: std_src.is_some() || shim.is_some(), entry: false, npm: None });
                     t
                 }
             };
@@ -365,6 +381,9 @@ fn resolve_import(from: &Path, spec: &str, span: Span, npm: &crate::npm::resolve
     }
     if spec.starts_with("node:") {
         return Err(Diagnostic::new("N0103", span, format!("\"{spec}\" is not a Node.js built-in module")));
+    }
+    if let Some(s) = npm_shim(spec) {
+        return Ok(PathBuf::from(format!("<std>/npm/{}", s.0)));
     }
     if !spec.starts_with("./") && !spec.starts_with("../") && !spec.starts_with('/') {
         // an npm package, from the nearest node_modules

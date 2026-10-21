@@ -28,11 +28,14 @@ pub struct Rewrites {
     pub(crate) spreads: Vec<(u32, ExprId, Vec<Vec<crate::intern::Sym>>)>,
     /// `p[k]`, `k` one of these field names: (module, the index), as `k === "a" ? p.a : p.b`.
     pub(crate) keyed: Vec<(u32, ExprId, Vec<crate::intern::Sym>)>,
+    /// A class instance where a number is wanted (`Number(x)`, `+x`): (module, the value, the
+    /// method), as `x.valueOf()` (JavaScript's conversion calls it).
+    pub(crate) prims: Vec<(u32, ExprId, crate::intern::Sym)>,
 }
 
 impl Rewrites {
     pub fn is_empty(&self) -> bool {
-        self.args.is_empty() && self.consts.is_empty() && self.items.is_empty() && self.awaits.is_empty() && self.calls.is_empty() && self.elems.is_empty() && self.keys.is_empty() && self.spreads.is_empty() && self.keyed.is_empty()
+        self.args.is_empty() && self.prims.is_empty() && self.consts.is_empty() && self.items.is_empty() && self.awaits.is_empty() && self.calls.is_empty() && self.elems.is_empty() && self.keys.is_empty() && self.spreads.is_empty() && self.keyed.is_empty()
     }
 
     pub(crate) fn extend(&mut self, o: Rewrites) {
@@ -45,6 +48,7 @@ impl Rewrites {
         self.keys.extend(o.keys);
         self.spreads.extend(o.spreads);
         self.keyed.extend(o.keyed);
+        self.prims.extend(o.prims);
     }
 }
 
@@ -173,6 +177,18 @@ pub fn apply(modules: &mut [Module], rw: &Rewrites) -> bool {
         ast.exprs.push(crate::ast::Expr { kind: ExprKind::Str(name), span: name_span });
         let index = ast.exprs.len() as ExprId - 1;
         ast.exprs[at as usize].kind = ExprKind::Index { obj, index, optional };
+        changed = true;
+    }
+    for &(m, x, method) in &rw.prims {
+        // `Number(x)` → `Number(x.valueOf())`: the node becomes the call, on a copy of itself
+        let ast = &mut modules[m as usize].ast;
+        let span = ast.exprs[x as usize].span;
+        let inner = crate::ast::Expr { kind: std::mem::replace(&mut ast.exprs[x as usize].kind, ExprKind::Error), span };
+        ast.exprs.push(inner);
+        let copy = ast.exprs.len() as ExprId - 1;
+        ast.exprs.push(crate::ast::Expr { kind: ExprKind::Member { obj: copy, name: method, name_span: span, optional: false }, span });
+        let callee = ast.exprs.len() as ExprId - 1;
+        ast.exprs[x as usize].kind = ExprKind::Call { callee, type_args: Vec::new(), args: Vec::new(), optional: false };
         changed = true;
     }
     for &(m, x) in &rw.awaits {

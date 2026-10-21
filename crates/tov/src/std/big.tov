@@ -1,0 +1,581 @@
+// big.js (6.2.2), natively: `import Big from "big.js"` gets this module instead of the package's
+// JavaScript. Values, results, rounding, errors and strings are big.js's; a value is held as a
+// sign, a bigint coefficient and a power of ten (not big.js's array of digits), so each operation
+// is a few bigint operations instead of a loop over digits.
+
+const NAME = "[big.js] "
+const INVALID = NAME + "Invalid "
+const INVALID_DP = INVALID + "decimal places"
+const INVALID_RM = INVALID + "rounding mode"
+const DIV_BY_ZERO = NAME + "Division by zero"
+const MAX_DP = 1e6
+const MAX_POWER = 1e6
+
+// 10^0 .. 10^63 (most alignments and roundings need one of these)
+const POW10: bigint[] = tens()
+
+function tens(): bigint[] {
+  const out: bigint[] = []
+  let p = 1n
+  for (let i = 0; i < 64; i++) {
+    out.push(p)
+    p = p * 10n
+  }
+  return out
+}
+
+function pow10(k: int): bigint {
+  return k < 64 ? POW10[k]! : 10n ** BigInt(k)
+}
+
+/// A whole number (that `Math.trunc` can take: big.js's limits are far below 2^53).
+function isInt(n: number): bool {
+  return n > -9007199254740992 && n < 9007199254740992 && n === Math.trunc(n)
+}
+
+/// The rounding mode `rm`, or Big.RM: 0, 1, 2 or 3.
+function mode(rm: number | undefined): int {
+  const m = rm === undefined ? Big.RM : rm
+  if (m !== 0 && m !== 1 && m !== 2 && m !== 3) {
+    throw new Error(INVALID_RM)
+  }
+  return Math.trunc(m)
+}
+
+/// `q` (the quotient of a division whose remainder is `r` of `d`) rounded with mode `rm`.
+function roundQ(q: bigint, r: bigint, d: bigint, rm: int): bigint {
+  if (r === 0n) {
+    return q
+  }
+  const twice = r * 2n
+  const up = rm === 3 || (rm === 1 && twice >= d) || (rm === 2 && (twice > d || (twice === d && q % 2n === 1n)))
+  return up ? q + 1n : q
+}
+
+export class Big {
+  static DP: number = 20
+  static RM: number = 1
+  static NE: number = -7
+  static PE: number = 21
+  static strict: bool = false
+  static readonly roundDown = 0
+  static readonly roundHalfUp = 1
+  static readonly roundHalfEven = 2
+  static readonly roundUp = 3
+
+  /// The value is s × c × 10^q: s is 1 or -1 (zeros are signed), c >= 0 (0 for zero, with q 0).
+  s: int = 1
+  c: bigint = 0n
+  q: int = 0
+
+  constructor(n: Big | number | string | bigint) {
+    if (n instanceof Big) {
+      this.s = n.s
+      this.c = n.c
+      this.q = n.q
+      return
+    }
+    let text = ""
+    if (typeof n === "string") {
+      text = n
+    } else if (typeof n === "bigint") {
+      text = String(n)
+    } else {
+      if (Big.strict) {
+        throw new TypeError(INVALID + "value")
+      }
+      // (a whole number below 2^53 is its own digits: no string to parse)
+      if (n > -9007199254740992 && n < 9007199254740992 && n === Math.trunc(n)) {
+        const m = Math.trunc(n)
+        this.s = m < 0 || (m === 0 && 1 / n < 0) ? -1 : 1
+        this.c = BigInt(m < 0 ? -m : m)
+        this.q = 0
+        return
+      }
+      text = String(n)
+    }
+    parse(this, text)
+  }
+
+  abs(): Big {
+    return make(1, this.c, this.q)
+  }
+
+  neg(): Big {
+    return make(-this.s, this.c, this.q)
+  }
+
+  cmp(y: Big | number | string | bigint): int {
+    return compare(this, from(y))
+  }
+
+  eq(y: Big | number | string | bigint): bool {
+    return compare(this, from(y)) === 0
+  }
+
+  gt(y: Big | number | string | bigint): bool {
+    return compare(this, from(y)) > 0
+  }
+
+  gte(y: Big | number | string | bigint): bool {
+    return compare(this, from(y)) > -1
+  }
+
+  lt(y: Big | number | string | bigint): bool {
+    return compare(this, from(y)) < 0
+  }
+
+  lte(y: Big | number | string | bigint): bool {
+    return compare(this, from(y)) < 1
+  }
+
+  plus(y: Big | number | string | bigint): Big {
+    return add(this, from(y), 1)
+  }
+
+  add(y: Big | number | string | bigint): Big {
+    return add(this, from(y), 1)
+  }
+
+  minus(y: Big | number | string | bigint): Big {
+    return add(this, from(y), -1)
+  }
+
+  sub(y: Big | number | string | bigint): Big {
+    return add(this, from(y), -1)
+  }
+
+  times(y: Big | number | string | bigint): Big {
+    return multiply(this, from(y))
+  }
+
+  mul(y: Big | number | string | bigint): Big {
+    return multiply(this, from(y))
+  }
+
+  div(y: Big | number | string | bigint): Big {
+    return divide(this, from(y))
+  }
+
+  mod(y: Big | number | string | bigint): Big {
+    const d = from(y)
+    if (d.c === 0n) {
+      throw new Error(DIV_BY_ZERO)
+    }
+    if (compare(make(1, d.c, d.q), make(1, this.c, this.q)) === 1) {
+      return make(this.s, this.c, this.q)
+    }
+    const dp = Big.DP
+    const rm = Big.RM
+    Big.DP = 0
+    Big.RM = 0
+    const t = divide(this, d)
+    Big.DP = dp
+    Big.RM = rm
+    return add(this, multiply(t, d), -1)
+  }
+
+  pow(n: number): Big {
+    if (!isInt(n) || n < -MAX_POWER || n > MAX_POWER) {
+      throw new Error(INVALID + "exponent")
+    }
+    const one = new Big("1")
+    let x: Big = this
+    let y = one
+    const neg = n < 0
+    let k = Math.trunc(neg ? -n : n)
+    for (;;) {
+      if ((k & 1) === 1) {
+        y = multiply(y, x)
+      }
+      k = k >> 1
+      if (k === 0) {
+        break
+      }
+      x = multiply(x, x)
+    }
+    return neg ? divide(one, y) : y
+  }
+
+  prec(sd: number, rm?: number): Big {
+    if (!isInt(sd) || sd < 1 || sd > MAX_DP) {
+      throw new Error(INVALID + "precision")
+    }
+    return toDigits(this, Math.trunc(sd), mode(rm))
+  }
+
+  round(dp?: number, rm?: number): Big {
+    let places = 0
+    if (dp !== undefined) {
+      if (!isInt(dp) || dp < -MAX_DP || dp > MAX_DP) {
+        throw new Error(INVALID_DP)
+      }
+      places = Math.trunc(dp)
+    }
+    return toPlaces(this, places, mode(rm))
+  }
+
+  sqrt(): Big {
+    if (this.c === 0n) {
+      return make(this.s, 0n, 0)
+    }
+    if (this.s < 0) {
+      throw new Error(NAME + "No square root")
+    }
+    const half = new Big("0.5")
+    let e = exponent(this)
+    // (an estimate from a number, as big.js takes it)
+    let s = Math.sqrt(Number(stringify(digits(this), e, 1, true, true)))
+    let r: Big
+    if (s === 0 || s === 1 / 0) {
+      let c = digits(this)
+      if (((c.length + e) & 1) === 0) {
+        c = c + "0"
+      }
+      s = Math.sqrt(Number(c))
+      e = Math.trunc(Math.trunc((e + 1) / 2)) - (e < 0 || (e & 1) === 1 ? 1 : 0)
+      const est = s === 1 / 0 ? "5e" : s.toExponential().slice(0, s.toExponential().indexOf("e") + 1)
+      r = new Big(est + `${e}`)
+    } else {
+      r = new Big(`${s}`)
+    }
+    Big.DP = Big.DP + 4
+    const k = exponent(r) + Math.trunc(Big.DP)
+    let t: Big
+    do {
+      t = r
+      r = multiply(half, add(t, divide(this, t), 1))
+    } while (digits(t).slice(0, k) !== digits(r).slice(0, k))
+    Big.DP = Big.DP - 4
+    return toPlaces(r, Math.trunc(Big.DP), mode(Big.RM))
+  }
+
+  toExponential(dp?: number, rm?: number): string {
+    const nonzero = this.c !== 0n
+    if (dp === undefined) {
+      return stringify(digits(this), exponent(this), this.s, true, nonzero)
+    }
+    if (!isInt(dp) || dp < 0 || dp > MAX_DP) {
+      throw new Error(INVALID_DP)
+    }
+    const x = toDigits(this, Math.trunc(dp) + 1, mode(rm))
+    return stringify(pad(digits(x), Math.trunc(dp) + 1), exponent(x), x.s, true, nonzero)
+  }
+
+  toFixed(dp?: number, rm?: number): string {
+    const nonzero = this.c !== 0n
+    if (dp === undefined) {
+      return stringify(digits(this), exponent(this), this.s, false, nonzero)
+    }
+    if (!isInt(dp) || dp < 0 || dp > MAX_DP) {
+      throw new Error(INVALID_DP)
+    }
+    const x = toPlaces(this, Math.trunc(dp), mode(rm))
+    const e = exponent(x)
+    return stringify(pad(digits(x), Math.trunc(dp) + e + 1), e, x.s, false, nonzero)
+  }
+
+  toPrecision(sd?: number, rm?: number): string {
+    const nonzero = this.c !== 0n
+    if (sd === undefined) {
+      const e = exponent(this)
+      return stringify(digits(this), e, this.s, e <= Big.NE || e >= Big.PE, nonzero)
+    }
+    if (!isInt(sd) || sd < 1 || sd > MAX_DP) {
+      throw new Error(INVALID + "precision")
+    }
+    const x = toDigits(this, Math.trunc(sd), mode(rm))
+    const e = exponent(x)
+    return stringify(pad(digits(x), Math.trunc(sd)), e, x.s, sd <= e || e <= Big.NE || e >= Big.PE, nonzero)
+  }
+
+  toString(): string {
+    const e = exponent(this)
+    return stringify(digits(this), e, this.s, e <= Big.NE || e >= Big.PE, this.c !== 0n)
+  }
+
+  toJSON(): string {
+    return this.toString()
+  }
+
+  toNumber(): number {
+    const n = Number(stringify(digits(this), exponent(this), this.s, true, true))
+    if (Big.strict && !this.eq(String(n))) {
+      throw new Error(NAME + "Imprecise conversion")
+    }
+    return n
+  }
+
+  valueOf(): string {
+    if (Big.strict) {
+      throw new Error(NAME + "valueOf disallowed")
+    }
+    const e = exponent(this)
+    return stringify(digits(this), e, this.s, e <= Big.NE || e >= Big.PE, true)
+  }
+}
+
+// (results are made from a zero, copied: not parsed)
+let zero: Big | undefined = undefined
+
+function make(s: int, c: bigint, q: int): Big {
+  let z = zero
+  if (z === undefined) {
+    z = new Big("0")
+    zero = z
+  }
+  const x = new Big(z)
+  x.s = s
+  x.c = c
+  x.q = c === 0n ? 0 : q
+  return x
+}
+
+function from(y: Big | number | string | bigint): Big {
+  return y instanceof Big ? y : new Big(y)
+}
+
+/// big.js's number syntax, `-?(\d+(\.\d*)?|\.\d+)(e[+-]?\d+)?` (any case of e), scanned once:
+/// the sign, the digits (as the coefficient) and the power of ten of the last.
+function parse(x: Big, text: string) {
+  const n = text.length
+  let i = 0
+  x.s = 1
+  if (i < n && text.charCodeAt(i) === 45) {
+    x.s = -1
+    i++
+  }
+  const start = i
+  while (i < n && isDigit(text.charCodeAt(i))) {
+    i++
+  }
+  const whole = i - start
+  let fracStart = i
+  let frac = 0
+  if (i < n && text.charCodeAt(i) === 46) {
+    i++
+    fracStart = i
+    while (i < n && isDigit(text.charCodeAt(i))) {
+      i++
+    }
+    frac = i - fracStart
+  }
+  if (whole === 0 && frac === 0) {
+    throw new Error(INVALID + "number")
+  }
+  let exp = 0
+  if (i < n && (text.charCodeAt(i) === 101 || text.charCodeAt(i) === 69)) {
+    i++
+    let sign = 1
+    if (i < n && (text.charCodeAt(i) === 43 || text.charCodeAt(i) === 45)) {
+      sign = text.charCodeAt(i) === 45 ? -1 : 1
+      i++
+    }
+    const expStart = i
+    while (i < n && isDigit(text.charCodeAt(i))) {
+      // (past 10^15 no value can be written out anyway)
+      if (exp < 1000000000000000) {
+        exp = exp * 10 + (text.charCodeAt(i) - 48)
+      }
+      i++
+    }
+    if (i === expStart) {
+      throw new Error(INVALID + "number")
+    }
+    exp = exp * sign
+  }
+  if (i !== n) {
+    throw new Error(INVALID + "number")
+  }
+  // the coefficient: the digits, a small integer when there are few of them
+  let c = 0n
+  const count = whole + frac
+  if (count <= 18) {
+    let v = 0
+    for (let k = start; k < start + whole; k++) {
+      v = v * 10 + (text.charCodeAt(k) - 48)
+    }
+    for (let k = fracStart; k < fracStart + frac; k++) {
+      v = v * 10 + (text.charCodeAt(k) - 48)
+    }
+    c = BigInt(v)
+  } else {
+    c = BigInt(text.slice(start, start + whole) + text.slice(fracStart, fracStart + frac))
+  }
+  x.c = c
+  x.q = c === 0n ? 0 : exp - frac
+}
+
+function isDigit(ch: int): bool {
+  return ch >= 48 && ch <= 57
+}
+
+/// The digits of the coefficient, without trailing zeros ("0" for zero).
+function digits(x: Big): string {
+  const t = x.c.toString()
+  let end = t.length
+  while (end > 1 && t.charCodeAt(end - 1) === 48) {
+    end--
+  }
+  return t.slice(0, end)
+}
+
+/// big.js's `e`: the power of ten of the first digit (0 for zero).
+function exponent(x: Big): int {
+  if (x.c === 0n) {
+    return 0
+  }
+  return x.q + x.c.toString().length - 1
+}
+
+function pad(ds: string, n: int): string {
+  return ds.length < n ? ds + "0".repeat(n - ds.length) : ds
+}
+
+/// big.js's stringify of digits `ds` (the first of them at 10^e), with the sign of `s` when
+/// `withSign`.
+function stringify(ds: string, e0: int, s: int, exponential: bool, withSign: bool): string {
+  let str = ds
+  const n = ds.length
+  let e = e0
+  if (exponential) {
+    str = ds.charAt(0) + (n > 1 ? "." + ds.slice(1) : "") + (e < 0 ? "e" : "e+") + `${e}`
+  } else if (e < 0) {
+    str = "0." + "0".repeat(-e - 1) + ds
+  } else if (e > 0) {
+    e++
+    if (e > n) {
+      str = ds + "0".repeat(e - n)
+    } else if (e < n) {
+      str = ds.slice(0, e) + "." + ds.slice(e)
+    }
+  } else if (n > 1) {
+    str = ds.charAt(0) + "." + ds.slice(1)
+  }
+  return s < 0 && withSign ? "-" + str : str
+}
+
+function compare(x: Big, y: Big): int {
+  const i = x.s
+  const j = y.s
+  if (x.c === 0n || y.c === 0n) {
+    return x.c === 0n ? (y.c === 0n ? 0 : -j) : i
+  }
+  if (i !== j) {
+    return i
+  }
+  const r = magnitude(x, y)
+  return i < 0 ? -r : r
+}
+
+/// |x| against |y|: 1, 0 or -1 (both nonzero).
+function magnitude(x: Big, y: Big): int {
+  if (x.q === y.q) {
+    return x.c > y.c ? 1 : x.c < y.c ? -1 : 0
+  }
+  // (far apart: the first digits' places decide)
+  const ex = exponent(x)
+  const ey = exponent(y)
+  if (ex !== ey) {
+    return ex > ey ? 1 : -1
+  }
+  const [a, b] = align(x, y)
+  return a > b ? 1 : a < b ? -1 : 0
+}
+
+/// x's and y's coefficients at the smaller of their powers of ten.
+function align(x: Big, y: Big): [bigint, bigint] {
+  if (x.q > y.q) {
+    return [x.c * pow10(x.q - y.q), y.c]
+  }
+  return [x.c, y.c * pow10(y.q - x.q)]
+}
+
+/// x + sign × y, with big.js's signs of zeros.
+function add(x: Big, y: Big, sign: int): Big {
+  const ys = y.s * sign
+  if (x.s !== ys) {
+    // (opposite signs: a difference of magnitudes)
+    if (x.c === 0n || y.c === 0n) {
+      if (y.c !== 0n) {
+        return make(ys, y.c, y.q)
+      }
+      if (x.c !== 0n) {
+        return make(x.s, x.c, x.q)
+      }
+      return make(sign === 1 ? 1 : x.s, 0n, 0)
+    }
+    const [a, b] = align(x, y)
+    const q = x.q < y.q ? x.q : y.q
+    if (a === b) {
+      return make(1, 0n, 0)
+    }
+    return a > b ? make(x.s, a - b, q) : make(ys, b - a, q)
+  }
+  if (x.c === 0n || y.c === 0n) {
+    if (y.c === 0n) {
+      if (x.c !== 0n) {
+        return make(x.s, x.c, x.q)
+      }
+      return make(sign === 1 ? x.s : 1, 0n, 0)
+    }
+    return make(ys, y.c, y.q)
+  }
+  const [a, b] = align(x, y)
+  return make(x.s, a + b, x.q < y.q ? x.q : y.q)
+}
+
+function multiply(x: Big, y: Big): Big {
+  const s = x.s === y.s ? 1 : -1
+  if (x.c === 0n || y.c === 0n) {
+    return make(s, 0n, 0)
+  }
+  return make(s, x.c * y.c, x.q + y.q)
+}
+
+function divide(x: Big, y: Big): Big {
+  const dp = Big.DP
+  if (!isInt(dp) || dp < 0 || dp > MAX_DP) {
+    throw new Error(INVALID_DP)
+  }
+  if (y.c === 0n) {
+    throw new Error(DIV_BY_ZERO)
+  }
+  const k = x.s === y.s ? 1 : -1
+  if (x.c === 0n) {
+    return make(k, 0n, 0)
+  }
+  const places = Math.trunc(dp)
+  // |x / y| × 10^dp = x.c × 10^t / y.c
+  const t = x.q - y.q + places
+  const num = t >= 0 ? x.c * pow10(t) : x.c
+  const den = t >= 0 ? y.c : y.c * pow10(-t)
+  const q = num / den
+  const r = num - q * den
+  if (r === 0n) {
+    return make(k, q, -places)
+  }
+  return make(k, roundQ(q, r, den, mode(Big.RM)), -places)
+}
+
+/// x rounded to `dp` decimal places (a multiple of 10^-dp) with mode `rm`.
+function toPlaces(x: Big, dp: int, rm: int): Big {
+  if (x.c === 0n || x.q >= -dp) {
+    return make(x.s, x.c, x.q)
+  }
+  const p = pow10(-dp - x.q)
+  return make(x.s, roundQ(x.c / p, x.c % p, p, rm), -dp)
+}
+
+/// x rounded to `sd` significant digits with mode `rm`.
+function toDigits(x: Big, sd: int, rm: int): Big {
+  if (x.c === 0n) {
+    return make(x.s, 0n, 0)
+  }
+  const n = x.c.toString().length
+  if (n <= sd) {
+    return make(x.s, x.c, x.q)
+  }
+  const p = pow10(n - sd)
+  return make(x.s, roundQ(x.c / p, x.c % p, p, rm), x.q + n - sd)
+}

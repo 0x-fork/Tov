@@ -146,6 +146,8 @@ console.log(r.success as bool)
 
 Tov code compiles to native code. The packages are bundled when the program is built (resolved as Node.js resolves them; ES modules, TypeScript and JSX converted), embedded in the binary, and run on JavaScriptCore, the engine Bun uses. Values that come from JavaScript have the type `Js` and are checked when converted (`as bool`). A JavaScript call or property read that throws passes a `JsError` on like any other error, and Tov functions handed to a package (a framework's handlers) can throw too: their errors, and JavaScript exceptions inside them, go back to the package as JavaScript exceptions, as they would in Bun.
 
+Some packages Tov has natively, compiled with the program instead of run in the engine: `import Big from "big.js"` gets a Tov implementation of [big.js](https://github.com/MikeMcl/big.js) that gives the package's results, rounding, errors and strings (checked against it on thousands of random operations), 6–12× faster than Bun runs the package (`TOV_NPM_JS=1` runs the package's JavaScript instead).
+
 Node's built-in modules are there for packages that need them (`fs`, `http`, `net`, `child_process`, `crypto`, `zlib`, `dns`, streams and the rest), and so is Bun's (`Bun.serve`, `Bun.spawn`, `Bun.file`). Native addons load through Node-API; an addon a package requires by name (`require("./build/addon.node")`) is loaded from the program's own directory, and `tov build` copies it there. An app written for Bun runs as it is: this is the whole port of [Cap's media server](https://github.com/CapSoftware/Cap/tree/main/apps/media-server) (Hono, zod, FFmpeg through a native addon, `Bun.spawn`):
 
 ```ts

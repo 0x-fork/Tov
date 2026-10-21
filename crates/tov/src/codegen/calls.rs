@@ -709,6 +709,16 @@ impl<'c, 'a> Gen<'c, 'a> {
                     let loc = self.loc(span);
                     self.tmp(STR, &format!("({present} ? tv_f64_to_precision({}, {d}, {loc}) : tv_str_from_f64({}))", x.code, x.code), true)
                 }
+                "toExponential" => {
+                    let x = self.coerce(rv, F64);
+                    let loc = self.loc(span);
+                    let Some(a) = args.first() else { return self.tmp(STR, &format!("tv_f64_to_exponential({}, 0, false, {loc})", x.code), true) };
+                    let d = self.expr(a.expr);
+                    let oi = self.c.types.optional(INT);
+                    let d = self.coerce(d, oi);
+                    let (d, present) = self.optional_int(&d);
+                    self.tmp(STR, &format!("tv_f64_to_exponential({}, {d}, {present}, {loc})", x.code), true)
+                }
                 "toFixed" => {
                     let d = self.expr(args[0].expr);
                     let d = self.int_code(d);

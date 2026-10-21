@@ -1041,23 +1041,19 @@ tv_str tv_f64_to_fixed(double v, tv_int digits, const char *loc) {
     return tv_str_from_ascii(buf, (size_t)len);
 }
 
-tv_str tv_f64_to_precision(double v, tv_int digits, const char *loc) {
-    if (digits < 1 || digits > 100) tv_trap("RangeError: toPrecision() argument must be between 1 and 100", loc);
-    if (v != v || isinf(v)) return tv_str_from_f64(v);
-    if (v == 0) v = 0.0;
-    int p = (int)digits;
-    /* p significant digits in scientific form; printf rounds exact ties to even, JS away from zero */
+/* |v|'s first p significant digits into d, rounded as JavaScript does (exact ties away from
+ * zero; printf would take them to even), and the power of ten of the first (v finite). */
+static void tv_round_digits(double v, int p, char *d, int *e_out) {
     char sci[160], wide[200];
-    snprintf(sci, sizeof sci, "%.*e", p - 1, v);
-    snprintf(wide, sizeof wide, "%.*e", p + 40, v);
-    char d[120];
-    int nd = 0, neg = v < 0;
-    const char *q = sci + neg;
+    snprintf(sci, sizeof sci, "%.*e", p - 1, fabs(v));
+    snprintf(wide, sizeof wide, "%.*e", p + 40, fabs(v));
+    int nd = 0;
+    const char *q = sci;
     for (; *q && *q != 'e'; q++)
         if (*q >= '0' && *q <= '9') d[nd++] = *q;
     int e = atoi(q + 1);
     /* a tie: the wide form's digits past p are 5 then only zeros */
-    const char *w = wide + neg;
+    const char *w = wide;
     int k = 0, tie = 1, seen = 0;
     for (; *w && *w != 'e'; w++) {
         if (*w < '0' || *w > '9') continue;
@@ -1067,9 +1063,8 @@ tv_str tv_f64_to_precision(double v, tv_int digits, const char *loc) {
     }
     if (tie && seen) {
         /* round up from the truncated digits */
-        snprintf(wide, sizeof wide, "%.*e", p + 40, v);
         nd = 0;
-        for (w = wide + neg; *w && *w != 'e' && nd < p; w++)
+        for (w = wide; *w && *w != 'e' && nd < p; w++)
             if (*w >= '0' && *w <= '9') d[nd++] = *w;
         e = atoi(strchr(wide, 'e') + 1);
         int i = nd - 1;
@@ -1077,6 +1072,42 @@ tv_str tv_f64_to_precision(double v, tv_int digits, const char *loc) {
         if (i >= 0) d[i]++;
         else { memmove(d + 1, d, (size_t)nd - 1); d[0] = '1'; e++; }
     }
+    *e_out = e;
+}
+
+tv_str tv_f64_to_exponential(double v, tv_int digits, bool has_digits, const char *loc) {
+    if (v != v || isinf(v)) return tv_str_from_f64(v);
+    if (has_digits && (digits < 0 || digits > 100)) tv_trap("RangeError: toExponential() argument must be between 0 and 100", loc);
+    char d[120], out[200];
+    int k, e, n = 0;
+    if (v == 0) {
+        k = has_digits ? (int)digits + 1 : 1;
+        memset(d, '0', (size_t)k);
+        e = 0;
+    } else if (has_digits) {
+        k = (int)digits + 1;
+        tv_round_digits(v, k, d, &e);
+    } else {
+        int pos;
+        k = tv_shortest_digits(fabs(v), false, d, &pos);
+        e = pos - 1;
+    }
+    if (v < 0) out[n++] = '-';
+    out[n++] = d[0];
+    if (k > 1) { out[n++] = '.'; memcpy(out + n, d + 1, (size_t)k - 1); n += k - 1; }
+    n += snprintf(out + n, sizeof out - (size_t)n, "e%c%d", e < 0 ? '-' : '+', e < 0 ? -e : e);
+    return tv_str_from_ascii(out, (size_t)n);
+}
+
+tv_str tv_f64_to_precision(double v, tv_int digits, const char *loc) {
+    if (digits < 1 || digits > 100) tv_trap("RangeError: toPrecision() argument must be between 1 and 100", loc);
+    if (v != v || isinf(v)) return tv_str_from_f64(v);
+    if (v == 0) v = 0.0;
+    int p = (int)digits;
+    char d[120];
+    int e, neg = v < 0;
+    if (v == 0) { memset(d, '0', (size_t)p); e = 0; }
+    else tv_round_digits(v, p, d, &e);
     char out[200];
     int n = 0;
     if (neg) out[n++] = '-';

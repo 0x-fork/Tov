@@ -1,0 +1,81 @@
+// big.js, natively: thousands of operations (random values, settings and rounding modes, bad
+// input) give what the package gives under Node (expected output from big.js 6.2.2).
+import Big from "big.js"
+
+let seed = 12345
+function rnd(n: number): number {
+  seed = (seed * 48271) % 2147483647
+  return seed % n
+}
+
+function digits(n: number): string {
+  let s = ""
+  for (let i = 0; i < n; i++) s += String(rnd(10))
+  return s
+}
+
+function value(): string {
+  const k = rnd(12)
+  const sign = rnd(3) === 0 ? "-" : ""
+  if (k === 0) return sign + "0"
+  if (k === 1) return sign + digits(1 + rnd(3))
+  if (k === 2) return sign + digits(1 + rnd(4)) + "." + digits(1 + rnd(6))
+  if (k === 3) return sign + "0." + "0".repeat(rnd(8)) + digits(1 + rnd(5))
+  if (k === 4) return sign + digits(1 + rnd(3)) + "e" + String(rnd(40) - 20)
+  if (k === 5) return sign + digits(1 + rnd(25))
+  if (k === 6) return sign + "." + digits(1 + rnd(5))
+  if (k === 7) return sign + digits(1 + rnd(2)) + "00"
+  if (k === 8) return sign + digits(2) + "." + digits(2) + "0"
+  if (k === 9) return sign + "9".repeat(1 + rnd(5)) + "." + "9".repeat(rnd(4))
+  if (k === 10) return sign + "5" + (rnd(2) === 0 ? "" : "." + "5".repeat(1 + rnd(3)))
+  return sign + digits(1 + rnd(3)) + "." + digits(1 + rnd(3)) + "e-" + String(rnd(30))
+}
+
+function show(f: () => string): string {
+  try {
+    return f()
+  } catch (e) {
+    return "ERR " + (e as Error).message
+  }
+}
+
+const out: string[] = []
+for (let i = 0; i < 3000; i++) {
+  Big.DP = rnd(10) === 0 ? rnd(60) : 20
+  Big.RM = rnd(4)
+  if (rnd(20) === 0) {
+    Big.NE = -rnd(10)
+    Big.PE = rnd(25)
+  } else {
+    Big.NE = -7
+    Big.PE = 21
+  }
+  const a = value()
+  const b = value()
+  const op = rnd(18)
+  let r = ""
+  if (op === 0) r = show(() => new Big(a).plus(b).toString())
+  else if (op === 1) r = show(() => new Big(a).minus(b).toString())
+  else if (op === 2) r = show(() => new Big(a).times(b).toString())
+  else if (op === 3) r = show(() => new Big(a).div(b).toString())
+  else if (op === 4) r = show(() => new Big(a).round(rnd(14) - 3, rnd(4)).toString())
+  else if (op === 5) r = show(() => new Big(a).toFixed(rnd(12)))
+  else if (op === 6) r = show(() => new Big(a).toFixed(rnd(6), rnd(4)))
+  else if (op === 7) r = show(() => new Big(a).toExponential(rnd(10), rnd(4)))
+  else if (op === 8) r = show(() => new Big(a).toPrecision(1 + rnd(12), rnd(4)))
+  else if (op === 9) r = show(() => String(new Big(a).cmp(b)) + " " + String(new Big(a).eq(b)) + String(new Big(a).lt(b)) + String(new Big(a).gte(b)))
+  else if (op === 10) r = show(() => new Big(a).mod(b).toString())
+  else if (op === 11) r = show(() => new Big(a).pow(rnd(9) - 4).toString())
+  else if (op === 12) r = show(() => new Big(a).abs().sqrt().toString())
+  else if (op === 13) r = show(() => String(new Big(a).toNumber()))
+  else if (op === 14) r = show(() => new Big(a).prec(1 + rnd(8), rnd(4)).toString())
+  else if (op === 15) r = show(() => new Big(a).neg().toFixed() + " " + new Big(a).valueOf() + " " + new Big(a).toExponential())
+  else if (op === 16) r = show(() => new Big(Number(a)).plus(new Big(a)).toString())
+  else {
+    const odd = ["1.", ".", "-", "1e", "e5", "+1", "1e+", "--1", "1.2.3", "Infinity", "NaN", "", "0x10", "1_0", " 1", "1 ", "-.5", "-0.0e-0", "00.00100E+3", "5e", "1e-", ".e1", "-e1", "1.e5", "123456789012345678901234567890.5e-10"]
+    const t = odd[rnd(odd.length)]!
+    r = show(() => new Big(t).toString() + " " + new Big(t).toFixed(3))
+  }
+  out.push(`${i} ${op} ${a} ${b} ${r}`)
+}
+console.log(out.join("\n"))
