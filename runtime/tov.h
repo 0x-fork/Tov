@@ -315,6 +315,17 @@ static inline void *tv_arr_at(tv_arr a, size_t elem_size, tv_int i, const char *
     if ((uint64_t)i >= (uint64_t)a.len) tv_arr_oob(i, a.len, loc);
     return a.p->data + (size_t)i * elem_size;
 }
+/* Bytes stored into arrays go through these: through a character type (uint8_t) a store could
+ * change any object as far as the C compiler knows, so it reloads around it what it kept in
+ * registers. _BitInt(8) is the same size and isn't a character type; every other access stays
+ * uint8_t, which may read and write anything. */
+#if defined(__BITINT_MAXWIDTH__)
+typedef unsigned _BitInt(8) TV_U8S;
+typedef signed _BitInt(8) TV_I8S;
+#else
+typedef uint8_t TV_U8S;
+typedef int8_t TV_I8S;
+#endif
 /* An index checked against a length held apart (an array's, read before a loop that can't change
  * it). A macro: as an inline function it keeps clang from pairing up the loop's float work. */
 #define TV_IDX(i, len, loc) ({ tv_int i_ = (i), n_ = (len); if ((uint64_t)i_ >= (uint64_t)n_) tv_arr_oob(i_, n_, loc); i_; })

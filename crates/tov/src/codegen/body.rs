@@ -4779,7 +4779,8 @@ impl<'c, 'a> Gen<'c, 'a> {
                     let r = self.release_code(p.ty, &lv);
                     self.line(format!("{r}; {lv} = {nv};"));
                 } else {
-                    self.line(format!("{lv} = {code};"));
+                    let store = self.store(target, p.ty, &lv, &code);
+                    self.line(store);
                 }
                 Val::plain(lv, p.ty)
             }
@@ -4858,9 +4859,30 @@ impl<'c, 'a> Gen<'c, 'a> {
                         self.coerce(r, p.ty)
                     }
                 };
-                self.line(format!("{lv} = {};", result.code));
+                let store = self.store(target, p.ty, &lv, &result.code);
+                self.line(store);
                 cur
             }
+        }
+    }
+
+    /// `lv = code;` for a plain value. A byte stored into an array goes through a type that
+    /// isn't a character type (`TV_U8S`): through `uint8_t` it could change any object as far as
+    /// the C compiler knows, so it would reload around it whatever it had in registers (a global
+    /// the loop updates, say).
+    fn store(&mut self, target: ExprId, ty: TyId, lv: &str, code: &str) -> String {
+        let m = self.cur_m();
+        let elem = match self.ast(m).expr(target).kind {
+            ExprKind::Index { obj, .. } => {
+                let ot = self.ty(obj);
+                matches!(self.tget(ot), Ty::Array(_))
+            }
+            _ => false,
+        };
+        match self.tget(ty) {
+            Ty::U8 if elem => format!("*(TV_U8S *)&{lv} = (TV_U8S)({code});"),
+            Ty::I8 if elem => format!("*(TV_I8S *)&{lv} = (TV_I8S)({code});"),
+            _ => format!("{lv} = {code};"),
         }
     }
 
