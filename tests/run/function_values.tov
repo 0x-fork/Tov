@@ -1,0 +1,74 @@
+// Functions used as values pass their errors on, as direct calls do: `const h = f; h(5)` throws
+// f's error, where it returned 0 and dropped the error.
+
+class Big extends Error {
+  constructor(message: string) {
+    super(message)
+    this.name = "Big"
+  }
+}
+
+function declared(x: int): int throws Big {
+  if (x > 1) {
+    throw new Big("big")
+  }
+  return x
+}
+
+function inferred(x: int): int {
+  if (x > 1) {
+    throw new Big(`too big: ${x}`)
+  }
+  return x
+}
+
+function through(f: (x: int) => int throws Big, x: int): int throws Big {
+  return f(x)
+}
+
+function main() {
+  const fs = [declared, inferred]
+  for (const f of fs) {
+    try {
+      console.log("ok", through(f, 1))
+      console.log("never:", through(f, 5))
+    } catch (e) {
+      console.log("caught", e.name, e.message)
+    }
+  }
+  const h = declared
+  try {
+    console.log("never:", h(5))
+  } catch (e) {
+    console.log("caught", e.name, e.message)
+  }
+  // through a value, in a function that passes the error on
+  try {
+    console.log("never:", twice(inferred, 7))
+  } catch (e) {
+    console.log("caught", e.message)
+  }
+  console.log("countdown", countdown(3))
+  try {
+    console.log("never:", countdown(5))
+  } catch (e) {
+    console.log("caught", e.name, e.message)
+  }
+}
+
+// a function calling itself through its own value
+function countdown(n: int): int {
+  if (n > 3) {
+    throw new Big(`countdown ${n}`)
+  }
+  if (n === 0) {
+    return 0
+  }
+  const again = countdown
+  return again(n - 1) + 1
+}
+
+function twice(f: (x: int) => int throws Big, x: int): int throws Big {
+  const g = f
+  return g(x) + g(x)
+}

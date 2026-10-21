@@ -1,0 +1,60 @@
+// A function used as a value keeps its `throws`. Calls through the value pass the error on
+// without `try`, as direct calls do; what changes for existing code is passing a throwing function
+// where the function type doesn't throw.
+
+class Big extends Error {}
+
+function declared(x: int): int throws Big {
+  if (x > 1) {
+    throw new Big("big")
+  }
+  return x
+}
+
+function inferred(x: int): int {
+  if (x > 1) {
+    throw new Big("big")
+  }
+  return x
+}
+
+// passes the errors on (it infers `throws Big`), with or without `try`
+function calls(): int {
+  const d = declared
+  const i = inferred
+  return d(1) + try i(1)
+}
+
+// a function taking its own value: inside its own body its `throws` is still being inferred, so
+// the value's reads as `Error` (the same whatever order functions are checked in); with `throws`
+// declared, it's that
+function countdown(n: int): int {
+  if (n > 3) {
+    throw new Big("big")
+  }
+  if (n === 0) {
+    return 0
+  }
+  const again = countdown
+  return again(n - 1)
+}
+
+function countdownDeclared(n: int): int throws Big {
+  if (n > 3) {
+    throw new Big("big")
+  }
+  if (n === 0) {
+    return 0
+  }
+  const again = countdownDeclared
+  return again(n - 1)
+}
+
+// a throwing function passed where a non-throwing function type is expected: refused
+function apply(f: (x: int) => int, x: int): int {
+  return f(x)
+}
+
+function passed(): int {
+  return apply(declared, 1)
+}

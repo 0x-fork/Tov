@@ -341,7 +341,7 @@ impl<'a> Checker<'a> {
                     );
                     return ERROR;
                 }
-                return self.types.func(sig.params, sig.ret);
+                return self.fn_value_type(sig);
             }
             Some(Decl::Const(m, i)) => {
                 if self.spec.on {
@@ -1751,7 +1751,7 @@ impl<'a> Checker<'a> {
         let decl = scope.values.get(&name).filter(|_| scope.exported_values.contains(&name)).map(|d| d.0);
         match decl {
             Some(Decl::Fn(fm, fi)) => match self.fn_sig(fm, fi) {
-                Some(sig) if sig.tparams.is_empty() => self.types.func(sig.params, sig.ret),
+                Some(sig) if sig.tparams.is_empty() => self.fn_value_type(sig),
                 Some(_) => {
                     let n = self.name(name).to_string();
                     self.report(Diagnostic::new("T0304", name_span, format!("generic function `{n}` must be called")));
@@ -3176,6 +3176,13 @@ impl<'a> Checker<'a> {
     }
 
     // ------------------------------------------------------------ JavaScript values (npm)
+
+    /// A function used as a value: its type keeps `throws`, so a call through the value passes the
+    /// error on as a direct call does (a `throws` still being inferred reads as `Error`).
+    fn fn_value_type(&mut self, sig: Sig) -> TyId {
+        let throws = if sig.throws == UNKNOWN { self.error_class() } else { sig.throws };
+        self.types.func_throws(sig.params, sig.ret, throws)
+    }
 
     /// Can a Tov value of type `t` go to JavaScript? It's converted on the way: numbers,
     /// strings, booleans, `undefined`, arrays, records and unions of these, `Js` itself, and
