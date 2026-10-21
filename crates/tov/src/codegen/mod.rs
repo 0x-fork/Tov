@@ -181,6 +181,9 @@ pub(crate) struct Gen<'c, 'a> {
     /// The `+` or `-` being compiled has a product among its operands (`h * 31 + c`): in
     /// TypeScript it's rounded past 2^53 too (see TV_JADD; sums of other values stay exact).
     pub(crate) js_mul_operand: bool,
+    /// The span of an integer expression whose value only becomes a float (see
+    /// `exact_half_sum`): its multiplication needs no JavaScript rounding.
+    pub(crate) float_only: Option<crate::source::Span>,
     pub(crate) c: &'c mut Checker<'a>,
     /// JavaScript values (npm packages).
     pub(crate) js: js::JsGen,
@@ -354,6 +357,7 @@ impl<'c, 'a> Gen<'c, 'a> {
             self_closure: None,
             ranges: None,
             js_mul_operand: false,
+            float_only: None,
             resizers: FxMap::default(),
             fresh_arrays: FxMap::default(),
             rec_structs: FxMap::default(),

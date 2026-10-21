@@ -347,6 +347,11 @@ pub fn build(paths: &[PathBuf], base: &Path, opts: &Options) -> Result<Built, Bu
     // Tov code is bounds-checked, so C's stack canaries and fortified memcpy only add checks
     // (and imports: each costs about 50 bytes of binary).
     flags.extend(["-fno-stack-protector", "-U_FORTIFY_SOURCE", "-D_FORTIFY_SOURCE=0"]);
+    // Every loop starts on a 16-byte boundary: where one happens to fall otherwise swings a hot
+    // loop's speed by up to 20% (spectral_norm, fannkuch) from one build to the next.
+    if opts.opt != "-Os" {
+        flags.push("-falign-loops=16");
+    }
     if opts.unchecked {
         flags.push("-DTOV_UNCHECKED=1");
     }

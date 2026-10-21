@@ -4141,8 +4141,13 @@ impl<'c, 'a> Gen<'c, 'a> {
         let lits: Vec<Option<u64>> = terms.iter().map(|&(_, t)| lit(t)).collect();
         terms.reverse();
         let lits: Vec<Option<u64>> = lits.into_iter().rev().collect();
-        // (evaluated in the order the float code would: `n`, then each term)
+        // (evaluated in the order the float code would: `n`, then each term; `n` only ever
+        // becomes a float, which rounds a product past 2^53 as JavaScript does, so its
+        // multiplication needn't round it first)
+        let nspan = ast.expr(strip(n)).span;
+        let saved = self.float_only.replace(nspan);
         let nv = self.expr(n);
+        self.float_only = saved;
         let nc = self.int_code(nv);
         let nn = self.fresh("hn");
         self.line(format!("tv_int {nn} = {nc};"));
@@ -4547,7 +4552,7 @@ impl<'c, 'a> Gen<'c, 'a> {
             Sub if js && konst(&b).is_some() => format!("TV_JSUBK({a}, {b}, {loc})"),
             Add if js_sum => format!("TV_JADD({a}, {b}, {loc})"),
             Sub if js_sum => format!("TV_JSUB({a}, {b}, {loc})"),
-            Mul if js => format!("TV_JMUL({a}, {b}, {loc})"),
+            Mul if js && self.float_only != Some(span) => format!("TV_JMUL({a}, {b}, {loc})"),
             Add => format!("TV_ADD({ct}, {a}, {b}, {loc})"),
             Sub => format!("TV_SUB({ct}, {a}, {b}, {loc})"),
             Mul => format!("TV_MUL({ct}, {a}, {b}, {loc})"),
