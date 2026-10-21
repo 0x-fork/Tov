@@ -263,9 +263,42 @@ impl<'c, 'a> Gen<'c, 'a> {
                 break;
             }
         }
+        // (and where none of their steps goes down, none goes below where they started: `i++`
+        // from 0 is never negative)
+        const DOWN: i128 = i128::MIN;
+        let mut low: FxMap<Var, i128> = cand.iter().map(|&v| (v, i128::MAX)).collect();
+        let mut settled = false;
+        for _ in 0..12 {
+            let mut changed = false;
+            for &v in &keys {
+                if !cand.contains(&v) {
+                    continue;
+                }
+                let mut lo = i128::MAX;
+                for d in &defs[&v] {
+                    let l = match *d {
+                        Def::Step(1) => low[&v],
+                        Def::Op(m, BinOp::Add, e) if matches!(self.eval_range(&vars, m, e), R::In(a, _) if a >= 0) => low[&v],
+                        Def::Op(m, BinOp::Sub, e) if matches!(self.eval_range(&vars, m, e), R::In(_, b) if b <= 0) => low[&v],
+                        Def::Expr(m, e) => self.low_of(&vars, &low, m, e),
+                        _ => DOWN,
+                    };
+                    lo = lo.min(l);
+                }
+                if lo < low[&v] {
+                    low.insert(v, lo);
+                    changed = true;
+                }
+            }
+            if !changed {
+                settled = true;
+                break;
+            }
+        }
         for &v in &keys {
             if cand.contains(&v) && !defs[&v].iter().all(|d| matches!(*d, Def::Expr(m, e) if self.small(&vars, m, e))) {
-                vars.insert(v, R::In(-SMALL - STEPS, SMALL + STEPS));
+                let lo = if settled && low[&v] >= -SMALL { low[&v] } else { -SMALL - STEPS };
+                vars.insert(v, R::In(lo, SMALL + STEPS));
             }
         }
         Ranges { vars }
@@ -377,6 +410,35 @@ impl<'c, 'a> Gen<'c, 'a> {
                     defs.entry(Var::Local(m, p.span.start)).or_default().extend(ds);
                 }
             }
+        }
+    }
+
+    /// The least `e` can be, given these least values of the variables in `low` (`step_of`'s
+    /// expressions; `i128::MIN` if it can go down).
+    fn low_of(&self, vars: &FxMap<Var, R>, low: &FxMap<Var, i128>, m: u32, e: ExprId) -> i128 {
+        if let R::In(lo, hi) = self.eval_range(vars, m, e)
+            && lo >= -SMALL
+            && hi <= SMALL
+        {
+            return lo;
+        }
+        let ast = self.ast(m);
+        let nonneg = |x: ExprId| matches!(self.eval_range(vars, m, x), R::In(a, _) if a >= 0);
+        match &ast.expr(e).kind {
+            ExprKind::Paren(x) | ExprKind::NonNull(x) => self.low_of(vars, low, m, *x),
+            ExprKind::Ident(_) => self.var_of(m, e).and_then(|v| low.get(&v).copied()).unwrap_or(i128::MIN),
+            ExprKind::Index { obj, .. } => match self.var_of(m, *obj) {
+                Some(Var::Local(am, k)) => low.get(&Var::Elems(am, k)).copied().unwrap_or(i128::MIN),
+                _ => i128::MIN,
+            },
+            ExprKind::Binary(BinOp::Add, a, b) if nonneg(*b) => self.low_of(vars, low, m, *a),
+            ExprKind::Binary(BinOp::Add, a, b) if nonneg(*a) => self.low_of(vars, low, m, *b),
+            ExprKind::Binary(BinOp::Sub, a, b) if matches!(self.eval_range(vars, m, *b), R::In(_, h) if h <= 0) => self.low_of(vars, low, m, *a),
+            ExprKind::Cond(_, a, b) => self.low_of(vars, low, m, *a).min(self.low_of(vars, low, m, *b)),
+            ExprKind::Call { args, .. } if self.step_of(vars, &low.keys().copied().collect(), m, e).is_some() => {
+                args.iter().map(|a| self.low_of(vars, low, m, a.expr)).min().unwrap_or(i128::MIN)
+            }
+            _ => i128::MIN,
         }
     }
 

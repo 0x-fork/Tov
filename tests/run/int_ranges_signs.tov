@@ -1,0 +1,12 @@
+// Remainders of values only stepped up are unsigned underneath; of values that go down, signed.
+function main() {
+  let d = 3
+  for (let i = 0; i < 10; i++) d--
+  console.log(d % 4, -7 % 3)
+  let u = 0
+  for (let i = 0; i < 10; i++) u++
+  console.log(u % 4)
+  const xs: int[] = [5]
+  for (let i = 0; i < 9; i++) xs.push(xs[i]! - 1)
+  console.log(xs[9]! % 3)
+}
