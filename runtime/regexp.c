@@ -188,7 +188,7 @@ tv_arr tv_native_reExec(tv_int h, tv_str s, tv_int from) {
         if (ret == 1) {
             tv_int *w = (tv_int *)tv_arr_reserve_tail(&out, &tv_type_int, 2 * ncap);
             for (int i = 0; i < 2 * ncap; i++) w[i] = cap[i] ? (tv_int)((cap[i] - buf) >> shift) : -1;
-            out.len = 2 * ncap;
+            out.p->len = 2 * ncap;
         }
     }
     tv_free(units);

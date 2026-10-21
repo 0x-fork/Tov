@@ -320,8 +320,8 @@ impl<'c, 'a> Gen<'c, 'a> {
                 let _ = writeln!(b, "    {ect} *w = ({ect} *)tv_arr_reserve_tail(&a, {d}, n);");
                 // a failing element: release what was converted (the length counts them)
                 let conv = conv.replace("return false;", &format!("{{ {rel}; return false; }}"));
-                let _ = writeln!(b, "    for (uint32_t i = 0; i < n; i++) {{ JSValueRef exc = NULL; JSValueRef x = tv_js_index(v, i, &exc); if (!x) {{ {rel}; return false; }} {conv} a.len = i + 1; }}");
-                let _ = writeln!(b, "    a.len = n; *out = a; return true;");
+                let _ = writeln!(b, "    for (uint32_t i = 0; i < n; i++) {{ JSValueRef exc = NULL; JSValueRef x = tv_js_index(v, i, &exc); if (!x) {{ {rel}; return false; }} {conv} a.p->len = i + 1; }}");
+                let _ = writeln!(b, "    a.p->len = n; *out = a; return true;");
             }
             Ty::Record(fs) => {
                 let fs = self.c.types.fields(fs).to_vec();

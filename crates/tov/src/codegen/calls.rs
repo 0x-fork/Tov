@@ -287,7 +287,7 @@ impl<'c, 'a> Gen<'c, 'a> {
         for (i, c) in codes.iter().enumerate() {
             self.line(format!("{w}[{i}] = {c};"));
         }
-        self.line(format!("{}.len = {};", arr.code, codes.len()));
+        self.line(format!("{}.p->len = {};", arr.code, codes.len()));
         arr.code
     }
 

@@ -650,7 +650,7 @@ static void test_array_ownership(void) {
     tv_arr s3 = tv_arr_slice(a, &obj_type, -100, 2, true, true);
     CHECK(tv_arr_len(s3) == 2 && oat(s3, 1) == oat(a, 1));
     tv_arr s4 = tv_arr_slice(a, &obj_type, 3, 1, true, true);
-    CHECK(s4.p == NULL);
+    CHECK(tv_arr_len(s4) == 0);
     tv_arr s5 = tv_arr_slice(a, &obj_type, 0, 0, false, false);
     CHECK(s5.p == a.p && a.p->rc == 2); /* full slice shares the buffer */
     tv_arr s6 = tv_arr_slice(a, &obj_type, 2, -7, true, true);
@@ -805,30 +805,33 @@ static void test_array_misc(void) {
     tv_arr_release(u, &tv_type_undefined);
 
     /* an immortal (static) array is cloned on mutation and never freed */
-    static struct { int64_t rc, cap, pad[2]; int64_t data[3]; } lit = {-1, 3, {0, 0}, {1, 2, 3}};
-    tv_arr la = {(tv_arrbuf *)(void *)&lit, 3};
+    static int64_t lit_data[3] = {1, 2, 3};
+    static tv_arrbuf lit = {-1, 3, 3, (unsigned char *)lit_data};
+    tv_arr la = {&lit};
     tv_arr_retain(la);
     tv_arr_release(la, &tv_type_int);
     int64_t four = 4;
     tv_arr_push(&la, &tv_type_int, &four);
-    CHECK(la.p != (tv_arrbuf *)(void *)&lit && lit.rc == -1 && lit.data[2] == 3 && tv_arr_len(la) == 4);
+    CHECK(la.p != &lit && lit.rc == -1 && lit_data[2] == 3 && tv_arr_len(la) == 4);
     CHECK_STR(tv_arr_join(la, &tv_type_int, S("+")), "1+2+3+4");
     tv_arr_release(la, &tv_type_int);
 
     /* make_unique / with_capacity edge cases */
     tv_arr e = tv_arr_with_capacity(&tv_type_int, 0);
-    CHECK(e.p == NULL);
+    CHECK(e.p->rc == 1 && e.p->len == 0 && e.p->cap == 0);
+    tv_arrbuf *e0 = e.p;
     tv_arr_make_unique(&e, &tv_type_int, 0);
-    CHECK(e.p == NULL);
+    CHECK(e.p == e0);
     tv_arr_make_unique(&e, &tv_type_int, 3);
-    CHECK(e.p && e.p->cap == 4 && e.len == 0 && e.p->rc == 1);
+    CHECK(e.p && e.p->cap == 4 && e.p->len == 0 && e.p->rc == 1);
     tv_arr e2 = e;
     tv_arr_retain(e2);
-    tv_arr_make_unique(&e2, &tv_type_int, 0); /* shared empty buffer → unique empty */
-    CHECK(e2.p == NULL && e.p->rc == 1);
+    tv_arr_make_unique(&e2, &tv_type_int, 0); /* shared empty header → a unique empty one */
+    CHECK(e2.p != e.p && e2.p->rc == 1 && e2.p->len == 0 && e.p->rc == 1);
     int64_t v = 0;
     CHECK(!tv_arr_pop(&e2, &tv_type_int, &v) && !tv_arr_shift(&e2, &tv_type_int, &v));
     tv_arr_release(e, &tv_type_int);
+    tv_arr_release(e2, &tv_type_int);
     tv_arr_release(TV_EMPTY_ARR, &tv_type_int);
 
     /* arrays of strings share element strings with a clone */
@@ -1168,33 +1171,33 @@ static void test_map_keys_special(void) {
     tv_map_release(s, &tv_type_str, &tv_type_undefined);
 }
 
-/* Length-in-value representation: sharing, copy-on-write and exact ownership. */
-_Static_assert(sizeof(tv_arrbuf) == 32 && offsetof(tv_arrbuf, data) == 32, "array header is 32 bytes");
-_Static_assert(sizeof(tv_arr) == 16, "tv_arr is a pointer + length");
+/* Header representation: sharing, copy-on-write and exact ownership. */
+_Static_assert(sizeof(tv_arrbuf) == 32, "array header is 32 bytes (inline elements stay 16-byte aligned)");
+_Static_assert(sizeof(tv_arr) == sizeof(void *), "tv_arr is a pointer to its header");
 
 static void trap_reserve_neg(void) { (void)tv_arr_reserve_tail(&g_arr, &tv_type_int, -1); }
 
 static void test_array_len_in_value(void) {
     int64_t r0 = n_retain, x0 = n_release;
     tv_arr a = TV_EMPTY_ARR;
-    CHECK(a.p == NULL && a.len == 0);
+    CHECK(a.p == &tv_empty_arrbuf && a.p->len == 0);
     obj o[3];
     for (int i = 0; i < 3; i++) {
         o[i] = obj_new();
         tv_arr_push(&a, &obj_type, &o[i]);
     }
-    CHECK(a.len == 3 && a.p->cap == 4 && a.p->rc == 1);
+    CHECK(a.p->len == 3 && a.p->cap == 4 && a.p->rc == 1);
 
     /* sharers of one buffer are exact copies (same len) */
     tv_arr b = a;
     tv_arr_retain(b);
-    CHECK(b.p == a.p && b.len == a.len && a.p->rc == 2);
+    CHECK(b.p == a.p && b.p->len == a.p->len && a.p->rc == 2);
     CHECK(oat(b, 2) == o[2] && n_retain == r0); /* sharing retains the buffer, not the elements */
 
     /* push on a shared value clones exactly len elements; the other value is unchanged */
     obj extra = obj_new();
     tv_arr_push(&b, &obj_type, &extra);
-    CHECK(b.p != a.p && a.p->rc == 1 && b.p->rc == 1 && a.len == 3 && b.len == 4);
+    CHECK(b.p != a.p && a.p->rc == 1 && b.p->rc == 1 && a.p->len == 3 && b.p->len == 4);
     CHECK(n_retain - r0 == 3 && count_of(o[0]) == 2 && count_of(extra) == 1);
     tv_arr_release(b, &obj_type);
     CHECK(count_of(o[0]) == 1 && count_of(extra) == 0 && n_release - x0 == 4);
@@ -1202,40 +1205,40 @@ static void test_array_len_in_value(void) {
     /* pop then push on a unique buffer: same buffer, the popped element is no longer owned */
     tv_arrbuf *buf = a.p;
     obj out = 0;
-    CHECK(tv_arr_pop(&a, &obj_type, &out) && out == o[2] && a.len == 2 && a.p == buf && a.p->cap == 4);
+    CHECK(tv_arr_pop(&a, &obj_type, &out) && out == o[2] && a.p->len == 2 && a.p == buf && a.p->cap == 4);
     obj_drop(out); /* released exactly once: by us, not by the array */
     CHECK(count_of(o[2]) == 0);
     obj o3 = obj_new();
     tv_arr_push(&a, &obj_type, &o3);
-    CHECK(a.p == buf && a.len == 3 && oat(a, 2) == o3);
+    CHECK(a.p == buf && a.p->len == 3 && oat(a, 2) == o3);
 
     /* pop on a shared value clones; the original keeps its elements */
     b = a;
     tv_arr_retain(b);
-    CHECK(tv_arr_pop(&b, &obj_type, NULL) && b.len == 2 && a.len == 3 && b.p != a.p);
+    CHECK(tv_arr_pop(&b, &obj_type, NULL) && b.p->len == 2 && a.p->len == 3 && b.p != a.p);
     CHECK(count_of(o3) == 1 && count_of(o[0]) == 2);
     tv_arr_release(b, &obj_type);
 
     /* a unique buffer with spare capacity after pops: a clone copies only len elements */
-    CHECK(tv_arr_pop(&a, &obj_type, NULL) && tv_arr_pop(&a, &obj_type, NULL) && a.len == 1 && a.p->cap == 4);
+    CHECK(tv_arr_pop(&a, &obj_type, NULL) && tv_arr_pop(&a, &obj_type, NULL) && a.p->len == 1 && a.p->cap == 4);
     CHECK(count_of(o3) == 0 && count_of(o[1]) == 0 && count_of(o[0]) == 1);
     b = a;
     tv_arr_retain(b);
     int64_t r1 = n_retain;
     obj o4 = obj_new();
     tv_arr_push(&b, &obj_type, &o4);
-    CHECK(n_retain - r1 == 1 && b.len == 2 && a.len == 1 && oat(b, 0) == o[0] && oat(b, 1) == o4);
+    CHECK(n_retain - r1 == 1 && b.p->len == 2 && a.p->len == 1 && oat(b, 0) == o[0] && oat(b, 1) == o4);
     tv_arr_release(b, &obj_type);
     CHECK(count_of(o4) == 0 && count_of(o[0]) == 1);
 
     /* shift: remaining elements move down; the shifted one moves out */
     obj o5 = obj_new();
     tv_arr_push(&a, &obj_type, &o5);
-    CHECK(tv_arr_shift(&a, &obj_type, &out) && out == o[0] && a.len == 1 && oat(a, 0) == o5);
+    CHECK(tv_arr_shift(&a, &obj_type, &out) && out == o[0] && a.p->len == 1 && oat(a, 0) == o5);
     obj_drop(out);
 
     /* popping to empty keeps the buffer; releasing it releases nothing more */
-    CHECK(tv_arr_pop(&a, &obj_type, NULL) && a.len == 0 && a.p == buf);
+    CHECK(tv_arr_pop(&a, &obj_type, NULL) && a.p->len == 0 && a.p == buf);
     CHECK(!tv_arr_pop(&a, &obj_type, NULL) && !tv_arr_shift(&a, &obj_type, NULL));
     int64_t x1 = n_release;
     tv_arr_release(a, &obj_type);
@@ -1248,13 +1251,13 @@ static void test_array_len_in_value(void) {
         tv_arr_push(&a, &obj_type, &x);
     }
     tv_arr s = tv_arr_slice(a, &obj_type, 1, -1, true, true);
-    CHECK(s.len == 3 && s.p != a.p && s.p->cap == 3 && s.p->rc == 1 && oat(s, 0) == oat(a, 1));
+    CHECK(s.p->len == 3 && s.p != a.p && s.p->cap == 3 && s.p->rc == 1 && oat(s, 0) == oat(a, 1));
     tv_arr whole = tv_arr_slice(a, &obj_type, 0, 0, true, false);
-    CHECK(whole.p == a.p && whole.len == a.len && a.p->rc == 2);
+    CHECK(whole.p == a.p && whole.p->len == a.p->len && a.p->rc == 2);
     tv_arr c = tv_arr_concat(s, a, &obj_type);
-    CHECK(c.len == 8 && c.p->cap == 8 && oat(c, 3) == oat(a, 0) && count_of(oat(a, 1)) == 4);
+    CHECK(c.p->len == 8 && c.p->cap == 8 && oat(c, 3) == oat(a, 0) && count_of(oat(a, 1)) == 4);
     tv_arr c2 = tv_arr_concat(TV_EMPTY_ARR, s, &obj_type);
-    CHECK(c2.p == s.p && c2.len == s.len && s.p->rc == 2);
+    CHECK(c2.p == s.p && c2.p->len == s.p->len && s.p->rc == 2);
     tv_arr_release(c2, &obj_type);
     tv_arr_release(c, &obj_type);
     tv_arr_release(whole, &obj_type);
@@ -1268,21 +1271,21 @@ static void test_array_len_in_value(void) {
     CHECK(b.p != a.p && b.p->rc == 1 && b.p->cap >= 7 && tail == (obj *)(void *)b.p->data + 5);
     tail[0] = obj_new();
     tail[1] = obj_new();
-    b.len += 2;
-    CHECK(a.len == 5 && b.len == 7 && count_of(oat(a, 0)) == 2 && count_of(tail[1]) == 1);
+    b.p->len += 2;
+    CHECK(a.p->len == 5 && b.p->len == 7 && count_of(oat(a, 0)) == 2 && count_of(tail[1]) == 1);
     tv_arr_release(b, &obj_type);
     tv_arr_release(a, &obj_type);
     CHECK(all_dead());
 
     tv_arr r = TV_EMPTY_ARR;
-    CHECK(tv_arr_reserve_tail(&r, &tv_type_int, 0) == NULL && r.p == NULL);
+    CHECK(tv_arr_reserve_tail(&r, &tv_type_int, 0) != NULL && r.p != &tv_empty_arrbuf && tv_arr_len(r) == 0);
     int64_t *w = (int64_t *)tv_arr_reserve_tail(&r, &tv_type_int, 5);
     for (int i = 0; i < 5; i++) w[i] = i * i;
-    r.len += 5;
+    r.p->len += 5;
     CHECK(r.p->cap == 5);
     w = (int64_t *)tv_arr_reserve_tail(&r, &tv_type_int, 1); /* unique: grows in place */
     *w = 99;
-    r.len++;
+    r.p->len++;
     CHECK_STR(tv_arr_join(r, &tv_type_int, S(",")), "0,1,4,9,16,99");
     CHECK(tv_arr_reserve_tail(&r, &tv_type_int, 0) == r.p->data + 6 * sizeof(int64_t));
     g_arr = r;
@@ -1293,26 +1296,26 @@ static void test_array_len_in_value(void) {
     tv_arr f = tv_arr_with_capacity(&tv_type_int, 3);
     buf = f.p;
     for (int64_t i = 0; i < 3; i++) tv_arr_push_fast(&f, &tv_type_int, &i);
-    CHECK(f.p == buf && f.len == 3);
+    CHECK(f.p == buf && f.p->len == 3);
     int64_t three = 3;
     tv_arr_push_fast(&f, &tv_type_int, &three); /* full: falls back to tv_arr_push */
-    CHECK(f.len == 4 && f.p->cap == 6);
+    CHECK(f.p->len == 4 && f.p->cap == 6);
     tv_arr g = f;
     tv_arr_retain(g);
     tv_arr_push_fast(&g, &tv_type_int, &three); /* shared: clones */
-    CHECK(g.p != f.p && g.len == 5 && f.len == 4 && f.p->rc == 1);
+    CHECK(g.p != f.p && g.p->len == 5 && f.p->len == 4 && f.p->rc == 1);
     tv_arr_release(g, &tv_type_int);
     tv_arr_release(f, &tv_type_int);
 
     /* arrays built by the runtime carry their len */
     tv_arr ch = tv_str_chars(S("héllo"));
-    CHECK(ch.len == 5 && ch.p->cap == 5);
+    CHECK(ch.p->len == 5 && ch.p->cap == 5);
     tv_arr_release(ch, &tv_type_str);
     tv_map m = TV_EMPTY_MAP;
     for (int64_t i = 0; i < 10; i++) map_set_int(&m, i, i);
     for (int64_t i = 0; i < 10; i += 3) CHECK(tv_map_delete(&m, &tv_type_int, &tv_type_int, &i));
     tv_arr ks = tv_map_keys(m, &tv_type_int, &tv_type_int);
-    CHECK(ks.len == 6 && tv_arr_len(ks) == tv_map_size(m));
+    CHECK(ks.p->len == 6 && tv_arr_len(ks) == tv_map_size(m));
     CHECK_STR(tv_arr_join(ks, &tv_type_int, S(",")), "1,2,4,5,7,8");
     tv_arr_release(ks, &tv_type_int);
     tv_map_release(m, &tv_type_int, &tv_type_int);

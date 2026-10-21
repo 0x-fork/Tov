@@ -1578,7 +1578,7 @@ impl<'c, 'a> Gen<'c, 'a> {
         let mut parts = vec![format!("{i} >= {}", -lo)];
         for &(xk, _, hi) in &plan.arrays {
             let a = self.b().locals[&xk].access.clone();
-            parts.push(format!("{n} <= ({a}).len - {}", hi + plan.le as i64));
+            parts.push(format!("{n} <= tv_arr_len({a}) - {}", hi + plan.le as i64));
         }
         parts.join(" && ")
     }
@@ -2058,7 +2058,7 @@ impl<'c, 'a> Gen<'c, 'a> {
                     let (i, j) = (self.b().locals[up].access.clone(), self.b().locals[down].access.clone());
                     let mut parts = vec![format!("{i} >= 0")];
                     for xk in arrays {
-                        parts.push(format!("{j} < ({}).len", self.b().locals[xk].access));
+                        parts.push(format!("{j} < tv_arr_len({})", self.b().locals[xk].access));
                     }
                     self.open(&format!("if ({}) {{", parts.join(" && ")));
                     let mut ptrs = Vec::new();
@@ -2993,14 +2993,14 @@ impl<'c, 'a> Gen<'c, 'a> {
                     self.line(format!("{ect} {n} = {code};"));
                     codes.push(n);
                 }
-                let arr = self.tmp(ty, "TV_EMPTY_ARR", true);
+                // (allocated inline: the C compiler sees the length, a constant)
+                let _ = d;
+                let arr = self.tmp(ty, &format!("tv_arr_new_len(sizeof({ect}), {})", codes.len()), true);
                 let w = self.fresh("w");
-                self.line(format!("{ect} *{w} = ({ect} *)tv_arr_reserve_tail(&{}, {d}, {});", arr.code, codes.len()));
+                self.line(format!("{ect} *{w} = ({ect} *)tv_arr_data({});", arr.code));
                 for (i, c) in codes.iter().enumerate() {
                     self.line(format!("{w}[{i}] = {c};"));
                 }
-                // A fresh literal starts empty, so its length is exactly the element count.
-                self.line(format!("{}.len = {};", arr.code, codes.len()));
                 arr
             }
             ExprKind::Arrow(_) => self.closure_value(e, ty),
@@ -4893,7 +4893,7 @@ impl<'c, 'a> Gen<'c, 'a> {
                     if !unique {
                         self.line(format!("tvg_make_unique(&{a}, {d});"));
                     }
-                    self.line(format!("if (__builtin_expect((uint64_t){i} >= (uint64_t)({a}).len, 0)) {a} = tvg_put_grow({a}, {d}, sizeof({ect}), {i}, {loc});"));
+                    self.line(format!("if (__builtin_expect((uint64_t){i} >= (uint64_t)tv_arr_len({a}), 0)) {a} = tvg_put_grow({a}, {d}, sizeof({ect}), {i}, {loc});"));
                     let store = self.store(target, et, &format!("((({ect} *)({a}).p->data)[{i}])"), &nv);
                     self.line(store);
                     return Val::plain(nv, et);

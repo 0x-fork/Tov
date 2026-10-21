@@ -1611,7 +1611,7 @@ tv_arr tv_str_chars(tv_str s) {
         out[k++] = tv_str_from(d + i, l);
         i += l;
     }
-    return (tv_arr){b, k};
+    return tv_arr_of(b, k);
 }
 
 tv_arr tv_str_split(tv_str s, tv_str sep) {
@@ -1633,7 +1633,7 @@ tv_arr tv_str_split(tv_str s, tv_str sep) {
             }
             i += l;
         }
-        return (tv_arr){b, k};
+        return tv_arr_of(b, k);
     }
     tv_arr r = TV_EMPTY_ARR;
     const char *d = s.p->data;
@@ -1932,13 +1932,19 @@ static int64_t tv_grow_cap(int64_t cur, int64_t min_cap) {
     return c < min_cap ? min_cap : c;
 }
 
+tv_arrbuf tv_empty_arrbuf = {-1, 0, 0, NULL};
+
+/* A header with room for cap elements right after it (len 0). */
 static tv_arrbuf *tv_arrbuf_new(size_t esize, int64_t cap) {
     tv_arrbuf *b = (tv_arrbuf *)tv_alloc(tv_size_mul_add((size_t)cap, esize, sizeof(tv_arrbuf)));
     b->rc = 1;
+    b->len = 0;
     b->cap = cap;
-    b->_pad[0] = b->_pad[1] = 0;
+    b->data = (unsigned char *)(b + 1);
     return b;
 }
+
+static inline bool tv_arrbuf_inline(const tv_arrbuf *b) { return b->data == (const unsigned char *)(b + 1); }
 
 /* Copies n elements and retains the copies. */
 static void tv_copy_retain(unsigned char *dst, const unsigned char *src, int64_t n, const tv_type *t) {
@@ -1952,47 +1958,53 @@ static void tv_copy_retain(unsigned char *dst, const unsigned char *src, int64_t
 void tv_arr_release_slow(tv_arr a, const tv_type *t) {
     if (t && t->release && t->size) {
         size_t es = t->size;
-        for (int64_t i = 0; i < a.len; i++) t->release(a.p->data + (size_t)i * es);
+        for (int64_t i = 0; i < a.p->len; i++) t->release(a.p->data + (size_t)i * es);
     }
+    if (!tv_arrbuf_inline(a.p)) free(a.p->data);
     free(a.p);
 }
 
 void tv_arr_make_unique(tv_arr *a, const tv_type *t, tv_int min_cap) {
     tv_arrbuf *p = a->p;
     size_t es = t->size;
-    if (p && p->rc == 1) {
-        if (p->cap >= min_cap) return;
-        int64_t nc = tv_grow_cap(p->cap, min_cap);
-        p = (tv_arrbuf *)tv_realloc(p, tv_size_mul_add((size_t)nc, es, sizeof(tv_arrbuf)));
-        p->cap = nc;
-        a->p = p;
-        return;
-    }
     if (!p) {
-        if (min_cap > 0) a->p = tv_arrbuf_new(es, tv_grow_cap(0, min_cap));
+        a->p = tv_arrbuf_new(es, min_cap > 0 ? tv_grow_cap(0, min_cap) : 0);
         return;
     }
-    /* shared (rc > 1) or immortal (rc < 0): clone the value's elements */
-    int64_t len = a->len;
-    int64_t nc = min_cap > len ? tv_grow_cap(len, min_cap) : len;
-    tv_arrbuf *q = NULL;
-    if (nc > 0) {
-        q = tv_arrbuf_new(es, nc);
-        tv_copy_retain(q->data, p->data, len, t);
+    if (p->rc == 1) {
+        if (p->cap >= min_cap) return;
+        /* grow: the elements move to a block of their own (the header stays put) */
+        int64_t nc = tv_grow_cap(p->cap, min_cap);
+        size_t bytes = tv_size_mul_add((size_t)nc, es, 0);
+        if (tv_arrbuf_inline(p)) {
+            unsigned char *d = (unsigned char *)tv_alloc(bytes ? bytes : 1);
+            if (es && p->len) memcpy(d, p->data, (size_t)p->len * es);
+            p->data = d;
+        } else {
+            p->data = (unsigned char *)tv_realloc(p->data, bytes ? bytes : 1);
+        }
+        p->cap = nc;
+        return;
     }
+    /* shared (rc > 1) or immortal (rc < 0): clone the elements */
+    int64_t len = p->len;
+    int64_t nc = min_cap > len ? tv_grow_cap(len, min_cap) : len;
+    tv_arrbuf *q = tv_arrbuf_new(es, nc);
+    tv_copy_retain(q->data, p->data, len, t);
+    q->len = len;
     if (p->rc > 0) p->rc--; /* was > 1, so this never frees */
     a->p = q;
 }
 
 tv_arr tv_arr_with_capacity(const tv_type *t, tv_int cap) {
-    if (cap <= 0) return TV_EMPTY_ARR;
-    return (tv_arr){tv_arrbuf_new(t->size, cap), 0};
+    return tv_arr_of(tv_arrbuf_new(t->size, cap > 0 ? cap : 0), 0);
 }
 
 void *tv_arr_reserve_tail(tv_arr *a, const tv_type *t, tv_int n) {
-    if (n < 0 || n > INT64_MAX - a->len) tv_trap("invalid array reserve count", NULL);
-    tv_arr_make_unique(a, t, a->len + n);
-    return a->p ? a->p->data + (size_t)a->len * t->size : NULL;
+    int64_t len = a->p ? a->p->len : 0;
+    if (n < 0 || n > INT64_MAX - len) tv_trap("invalid array reserve count", NULL);
+    tv_arr_make_unique(a, t, len + n);
+    return a->p->data + (size_t)len * t->size;
 }
 
 _Noreturn void tv_arr_oob(tv_int i, tv_int len, const char *loc) {
@@ -2012,7 +2024,7 @@ void tv_arr_push(tv_arr *a, const tv_type *t, void *elem) {
     int64_t len = tv_arr_len(*a);
     tv_arr_make_unique(a, t, len + 1);
     if (t->size) memcpy(a->p->data + (size_t)len * t->size, elem, t->size);
-    a->len = len + 1;
+    a->p->len = len + 1;
 }
 
 bool tv_arr_pop(tv_arr *a, const tv_type *t, void *out) {
@@ -2025,7 +2037,7 @@ bool tv_arr_pop(tv_arr *a, const tv_type *t, void *out) {
         if (out) memcpy(out, src, es);
         else if (t->release) t->release(src);
     }
-    a->len = len - 1;
+    a->p->len = len - 1;
     return true;
 }
 
@@ -2040,7 +2052,7 @@ bool tv_arr_shift(tv_arr *a, const tv_type *t, void *out) {
         else if (t->release) t->release(d);
         memmove(d, d + es, (size_t)(len - 1) * es);
     }
-    a->len = len - 1;
+    a->p->len = len - 1;
     return true;
 }
 
@@ -2053,7 +2065,7 @@ void tv_arr_unshift(tv_arr *a, const tv_type *t, void *elem) {
         memmove(d + es, d, (size_t)len * es);
         memcpy(d, elem, es);
     }
-    a->len = len + 1;
+    a->p->len = len + 1;
 }
 
 tv_arr tv_arr_splice(tv_arr *a, const tv_type *t, tv_int start, tv_int del, bool has_del, tv_arr items) {
@@ -2068,14 +2080,14 @@ tv_arr tv_arr_splice(tv_arr *a, const tv_type *t, tv_int start, tv_int del, bool
     if (d > 0) {
         tv_arrbuf *b = tv_arrbuf_new(es, d);
         if (es) memcpy(b->data, a->p->data + (size_t)s * es, (size_t)d * es); /* moved out */
-        removed = (tv_arr){b, d};
+        removed = tv_arr_of(b, d);
     }
     if (es) {
         unsigned char *data = a->p->data;
         memmove(data + (size_t)(s + n) * es, data + (size_t)(s + d) * es, (size_t)(len - s - d) * es);
         if (n) tv_copy_retain(data + (size_t)s * es, items.p->data, n, t);
     }
-    a->len = len - d + n;
+    a->p->len = len - d + n;
     return removed;
 }
 
@@ -2087,7 +2099,7 @@ tv_arr tv_arr_slice(tv_arr a, const tv_type *t, tv_int start, tv_int end, bool h
     if (s == 0 && e == len) { tv_arr_retain(a); return a; } /* whole array: share (copy-on-write) */
     tv_arrbuf *b = tv_arrbuf_new(t->size, e - s);
     tv_copy_retain(b->data, a.p->data + (size_t)s * t->size, e - s, t);
-    return (tv_arr){b, e - s};
+    return tv_arr_of(b, e - s);
 }
 
 tv_arr tv_arr_concat(tv_arr a, tv_arr b, const tv_type *t) {
@@ -2098,7 +2110,7 @@ tv_arr tv_arr_concat(tv_arr a, tv_arr b, const tv_type *t) {
     tv_arrbuf *r = tv_arrbuf_new(t->size, na + nb);
     tv_copy_retain(r->data, a.p->data, na, t);
     tv_copy_retain(r->data + (size_t)na * t->size, b.p->data, nb, t);
-    return (tv_arr){r, na + nb};
+    return tv_arr_of(r, na + nb);
 }
 
 tv_arr tv_arr_make(const tv_type *t, tv_int n, const void *elem, const char *loc) {
@@ -2110,7 +2122,7 @@ tv_arr tv_arr_make(const tv_type *t, tv_int n, const void *elem, const char *loc
     for (size_t k = 0; k < t->size; k++) zero &= ((const unsigned char *)elem)[k] == 0;
     if (zero && !t->retain) memset(d, 0, (size_t)n * t->size);
     else for (tv_int i = 0; i < n; i++) tv_copy_retain(d + (size_t)i * t->size, elem, 1, t);
-    return (tv_arr){b, n};
+    return tv_arr_of(b, n);
 }
 
 void tv_arr_fill(tv_arr *a, const tv_type *t, const void *elem, tv_int start, bool has_start, tv_int end, bool has_end) {
@@ -2131,7 +2143,7 @@ void tv_arr_extend(tv_arr *a, const tv_type *t, tv_arr b) {
     if (tv_arr_len(*a) == 0 && a->p == NULL) { tv_arr_retain(b); *a = b; return; }
     unsigned char *w = tv_arr_reserve_tail(a, t, nb);
     tv_copy_retain(w, b.p->data, nb, t);
-    a->len += nb;
+    a->p->len += nb;
 }
 
 static void tv_swap_bytes(unsigned char *x, unsigned char *y, size_t n) {
@@ -2647,7 +2659,7 @@ static tv_arr tv_map_column(tv_map mm, const tv_type *kt, const tv_type *vt, boo
         }
         j++;
     }
-    return (tv_arr){b, j};
+    return tv_arr_of(b, j);
 }
 
 tv_arr tv_map_keys(tv_map m, const tv_type *kt, const tv_type *vt) { return tv_map_column(m, kt, vt, false); }
@@ -4318,7 +4330,7 @@ static void tv_all_step(void *a, void *b) {
                 tv_arr arr = tv_arr_with_capacity(s->et, s->n);
                 void *dst = tv_arr_reserve_tail(&arr, s->et, s->n);
                 if (size) memcpy(dst, s->values, (size_t)s->n * size);
-                arr.len = s->n;
+                arr.p->len = s->n;
                 memset(s->filled, 0, (size_t)s->n * sizeof *s->filled);
                 tv_promise_resolve_move(s->result, &arr);
             }
@@ -8060,7 +8072,7 @@ tv_arr tv_native_fetchTake(tv_int id) {
     if (!r) return TV_EMPTY_ARR;
     tv_arr a = tv_arr_with_capacity(&tv_type_u8, (tv_int)r->rbody.len);
     if (r->rbody.len) memcpy(tv_arr_data(a), r->rbody.data, r->rbody.len);
-    a.len = (tv_int)r->rbody.len;
+    a.p->len = (tv_int)r->rbody.len;
     tv_native_fetchTaken(id);
     return a;
 }
@@ -8200,13 +8212,13 @@ void tv_native_fetchFree(tv_int id) {
 /* ---- bodies: bytes <-> strings, and text() decoding */
 
 tv_str tv_native_bytesToString(tv_arr bytes) {
-    return tv_str_from((const char *)tv_arr_data(bytes), (size_t)bytes.len);
+    return tv_str_from((const char *)tv_arr_data(bytes), (size_t)bytes.p->len);
 }
 
 tv_arr tv_native_stringToBytes(tv_str s) {
     tv_arr a = tv_arr_with_capacity(&tv_type_u8, s.p->len);
     if (s.p->len) memcpy(tv_arr_data(a), s.p->data, (size_t)s.p->len);
-    a.len = s.p->len;
+    a.p->len = s.p->len;
     return a;
 }
 
@@ -8340,7 +8352,7 @@ tv_arr tv_native_headerEntries(tv_str block) {
         }
         i = j;
     }
-    out.len = (tv_int)k;
+    out.p->len = (tv_int)k;
     tv_free(lines);
     return out;
 }
@@ -8360,7 +8372,7 @@ tv_arr tv_native_headerValues(tv_str block, tv_str name) {
             while (ve > v && (ve[-1] == ' ' || ve[-1] == '\t')) ve--;
             tv_str *slot = tv_arr_reserve_tail(&out, &tv_type_str, 1);
             *slot = tv_str_from(v, (size_t)(ve - v));
-            out.len++;
+            out.p->len++;
         }
         if (!nl) break;
         s = nl + 1;
@@ -8372,7 +8384,7 @@ tv_arr tv_native_headerValues(tv_str block, tv_str name) {
  * cut off at the end (still valid so far: more bytes may complete it). */
 tv_int tv_native_utf8Complete(tv_arr bytes) {
     const uint8_t *p = tv_arr_data(bytes);
-    size_t n = (size_t)bytes.len;
+    size_t n = (size_t)bytes.p->len;
     /* look back at most 3 bytes for the start of the last character */
     for (size_t back = 1; back <= 3 && back <= n; back++) {
         uint8_t c = p[n - back];
@@ -8479,7 +8491,7 @@ tv_arr tv_native_multipartParse(tv_str body, tv_str boundary) {
             };
             tv_str *slot = tv_arr_reserve_tail(&out, &tv_type_str, 5);
             memcpy(slot, fields, sizeof fields);
-            out.len += 5;
+            out.p->len += 5;
         }
         at = next;
     }
@@ -8489,7 +8501,7 @@ tv_arr tv_native_multipartParse(tv_str body, tv_str boundary) {
         out = TV_EMPTY_ARR;
         tv_str *slot = tv_arr_reserve_tail(&out, &tv_type_str, 1);
         *slot = tv_str_from(why, strlen(why));
-        out.len = 1;
+        out.p->len = 1;
     }
     return out;
 }

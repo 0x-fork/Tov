@@ -249,7 +249,7 @@ static void tv_ws_emit(tv_ns *s, int kind, const uint8_t *p, size_t n, bool text
     } else if (n) {
         bytes = tv_arr_with_capacity(&tv_type_u8, (tv_int)n);
         memcpy(tv_arr_data(bytes), p, n);
-        bytes.len = (tv_int)n;
+        bytes.p->len = (tv_int)n;
     }
     s->busy++;
     ((void (*)(tv_env *, tv_int, tv_arr, tv_str, tv_int))s->cb.fn)(s->cb.env, kind, bytes, t, code);
@@ -642,9 +642,9 @@ tv_int tv_native_wsSendText(tv_int id, tv_str text, tv_int op) {
 tv_int tv_native_wsSendBytes(tv_int id, tv_arr bytes, tv_int op) {
     tv_ns *s = tv_ws_get(id);
     if (!s || s->ws->phase != 1 || s->state == TV_NS_CLOSED) return -1;
-    if (op >= 8 && bytes.len > 125) return -1;
-    tv_ws_frame(s, (int)op, tv_arr_data(bytes), (size_t)bytes.len);
-    return bytes.len;
+    if (op >= 8 && bytes.p->len > 125) return -1;
+    tv_ws_frame(s, (int)op, tv_arr_data(bytes), (size_t)bytes.p->len);
+    return bytes.p->len;
 }
 
 /* close(code, reason): the close frame goes out; the socket closes when the peer answers (or now,
@@ -735,7 +735,7 @@ tv_int tv_native_wsPublishText(tv_str topic, tv_str text, tv_int except) {
 }
 
 tv_int tv_native_wsPublishBytes(tv_str topic, tv_arr bytes, tv_int except) {
-    return tv_ws_publish(topic, tv_arr_data(bytes), (size_t)bytes.len, 2, except);
+    return tv_ws_publish(topic, tv_arr_data(bytes), (size_t)bytes.p->len, 2, except);
 }
 
 tv_int tv_native_wsSubscribers(tv_str topic) {

@@ -120,7 +120,7 @@ static void tv_ns_emit(tv_ns *s, int kind, const void *data, size_t n, const cha
     if (n) {
         bytes = tv_arr_with_capacity(&tv_type_u8, (tv_int)n);
         memcpy(tv_arr_data(bytes), data, n);
-        bytes.len = (tv_int)n;
+        bytes.p->len = (tv_int)n;
     }
     tv_str t = text ? tv_str_from(text, strlen(text)) : TV_EMPTY_STR;
     s->busy++;
@@ -585,7 +585,7 @@ void tv_native_netBind(tv_int id, tv_fn events, tv_str host, tv_str unix_path) {
 tv_int tv_native_netWrite(tv_int id, tv_arr bytes) {
     tv_ns *s = tv_ns_get(id);
     if (!s || s->state == TV_NS_CLOSED || s->ending) return -1;
-    size_t n = (size_t)bytes.len;
+    size_t n = (size_t)bytes.p->len;
     if (n) {
         tv_ns_append(s, tv_arr_data(bytes), n);
         if (s->state == TV_NS_OPEN) tv_ns_mark(s);

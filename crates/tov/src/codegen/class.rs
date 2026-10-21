@@ -879,7 +879,7 @@ impl<'c, 'a> Gen<'c, 'a> {
                     let code = format!("static void {name}(void *buf, int64_t len) {{\n    {ect} *d = ({ect} *)(void *)((tv_arrbuf *)buf)->data;\n    for (int64_t i = 0; i < len; i++) {{ {body} }}\n}}\n");
                     gv.insert(ty, code);
                 }
-                Some(format!("if (tvg_gc_buf(({place}).p, ({place}).len, {name})) {name}(({place}).p, ({place}).len);"))
+                Some(format!("if (tvg_gc_buf(({place}).p, ({place}).p->len, {name})) {name}(({place}).p, ({place}).p->len);"))
             }
             Ty::Map(k, v) => {
                 let (kct, vct) = (self.ctype(k), self.ctype(v));

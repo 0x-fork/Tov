@@ -56,7 +56,8 @@ static inline int32_t tv_f64_to_i32(double d) {
 /* ------------------------------------------------------------------ traps */
 
 _Noreturn void tv_trap(const char *msg, const char *loc);
-void *tv_alloc(size_t size);          /* traps on out-of-memory */
+/* traps on out-of-memory; fresh memory nothing else points to (the C compiler may assume so) */
+__attribute__((malloc, alloc_size(1), returns_nonnull)) void *tv_alloc(size_t size);
 void tv_write_fd(int fd, const char *s, size_t n); /* all of s to fd 1 or 2, unbuffered */
 void tv_err_cstr(const char *s);                     /* to stderr */
 
@@ -265,38 +266,59 @@ tv_str tv_str_pad_end(tv_str s, tv_int len, tv_str fill);
 
 /* ------------------------------------------------------------------ arrays (copy-on-write) */
 
-/* Representation: the length lives in the value (so the C compiler can see it, e.g. a
- * constant length after inlining); the heap buffer holds rc, capacity and the elements.
+/* Representation: an array is a pointer to its header, which holds the length, the capacity and
+ * where the elements are: right after the header when it was allocated with room for them, or
+ * a block of their own once it has grown (the header never moves, so every reference to the
+ * array sees the same length and elements).
  *
- * Sharing invariant: a buffer is shared (rc > 1) only through tv_arr_retain, i.e. by exact
- * copies of one value, and every mutation goes through tv_arr_make_unique (or a function that
- * calls it) before it changes elements or len. Hence all values sharing a buffer have the same
- * len, and the buffer owns exactly the elements [0, len) of any of them: tv_arr_release_slow
- * releases a.len elements. Elements at index >= len of a unique buffer are not owned (e.g.
- * after pop). A buffer with rc < 0 is immortal (a static literal) and is never mutated or
- * freed. Functions returning a tv_arr return either a fresh buffer (rc 1) or a retained copy
- * of an argument value (same len), which preserves the invariant. */
+ * Copy-on-write: a header is shared (rc > 1) only through tv_arr_retain, and every mutation
+ * goes through tv_arr_make_unique (or a function that calls it) before it changes elements or
+ * the length. The header owns exactly the elements [0, len); elements at index >= len are not
+ * owned (e.g. after pop). A header with rc < 0 is immortal (tv_empty_arrbuf, the empty array)
+ * and is never changed or freed. A NULL header (zeroed memory) is only released, never read. */
+/* The header's counts have a 64-bit type that no element has (tv_int is int64_t; this is the
+ * other one of long and long long): a store into an element then can't change the length or
+ * the count as far as the C compiler knows, so it keeps them in registers around such stores. */
+#if defined(__APPLE__)
+typedef long tv_hcount;
+#else
+typedef long long tv_hcount;
+#endif
 typedef struct tv_arrbuf {
-    int64_t rc;
-    int64_t cap;
-    int64_t _pad[2];            /* keeps data 16-byte aligned (header stays 32 bytes) */
-    unsigned char data[];
+    tv_hcount rc;
+    tv_hcount len;
+    tv_hcount cap;
+    unsigned char *data;        /* cap elements (header 32 bytes: inline elements are 16-byte aligned) */
 } tv_arrbuf;
 
 typedef struct tv_arr {
-    tv_arrbuf *p;               /* NULL = no allocation (len must be 0) */
-    int64_t len;
+    tv_arrbuf *p;
 } tv_arr;
 
-#define TV_EMPTY_ARR ((tv_arr){NULL, 0})
+extern tv_arrbuf tv_empty_arrbuf;
+#define TV_EMPTY_ARR ((tv_arr){&tv_empty_arrbuf})
 
 /* (an array's length is under 2^48: its elements fill memory, and no machine has that much.
  * Saying so lets the C compiler see that `i + j` of indexes below two lengths can't overflow.) */
 static inline tv_int tv_arr_len(tv_arr a) {
-    if ((uint64_t)a.len >= ((uint64_t)1 << 48)) __builtin_unreachable();
-    return a.len;
+    tv_int n = (tv_int)a.p->len;
+    if ((uint64_t)n >= ((uint64_t)1 << 48)) __builtin_unreachable();
+    return n;
 }
-static inline void *tv_arr_data(tv_arr a) { return a.p ? (void *)a.p->data : NULL; }
+static inline void *tv_arr_data(tv_arr a) { return (void *)a.p->data; }
+/* A fresh header for len elements of `es` bytes (len set; elements not written yet). */
+static inline tv_arr tv_arr_of(tv_arrbuf *b, int64_t len) { b->len = len; return (tv_arr){b}; }
+/* A fresh array of n elements of `es` bytes each, inline (elements not written yet). Inline, so
+ * the C compiler sees the length it stores, and that nothing else can change it until the
+ * array is passed somewhere: a literal's length stays a constant it can unroll loops by. */
+static inline tv_arr tv_arr_new_len(size_t es, tv_int n) {
+    tv_arrbuf *b = (tv_arrbuf *)tv_alloc(sizeof(tv_arrbuf) + (size_t)n * es);
+    b->rc = 1;
+    b->len = n;
+    b->cap = n;
+    b->data = (unsigned char *)(b + 1);
+    return (tv_arr){b};
+}
 static inline void tv_arr_retain(tv_arr a) { if (a.p && a.p->rc >= 0) a.p->rc++; }
 void tv_arr_release_slow(tv_arr a, const tv_type *t);
 static inline void tv_arr_release(tv_arr a, const tv_type *t) { if (a.p && a.p->rc > 0 && --a.p->rc == 0) tv_arr_release_slow(a, t); }
@@ -305,14 +327,14 @@ static inline void tv_arr_release(tv_arr a, const tv_type *t) { if (a.p && a.p->
  * elements, retaining them, when the buffer is shared or immortal). */
 void tv_arr_make_unique(tv_arr *a, const tv_type *t, tv_int min_cap);
 tv_arr tv_arr_with_capacity(const tv_type *t, tv_int cap);   /* len 0 */
-/* Reserve capacity for exactly n more elements and return a pointer to where element a->len goes
-   (buffer made unique; caller writes elements and then adds to a->len). */
+/* Reserve capacity for exactly n more elements and return a pointer to where element a->p->len
+   goes (header made unique; caller writes elements and then adds to a->p->len). */
 void *tv_arr_reserve_tail(tv_arr *a, const tv_type *t, tv_int n);
 
 /* Index checks: trap with "index <i> out of bounds for length <n>". */
 _Noreturn void tv_arr_oob(tv_int i, tv_int len, const char *loc);
 static inline void *tv_arr_at(tv_arr a, size_t elem_size, tv_int i, const char *loc) {
-    if ((uint64_t)i >= (uint64_t)a.len) tv_arr_oob(i, a.len, loc);
+    if ((uint64_t)i >= (uint64_t)a.p->len) tv_arr_oob(i, a.p->len, loc);
     return a.p->data + (size_t)i * elem_size;
 }
 /* Bytes stored into arrays go through these: through a character type (uint8_t) a store could
@@ -334,9 +356,9 @@ void *tv_arr_at_mut(tv_arr *a, const tv_type *t, tv_int i, const char *loc);
 
 void tv_arr_push(tv_arr *a, const tv_type *t, void *elem);         /* moves elem */
 static inline void tv_arr_push_fast(tv_arr *a, const tv_type *t, void *elem) {
-    if (a->p && a->p->rc == 1 && a->len < a->p->cap) {
-        memcpy(a->p->data + (size_t)a->len * t->size, elem, t->size);
-        a->len++;
+    if (a->p && a->p->rc == 1 && a->p->len < a->p->cap) {
+        memcpy(a->p->data + (size_t)a->p->len * t->size, elem, t->size);
+        a->p->len++;
     } else {
         tv_arr_push(a, t, elem);
     }

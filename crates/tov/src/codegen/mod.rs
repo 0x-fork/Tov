@@ -1993,30 +1993,30 @@ static void tvg_cyc_collect(void) {
     tvg_cyc_limit = live > 10000 ? live : 10000;
 }
 /* Slow paths take arrays by value and return the updated value, so the array itself never
- * escapes: the C compiler keeps its length (and pointer) in registers and can reason about it. */
+ * escapes: the C compiler keeps the pointer to its header in a register. */
 static __attribute__((noinline)) tv_arr tvg_push_slow(tv_arr a, const tv_type *t, void *elem) { tv_arr_push(&a, t, elem); return a; }
 static __attribute__((noinline)) tv_arrbuf *tvg_clone_buf(tv_arr a, const tv_type *t) { tv_arr_make_unique(&a, t, 0); return a.p; }
 /* Capacity for `n` elements, by value (taking the array's address would keep it in memory). */
 static __attribute__((noinline)) tv_arr tvg_reserve(tv_arr a, const tv_type *t, tv_int n) { tv_arr_make_unique(&a, t, n); return a; }
-/* Makes the buffer unique (copy-on-write) without changing the length. */
+/* Makes the header unique (copy-on-write) without changing the length. */
 static inline void tvg_make_unique(tv_arr *a, const tv_type *t) {
-    if (a->p && __builtin_expect(a->p->rc != 1, 0)) a->p = tvg_clone_buf(*a, t);
+    if (__builtin_expect(!a->p || a->p->rc != 1, 0)) a->p = tvg_clone_buf(*a, t);
 }
-/* Typed push: inline fast path when the buffer is unique with spare capacity. */
+/* Typed push: inline fast path when the header is unique with spare capacity. */
 #define TVG_PUSH(T, arr, desc, val) do { tv_arr *bmp_a = (arr); T bmp_v = (val); tv_arrbuf *bmp_p = bmp_a->p; \
-    if (__builtin_expect(bmp_p && bmp_p->rc == 1 && bmp_a->len < bmp_p->cap, 1)) ((T *)(void *)bmp_p->data)[bmp_a->len++] = bmp_v; \
+    if (__builtin_expect(bmp_p->rc == 1 && bmp_p->len < bmp_p->cap, 1)) ((T *)(void *)bmp_p->data)[bmp_p->len++] = bmp_v; \
     else { T bmp_s = bmp_v; /* addressable only on the slow path: no spill per push */ \
         *bmp_a = tvg_push_slow(*bmp_a, (desc), &bmp_s); } } while (0)
 /* Push onto an array known to be uniquely owned (made unique before the loop). */
 #define TVG_PUSH_U(T, arr, desc, val) do { tv_arr *bmp_a = (arr); T bmp_v = (val); tv_arrbuf *bmp_p = bmp_a->p; \
-    if (__builtin_expect(bmp_p && bmp_a->len < bmp_p->cap, 1)) ((T *)(void *)bmp_p->data)[bmp_a->len++] = bmp_v; \
+    if (__builtin_expect(bmp_p->len < bmp_p->cap, 1)) ((T *)(void *)bmp_p->data)[bmp_p->len++] = bmp_v; \
     else { T bmp_s = bmp_v; *bmp_a = tvg_push_slow(*bmp_a, (desc), &bmp_s); } } while (0)
 /* Push onto a unique array whose capacity is cached in `cap` (only pushes reallocate it). */
 #define TVG_PUSH_C(T, arr, capv, desc, val) do { tv_arr *bmp_a = (arr); T bmp_v = (val); \
-    if (__builtin_expect(bmp_a->len < (capv), 1)) ((T *)(void *)bmp_a->p->data)[bmp_a->len++] = bmp_v; \
+    if (__builtin_expect(bmp_a->p->len < (capv), 1)) ((T *)(void *)bmp_a->p->data)[bmp_a->p->len++] = bmp_v; \
     else { T bmp_s = bmp_v; *bmp_a = tvg_push_slow(*bmp_a, (desc), &bmp_s); (capv) = bmp_a->p->cap; } } while (0)
 /* Push with capacity reserved for it before the loop (reserve_for_pushes). */
-#define TVG_PUSH_X(T, arr, val) do { tv_arr *bmp_a = (arr); ((T *)(void *)bmp_a->p->data)[bmp_a->len++] = (val); } while (0)
+#define TVG_PUSH_X(T, arr, val) do { tv_arr *bmp_a = (arr); ((T *)(void *)bmp_a->p->data)[bmp_a->p->len++] = (val); } while (0)
 /* Mutable element access: copy-on-write, then a bounds-checked pointer. */
 static inline void *tvg_at_mut(tv_arr *a, const tv_type *t, size_t size, tv_int i, const char *loc) {
     tvg_make_unique(a, t);
@@ -2026,10 +2026,10 @@ static inline void *tvg_at_mut(tv_arr *a, const tv_type *t, size_t size, tv_int 
  * slot, written next), as in JavaScript; further out traps. The array comes back by value, so
  * the caller's never has its address taken (and can stay in registers). */
 static __attribute__((noinline, cold)) tv_arr tvg_put_grow(tv_arr a, const tv_type *t, size_t size, tv_int i, const char *loc) {
-    if (i != a.len) tv_arr_oob(i, a.len, loc);
-    tv_arr_make_unique(&a, t, a.len + 1);
+    if (i != a.p->len) tv_arr_oob(i, a.p->len, loc);
+    tv_arr_make_unique(&a, t, a.p->len + 1);
     memset(a.p->data + (size_t)i * size, 0, size);
-    a.len++;
+    a.p->len++;
     return a;
 }
 /* Sorting (radix sorts of 64-bit keys) lives in the runtime, compiled once (runtime/tov.c). */
