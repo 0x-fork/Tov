@@ -69,6 +69,9 @@ pub(crate) struct Body {
     pub params: FxSet<u32>,
     /// In a derived class's constructor: the class whose field initializers run after `super(...)`.
     pub ctor_class: Option<TyId>,
+    /// Parameters the caller moved in (a constructor's `this.f = p`, see `ctor_moves`): their one
+    /// read takes the reference.
+    pub owned_once: FxSet<u32>,
     /// Enclosing `try` blocks of this function: (label of the handler, scope depth to unwind to).
     pub handlers: Vec<(String, usize)>,
     /// An async function's body (module, item): its locals live in a frame (see asyncfn.rs).
@@ -267,6 +270,7 @@ impl<'c, 'a> Gen<'c, 'a> {
             mutated: FxSet::default(),
             params: FxSet::default(),
             ctor_class: None,
+            owned_once: FxSet::default(),
             handlers: Vec::new(),
             async_fn: None,
             children: Vec::new(),
@@ -464,6 +468,7 @@ impl<'c, 'a> Gen<'c, 'a> {
             mutated,
             params: params.iter().filter(|p| !p.2).map(|p| p.0).collect(),
             ctor_class,
+            owned_once: FxSet::default(),
             handlers: Vec::new(),
             async_fn: self.pending_async.take(),
             children: Vec::new(),
@@ -498,6 +503,19 @@ impl<'c, 'a> Gen<'c, 'a> {
         {
             self.b().ctor_class = None;
             self.emit_field_inits(cls);
+        }
+        // (a constructor's parameters its caller moved into `this.f = p`)
+        if let Some(cls) = ctor_class
+            && let Some((decl, _)) = self.c.class_of(cls)
+            && let Some(mi) = self.c.classes[decl as usize].ctor.member
+        {
+            let moves = self.ctor_moves(cls);
+            let fd = self.c.member_fn(decl, mi);
+            for (i, p) in fd.params.iter().enumerate() {
+                if p.prop.is_none() && moves.get(i).copied().unwrap_or(false) && !self.b().boxed.contains(&p.span.start) {
+                    self.b().owned_once.insert(p.span.start);
+                }
+            }
         }
         // A parameter the body reassigns is owned from the start (borrowed, it can't be released
         // when replaced).
@@ -3310,6 +3328,9 @@ impl<'c, 'a> Gen<'c, 'a> {
                     self.unsupported(span, "this variable reference");
                     return Val::plain("0", ty);
                 };
+                if local.ty == ty && self.b().owned_once.remove(&k) {
+                    return Val { code: local.access, ty, owned: true };
+                }
                 self.project(Val::plain(local.access, local.ty), ty)
             }
             Some(IdentFact::Fn(fm, fi)) => {
@@ -5563,6 +5584,7 @@ impl<'c, 'a> Gen<'c, 'a> {
             mutated: inner_mutated,
             params: params.iter().filter(|p| !p.2).map(|p| p.0).collect(),
             ctor_class: None,
+            owned_once: FxSet::default(),
             handlers: Vec::new(),
             async_fn: self.pending_async.take(),
             children: Vec::new(),

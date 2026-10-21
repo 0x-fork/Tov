@@ -348,6 +348,44 @@ impl<'c, 'a> Gen<'c, 'a> {
 
     /// Which constructor parameters are moved into the object (parameter properties the
     /// constructor never reassigns): the caller hands over ownership instead of lending them.
+    /// The constructor parameters stored with `this.f = p` in the plain field assignments its
+    /// body starts with (nothing before can throw or return), used nowhere else, into a strong
+    /// field of the parameter's own type.
+    fn field_assigned_params(&mut self, decl: u32, fd: &crate::ast::FnDecl) -> FxSet<u32> {
+        let info = self.c.classes[decl as usize].clone();
+        let ast = self.ast(info.module);
+        let mut out = FxSet::default();
+        let crate::ast::StmtKind::Block(ss) = &ast.stmt(fd.body).kind else { return out };
+        let mut uses: FxMap<crate::intern::Sym, usize> = FxMap::default();
+        let mut exprs = Vec::new();
+        super::body::collect_exprs_stmt_pub(ast, fd.body, &mut exprs);
+        for &e in &exprs {
+            if let ExprKind::Ident(s) = ast.expr(e).kind {
+                *uses.entry(s).or_default() += 1;
+            }
+        }
+        for &s in ss {
+            let crate::ast::StmtKind::Expr(e) = &ast.stmt(s).kind else { break };
+            let ExprKind::Assign(crate::ast::AssignOp::Assign, t, v) = &ast.expr(*e).kind else { break };
+            let ExprKind::Member { obj, name, .. } = &ast.expr(*t).kind else { break };
+            if !matches!(ast.expr(*obj).kind, ExprKind::This) {
+                break;
+            }
+            match ast.expr(*v).kind {
+                ExprKind::Ident(ps) => {
+                    let Some(pi) = fd.params.iter().position(|p| p.name == ps) else { break };
+                    let field = info.fields.iter().find(|f| f.name == *name && f.owner == decl);
+                    if uses.get(&ps).copied() == Some(1) && field.is_some_and(|f| !f.weak && Some(f.ty) == info.ctor.params.get(pi).map(|p| p.ty)) && !fd.params[pi].rest && !fd.params[pi].optional {
+                        out.insert(pi as u32);
+                    }
+                }
+                ExprKind::Int(_) | ExprKind::Float(_) | ExprKind::Str(_) | ExprKind::Bool(_) | ExprKind::Null | ExprKind::Undefined => {}
+                _ => break,
+            }
+        }
+        out
+    }
+
     pub(crate) fn ctor_moves(&mut self, ty: TyId) -> Vec<bool> {
         let Some((decl, _)) = self.c.class_of(ty) else { return Vec::new() };
         if let Some(v) = self.ctor_move_memo.get(&decl) {
@@ -360,14 +398,20 @@ impl<'c, 'a> Gen<'c, 'a> {
                 let ast = self.ast(info.module);
                 let mut exprs = Vec::new();
                 super::body::collect_exprs_stmt_pub(ast, fd.body, &mut exprs);
+                // (`this.f = p` among the plain field assignments the body starts with, p not used
+                // otherwise, f a strong field of p's type: the caller moves its argument in)
+                let assigned = if info.base.is_none() { self.field_assigned_params(decl, fd) } else { FxSet::default() };
                 fd.params
                     .iter()
-                    .map(|p| {
-                        p.prop.is_some()
+                    .enumerate()
+                    .map(|(pi, p)| {
+                        let field_set = assigned.contains(&(pi as u32));
+                        (p.prop.is_some() || field_set)
                             && !exprs.iter().any(|&e| match &ast.expr(e).kind {
                                 ExprKind::Assign(_, t, _) | ExprKind::Update { target: t, .. } => match &ast.expr(*t).kind {
                                     ExprKind::Ident(s) => *s == p.name,
-                                    ExprKind::Member { obj, name, .. } => *name == p.name && matches!(ast.expr(*obj).kind, ExprKind::This),
+                                    // (a parameter property's field changed again; `this.f = p` itself is the move)
+                                    ExprKind::Member { obj, name, .. } => !field_set && *name == p.name && matches!(ast.expr(*obj).kind, ExprKind::This),
                                     _ => false,
                                 },
                                 ExprKind::Call { args, .. } => args.iter().any(|a| a.by_ref.is_some() && matches!(ast.expr(a.expr).kind, ExprKind::Ident(s) if s == p.name)),

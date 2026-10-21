@@ -1,0 +1,73 @@
+// Constructors that store their parameters in fields: the argument moves in where nothing can see
+// the difference; elsewhere (used again, a call or a throw first, a base class) it's shared.
+class Node {
+  readonly name: string
+  readonly next: Node | undefined
+  constructor(name: string, next: Node | undefined) {
+    this.name = name
+    this.next = next
+  }
+  path(): string {
+    return this.next === undefined ? this.name : `${this.name}>${this.next.path()}`
+  }
+}
+
+class Twice {
+  a: string
+  b: string
+  constructor(s: string) {
+    this.a = s
+    this.b = s
+  }
+}
+
+class Checked {
+  label: string
+  constructor(label: string) {
+    if (label.length === 0) throw new Error("empty label")
+    this.label = label
+  }
+}
+
+class Logged {
+  v: string
+  constructor(v: string) {
+    console.log("making", v)
+    this.v = v
+  }
+}
+
+class Base {
+  tag: string
+  constructor(tag: string) {
+    this.tag = tag
+  }
+}
+
+class Derived extends Base {
+  extra: string
+  constructor(tag: string, extra: string) {
+    super(tag)
+    this.extra = extra
+  }
+}
+
+function main() {
+  let list: Node | undefined = undefined
+  for (const n of ["c", "b", "a"]) list = new Node(n + "!", list)
+  console.log(list!.path())
+  const shared = "x".repeat(3)
+  const t = new Twice(shared)
+  console.log(t.a, t.b, shared)
+  try {
+    new Checked("")
+  } catch (e) {
+    console.log((e as Error).message)
+  }
+  console.log(new Checked("ok").label, new Logged("v1").v)
+  const d = new Derived("t", "e")
+  console.log(d.tag, d.extra)
+  const keep = new Node("keep", undefined)
+  const outer = new Node("outer", keep)
+  console.log(keep.path(), outer.path())
+}
