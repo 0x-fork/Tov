@@ -7,9 +7,8 @@
  * - Values are *owned* (+1) or *borrowed* (+0). Unless a comment says otherwise:
  *   arguments are borrowed, return values are owned, and `void *elem`/`key`/`value`
  *   inputs to container "insert" operations are MOVED (the container takes ownership).
- * - Arrays are shared, as JavaScript's (every reference sees every change). Maps and sets are
- *   copy-on-write: mutating operations call *_make_unique first, which clones the buffer when
- *   rc > 1 (retaining the elements it copies).
+ * - Arrays, maps and sets are shared, as JavaScript's (every reference sees every change);
+ *   copies are made only by operations that make new ones (slice, concat, tv_map_copy...).
  * - Element/key/value types are described by `tv_type` descriptors emitted by the compiler.
  * - Out-of-range indices, integer overflow, failed `!` assertions etc. call tv_trap(),
  *   which prints "trap: <msg>\n  at <loc>" to stderr and exits with status 101 —
@@ -265,7 +264,7 @@ tv_str tv_str_repeat(tv_str s, tv_int count, const char *loc);         /* traps 
 tv_str tv_str_pad_start(tv_str s, tv_int len, tv_str fill);            /* len in UTF-16 units */
 tv_str tv_str_pad_end(tv_str s, tv_int len, tv_str fill);
 
-/* ------------------------------------------------------------------ arrays (copy-on-write) */
+/* ------------------------------------------------------------------ arrays (shared) */
 
 /* Representation: an array is a pointer to its header, which holds the length, the capacity and
  * where the elements are: right after the header when it was allocated with room for them, or
@@ -398,14 +397,21 @@ tv_int tv_arr_index_of(tv_arr a, const tv_type *t, const void *elem);
 tv_int tv_arr_last_index_of(tv_arr a, const tv_type *t, const void *elem);
 tv_str tv_arr_join(tv_arr a, const tv_type *t, tv_str sep);       /* elements via t->to_str; "undefined" members print as "" (JS) */
 
-/* ------------------------------------------------------------------ maps and sets (insertion-ordered, copy-on-write) */
+/* ------------------------------------------------------------------ maps and sets (insertion-ordered, shared) */
 
-typedef struct tv_mapbuf tv_mapbuf;   /* private layout */
+/* A map (or set) is a pointer to its header, which every reference shares (as JavaScript's
+ * objects): changes through any reference are seen through all. NULL stands in where no map has
+ * been given yet (a change gives the place a map of its own first). */
+typedef struct tv_maphdr tv_maphdr;   /* private layout */
 typedef struct tv_map {
-    tv_mapbuf *p;               /* NULL = empty map */
+    tv_maphdr *p;
 } tv_map;
 
 #define TV_EMPTY_MAP ((tv_map){NULL})
+
+tv_map tv_map_fresh(void);                                           /* a new empty map */
+tv_map tv_map_fresh_object(void);                                    /* the same, made as an object (printed as one) */
+tv_map tv_map_copy(tv_map m, const tv_type *kt, const tv_type *vt);  /* new Map(m): a new map, same entries */
 
 void tv_map_retain(tv_map m);
 void tv_map_release(tv_map m, const tv_type *kt, const tv_type *vt);

@@ -1,12 +1,7 @@
 error[V0120] shared_views.tov:15:10: this changes `t`, but `tasks` is a separate copy (TypeScript would change both)
    15 |   if (t) t.done = true
-  why: `t` was initialized from `tasks.find((x) => x.id === 1)`: Tov arrays, records and maps are values, so assignment copies
+  why: `t` was initialized from `tasks.find((x) => x.id === 1)`: Tov records (object literals) are values, so assignment copies
   if you meant a copy: say so explicitly: build a new value
   if you meant one value: find its index (`const i = tasks.findIndex((x) => x.id === 1)`) and modify `tasks[i]` directly
 
-error[V0122] shared_views.tov:31:3: this changes parameter `seen`, which has a default value: TypeScript would change the caller's value too
-   31 |   seen.add(node)
-  why: Tov arrays, sets, maps and records are values: the function has its own copy
-  instead: drop the default and pass the value (`inout seen` is then made for you), or return the changed value
-
-2 error(s)
+1 error(s)

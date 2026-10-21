@@ -1179,13 +1179,13 @@ impl<'a> Checker<'a> {
         })
     }
 
-    /// The storage at path `e` (`xs`, `p.items`, `ps[0].x`'s object) is in an array, or is one:
-    /// an object every reference shares, as in JavaScript.
+    /// The storage at path `e` (`xs`, `p.items`, `ps[0].x`'s object) is in an array, map or set,
+    /// or is one: an object every reference shares, as in JavaScript.
     pub(super) fn inside_shared(&mut self, e: ExprId) -> bool {
         let mut cur = e;
         loop {
             if let Some(t) = self.path_ty(cur)
-                && self.flat_members(t).iter().any(|&m| matches!(self.types.get(m), Ty::Array(_)))
+                && self.flat_members(t).iter().any(|&m| matches!(self.types.get(m), Ty::Array(_) | Ty::Map(..) | Ty::Set(_)))
             {
                 return true;
             }
@@ -1233,7 +1233,7 @@ impl<'a> Checker<'a> {
 
     /// `allow_temp`: mutating a temporary (`xs.slice().sort()`) is fine for method calls.
     pub(super) fn check_mutable_root_ext(&mut self, e: ExprId, span: Span, allow_temp: bool) -> Option<LocalId> {
-        // (inside an array: shared, as in JavaScript, so changing it changes no variable)
+        // (inside an array, map or set: shared, as in JavaScript, so changing it changes no variable)
         if self.inside_shared(e) {
             return None;
         }
@@ -1261,7 +1261,7 @@ impl<'a> Checker<'a> {
                     LocalKind::LoopVar => {
                         self.report(
                             Diagnostic::new("V0104", span, format!("can't modify loop variable `{n}`: it is a copy of the element"))
-                                .note("why", "changes to the copy would not reach the collection (Tov collections hold values)")
+                                .note("why", "changes to the copy would not reach the collection (a record element is a value in Tov)")
                                 .note("instead", "loop over indices and assign `xs[i] = ...`, or build a new array with `map`"),
                         );
                         None
@@ -1275,7 +1275,7 @@ impl<'a> Checker<'a> {
                     {
                         self.report(
                             Diagnostic::new("V0122", span, format!("this changes parameter `{n}`, which has a default value: TypeScript would change the caller's value too"))
-                                .note("why", "Tov arrays, sets, maps and records are values: the function has its own copy")
+                                .note("why", "Tov records (object literals) are values: the function has its own copy")
                                 .note("instead", format!("drop the default and pass the value (`inout {n}` is then made for you), or return the changed value")),
                         );
                         None
@@ -2653,6 +2653,14 @@ impl<'a> Checker<'a> {
                     let t = self.expr(a.expr, hint);
                     let s = self.ast().expr(a.expr).span;
                     match (hint, *self.types.get(t)) {
+                        // `new Map(other)`: a copy of another map
+                        (_, Ty::Map(k2, v2)) => match kv {
+                            Some((k, v)) => {
+                                let want = self.types.intern(Ty::Map(k, v));
+                                self.expect_assignable(t, want, s, Some("the map".into()));
+                            }
+                            None => kv = Some((k2, v2)),
+                        },
                         (Some(h), _) => {
                             self.expect_assignable(t, h, s, Some("the entries".into()));
                         }

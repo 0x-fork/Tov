@@ -99,13 +99,13 @@ Status tags: **[M0]** checked today · **[Mn]** planned for milestone n.
 
 ## 6. Values, mutation, `inout` **[M0]**
 - `let` bindings can be reassigned; `const` bindings cannot. Both can be mutated in place (`xs.push(1)`, `p.x = 2`) — same as TS.
-- Arrays are shared, as in TypeScript: `const b = a` makes `b` the same array, and a change through any reference (`b.push(1)`, `b[0] = 2`, a function changing its parameter, `m.get(k)!.push(x)`, `const row = grid[0]; row.push(9)`) is seen through all of them. `===` compares arrays by identity; `slice()`, `[...a]`, `Array.from(a)` and `concat` make new ones.
-- Records (object literals), maps and sets are still values: a function that changes a record parameter in place (and never reassigns it) changes the caller's, as TypeScript's shared objects would: the parameter is `inout`, and arguments are passed as if with `&` (a `const` passed this way becomes a `let`). Written explicitly, `inout` lets the callee replace the whole value (for arrays too):
+- Arrays, maps and sets are shared, as in TypeScript: `const b = a` makes `b` the same array, and a change through any reference (`b.push(1)`, `b[0] = 2`, a function changing its parameter, `m.get(k)!.push(x)`, `const row = grid[0]; row.push(9)`, `seen.add(x)` through a parameter) is seen through all of them. `===` compares them by identity; `slice()`, `[...a]`, `Array.from(a)`, `concat` and `new Map(m)` make new ones.
+- Records (object literals) are still values: a function that changes a record parameter in place (and never reassigns it) changes the caller's, as TypeScript's shared objects would: the parameter is `inout`, and arguments are passed as if with `&` (a `const` passed this way becomes a `let`). Written explicitly, `inout` lets the callee replace the whole value (for arrays too):
   ```ts
   function addOne(inout xs: int[]) { xs = [...xs, 1] }
   addOne(&items)
   ```
-- Copy-then-mutate of a record, map or set where the original is read again (`const q = p; q.x = 1; use(p)`) is an error [M1], because TS would share and Tov copies.
+- Copy-then-mutate of a record where the original is read again (`const q = p; q.x = 1; use(p)`) is an error [M1], because TS would share and Tov copies.
 - `class` instances are shared references (reference-counted): assignment shares the object, as in TS, and changes through one reference are seen through all. Their fields can be changed through any reference (`p.x = 1` works on a `const p` or a parameter). See §6a.
 - A value is freed as soon as nothing can use it again: a local's value is released after the last statement of its block that uses it (directly or through a local that may borrow from it), not at the end of the block.
 

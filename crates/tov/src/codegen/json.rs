@@ -255,7 +255,7 @@ impl<'c, 'a> Gen<'c, 'a> {
                 let rel_v = self.release_code(v, "x");
                 let rel = self.release_code(t, "*out");
                 format!(
-                    "    if (!tv_jp_char(p, '{{')) return false;\n    tv_map m = TV_EMPTY_MAP;\n    if (!tv_jp_try_char(p, '}}')) {{\n        do {{\n            tv_str k;\n            if (!tv_jp_string(p, &k)) {{ tv_map_release(m, {kd}, {vd}); return false; }}\n            if (!tv_jp_char(p, ':')) {{ tv_str_release(k); tv_map_release(m, {kd}, {vd}); return false; }}\n            {vct} x = {dv};\n            if (!{pv}(p, &x)) {{ tv_str_release(k); {rel_v}; tv_map_release(m, {kd}, {vd}); return false; }}\n            tv_map_set(&m, {kd}, {vd}, &k, &x);\n        }} while (tv_jp_try_char(p, ','));\n        if (!tv_jp_char(p, '}}')) {{ tv_map_release(m, {kd}, {vd}); return false; }}\n    }}\n    {rel};\n    *out = m;\n    return true;\n"
+                    "    if (!tv_jp_char(p, '{{')) return false;\n    tv_map m = tv_map_fresh_object();\n    if (!tv_jp_try_char(p, '}}')) {{\n        do {{\n            tv_str k;\n            if (!tv_jp_string(p, &k)) {{ tv_map_release(m, {kd}, {vd}); return false; }}\n            if (!tv_jp_char(p, ':')) {{ tv_str_release(k); tv_map_release(m, {kd}, {vd}); return false; }}\n            {vct} x = {dv};\n            if (!{pv}(p, &x)) {{ tv_str_release(k); {rel_v}; tv_map_release(m, {kd}, {vd}); return false; }}\n            tv_map_set(&m, {kd}, {vd}, &k, &x);\n        }} while (tv_jp_try_char(p, ','));\n        if (!tv_jp_char(p, '}}')) {{ tv_map_release(m, {kd}, {vd}); return false; }}\n    }}\n    {rel};\n    *out = m;\n    return true;\n"
                 )
             }
             Ty::Record(_) if self.tuple_of(t).is_some() => {

@@ -1259,11 +1259,7 @@ impl<'c, 'a> Gen<'c, 'a> {
             Ty::BigInt => format!("tv_big_eq({a}, {b})"),
             Ty::Decimal => format!("tv_dec_eq({a}, {b})"),
             Ty::StrLit(_) | Ty::Undefined | Ty::Null | Ty::Void | Ty::Never => "true".into(),
-            Ty::Array(_) => format!("(({a}).p == ({b}).p)"),
-            Ty::Map(..) | Ty::Set(_) => {
-                let d = self.desc(t);
-                format!("({d})->eq(&({a}), &({b}))")
-            }
+            Ty::Array(_) | Ty::Map(..) | Ty::Set(_) => format!("(({a}).p == ({b}).p)"),
             Ty::Func(..) => format!("(({a}).fn == ({b}).fn && ({a}).env == ({b}).env)"),
             Ty::Class(..) | Ty::Promise(..) => format!("((void *)({a}) == (void *)({b}))"),
             Ty::Interface(..) => format!("(({a}).p == ({b}).p)"),
@@ -1445,14 +1441,8 @@ impl<'c, 'a> Gen<'c, 'a> {
             let extra = match self.tget(t) {
                 // (arrays are objects: equal when they're the same one, as `===` in JavaScript)
                 Ty::Array(_) => format!("static uint64_t {key}_hs2(const void *p) {{ return (uint64_t)(uintptr_t)((const tv_arr *)p)->p * 0x9E3779B97F4A7C15ull; }}\nstatic bool {key}_eq2(const void *x, const void *y) {{ return ((const tv_arr *)x)->p == ((const tv_arr *)y)->p; }}\n"),
-                Ty::Map(k, v) => {
-                    let (kd, vd) = (self.desc(k), self.desc(v));
-                    format!("static uint64_t {key}_hs2(const void *p) {{ return (uint64_t)tv_map_size(*(const tv_map *)p); }}\nstatic bool {key}_eq2(const void *x, const void *y) {{ return tv_map_eq(*(const tv_map *)x, *(const tv_map *)y, {kd}, {vd}); }}\n")
-                }
-                Ty::Set(k) => {
-                    let kd = self.desc(k);
-                    format!("static uint64_t {key}_hs2(const void *p) {{ return (uint64_t)tv_map_size(*(const tv_map *)p); }}\nstatic bool {key}_eq2(const void *x, const void *y) {{ return tv_map_eq(*(const tv_map *)x, *(const tv_map *)y, {kd}, &tv_type_undefined); }}\n")
-                }
+                // (maps and sets too: the same one)
+                Ty::Map(..) | Ty::Set(_) => format!("static uint64_t {key}_hs2(const void *p) {{ return (uint64_t)(uintptr_t)((const tv_map *)p)->p * 0x9E3779B97F4A7C15ull; }}\nstatic bool {key}_eq2(const void *x, const void *y) {{ return ((const tv_map *)x)->p == ((const tv_map *)y)->p; }}\n"),
                 _ => String::new(),
             };
             let (eq_fn, hash_fn) = if extra.is_empty() {

@@ -3021,13 +3021,19 @@ impl<'c, 'a> Gen<'c, 'a> {
                     // entries `[key, value]`: set one by one
                     let Ty::Map(k, v) = self.tget(ty) else { return Val::plain("TV_EMPTY_MAP", ty) };
                     let arr = self.expr(args[0].expr);
+                    // (another map: a copy of it)
+                    let at = self.c.types.without_undefined(arr.ty);
+                    if matches!(self.tget(at), Ty::Map(..)) {
+                        let (kd, vd) = (self.desc(k), self.desc(v));
+                        return self.tmp(ty, &format!("tv_map_copy({}, {kd}, {vd})", arr.code), true);
+                    }
                     let Ty::Array(et) = self.tget(arr.ty) else { return Val::plain("TV_EMPTY_MAP", ty) };
                     let f = self.tuple_of(et).unwrap_or_default();
                     if f.len() != 2 {
                         return Val::plain("TV_EMPTY_MAP", ty);
                     }
                     let (f0, f1) = (self.sym(f[0].name).to_string(), self.sym(f[1].name).to_string());
-                    let res = self.tmp(ty, "TV_EMPTY_MAP", true);
+                    let res = self.tmp(ty, "tv_map_fresh()", true);
                     let (kd, vd, kct, vct, ect) = (self.desc(k), self.desc(v), self.ctype(k), self.ctype(v), self.ctype(et));
                     let i = self.fresh("i");
                     self.open(&format!("for (tv_int {i} = 0; {i} < tv_arr_len({}); {i}++) {{", arr.code));
@@ -3046,7 +3052,7 @@ impl<'c, 'a> Gen<'c, 'a> {
                     let arr = self.spread_array(args[0].expr);
                     let arr_ty = self.c.types.array(elem);
                     let arr = self.coerce(arr, arr_ty);
-                    let res = self.tmp(ty, "TV_EMPTY_MAP", true);
+                    let res = self.tmp(ty, "tv_map_fresh()", true);
                     let (d, ect) = (self.desc(elem), self.ctype(elem));
                     let i = self.fresh("i");
                     self.open(&format!("for (tv_int {i} = 0; {i} < tv_arr_len({}); {i}++) {{", arr.code));
@@ -3055,6 +3061,10 @@ impl<'c, 'a> Gen<'c, 'a> {
                     self.line(format!("tv_map_set(&{}, {d}, &tv_type_undefined, &{i}k, NULL);", res.code));
                     self.close("}");
                     return res;
+                }
+                // (`new Map()`: a map of its own)
+                if matches!(self.tget(ty), Ty::Map(..) | Ty::Set(_)) {
+                    return self.tmp(ty, "tv_map_fresh()", true);
                 }
                 Val::plain("TV_EMPTY_MAP", ty)
             }
@@ -3084,7 +3094,7 @@ impl<'c, 'a> Gen<'c, 'a> {
                 };
                 // A `Record<string, V>` literal: a map built key by key.
                 if let Ty::Map(k, v) = self.tget(target) {
-                    let res = self.tmp(target, "TV_EMPTY_MAP", true);
+                    let res = self.tmp(target, "tv_map_fresh_object()", true);
                     let (kd, vd) = (self.desc(k), self.desc(v));
                     let (kct, vct) = (self.ctype(k), self.ctype(v));
                     for f in fields {
@@ -3492,7 +3502,7 @@ impl<'c, 'a> Gen<'c, 'a> {
                 let (tkd, tvd) = (self.desc(tk), self.desc(tv));
                 let (fkct, fvct) = (self.ctype(fk), self.ctype(fv));
                 let (tkct, tvct) = (self.ctype(tk), self.ctype(tv));
-                let res = self.tmp(to, "TV_EMPTY_MAP", true);
+                let res = self.tmp(to, "tv_map_fresh()", true);
                 let (cursor, kp, vp) = (self.fresh("i"), self.fresh("k"), self.fresh("v"));
                 self.line(format!("{fkct} *{kp} = NULL; {fvct} *{vp} = NULL;"));
                 self.open(&format!("for (tv_int {cursor} = 0; tv_map_next({}, {fkd}, {fvd}, &{cursor}, (void **)&{kp}, (void **)&{vp});) {{", v.code));

@@ -2478,9 +2478,9 @@ impl<'a> Checker<'a> {
 
     /// Would TypeScript share this value between two variables (objects, arrays, maps, sets)?
     /// A copy of a value of `ty` would be shared in TypeScript but is its own in Tov: records
-    /// (arrays are shared in Tov too).
+    /// (arrays, maps and sets are shared in Tov too).
     fn shared_in_ts(&mut self, ty: TyId) -> bool {
-        self.flat_members(ty).iter().any(|&m| matches!(self.types.get(m), Ty::Map(..) | Ty::Set(_) | Ty::Record(_) | Ty::Interface(..)))
+        self.flat_members(ty).iter().any(|&m| matches!(self.types.get(m), Ty::Record(_) | Ty::Interface(..)))
     }
 
     /// V0120: `const b = a; b.push(x); use(a)` — TypeScript shares `a` and `b`, Tov copies.
@@ -2526,7 +2526,7 @@ impl<'a> Checker<'a> {
             };
             self.report(
                 Diagnostic::new("V0120", sp, format!("this changes `{c}`, but `{o}` is a separate copy (TypeScript would change both)"))
-                    .note("why", format!("`{cp}` was initialized from `{sr}`: Tov arrays, records and maps are values, so assignment copies"))
+                    .note("why", format!("`{cp}` was initialized from `{sr}`: Tov records (object literals) are values, so assignment copies"))
                     .note("if you meant a copy", copy_note)
                     .note("if you meant one value", one_note),
             );
@@ -2535,7 +2535,7 @@ impl<'a> Checker<'a> {
             let (v, c) = (self.name(value).to_string(), self.name(container).to_string());
             self.report(
                 Diagnostic::new("V0120", sp, format!("this changes `{v}`, but `{c}` holds a separate copy of it (TypeScript would change both)"))
-                    .note("why", format!("`{v}` was copied into `{c}`: Tov arrays, records and maps are values"))
+                    .note("why", format!("`{v}` was copied into `{c}`: Tov records (object literals) are values"))
                     .note("instead", format!("finish changing `{v}` before storing it, change it through `{c}`, or make it a class instance (a reference)")),
             );
         }
@@ -2543,7 +2543,7 @@ impl<'a> Checker<'a> {
             let (n, p) = (self.name(name).to_string(), self.src(place).to_string());
             self.report(
                 Diagnostic::new("V0121", sp, format!("this changes `{n}`, but `{p}` holds a separate copy (TypeScript would change both)"))
-                    .note("why", "Tov arrays, records and maps are values, so assignment copies")
+                    .note("why", "Tov records (object literals) are values, so assignment copies")
                     .note("instead", format!("change `{p}` directly, or make the shared value a class instance (a reference)")),
             );
         }

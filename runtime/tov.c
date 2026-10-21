@@ -2324,8 +2324,17 @@ void tv_to_str_arr(tv_sb *sb, tv_arr a, const tv_type *t) { tv_join_into(sb, a, 
  * Index slot: entry number + 1, 0 = empty. Open addressing, linear probing, backward-shift
  * deletion (so the index never holds tombstones); deleted entries are compacted away when
  * the entry array fills up. */
+/* The store of a map's entries: replaced by a bigger one as the map grows (the header that
+ * every reference holds stays). */
+typedef struct tv_mapbuf tv_mapbuf;
+struct tv_maphdr {
+    tv_hcount rc;
+    tv_mapbuf *b;     /* NULL while empty */
+    int64_t object;   /* made as an object (`{ a: 1 }` for a Record<string, V>, JSON): printed as one */
+};
+
 struct tv_mapbuf {
-    int64_t rc;
+    int64_t rc;       /* (unused: 1) */
     int64_t count;    /* live entries */
     int64_t used;     /* entries used, live or deleted */
     int64_t cap;      /* entry capacity (power of two) */
@@ -2415,13 +2424,35 @@ static tv_mapbuf *tv_map_rebuild(const tv_mapbuf *old, tv_mlayout L, int64_t cap
     return m;
 }
 
+static inline tv_mapbuf *tv_map_buf(tv_map m) { return m.p ? m.p->b : NULL; }
+
+tv_map tv_map_fresh(void) {
+    tv_maphdr *h = (tv_maphdr *)tv_alloc(sizeof(tv_maphdr));
+    h->rc = 1;
+    h->b = NULL;
+    h->object = 0;
+    return (tv_map){h};
+}
+
+tv_map tv_map_fresh_object(void) {
+    tv_map m = tv_map_fresh();
+    m.p->object = 1;
+    return m;
+}
+
+tv_map tv_map_copy(tv_map m, const tv_type *kt, const tv_type *vt) {
+    tv_map c = tv_map_fresh();
+    tv_mapbuf *b = tv_map_buf(m);
+    if (b && b->count) c.p->b = tv_map_rebuild(b, tv_mlay(kt, vt), b->cap, true, kt, vt);
+    return c;
+}
+
+/* The store to change: the map's own (a place without one gets a new map first). */
 static tv_mapbuf *tv_map_unique(tv_map *mp, const tv_type *kt, const tv_type *vt, tv_mlayout L) {
-    tv_mapbuf *m = mp->p;
-    if (!m) return mp->p = tv_mapbuf_new(TV_MAP_MIN_CAP, L);
-    if (m->rc == 1) return m;
-    tv_mapbuf *c = tv_map_rebuild(m, L, m->cap, true, kt, vt);
-    if (m->rc > 0) m->rc--;
-    return mp->p = c;
+    (void)kt, (void)vt;
+    if (!mp->p) *mp = tv_map_fresh();
+    if (!mp->p->b) mp->p->b = tv_mapbuf_new(TV_MAP_MIN_CAP, L);
+    return mp->p->b;
 }
 
 /* Index slot holding `key` (*found = true), or the empty slot where it would go. */
@@ -2454,14 +2485,17 @@ static void tv_map_release_entries(tv_mapbuf *m, const tv_type *kt, const tv_typ
 
 void tv_map_release(tv_map m, const tv_type *kt, const tv_type *vt) {
     if (!m.p || m.p->rc <= 0 || --m.p->rc > 0) return;
-    tv_map_release_entries(m.p, kt, vt, tv_mlay(kt, vt));
+    if (m.p->b) {
+        tv_map_release_entries(m.p->b, kt, vt, tv_mlay(kt, vt));
+        free(m.p->b);
+    }
     free(m.p);
 }
 
-tv_int tv_map_size(tv_map m) { return m.p ? m.p->count : 0; }
+tv_int tv_map_size(tv_map m) { tv_mapbuf *b = tv_map_buf(m); return b ? b->count : 0; }
 
 void *tv_map_get(tv_map mm, const tv_type *kt, const tv_type *vt, const void *key) {
-    tv_mapbuf *m = mm.p;
+    tv_mapbuf *m = tv_map_buf(mm);
     if (!m || !m->count) return NULL;
     tv_mlayout L = tv_mlay(kt, vt);
     bool found;
@@ -2481,7 +2515,7 @@ static unsigned char *tv_map_add(tv_map *mp, tv_mapbuf *m, tv_mlayout L, const t
         int64_t ncap = m->count * 2 <= m->cap ? m->cap : m->cap * 2;
         tv_mapbuf *n = tv_map_rebuild(m, L, ncap, false, kt, vt);
         free(m);
-        mp->p = m = n;
+        mp->p->b = m = n;
         pos = h & m->mask;
         while (m->index[pos]) pos = (pos + 1) & m->mask;
     }
@@ -2515,7 +2549,7 @@ void tv_map_set(tv_map *mp, const tv_type *kt, const tv_type *vt, void *key, voi
 
 /* Find-or-insert, for `m.set(k, (m.get(k) ?? d) op e)`: one probe. */
 void *tv_map_get_mut(tv_map *mp, const tv_type *kt, const tv_type *vt, const void *key) {
-    if (!mp->p) return NULL;
+    if (!tv_map_buf(*mp)) return NULL;
     tv_mlayout L = tv_mlay(kt, vt);
     tv_mapbuf *m = tv_map_unique(mp, kt, vt, L);
     bool found;
@@ -2598,17 +2632,13 @@ void *tv_map_slot_slice(tv_map *mp, const tv_type *vt, tv_str s, tv_int start, t
 }
 
 bool tv_map_delete(tv_map *mp, const tv_type *kt, const tv_type *vt, const void *key) {
-    tv_mapbuf *m = mp->p;
+    tv_mapbuf *m = tv_map_buf(*mp);
     if (!m || !m->count) return false;
     tv_mlayout L = tv_mlay(kt, vt);
     uint64_t h = tv_key_hash(kt, key);
     bool found;
     uint64_t pos = tv_map_find(m, L, kt, key, h, &found);
     if (!found) return false;
-    if (m->rc != 1) {
-        m = tv_map_unique(mp, kt, vt, L);
-        pos = tv_map_find(m, L, kt, key, h, &found);
-    }
     unsigned char *e = tv_entry(m, L, m->index[pos] - 1);
     tv_entry_set_hash(e, 0);
     m->count--;
@@ -2632,13 +2662,17 @@ bool tv_map_delete(tv_map *mp, const tv_type *kt, const tv_type *vt, const void 
     return true;
 }
 
+/* Empties the map (for every reference to it). */
 void tv_map_clear(tv_map *m, const tv_type *kt, const tv_type *vt) {
-    tv_map_release(*m, kt, vt);
-    m->p = NULL;
+    tv_mapbuf *b = tv_map_buf(*m);
+    if (!b) return;
+    m->p->b = NULL; /* (a release callback sees the map empty) */
+    tv_map_release_entries(b, kt, vt, tv_mlay(kt, vt));
+    free(b);
 }
 
 static tv_arr tv_map_column(tv_map mm, const tv_type *kt, const tv_type *vt, bool values) {
-    tv_mapbuf *m = mm.p;
+    tv_mapbuf *m = tv_map_buf(mm);
     if (!m || !m->count) return tv_arr_fresh();
     tv_mlayout L = tv_mlay(kt, vt);
     const tv_type *t = values ? vt : kt;
@@ -2661,7 +2695,7 @@ tv_arr tv_map_keys(tv_map m, const tv_type *kt, const tv_type *vt) { return tv_m
 tv_arr tv_map_values(tv_map m, const tv_type *kt, const tv_type *vt) { return tv_map_column(m, kt, vt, true); }
 
 bool tv_map_next(tv_map mm, const tv_type *kt, const tv_type *vt, tv_int *cursor, void **key, void **value) {
-    tv_mapbuf *m = mm.p;
+    tv_mapbuf *m = tv_map_buf(mm);
     if (!m) return false;
     tv_mlayout L = tv_mlay(kt, vt);
     for (int64_t i = *cursor; i < m->used; i++) {
@@ -3076,7 +3110,29 @@ static void tv_inspect_map_impl(tv_sb *sb, tv_map m, const tv_type *kt, const tv
     tv_reduce_to_single_string(sb, &out, brace0, "}", false, depth + 1, false);
 }
 
+void tv_inspect_record(tv_sb *sb, int depth, size_t n, const char *const *names, const tv_type *const *types,
+                       const void *const *fields);
+
 void tv_map_inspect(tv_sb *sb, tv_map m, const tv_type *kt, const tv_type *vt, int depth) {
+    /* (made as an object: printed as one, `{ a: 1 }`) */
+    if (m.p && m.p->object && kt == &tv_type_str) {
+        size_t n = (size_t)tv_map_size(m), k = 0;
+        const char **names = (const char **)tv_alloc((n ? n : 1) * sizeof *names);
+        const tv_type **types = (const tv_type **)tv_alloc((n ? n : 1) * sizeof *types);
+        const void **fields = (const void **)tv_alloc((n ? n : 1) * sizeof *fields);
+        void *kp, *vp;
+        for (tv_int i = 0; tv_map_next(m, kt, vt, &i, &kp, &vp);) {
+            names[k] = ((tv_str *)kp)->p->data;
+            types[k] = vt;
+            fields[k] = vp;
+            k++;
+        }
+        tv_inspect_record(sb, depth, k, names, types, fields);
+        tv_free(names);
+        tv_free((void *)types);
+        tv_free((void *)fields);
+        return;
+    }
     tv_inspect_map_impl(sb, m, kt, vt, depth, false);
 }
 

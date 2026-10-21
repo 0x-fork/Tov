@@ -907,10 +907,18 @@ static void test_map_basics(void) {
     tv_int cur = 0;
     CHECK(!tv_map_next(TV_EMPTY_MAP, &tv_type_int, &tv_type_int, &cur, &kp, &vp));
 
-    /* copy-on-write */
+    /* sharing (as JavaScript's maps): m2 is m */
     tv_map m2 = m;
     tv_map_retain(m2);
     CHECK(m.p->rc == 2);
+    map_set_int(&m2, 4, 40);
+    CHECK(m.p == m2.p && tv_map_size(m) == 4);
+    k = 4;
+    CHECK(tv_map_delete(&m2, &tv_type_int, &tv_type_int, &k) && tv_map_size(m) == 3);
+    tv_map_release(m2, &tv_type_int, &tv_type_int);
+
+    /* a copy (new Map(m)) is a map of its own */
+    m2 = tv_map_copy(m, &tv_type_int, &tv_type_int);
     map_set_int(&m2, 4, 40);
     CHECK(m.p != m2.p && m.p->rc == 1 && tv_map_size(m) == 3 && tv_map_size(m2) == 4);
     CHECK_ORDER(m2, 3, 2, 1, 4);
@@ -932,11 +940,10 @@ static void test_map_basics(void) {
     tv_map_release(a, &tv_type_int, &tv_type_int);
     tv_map_release(b, &tv_type_int, &tv_type_int);
 
-    /* delete on a shared map clones only when the key exists */
-    m2 = m;
-    tv_map_retain(m2);
+    /* delete on a copy leaves the original */
+    m2 = tv_map_copy(m, &tv_type_int, &tv_type_int);
     k = 77;
-    CHECK(!tv_map_delete(&m2, &tv_type_int, &tv_type_int, &k) && m2.p == m.p);
+    CHECK(!tv_map_delete(&m2, &tv_type_int, &tv_type_int, &k));
     k = 3;
     CHECK(tv_map_delete(&m2, &tv_type_int, &tv_type_int, &k) && m2.p != m.p && tv_map_size(m) == 3);
     CHECK_ORDER(m2, 2, 1);
@@ -944,12 +951,13 @@ static void test_map_basics(void) {
 
     /* deleting everything, then reuse */
     for (k = 1; k <= 3; k++) CHECK(tv_map_delete(&m, &tv_type_int, &tv_type_int, &k));
-    CHECK(tv_map_size(m) == 0 && m.p->used == 0);
+    CHECK(tv_map_size(m) == 0 && m.p->b->used == 0);
     map_set_int(&m, 9, 90);
     CHECK_ORDER(m, 9);
     tv_map_clear(&m, &tv_type_int, &tv_type_int);
-    CHECK(m.p == NULL && tv_map_size(m) == 0);
+    CHECK(m.p != NULL && tv_map_size(m) == 0); /* the same map, now empty */
     tv_map_clear(&m, &tv_type_int, &tv_type_int);
+    tv_map_release(m, &tv_type_int, &tv_type_int);
     drain();
 }
 
@@ -957,7 +965,7 @@ static void test_map_growth(void) {
     enum { N = 100000 };
     tv_map m = TV_EMPTY_MAP;
     for (int64_t i = 0; i < N; i++) map_set_int(&m, i * 7919, i);
-    CHECK(tv_map_size(m) == N && m.p->cap == 131072);
+    CHECK(tv_map_size(m) == N && m.p->b->cap == 131072);
     bool ok = true;
     for (int64_t i = 0; i < N; i++) ok &= map_int(m, i * 7919) == i;
     CHECK(ok);
@@ -967,15 +975,15 @@ static void test_map_growth(void) {
         int64_t k = i * 7919;
         if (i % 4 != 3) ok &= tv_map_delete(&m, &tv_type_int, &tv_type_int, &k);
     }
-    CHECK(ok && tv_map_size(m) == N / 4 && m.p->used == N);
+    CHECK(ok && tv_map_size(m) == N / 4 && m.p->b->used == N);
     ok = true;
     for (int64_t i = 0; i < N; i++) ok &= map_int(m, i * 7919) == (i % 4 == 3 ? i : -999);
     CHECK(ok);
     /* fill up: the entry array compacts (same capacity) instead of growing */
-    int64_t cap = m.p->cap;
-    for (int64_t i = N; m.p->used < cap; i++) map_set_int(&m, i * 7919, i);
+    int64_t cap = m.p->b->cap;
+    for (int64_t i = N; m.p->b->used < cap; i++) map_set_int(&m, i * 7919, i);
     map_set_int(&m, -1, -1);
-    CHECK(m.p->cap == cap && m.p->used == m.p->count);
+    CHECK(m.p->b->cap == cap && m.p->b->used == m.p->b->count);
     /* order survives compaction: surviving originals first, then the new keys */
     void *kp, *vp;
     int64_t prev = -1, n = 0;
@@ -992,10 +1000,10 @@ static void test_map_growth(void) {
     /* small map: compaction when half the entries are deleted */
     tv_map s = TV_EMPTY_MAP;
     for (int64_t k = 0; k < 8; k++) map_set_int(&s, k, k);
-    CHECK(s.p->cap == 8);
+    CHECK(s.p->b->cap == 8);
     for (int64_t k = 0; k < 6; k++) CHECK(tv_map_delete(&s, &tv_type_int, &tv_type_int, &k));
     map_set_int(&s, 100, 100);
-    CHECK(s.p->cap == 8 && s.p->used == 3);
+    CHECK(s.p->b->cap == 8 && s.p->b->used == 3);
     CHECK_ORDER(s, 6, 7, 100);
     map_set_int(&s, 7, 77);
     CHECK_ORDER(s, 6, 7, 100);
@@ -1055,9 +1063,8 @@ static void test_map_ownership(void) {
     tv_map_set(&m, &tv_type_str, &obj_type, &k2, &nv);
     CHECK(count_of(vals[5]) == 0 && count_of(nv) == 1);
 
-    /* clone retains every key and value; release of the clone balances */
-    tv_map c = m;
-    tv_map_retain(c);
+    /* a copy retains every key and value; release of the copy balances */
+    tv_map c = tv_map_copy(m, &tv_type_str, &obj_type);
     tv_str k3 = tv_str_from("new-key", 7);
     obj v3 = obj_new();
     tv_map_set(&c, &tv_type_str, &obj_type, &k3, &v3);
@@ -1077,6 +1084,7 @@ static void test_map_ownership(void) {
     CHECK(tv_map_delete(&m, &tv_type_str, &obj_type, &dk));
     CHECK(count_of(vals[7]) == 0);
     tv_map_clear(&m, &tv_type_str, &obj_type);
+    tv_map_release(m, &tv_type_str, &obj_type);
     CHECK(all_dead());
 
     /* obj keys with a set (size-0 values) */
@@ -1092,8 +1100,7 @@ static void test_map_ownership(void) {
     CHECK(tv_map_size(s) == 50 && count_of(ks[3]) == 1);
     CHECK(tv_map_has(s, &obj_type, &tv_type_undefined, &ks[10]));
     CHECK(tv_map_get(s, &obj_type, &tv_type_undefined, &ks[10]) != NULL);
-    tv_map s2 = s;
-    tv_map_retain(s2);
+    tv_map s2 = tv_map_copy(s, &obj_type, &tv_type_undefined);
     CHECK(tv_map_delete(&s2, &obj_type, &tv_type_undefined, &ks[10]));
     CHECK(count_of(ks[10]) == 1 && count_of(ks[11]) == 2);
     CHECK(tv_map_has(s, &obj_type, &tv_type_undefined, &ks[10]) &&

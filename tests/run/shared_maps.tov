@@ -1,0 +1,31 @@
+// Maps and sets are shared, as in TypeScript (checked against Node)
+const m = new Map<string, number>()
+const m2 = m
+m2.set("a", 1)
+console.log(m.get("a"), m === m2, new Map<string, number>() === new Map<string, number>())
+function fill(s: Set<string>, x: string): void { s.add(x) }
+const s = new Set<string>()
+fill(s, "x"); fill(s, "y")
+console.log(s)
+const copy = new Map(m)
+copy.set("b", 2)
+console.log(m.size, copy.size)
+const nested = new Map<string, Set<number>>()
+nested.set("k", new Set())
+const inner = nested.get("k")!
+inner.add(3)
+console.log(nested)
+const cleared = m
+cleared.clear()
+console.log(m.size)
+function dfs(node: string, seen: Set<string> = new Set()): string[] {
+  if (seen.has(node)) return []
+  seen.add(node)
+  const adj: Record<string, string[]> = { a: ["b", "c"], b: ["d"], c: ["d"], d: [] }
+  return [node, ...adj[node].flatMap((n) => dfs(n, seen))]
+}
+console.log(dfs("a"))
+const r: Record<string, number[]> = {}
+const alias = r
+alias["k"] = [1]
+console.log(r)
