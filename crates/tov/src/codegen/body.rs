@@ -1371,9 +1371,19 @@ impl<'c, 'a> Gen<'c, 'a> {
                     _ => false,
                 })
         };
+        // (or a sum of those: `i < start + len`)
+        fn sum_of(ast: &ast::Ast, e: ExprId, leaf: &dyn Fn(ExprId) -> bool) -> bool {
+            match &ast.expr(e).kind {
+                ExprKind::Int(_) => true,
+                ExprKind::Paren(x) => sum_of(ast, *x, leaf),
+                ExprKind::Binary(BinOp::Add | BinOp::Sub, a, b) => sum_of(ast, *a, leaf) && sum_of(ast, *b, leaf),
+                _ => leaf(e),
+            }
+        }
         match &ast.expr(hi).kind {
             ExprKind::Int(_) => {}
             ExprKind::Ident(_) if local(hi).is_some_and(stable) => {}
+            ExprKind::Binary(BinOp::Add | BinOp::Sub, ..) if sum_of(ast, hi, &|e| matches!(ast.expr(e).kind, ExprKind::Ident(_)) && local(e).is_some_and(stable) && facts.expr_ty.get(e as usize) == Some(&INT)) => {}
             ExprKind::Member { obj, name, optional: false, .. } if self.sym(*name) == "length" => {
                 let xk = local(*obj)?;
                 if !matches!(self.tget(facts.expr_ty[*obj as usize]), Ty::Array(_)) || boxed.contains(&xk) || uses.get(&xk).is_some_and(|u| !u.1) {
