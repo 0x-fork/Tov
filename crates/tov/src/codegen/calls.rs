@@ -128,7 +128,9 @@ impl<'c, 'a> Gen<'c, 'a> {
                     let ct = self.ctype(ty);
                     self.line(format!("{ct} {res};"));
                     self.open_block(&format!("if ({present}) {{"));
-                    let inner_ret = self.c.types.without_undefined(ty);
+                    // (the method's own result: `m.get(k)` may be undefined itself)
+                    let own = self.inst(fact.own_ret);
+                    let inner_ret = if own != ERROR && own != VOID && self.c.types.has_undefined(own) { own } else { self.c.types.without_undefined(ty) };
                     let rv = self.project(base, recv);
                     let r = self.method_on(Some(rv), *obj, recv, &name, args, &params, inner_ret, span);
                     let r = self.coerce(r, ty);

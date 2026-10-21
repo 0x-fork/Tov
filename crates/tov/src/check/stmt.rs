@@ -247,6 +247,14 @@ impl<'a> Checker<'a> {
                         self.report(Diagnostic::new("F0102", sp, "unreachable code").note("why", "the previous statement always returns, breaks or continues"));
                         reported_unreachable = true;
                     }
+                    // `const u = db[id]` tested later (`if (u)`, `u ?? d`): the read may find
+                    // nothing, `undefined`, as in JavaScript (rather than trapping)
+                    if let StmtKind::Let { ty: None, init: Some(x), name, .. } = &ast.stmt(st).kind
+                        && matches!(ast.expr(*x).kind, ExprKind::Index { .. })
+                        && tested(ast, *name, &stmts[i + 1..])
+                    {
+                        self.want_optional = true;
+                    }
                     self.stmt(st);
                 }
                 let ends = self.end_types(&fx.assigned, entry);
@@ -1372,4 +1380,34 @@ pub(crate) fn closure_groups(ast: &Ast, stmts: &[StmtId]) -> Vec<Vec<StmtId>> {
         i = j.max(i + 1);
     }
     out
+}
+
+/// Whether `name` is tested for being there in `stmts` (`if (u)`, `!u`, `u === undefined`,
+/// `u ?? d`, `u?.x`).
+pub(super) fn tested(ast: &crate::ast::Ast, name: Sym, stmts: &[StmtId]) -> bool {
+    use crate::ast::BinOp;
+    let is = |e: ExprId| matches!(ast.expr(e).kind, ExprKind::Ident(n) if n == name);
+    let absent = |e: ExprId| matches!(ast.expr(e).kind, ExprKind::Undefined | ExprKind::Null);
+    let Some(last) = stmts.last() else { return false };
+    let span = ast.stmt(stmts[0]).span.to(ast.stmt(*last).span);
+    let inside = |sp: Span| sp.file == span.file && sp.start >= span.start && sp.end <= span.end;
+    for st in ast.stmts.iter().filter(|st| inside(st.span)) {
+        if let StmtKind::If(c, ..) | StmtKind::While(c, _) | StmtKind::DoWhile(_, c) = &st.kind
+            && is(*c)
+        {
+            return true;
+        }
+    }
+    let mut exprs = Vec::new();
+    for &st in stmts {
+        crate::codegen::body::collect_exprs_stmt_pub(ast, st, &mut exprs);
+    }
+    exprs.iter().any(|&e| match &ast.expr(e).kind {
+        ExprKind::Unary(crate::ast::UnOp::Not, x) => is(*x),
+        ExprKind::Cond(c, ..) => is(*c),
+        ExprKind::Binary(BinOp::And | BinOp::Or | BinOp::Nullish, a, _) => is(*a),
+        ExprKind::Binary(BinOp::Eq | BinOp::Ne | BinOp::LooseEq | BinOp::LooseNe, a, b) => (is(*a) && absent(*b)) || (is(*b) && absent(*a)),
+        ExprKind::Member { obj, optional: true, .. } => is(*obj),
+        _ => false,
+    })
 }

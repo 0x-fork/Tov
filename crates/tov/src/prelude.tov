@@ -386,6 +386,28 @@ export async function __then2<T, R>(p: Promise<T, Error>, f: (v: T) => R throws 
   return f(await p)
 }
 
+/** One outcome of `Promise.allSettled`. */
+export type PromiseSettledResult<T> = { status: "fulfilled", value: T } | { status: "rejected", reason: Error }
+
+/** `Promise.allSettled(ps)`: every outcome, in order, once all have settled (each awaited at
+ * once, so none goes unhandled). */
+export async function __allSettled<T>(ps: Promise<T, Error>[]): Promise<PromiseSettledResult<T>[]> {
+  const settling: Promise<PromiseSettledResult<T>>[] = []
+  for (const p of ps) {
+    settling.push(__settle(p))
+  }
+  return await Promise.all(settling)
+}
+
+async function __settle<T>(p: Promise<T, Error>): Promise<PromiseSettledResult<T>> {
+  try {
+    const value = await p
+    return { status: "fulfilled", value }
+  } catch (e) {
+    return { status: "rejected", reason: e }
+  }
+}
+
 /** `p.catch(g)`. */
 export async function __catch<T, R>(p: Promise<T, Error>, g: (e: Error) => R throws Error): Promise<T | R, Error> {
   try {

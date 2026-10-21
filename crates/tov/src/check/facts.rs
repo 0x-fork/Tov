@@ -68,6 +68,8 @@ pub struct CallFact {
     pub params: Vec<FnParam>,
     pub rest: Option<TyId>,
     pub ret: TyId,
+    /// The callee's own result (`ret` is the call's, `undefined` too for `x?.m()`).
+    pub own_ret: TyId,
 }
 
 #[derive(Clone, Copy, Debug)]

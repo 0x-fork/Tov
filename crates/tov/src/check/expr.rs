@@ -3951,6 +3951,7 @@ impl<'a> Checker<'a> {
                 c.rest = rest;
                 c.targs = targs;
                 c.ret = ret;
+                c.own_ret = ret;
             }
         }
         ret

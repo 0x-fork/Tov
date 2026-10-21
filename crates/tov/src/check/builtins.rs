@@ -618,7 +618,7 @@ impl<'a> Checker<'a> {
             "process" => vec!["argv", "env", "exit", "cwd", "platform", "arch", "pid", "stdout", "stderr"],
             "Date" | "performance" => vec!["now"],
             "JSON" => vec!["stringify", "parse"],
-            "Promise" => vec!["resolve", "reject", "all", "race"],
+            "Promise" => vec!["resolve", "reject", "all", "race", "allSettled"],
             "BigInt" => vec!["asIntN", "asUintN"],
             "Number" => NUMBER_CONSTS.iter().chain(NUMBER_FNS).copied().collect(),
             "String" => vec!["fromCharCode", "fromCodePoint"],
@@ -727,9 +727,15 @@ impl<'a> Checker<'a> {
                 let v = if name == "all" { self.types.array(v) } else { v };
                 self.types.promise(v, e)
             }
+            // (rewritten as the prelude's `__allSettled(ps)`, checked then)
+            "allSettled" if let Some(call) = self.pending_call.take() && let Some(f) = self.interner.lookup("__allSettled") => {
+                self.check_args_loose(args);
+                self.rewrites.static_calls.push((self.cur, call, f));
+                ERROR
+            }
             _ => {
                 self.check_args_loose(args);
-                self.unknown_ns_member("Promise", name, &["resolve", "reject", "all", "race"], name_span);
+                self.unknown_ns_member("Promise", name, &["resolve", "reject", "all", "race", "allSettled"], name_span);
                 ERROR
             }
         }

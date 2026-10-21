@@ -714,7 +714,7 @@ impl<'a> Checker<'a> {
 
     fn rec_call(&mut self, e: ExprId, callee: Callee) {
         if let Some(f) = self.facts_mut() {
-            f.calls.insert(e, CallFact { callee, targs: Vec::new(), params: Vec::new(), rest: None, ret: ERROR });
+            f.calls.insert(e, CallFact { callee, targs: Vec::new(), params: Vec::new(), rest: None, ret: ERROR, own_ret: ERROR });
         }
     }
 
@@ -1202,6 +1202,15 @@ impl<'a> Checker<'a> {
                         declared
                     }
                     None => {
+                        // (`const u = db[id]` tested in the script: may be `undefined`, see `stmt::tested`)
+                        if matches!(c.ast().expr(init).kind, ast::ExprKind::Index { .. })
+                            && let Some(si) = c.ast().script
+                            && let ItemKind::Function(f) = &c.ast().items[si as usize].kind
+                            && let ast::StmtKind::Block(body) = &c.ast().stmt(f.body).kind
+                            && stmt::tested(c.ast(), *name, body)
+                        {
+                            c.want_optional = true;
+                        }
                         let found = c.expr(init, None);
                         let t = c.check_inferred_binding(found, c.ast().expr(init).span);
                         // `let s = ""` holds any string later, as in TypeScript; `let x = 0`

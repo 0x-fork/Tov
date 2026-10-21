@@ -47,11 +47,13 @@ pub struct Rewrites {
     /// `x.name = v` (or `op=`) through a setter: (module, the assignment, the setter method), as
     /// `x.__set_name(v)` (`x.__set_name(x.name op v)`).
     pub(crate) setters: Vec<(u32, ExprId, crate::intern::Sym)>,
+    /// `Promise.allSettled(ps)`: (module, the call, the prelude function), as `__allSettled(ps)`.
+    pub(crate) static_calls: Vec<(u32, ExprId, crate::intern::Sym)>,
 }
 
 impl Rewrites {
     pub fn is_empty(&self) -> bool {
-        self.args.is_empty() && self.prims.is_empty() && self.records.is_empty() && self.fn_values.is_empty() && self.enum_names.is_empty() && self.rests.is_empty() && self.setters.is_empty() && self.consts.is_empty() && self.items.is_empty() && self.awaits.is_empty() && self.calls.is_empty() && self.elems.is_empty() && self.keys.is_empty() && self.spreads.is_empty() && self.keyed.is_empty()
+        self.args.is_empty() && self.prims.is_empty() && self.records.is_empty() && self.fn_values.is_empty() && self.enum_names.is_empty() && self.rests.is_empty() && self.setters.is_empty() && self.static_calls.is_empty() && self.consts.is_empty() && self.items.is_empty() && self.awaits.is_empty() && self.calls.is_empty() && self.elems.is_empty() && self.keys.is_empty() && self.spreads.is_empty() && self.keyed.is_empty()
     }
 
     pub(crate) fn extend(&mut self, o: Rewrites) {
@@ -70,6 +72,7 @@ impl Rewrites {
         self.enum_names.extend(o.enum_names);
         self.rests.extend(o.rests);
         self.setters.extend(o.setters);
+        self.static_calls.extend(o.static_calls);
     }
 }
 
@@ -111,6 +114,17 @@ pub fn apply(modules: &mut [Module], rw: &Rewrites) -> bool {
         if let ExprKind::Call { callee, args, .. } = &mut ast.exprs[call as usize].kind {
             *callee = fe;
             *args = all;
+        }
+        changed = true;
+    }
+    for &(m, call, f) in &rw.static_calls {
+        let ast = &mut modules[m as usize].ast;
+        let ExprKind::Call { callee, .. } = ast.exprs[call as usize].kind else { continue };
+        let span = ast.exprs[callee as usize].span;
+        ast.exprs.push(crate::ast::Expr { kind: ExprKind::Ident(f), span });
+        let fe = ast.exprs.len() as ExprId - 1;
+        if let ExprKind::Call { callee, .. } = &mut ast.exprs[call as usize].kind {
+            *callee = fe;
         }
         changed = true;
     }
