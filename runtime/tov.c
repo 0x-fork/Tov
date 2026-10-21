@@ -2462,7 +2462,8 @@ struct tv_mapbuf {
     int64_t cap;      /* entry capacity (power of two) */
     uint64_t mask;    /* index slots - 1 */
     uint32_t *index;
-    int64_t _pad[2];  /* header = 64 bytes, entries stay 16-byte aligned */
+    int64_t first;    /* entries before it are all deleted: iteration starts there */
+    int64_t _pad[1];  /* header = 64 bytes, entries stay 16-byte aligned */
     unsigned char entries[];
 };
 
@@ -2516,7 +2517,7 @@ static tv_mapbuf *tv_mapbuf_new(int64_t cap, tv_mlayout L) {
     m->cap = cap;
     m->mask = islots - 1;
     m->index = (uint32_t *)(void *)(m->entries + (size_t)cap * L.stride);
-    m->_pad[0] = m->_pad[1] = 0;
+    m->first = m->_pad[0] = 0;
     memset(m->index, 0, islots * sizeof(uint32_t));
     return m;
 }
@@ -2761,9 +2762,14 @@ bool tv_map_delete(tv_map *mp, const tv_type *kt, const tv_type *vt, const void 
     bool found;
     uint64_t pos = tv_map_find(m, L, kt, key, h, &found);
     if (!found) return false;
-    unsigned char *e = tv_entry(m, L, m->index[pos] - 1);
+    int64_t at = (int64_t)m->index[pos] - 1;
+    unsigned char *e = tv_entry(m, L, at);
     tv_entry_set_hash(e, 0);
     m->count--;
+    /* (deleting the oldest, as an LRU cache does: later reads of the first skip it at once) */
+    if (at == m->first) {
+        while (m->first < m->used && !tv_entry_hash(tv_entry(m, L, m->first))) m->first++;
+    }
     /* backward-shift deletion in the index */
     uint64_t mask = m->mask, i = pos, j = pos;
     for (;;) {
@@ -2777,7 +2783,7 @@ bool tv_map_delete(tv_map *mp, const tv_type *kt, const tv_type *vt, const void 
         }
     }
     m->index[i] = 0;
-    if (m->count == 0) m->used = 0; /* index is empty too */
+    if (m->count == 0) m->used = m->first = 0; /* index is empty too */
     /* release last: a release callback must see a consistent map */
     if (kt->release && kt->size) kt->release(e + 8);
     if (vt->release && vt->size) vt->release(e + L.voff);
@@ -2820,7 +2826,7 @@ bool tv_map_next(tv_map mm, const tv_type *kt, const tv_type *vt, tv_int *cursor
     tv_mapbuf *m = tv_map_buf(mm);
     if (!m) return false;
     tv_mlayout L = tv_mlay(kt, vt);
-    for (int64_t i = *cursor; i < m->used; i++) {
+    for (int64_t i = *cursor < m->first ? m->first : *cursor; i < m->used; i++) {
         unsigned char *e = tv_entry(m, L, i);
         if (!tv_entry_hash(e)) continue;
         if (key) *key = e + 8;

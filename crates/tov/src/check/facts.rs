@@ -81,6 +81,9 @@ pub enum MemberFact {
     MathConst,
     /// `C.NAME`: a static readonly field (class, member).
     StaticField(u32, u32),
+    /// `m.keys().next().value` (`.values()` when true) on a map or set: its first key (value),
+    /// `undefined` if it's empty, read without making the array (the expression `m`).
+    First(ExprId, bool),
     /// `process.env.NAME` (the variable's name).
     Env(Sym),
     /// `req.params` in a `routes` handler: the route's `:name` segments as this record type,

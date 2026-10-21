@@ -4697,6 +4697,56 @@ impl<'c, 'a> Gen<'c, 'a> {
             }
             Some(MemberFact::NsConst(cm, ci)) => return self.const_ref(cm, ci),
             Some(MemberFact::StaticField(c, mi)) => return self.static_field_ref(c, mi),
+            Some(MemberFact::First(coll, values)) => {
+                let cv = self.expr(coll);
+                let ct = self.c.types.without_undefined(cv.ty);
+                let (k, v, set) = match self.tget(ct) {
+                    Ty::Map(k, v) => (k, v, false),
+                    Ty::Set(k) => (k, UNDEFINED, true),
+                    // (an array: its first element, or index 0)
+                    Ty::Array(el) => {
+                        let (et, res) = (if values { el } else { INT }, self.fresh("t"));
+                        let (ect, ct2) = (self.ctype(el), self.ctype(ty));
+                        self.line(format!("{ct2} {res};"));
+                        self.open_block(&format!("if (tv_arr_len({}) > 0) {{", cv.code));
+                        let first = if values { Val::plain(format!("(({ect} *)tv_arr_data({}))[0]", cv.code), et) } else { Val::plain("INT64_C(0)", INT) };
+                        let found = self.coerce(first, ty);
+                        let code = self.consume(found);
+                        self.line(format!("{res} = {code};"));
+                        self.mid_block("} else {");
+                        let u = self.coerce(Val::plain("0", UNDEFINED), ty);
+                        self.line(format!("{res} = {};", u.code));
+                        self.close_block("}");
+                        let owned = self.is_rc(ty);
+                        if owned {
+                            self.b().temps.last_mut().unwrap().push((res.clone(), ty));
+                        }
+                        return Val { code: res, ty, owned };
+                    }
+                    _ => return Val::plain("0", ty),
+                };
+                let (kd, vd) = (self.desc(k), if set { "&tv_type_undefined".to_string() } else { self.desc(v) });
+                let et = if values && !set { v } else { k };
+                let ect = self.ctype(et);
+                let (cur, kp, vp, res) = (self.fresh("i"), self.fresh("k"), self.fresh("v"), self.fresh("t"));
+                self.line(format!("tv_int {cur} = 0; void *{kp}, *{vp};"));
+                let ct2 = self.ctype(ty);
+                self.line(format!("{ct2} {res};"));
+                self.open_block(&format!("if (tv_map_next({}, {kd}, {vd}, &{cur}, &{kp}, &{vp})) {{", cv.code));
+                let p = if values && !set { &vp } else { &kp };
+                let found = self.coerce(Val::plain(format!("(*({ect} *){p})"), et), ty);
+                let code = self.consume(found);
+                self.line(format!("{res} = {code};"));
+                self.mid_block("} else {");
+                let u = self.coerce(Val::plain("0", UNDEFINED), ty);
+                self.line(format!("{res} = {};", u.code));
+                self.close_block("}");
+                let owned = self.is_rc(ty);
+                if owned {
+                    self.b().temps.last_mut().unwrap().push((res.clone(), ty));
+                }
+                return Val { code: res, ty, owned };
+            }
             // `req.params` in a route handler: the record of the route's params, from the map.
             Some(MemberFact::RouteParams(rt)) => {
                 let base = self.expr(obj);

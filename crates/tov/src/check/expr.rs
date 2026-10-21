@@ -1748,6 +1748,35 @@ impl<'a> Checker<'a> {
             self.report(Diagnostic::new("T0801", span, format!("`super.{n}` must be called; base fields are read through `this.{n}`")));
             return ERROR;
         }
+        // `m.keys().next().value`: the first key (an LRU cache's oldest), or `undefined`
+        if self.name(name) == "value"
+            && let ExprKind::Call { callee: next, args: a1, optional: false, .. } = &self.ast().expr(obj).kind
+            && a1.is_empty()
+            && let ExprKind::Member { obj: it, name: nn, optional: false, .. } = self.ast().expr(*next).kind
+            && self.name(nn) == "next"
+            && let ExprKind::Call { callee: kc, args: a2, optional: false, .. } = &self.ast().expr(it).kind
+            && a2.is_empty()
+            && let ExprKind::Member { obj: coll, name: kn, optional: false, .. } = self.ast().expr(*kc).kind
+            && matches!(self.name(kn), "keys" | "values")
+        {
+            let values = self.name(kn) == "values";
+            let ct = self.expr(coll, None);
+            let t = match *self.types.get(ct) {
+                Ty::Map(k, v) => if values { v } else { k },
+                Ty::Set(k) => k,
+                Ty::Array(el) => if values { el } else { INT },
+                Ty::Error => return ERROR,
+                _ => {
+                    let msg = format!("`{}.{}().next()` needs a map, set or array, found `{}`", self.src(self.ast().expr(coll).span), self.name(kn), self.show(ct));
+                    self.report(Diagnostic::new("T0107", span, msg).note("instead", "iterate with `for (const x of ...)`"));
+                    return ERROR;
+                }
+            };
+            if let Some(f) = self.facts_mut() {
+                f.members.insert(e, MemberFact::First(coll, values));
+            }
+            return self.types.optional(t);
+        }
         self.want_optional = optional;
         let t = self.expr(obj, None);
         if t == ERROR {
