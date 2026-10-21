@@ -517,7 +517,7 @@ pub(crate) fn has_assign(ast: &ast::Ast, e: ExprId) -> bool {
         ExprKind::Cond(a, b, c) => has_assign(ast, *a) || has_assign(ast, *b) || has_assign(ast, *c),
         ExprKind::Call { callee, args, .. } | ExprKind::New { callee, args, .. } => has_assign(ast, *callee) || args.iter().any(|a| has_assign(ast, a.expr)),
         ExprKind::Member { obj, .. } => has_assign(ast, *obj),
-        ExprKind::Template(_, xs) | ExprKind::Array(xs) => any(xs),
+        ExprKind::Template(_, xs) | ExprKind::Array(xs) | ExprKind::Seq(xs) => any(xs),
         ExprKind::Object(fs) => fs.iter().any(|f| has_assign(ast, f.value)),
         _ => false,
     }
@@ -535,7 +535,7 @@ pub(crate) fn has_await(ast: &ast::Ast, e: ExprId) -> bool {
         ExprKind::Cond(a, b, c) => has_await(ast, *a) || has_await(ast, *b) || has_await(ast, *c),
         ExprKind::Call { callee, args, .. } | ExprKind::New { callee, args, .. } => has_await(ast, *callee) || args.iter().any(|a| has_await(ast, a.expr)),
         ExprKind::Member { obj, .. } => has_await(ast, *obj),
-        ExprKind::Template(_, xs) | ExprKind::Array(xs) => any(xs),
+        ExprKind::Template(_, xs) | ExprKind::Array(xs) | ExprKind::Seq(xs) => any(xs),
         ExprKind::Object(fs) => fs.iter().any(|f| has_await(ast, f.value)),
         ExprKind::Int(_) | ExprKind::Float(_) | ExprKind::BigInt(_) | ExprKind::Decimal(_) | ExprKind::Str(_) | ExprKind::Bool(_) | ExprKind::Undefined | ExprKind::Null | ExprKind::Ident(_) | ExprKind::This | ExprKind::Super | ExprKind::Error => false,
     }

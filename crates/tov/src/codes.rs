@@ -11,7 +11,6 @@ pub const CODES: &[(&str, &str)] = &[
     ("P0002", "Statements end with `;` or a line break."),
     ("P0003", "A type was expected here."),
     ("P0004", "An expression was expected here."),
-    ("P0005", "Declare one variable or constant per statement."),
     ("P0006", "Imports, types, interfaces and functions are declared at the top level of a module."),
     ("P0007", "Array holes (`[1, , 2]`) are not supported."),
     ("P0008", "`for await` reads a stream: `for await (const chunk of stream)`."),

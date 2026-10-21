@@ -1361,7 +1361,7 @@ fn children(ast: &Ast, e: ExprId) -> Vec<ExprId> {
         ExprKind::Member { obj, .. } => out.push(*obj),
         ExprKind::Index { obj, index, .. } => out.extend([*obj, *index]),
         ExprKind::Cond(a, b, c) => out.extend([*a, *b, *c]),
-        ExprKind::Array(xs) | ExprKind::Template(_, xs) => out.extend(xs.iter().copied()),
+        ExprKind::Array(xs) | ExprKind::Template(_, xs) | ExprKind::Seq(xs) => out.extend(xs.iter().copied()),
         ExprKind::Object(fs) => out.extend(fs.iter().map(|f| f.value)),
         ExprKind::Arrow(f) => match &f.body {
             ArrowBody::Expr(x) => out.push(*x),

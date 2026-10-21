@@ -15,7 +15,7 @@ pub fn parse(src: &str, file: FileId, interner: &mut Interner) -> (Ast, Vec<Diag
             lexed.tokens[i].kind = Tok::Ident;
         }
     }
-    let mut p = Parser { src, toks: lexed.tokens, strings: lexed.strings, pos: 0, file, interner, ast: Ast::default(), diags, script_stmts: Vec::new(), defaults: Vec::new() };
+    let mut p = Parser { src, toks: lexed.tokens, strings: lexed.strings, pos: 0, file, interner, ast: Ast::default(), diags, script_stmts: Vec::new(), defaults: Vec::new(), more_stmts: Vec::new() };
     p.module();
     (p.ast, p.diags)
 }
@@ -34,6 +34,9 @@ struct Parser<'a> {
     /// Default parameter values of the parameter list just parsed, for its body: (name, its
     /// span, its type, the default).
     defaults: Vec<(Sym, Span, Option<TypeId>, ExprId)>,
+    /// `let a = 1, b = 2`: the declarations after the first, for the statement list that the
+    /// statement is in.
+    more_stmts: Vec<StmtId>,
 }
 
 impl<'a> Parser<'a> {
@@ -970,25 +973,30 @@ impl<'a> Parser<'a> {
             self.recover_line();
             return;
         }
-        let Some((name, name_span)) = self.ident("a constant name") else {
-            self.recover_line();
-            return;
-        };
-        let ty = if self.eat(Tok::Colon) { Some(self.ty()) } else { None };
-        if !self.expect(Tok::Eq, "(module constants need a value)") {
-            self.recover_line();
-            return;
+        // (`let lo = 0, hi = n`: a module variable each)
+        let mut start = start;
+        loop {
+            let Some((name, name_span)) = self.ident("a constant name") else {
+                self.recover_line();
+                return;
+            };
+            let ty = if self.eat(Tok::Colon) { Some(self.ty()) } else { None };
+            if !self.expect(Tok::Eq, "(module constants need a value)") {
+                self.recover_line();
+                return;
+            }
+            let init = self.assign();
+            let more = self.eat(Tok::Comma);
+            if !more {
+                self.terminator();
+            }
+            let span = start.to(self.prev_span());
+            self.ast.items.push(Item { kind: ItemKind::Const { name, name_span, ty, init, mutable }, span, exported });
+            if !more {
+                return;
+            }
+            start = self.cur_span();
         }
-        let init = self.assign();
-        if self.at(Tok::Comma) {
-            let span = self.cur_span();
-            self.err("P0005", span, "declare one constant per statement");
-            self.recover_line();
-        } else {
-            self.terminator();
-        }
-        let span = start.to(self.prev_span());
-        self.ast.items.push(Item { kind: ItemKind::Const { name, name_span, ty, init, mutable }, span, exported });
     }
 
     fn test_item(&mut self, start: Span) {
@@ -1227,6 +1235,7 @@ impl<'a> Parser<'a> {
         while !self.at(Tok::RBrace) && !self.at(Tok::Eof) {
             let before = self.pos;
             stmts.push(self.stmt());
+            stmts.append(&mut self.more_stmts);
             if self.pos == before {
                 self.bump();
             }
@@ -1250,8 +1259,8 @@ impl<'a> Parser<'a> {
                 self.expect(Tok::LParen, "after `if`");
                 let cond = self.expr();
                 self.expect(Tok::RParen, "to close the `if` condition");
-                let then = self.stmt();
-                let els = if self.eat(Tok::Else) { Some(self.stmt()) } else { None };
+                let then = self.single_stmt();
+                let els = if self.eat(Tok::Else) { Some(self.single_stmt()) } else { None };
                 let span = start.to(self.prev_span());
                 self.mk_stmt(StmtKind::If(cond, then, els), span)
             }
@@ -1260,13 +1269,13 @@ impl<'a> Parser<'a> {
                 self.expect(Tok::LParen, "after `while`");
                 let cond = self.expr();
                 self.expect(Tok::RParen, "to close the `while` condition");
-                let body = self.stmt();
+                let body = self.single_stmt();
                 let span = start.to(self.prev_span());
                 self.mk_stmt(StmtKind::While(cond, body), span)
             }
             Tok::Do => {
                 self.bump();
-                let body = self.stmt();
+                let body = self.single_stmt();
                 self.expect(Tok::While, "after the `do` body");
                 self.expect(Tok::LParen, "after `while`");
                 let cond = self.expr();
@@ -1394,13 +1403,35 @@ impl<'a> Parser<'a> {
         };
         let ty = if self.eat(Tok::Colon) { Some(self.ty()) } else { None };
         let init = if self.eat(Tok::Eq) { Some(self.assign()) } else { None };
-        if self.at(Tok::Comma) {
-            let span = self.cur_span();
-            self.err("P0005", span, "declare one variable per statement");
-            self.recover_line();
-        }
         let span = start.to(self.prev_span());
-        self.mk_stmt(StmtKind::Let { mutable, name, name_span, ty, init }, span)
+        let first = self.mk_stmt(StmtKind::Let { mutable, name, name_span, ty, init }, span);
+        // `let a = 1, b = 2`: one statement each
+        while self.eat(Tok::Comma) {
+            let s = self.cur_span();
+            let Some((name, name_span)) = self.ident("a variable name") else {
+                self.recover_line();
+                break;
+            };
+            let ty = if self.eat(Tok::Colon) { Some(self.ty()) } else { None };
+            let init = if self.eat(Tok::Eq) { Some(self.assign()) } else { None };
+            let span = s.to(self.prev_span());
+            let st = self.mk_stmt(StmtKind::Let { mutable, name, name_span, ty, init }, span);
+            self.more_stmts.push(st);
+        }
+        first
+    }
+
+    /// A statement where one is expected (`if (c) stmt`): declarations of several variables
+    /// become a block.
+    fn single_stmt(&mut self) -> StmtId {
+        let s = self.stmt();
+        if self.more_stmts.is_empty() {
+            return s;
+        }
+        let mut all = vec![s];
+        all.append(&mut self.more_stmts);
+        let span = self.ast.stmts[s as usize].span;
+        self.mk_stmt(StmtKind::Block(all), span)
     }
 
     fn for_stmt(&mut self) -> StmtId {
@@ -1425,7 +1456,7 @@ impl<'a> Parser<'a> {
                 }
                 let iter = self.expr();
                 self.expect(Tok::RParen, "to close the `for` header");
-                let body = self.stmt();
+                let body = self.single_stmt();
                 let span = start.to(self.prev_span());
                 if is_in {
                     return self.mk_stmt(StmtKind::Error, span);
@@ -1449,14 +1480,36 @@ impl<'a> Parser<'a> {
             let span = self.expr_span(e);
             Some(self.mk_stmt(StmtKind::Expr(e), span))
         };
+        // `for (let i = 0, j = n - 1; ...)`: the declarations before the loop, in a block of its own
+        let more = std::mem::take(&mut self.more_stmts);
         self.expect(Tok::Semi, "after the `for` initializer");
         let cond = if self.at(Tok::Semi) { None } else { Some(self.expr()) };
         self.expect(Tok::Semi, "after the `for` condition");
-        let step = if self.at(Tok::RParen) { None } else { Some(self.expr()) };
+        let step = if self.at(Tok::RParen) {
+            None
+        } else {
+            let first = self.expr();
+            let mut steps = vec![first];
+            while self.eat(Tok::Comma) {
+                steps.push(self.expr());
+            }
+            if steps.len() == 1 {
+                Some(first)
+            } else {
+                let span = self.expr_span(first).to(self.prev_span());
+                Some(self.mk_expr(ExprKind::Seq(steps), span))
+            }
+        };
         self.expect(Tok::RParen, "to close the `for` header");
-        let body = self.stmt();
+        let body = self.single_stmt();
         let span = start.to(self.prev_span());
-        self.mk_stmt(StmtKind::For { init, cond, step, body }, span)
+        if more.is_empty() {
+            return self.mk_stmt(StmtKind::For { init, cond, step, body }, span);
+        }
+        let mut all: Vec<StmtId> = init.into_iter().collect();
+        all.extend(more);
+        all.push(self.mk_stmt(StmtKind::For { init: None, cond, step, body }, span));
+        self.mk_stmt(StmtKind::Block(all), span)
     }
 
     /// `for await (const x of stream) body` reads a ReadableStream (`res.body`) chunk by chunk:
@@ -1558,6 +1611,7 @@ impl<'a> Parser<'a> {
             while !matches!(self.kind(), Tok::Case | Tok::Default | Tok::RBrace | Tok::Eof) {
                 let before = self.pos;
                 body.push(self.stmt());
+                body.append(&mut self.more_stmts);
                 if self.pos == before {
                     self.bump();
                 }
@@ -2356,7 +2410,7 @@ fn top_level_await(ast: &Ast, s: StmtId) -> bool {
             ExprKind::Cond(a, b, c) => expr(ast, *a) || expr(ast, *b) || expr(ast, *c),
             ExprKind::Call { callee, args, .. } | ExprKind::New { callee, args, .. } => expr(ast, *callee) || args.iter().any(|a| expr(ast, a.expr)),
             ExprKind::Member { obj, .. } => expr(ast, *obj),
-            ExprKind::Template(_, xs) | ExprKind::Array(xs) => xs.iter().any(|&x| expr(ast, x)),
+            ExprKind::Template(_, xs) | ExprKind::Array(xs) | ExprKind::Seq(xs) => xs.iter().any(|&x| expr(ast, x)),
             ExprKind::Object(fs) => fs.iter().any(|f| expr(ast, f.value)),
             ExprKind::Int(_) | ExprKind::Float(_) | ExprKind::BigInt(_) | ExprKind::Decimal(_) | ExprKind::Str(_) | ExprKind::Bool(_) | ExprKind::Undefined | ExprKind::Null | ExprKind::Ident(_) | ExprKind::This | ExprKind::Super | ExprKind::Error => false,
         }

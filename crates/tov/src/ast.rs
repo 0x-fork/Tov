@@ -197,6 +197,8 @@ pub enum ExprKind {
     Await(ExprId),
     /// `...xs`: an array literal's elements, or a call's arguments, taken from a collection.
     Spread(ExprId),
+    /// `i++, j--` in a `for` step: each in turn (the comma operator, only there).
+    Seq(Vec<ExprId>),
     Error,
 }
 

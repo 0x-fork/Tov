@@ -2585,6 +2585,15 @@ impl<'c, 'a> Gen<'c, 'a> {
                 self.unsupported(span, "`...` here");
                 Val::plain("0", ty)
             }
+            ExprKind::Seq(xs) => {
+                for &x in xs {
+                    let v = self.expr(x);
+                    if v.ty != VOID && !v.code.is_empty() {
+                        self.line(format!("(void)({});", v.code));
+                    }
+                }
+                Val::plain("0", ty)
+            }
             ExprKind::Int(v) if ty == DECIMAL => Val::plain(self.dec_lit(&v.to_string()), DECIMAL),
             ExprKind::Float(_) if ty == DECIMAL => {
                 let text = self.c.sm.get(span.file).text[span.start as usize..span.end as usize].to_string();
@@ -4866,7 +4875,7 @@ pub(crate) fn collect_exprs_expr(ast: &ast::Ast, e: ExprId, out: &mut Vec<ExprId
                 collect_exprs_expr(ast, *x, out);
             }
         }
-        ExprKind::Array(xs) | ExprKind::Template(_, xs) => xs.iter().for_each(|&x| collect_exprs_expr(ast, x, out)),
+        ExprKind::Array(xs) | ExprKind::Template(_, xs) | ExprKind::Seq(xs) => xs.iter().for_each(|&x| collect_exprs_expr(ast, x, out)),
         ExprKind::Object(fs) => fs.iter().for_each(|f| collect_exprs_expr(ast, f.value, out)),
         ExprKind::Arrow(f) => match &f.body {
             ArrowBody::Expr(x) => collect_exprs_expr(ast, *x, out),

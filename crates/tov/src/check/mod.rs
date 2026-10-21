@@ -2443,7 +2443,7 @@ pub(crate) fn may_throw(ast: &Ast, s: StmtId) -> bool {
             ExprKind::Member { obj, .. } => expr(ast, *obj),
             ExprKind::Index { obj, index, .. } => expr(ast, *obj) || expr(ast, *index),
             ExprKind::Cond(a, b, c) => expr(ast, *a) || expr(ast, *b) || expr(ast, *c),
-            ExprKind::Array(xs) | ExprKind::Template(_, xs) => xs.iter().any(|&x| expr(ast, x)),
+            ExprKind::Array(xs) | ExprKind::Template(_, xs) | ExprKind::Seq(xs) => xs.iter().any(|&x| expr(ast, x)),
             ExprKind::Object(fs) => fs.iter().any(|f| expr(ast, f.value)),
             _ => false,
         }

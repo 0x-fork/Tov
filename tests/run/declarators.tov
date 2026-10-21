@@ -1,0 +1,18 @@
+// Several declarations in one statement, and comma-separated for steps.
+let lo = 10, hi = 20
+function rev(xs: number[]): number[] {
+  const out = xs.slice()
+  for (let i = 0, j = out.length - 1; i < j; i++, j--) {
+    const t = out[i]!
+    out[i] = out[j]!
+    out[j] = t
+  }
+  return out
+}
+function main() {
+  let a = 1, b: number = 2.5, c = "x"
+  console.log(a + b, c, lo + hi, rev([1, 2, 3, 4, 5]).join(","))
+  let n = 0
+  for (let i = 0, k = 10; i < k; i += 2, k--) { if (i === 4) continue; n += i }
+  console.log(n)
+}

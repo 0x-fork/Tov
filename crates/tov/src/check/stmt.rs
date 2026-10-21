@@ -855,7 +855,7 @@ fn collect_assigned_expr(ast: &Ast, e: ExprId, out: &mut Vec<Sym>) {
                 collect_assigned_expr(ast, *x, out);
             }
         }
-        ExprKind::Array(xs) => xs.iter().for_each(|&x| collect_assigned_expr(ast, x, out)),
+        ExprKind::Array(xs) | ExprKind::Seq(xs) => xs.iter().for_each(|&x| collect_assigned_expr(ast, x, out)),
         ExprKind::Object(fs) => fs.iter().for_each(|f| collect_assigned_expr(ast, f.value, out)),
         ExprKind::Template(_, xs) => xs.iter().for_each(|&x| collect_assigned_expr(ast, x, out)),
         ExprKind::Arrow(f) => match &f.body {
@@ -984,7 +984,7 @@ fn effects_into(ast: &Ast, e: ExprId, fx: &mut Effects) {
                 effects_into(ast, *x, fx);
             }
         }
-        ExprKind::Array(xs) | ExprKind::Template(_, xs) => xs.iter().for_each(|&x| effects_into(ast, x, fx)),
+        ExprKind::Array(xs) | ExprKind::Template(_, xs) | ExprKind::Seq(xs) => xs.iter().for_each(|&x| effects_into(ast, x, fx)),
         ExprKind::Object(fs) => fs.iter().for_each(|f| effects_into(ast, f.value, fx)),
         _ => {}
     }
@@ -1153,7 +1153,7 @@ fn collect_children(ast: &Ast, e: ExprId, out: &mut Vec<ExprId>) {
         ExprKind::Member { obj, .. } => out.push(*obj),
         ExprKind::Index { obj, index, .. } => out.extend([*obj, *index]),
         ExprKind::Cond(a, b, c) => out.extend([*a, *b, *c]),
-        ExprKind::Array(xs) | ExprKind::Template(_, xs) => out.extend(xs.iter().copied()),
+        ExprKind::Array(xs) | ExprKind::Template(_, xs) | ExprKind::Seq(xs) => out.extend(xs.iter().copied()),
         ExprKind::Object(fs) => out.extend(fs.iter().map(|f| f.value)),
         _ => {}
     }

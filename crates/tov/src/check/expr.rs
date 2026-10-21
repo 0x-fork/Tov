@@ -174,6 +174,13 @@ impl<'a> Checker<'a> {
             ExprKind::Index { obj, index, optional } => self.index(*obj, *index, *optional, span),
             ExprKind::Object(fields) => self.object(fields, exp, span),
             ExprKind::Array(elems) => self.array_lit(elems, exp, span),
+            ExprKind::Seq(xs) => {
+                let mut t = VOID;
+                for &x in xs {
+                    t = self.expr(x, None);
+                }
+                t
+            }
             ExprKind::Spread(x) => {
                 self.report(Diagnostic::new("P0001", span, "`...` spreads only into an array literal or a call's arguments"));
                 self.expr(*x, None);
