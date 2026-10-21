@@ -341,6 +341,8 @@ pub struct Checker<'a> {
     /// Checking a value stored into an element of a sized-integer array (`bytes[i] = n`,
     /// `bytes.push(n)`): a number wraps into it, as into a JavaScript typed array.
     wrap_store: bool,
+    /// Checking an object literal written `as const` (see `object`).
+    as_const: bool,
     /// What the driver rewrites before checking again (see `rewrite`).
     pub(crate) rewrites: rewrite::Rewrites,
     /// The next expression checked may be absent (see `expr_inner`).
@@ -422,6 +424,7 @@ fn new_checker<'a>(modules: &'a [Module], interner: &'a Interner, sm: &'a Source
         spec_fields: HashMap::default(),
         call_spec: None,
         wrap_store: false,
+        as_const: false,
         rewrites: rewrite::Rewrites::default(),
         want_optional: false,
         float_args: false,
@@ -672,6 +675,7 @@ impl<'a> Checker<'a> {
             spec_fields: HashMap::default(),
             call_spec: None,
             wrap_store: false,
+            as_const: false,
             rewrites: rewrite::Rewrites::default(),
             want_optional: false,
             float_args: false,

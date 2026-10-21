@@ -3494,6 +3494,13 @@ impl<'c, 'a> Gen<'c, 'a> {
 
     fn coerce_inner(&mut self, v: Val, to: TyId) -> Val {
         let from = v.ty;
+        if from == NEVER && to != VOID && to != NEVER && to != ERROR {
+            // (no value ever comes: `await` of a promise that only rejects; a valid one of `to`
+            // stands in, after what's evaluated)
+            let d = self.default_value(to);
+            let code = if v.code == "0" { d } else { format!("({{ (void)({}); {d}; }})", v.code) };
+            return Val::plain(code, to);
+        }
         if from == to || to == ERROR || from == ERROR || from == NEVER {
             return Val { ty: to, ..v };
         }

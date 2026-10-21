@@ -38,11 +38,20 @@ pub struct Rewrites {
     /// A built-in function as a value (`xs.map(Number)`): (module, the name, a parameter name),
     /// as `(v) => Number(v)`.
     pub(crate) fn_values: Vec<(u32, ExprId, crate::intern::Sym)>,
+    /// `Direction[d]` on a numeric enum: (module, the enum, its member names), as
+    /// `["Up", "Down"][d]`.
+    pub(crate) enum_names: Vec<(u32, ExprId, Vec<crate::intern::Sym>)>,
+    /// `const { a, ...others } = r`: (module, the `__rest(r, "a")` call, the other fields), as
+    /// `{ b: r.b, c: r.c }`.
+    pub(crate) rests: Vec<(u32, ExprId, Vec<crate::intern::Sym>)>,
+    /// `x.name = v` (or `op=`) through a setter: (module, the assignment, the setter method), as
+    /// `x.__set_name(v)` (`x.__set_name(x.name op v)`).
+    pub(crate) setters: Vec<(u32, ExprId, crate::intern::Sym)>,
 }
 
 impl Rewrites {
     pub fn is_empty(&self) -> bool {
-        self.args.is_empty() && self.prims.is_empty() && self.records.is_empty() && self.fn_values.is_empty() && self.consts.is_empty() && self.items.is_empty() && self.awaits.is_empty() && self.calls.is_empty() && self.elems.is_empty() && self.keys.is_empty() && self.spreads.is_empty() && self.keyed.is_empty()
+        self.args.is_empty() && self.prims.is_empty() && self.records.is_empty() && self.fn_values.is_empty() && self.enum_names.is_empty() && self.rests.is_empty() && self.setters.is_empty() && self.consts.is_empty() && self.items.is_empty() && self.awaits.is_empty() && self.calls.is_empty() && self.elems.is_empty() && self.keys.is_empty() && self.spreads.is_empty() && self.keyed.is_empty()
     }
 
     pub(crate) fn extend(&mut self, o: Rewrites) {
@@ -58,6 +67,9 @@ impl Rewrites {
         self.prims.extend(o.prims);
         self.records.extend(o.records);
         self.fn_values.extend(o.fn_values);
+        self.enum_names.extend(o.enum_names);
+        self.rests.extend(o.rests);
+        self.setters.extend(o.setters);
     }
 }
 
@@ -218,6 +230,51 @@ pub fn apply(modules: &mut [Module], rw: &Rewrites) -> bool {
         let call = ast.exprs.len() as ExprId - 1;
         let param = crate::ast::Param { name: v, span, ty: None, inout: false, optional: false, prop: None, rest: false };
         ast.exprs[e as usize].kind = ExprKind::Arrow(Box::new(crate::ast::ArrowFn { params: vec![param], ret: None, throws: None, body: crate::ast::ArrowBody::Expr(call), is_async: false }));
+        changed = true;
+    }
+    for &(m, e, setter) in &rw.setters {
+        let ast = &mut modules[m as usize].ast;
+        let ExprKind::Assign(op, target, value) = ast.exprs[e as usize].kind else { continue };
+        let ExprKind::Member { obj, name_span, .. } = ast.exprs[target as usize].kind else { continue };
+        let span = ast.exprs[e as usize].span;
+        let value = match op {
+            crate::ast::AssignOp::Assign => value,
+            // (`x.name += v`: the getter's value, then the setter's call)
+            crate::ast::AssignOp::Op(bop) => {
+                ast.exprs.push(crate::ast::Expr { kind: ExprKind::Binary(bop, target, value), span });
+                ast.exprs.len() as ExprId - 1
+            }
+        };
+        ast.exprs.push(crate::ast::Expr { kind: ExprKind::Member { obj, name: setter, name_span, optional: false }, span });
+        let callee = ast.exprs.len() as ExprId - 1;
+        ast.exprs[e as usize].kind = ExprKind::Call { callee, type_args: Vec::new(), args: vec![Arg { expr: value, by_ref: None }], optional: false };
+        changed = true;
+    }
+    for (m, e, names) in &rw.rests {
+        let ast = &mut modules[*m as usize].ast;
+        let ExprKind::Call { args, .. } = &ast.exprs[*e as usize].kind else { continue };
+        // (the pattern's hidden variable)
+        let ExprKind::Ident(src) = ast.exprs[args[0].expr as usize].kind else { continue };
+        let span = ast.exprs[*e as usize].span;
+        let mut fields = Vec::new();
+        for &name in names {
+            ast.exprs.push(crate::ast::Expr { kind: ExprKind::Ident(src), span });
+            let obj = ast.exprs.len() as ExprId - 1;
+            ast.exprs.push(crate::ast::Expr { kind: ExprKind::Member { obj, name, name_span: span, optional: false }, span });
+            fields.push(crate::ast::ObjField { name, name_span: span, value: ast.exprs.len() as ExprId - 1, quoted: false });
+        }
+        ast.exprs[*e as usize].kind = ExprKind::Object(fields);
+        changed = true;
+    }
+    for (m, e, names) in &rw.enum_names {
+        let ast = &mut modules[*m as usize].ast;
+        let span = ast.exprs[*e as usize].span;
+        let mut xs = Vec::new();
+        for &n in names {
+            ast.exprs.push(crate::ast::Expr { kind: ExprKind::Str(n), span });
+            xs.push(ast.exprs.len() as ExprId - 1);
+        }
+        ast.exprs[*e as usize].kind = ExprKind::Array(xs);
         changed = true;
     }
     for (m, e, names) in &rw.records {

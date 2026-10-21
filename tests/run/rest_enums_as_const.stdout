@@ -1,0 +1,15 @@
+Zed { id: 7, role: 'admin', meta: { created: 2020 } }
+7 2020 { name: 'Zed', role: 'admin' }
+1 [ 2, 3 ]
+Up -10
+Right 1
+Down 10
+Right 2
+0s:green 30s:yellow 35s:red 60s:green 90s:yellow 95s:red
+{
+  "a": 1,
+  "b": [
+    2
+  ]
+}
+nope

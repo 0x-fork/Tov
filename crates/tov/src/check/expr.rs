@@ -181,7 +181,16 @@ impl<'a> Checker<'a> {
             ExprKind::Await(x) => self.await_expr(e, *x, exp, span),
             ExprKind::Unary(op, x) => self.unary(*op, *x, exp, span),
             ExprKind::Binary(op, l, r) => self.binary(*op, *l, *r, exp, span),
-            ExprKind::Assign(op, t, v) => self.assign(*op, *t, *v, span),
+            ExprKind::Assign(op, t, v) => {
+                if let Some(setter) = self.setter_of(*t) {
+                    // (rewritten as `x.__set_name(v)`, checked then)
+                    self.expr(*t, None);
+                    let vt = self.expr(*v, None);
+                    self.rewrites.setters.push((self.cur, e, setter));
+                    return vt;
+                }
+                self.assign(*op, *t, *v, span)
+            }
             ExprKind::Update { target, .. } => {
                 let Some(place) = self.place(*target, false) else { return ERROR };
                 if !self.types.is_num_like(place.ty) && place.ty != ERROR && place.ty != BIGINT {
@@ -251,7 +260,12 @@ impl<'a> Checker<'a> {
                                 return self.expr(*x, Some(tuple));
                             }
                         }
-                        return self.expr(*x, exp);
+                        // `{ next: "green" } as const`: its strings keep their literal types
+                        let object = matches!(self.ast().expr(*x).kind, ExprKind::Object(_));
+                        let saved = std::mem::replace(&mut self.as_const, object);
+                        let t = self.expr(*x, exp);
+                        self.as_const = saved;
+                        return t;
                     }
                 let tscope = self.tscope();
                 let target = self.resolve_type(*te, &tscope);
@@ -1572,6 +1586,18 @@ impl<'a> Checker<'a> {
     }
 
     fn index(&mut self, e: ExprId, obj: ExprId, index: ExprId, optional: bool, absent: bool, span: Span) -> TyId {
+        // `Direction[d]`: a numeric enum's member names (rewritten as `["Up", "Down"][d]`)
+        if let ExprKind::Ident(sym) = self.ast().expr(obj).kind
+            && let Some(names) = self.enum_names(sym)
+            && !matches!(self.ast().expr(index).kind, ExprKind::Str(_))
+        {
+            self.expr(obj, None);
+            let it = self.expr(index, Some(INT));
+            if self.types.is_numeric(it) {
+                self.rewrites.enum_names.push((self.cur, obj, names));
+                return STR;
+            }
+        }
         let t = self.expr(obj, None);
         let base = if optional {
             self.types.without_nullish(t)
@@ -2023,6 +2049,7 @@ impl<'a> Checker<'a> {
     }
 
     fn object(&mut self, fields: &[crate::ast::ObjField], exp: Option<TyId>, span: Span) -> TyId {
+        let as_const = std::mem::take(&mut self.as_const);
         let mut seen = HashSet::default();
         for f in fields {
             if !seen.insert(f.name) {
@@ -2072,8 +2099,10 @@ impl<'a> Checker<'a> {
             let mut lits = Vec::new();
             let mut srcs = Vec::new();
             for f in fields {
+                self.as_const = as_const && matches!(self.ast().expr(f.value).kind, ExprKind::Object(_));
                 let t = self.expr(f.value, None);
-                let t = self.types.widen(t);
+                self.as_const = false;
+                let t = if as_const && matches!(self.types.get(t), Ty::StrLit(_)) { t } else { self.types.widen(t) };
                 out.push(Field { name: f.name, ty: t, optional: false });
                 // (`n: 0`, `n: -1`: an `int` a float may later need to fit)
                 let mut v = f.value;
@@ -2470,6 +2499,15 @@ impl<'a> Checker<'a> {
         let mut params = Vec::new();
         for (i, p) in f.params.iter().enumerate() {
             let ty = match p.ty {
+                // (`(e: unknown) => ...` where an `Error` is passed: it takes the `Error`, as it
+                // takes anything)
+                Some(t) if self.resolve_type(t, &tscope) == UNKNOWN
+                    && let Some(fp) = exp_fn.as_ref().and_then(|(ps, _)| ps.get(i))
+                    && !self.types.mentions(fp.ty, &self.infer_free)
+                    && fp.ty != ERROR =>
+                {
+                    fp.ty
+                }
                 Some(t) => self.resolve_type(t, &tscope),
                 None => match exp_fn.as_ref().and_then(|(ps, _)| ps.get(i)) {
                     Some(fp) if !self.types.mentions(fp.ty, &self.infer_free) => fp.ty,
@@ -2968,6 +3006,7 @@ impl<'a> Checker<'a> {
                         return self.new_expr(e, callee, type_args, args, exp, span);
                     }
                     Some(_) => {}
+                    None if text == "__rest" => return self.object_rest(e, args, span),
                     None => {
                         self.rec_call(e, Callee::Builtin { ns: None, name: *s });
                         self.pending_call = Some(e);
@@ -3272,6 +3311,42 @@ impl<'a> Checker<'a> {
         self.set_call_spec_from(callee);
         let r = self.call_value(t, &text, args, exp, span);
         if optional { self.types.optional(r) } else { r }
+    }
+
+    /// `x.name = v` where `x`'s class has a setter `name`: its method `__set_name`.
+    fn setter_of(&mut self, target: ExprId) -> Option<Sym> {
+        let ExprKind::Member { obj, name, .. } = self.ast().expr(target).kind else { return None };
+        let setter = self.interner.lookup(&format!("__set_{}", self.name(name)))?;
+        let t = match self.ast().expr(obj).kind {
+            ExprKind::This => self.lookup(super::THIS_SYM).map(|(_, t)| t)?,
+            _ => self.expr_type_peek(obj)?,
+        };
+        matches!(self.types.get(t), Ty::Class(..)).then_some(())?;
+        matches!(self.class_member(t, setter), Some(super::class::ClassMemberRef::Method(_))).then_some(setter)
+    }
+
+    /// `const { a, ...others } = r`: `__rest(r, "a")`, the record of `r`'s other fields
+    /// (rewritten as `{ b: r.b, c: r.c }`).
+    fn object_rest(&mut self, e: ExprId, args: &[Arg], span: Span) -> TyId {
+        let t = self.expr(args[0].expr, None);
+        let names: Vec<Sym> = args[1..].iter().filter_map(|a| match self.ast().expr(a.expr).kind {
+            ExprKind::Str(s) => Some(s),
+            _ => None,
+        }).collect();
+        if t == ERROR {
+            return ERROR;
+        }
+        if !matches!(self.types.get(t), Ty::Record(_)) {
+            let msg = format!("rest properties take the other fields of a record, found `{}`", self.show(t));
+            self.report(Diagnostic::new("U0006", span, msg));
+            return ERROR;
+        }
+        let kept: Vec<Field> = self.types.fields_in_order(t).into_iter().filter(|f| !names.contains(&f.name)).collect();
+        let order: Vec<Sym> = kept.iter().map(|f| f.name).collect();
+        let r = self.types.record(kept);
+        self.types.note_field_order(r, order.clone());
+        self.rewrites.rests.push((self.cur, e, order));
+        r
     }
 
     /// `xs.reduce(f)`: `reduce/1f` where `xs` holds integers and `f` (a named function) takes

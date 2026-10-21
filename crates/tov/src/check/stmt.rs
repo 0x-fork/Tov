@@ -799,9 +799,54 @@ impl<'a> Checker<'a> {
                         .fix(Applicability::Placeholder, format!("add case{} {}", if missing.len() == 1 { "" } else { "s" }, names.join(", ")), close, insert),
                 );
             }
-        } else if has_default {
+        } else if has_default || self.covers_enum(cases) {
             self.exhaustive.insert((self.cur, sid));
         }
+    }
+
+    /// Every case is a member of one numeric enum (`case Direction.Up:`), and every member has
+    /// a case: the switch handles each value the enum's type was meant to hold.
+    fn covers_enum(&self, cases: &[Case]) -> bool {
+        let ast = self.ast();
+        let mut enum_name = None;
+        let mut covered = Vec::new();
+        for c in cases {
+            let Some(test) = c.test else { return false };
+            let ExprKind::Member { obj, name, .. } = ast.expr(test).kind else { return false };
+            let ExprKind::Ident(e) = ast.expr(obj).kind else { return false };
+            if enum_name.is_some_and(|n| n != e) {
+                return false;
+            }
+            enum_name = Some(e);
+            covered.push(name);
+        }
+        let Some(e) = enum_name else { return false };
+        self.enum_members(e).is_some_and(|(_, ms)| ms.iter().all(|(n, _)| covered.contains(n)))
+    }
+
+    /// `e` names an enum (not shadowed): its module and its members with their values.
+    pub(super) fn enum_members(&self, e: Sym) -> Option<(u32, Vec<(Sym, ExprId)>)> {
+        // (a script's top-level `const` is a local standing in for the item)
+        let (m, i) = match self.lookup(e) {
+            Some((id, _)) => self.local(id).global?,
+            None => match self.scopes[self.cur as usize].values.get(&e) {
+                Some(&(Decl::Const(m, i), _)) => (m, i),
+                _ => return None,
+            },
+        };
+        let mast = &self.modules[m as usize].ast;
+        let ItemKind::Const { ty: Some(t), init, .. } = &mast.items[i as usize].kind else { return None };
+        let (TypeExprKind::Record(fields), ExprKind::Object(values)) = (&mast.ty(*t).kind, &mast.expr(*init).kind) else { return None };
+        // (the record `{ Up: Direction, ... }` the parser gives an enum's members)
+        let is_enum = !fields.is_empty() && fields.iter().all(|f| matches!(&mast.ty(f.ty).kind, TypeExprKind::Named { name, args, .. } if *name == e && args.is_empty()));
+        is_enum.then(|| (m, values.iter().map(|f| (f.name, f.value)).collect()))
+    }
+
+    /// `Direction[d]` on an enum whose values are 0, 1, ...: the members' names, in order.
+    pub(super) fn enum_names(&self, e: Sym) -> Option<Vec<Sym>> {
+        let (m, ms) = self.enum_members(e)?;
+        let ast = &self.modules[m as usize].ast;
+        ms.iter().enumerate().all(|(k, &(_, v))| matches!(ast.expr(v).kind, ExprKind::Int(x) if x == k as u64)).then(|| ms.iter().map(|m| m.0).collect())
     }
 
     // ---------------------------------------------------------------- control flow

@@ -952,9 +952,9 @@ impl<'a> Checker<'a> {
                 }
                 if let Some(a) = args.get(1) {
                     let t = self.expr(a.expr, None);
-                    if t != UNDEFINED && t != ERROR {
+                    if t != UNDEFINED && t != NULL && t != ERROR {
                         let s = self.ast().expr(a.expr).span;
-                        self.report(Diagnostic::new("U0017", s, "`JSON.stringify` replacers are not supported; pass `undefined`"));
+                        self.report(Diagnostic::new("U0017", s, "`JSON.stringify` replacers are not supported; pass `null` or `undefined`"));
                     }
                 }
                 if let Some(a) = args.get(2) {

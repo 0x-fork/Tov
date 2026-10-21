@@ -56,14 +56,14 @@ enum Pat {
     Name(Sym, Span),
     /// Elements (holes are `None`), each with its default, and `...rest`.
     Array(Vec<Option<(Pat, Option<ExprId>)>>, Option<Box<Pat>>, Span),
-    /// (field, its span, pattern, default).
-    Object(Vec<(Sym, Span, Pat, Option<ExprId>)>, Span),
+    /// (field, its span, pattern, default), and `...rest`.
+    Object(Vec<(Sym, Span, Pat, Option<ExprId>)>, Option<Box<Pat>>, Span),
 }
 
 impl Pat {
     fn span(&self) -> Span {
         match self {
-            Pat::Name(_, s) | Pat::Array(_, _, s) | Pat::Object(_, s) => *s,
+            Pat::Name(_, s) | Pat::Array(_, _, s) | Pat::Object(_, _, s) => *s,
         }
     }
 }
@@ -587,18 +587,14 @@ impl<'a> Parser<'a> {
                 }
             }
         };
+        // `set name(v) { ... }`: the method `__set_name` (`x.name = v` calls it: see the checker)
+        let name = if accessor == Some(false) {
+            let text = format!("__set_{}", self.interner.get(name));
+            self.interner.intern(&text)
+        } else {
+            name
+        };
         let text = self.interner.get(name).to_string();
-        if accessor == Some(false) {
-            let span = start.to(self.prev_span());
-            self.err("U0019", span, "setters are not supported yet; use a method like `setName(v)`");
-            if self.at(Tok::LParen) {
-                self.skip_balanced();
-            }
-            if self.at(Tok::LBrace) {
-                self.skip_balanced();
-            }
-            return None;
-        }
         if self.at(Tok::LParen) || self.at(Tok::Lt) {
             let tparams = self.tparams();
             self.prop_defaults = false;
@@ -1856,12 +1852,10 @@ impl<'a> Parser<'a> {
         }
         if self.eat(Tok::LBrace) {
             let mut props = Vec::new();
+            let mut rest = None;
             while !self.at(Tok::RBrace) && !self.at(Tok::Eof) {
-                if self.at(Tok::DotDotDot) {
-                    let span = self.cur_span();
-                    self.err("U0006", span, "rest properties in destructuring are not supported yet; read the fields you need");
-                    self.bump();
-                    self.pattern();
+                if self.eat(Tok::DotDotDot) {
+                    rest = Some(Box::new(self.pattern()));
                     break;
                 }
                 let Some((key, kspan)) = self.ident("a field name") else { break };
@@ -1873,7 +1867,7 @@ impl<'a> Parser<'a> {
                 }
             }
             self.expect(Tok::RBrace, "to close the pattern");
-            return Pat::Object(props, start);
+            return Pat::Object(props, rest, start);
         }
         match self.ident("a variable name") {
             Some((n, s)) => Pat::Name(n, s),
@@ -1898,7 +1892,7 @@ impl<'a> Parser<'a> {
                 out.push((*n, *s, ty, init, false));
                 return;
             }
-            Pat::Array(_, _, s) | Pat::Object(_, s) => (self.fresh_name(), *s),
+            Pat::Array(_, _, s) | Pat::Object(_, _, s) => (self.fresh_name(), *s),
         };
         out.push((tmp, tspan, ty, init, true));
         let read = |p: &mut Self| p.mk_expr(ExprKind::Ident(tmp), tspan);
@@ -1926,7 +1920,7 @@ impl<'a> Parser<'a> {
                     self.bindings(r, None, v, out);
                 }
             }
-            Pat::Object(props, _) => {
+            Pat::Object(props, rest, _) => {
                 for (key, kspan, sub, d) in props {
                     let t = read(self);
                     let at = self.mk_expr(ExprKind::Member { obj: t, name: *key, name_span: *kspan, optional: false }, *kspan);
@@ -1935,6 +1929,18 @@ impl<'a> Parser<'a> {
                         None => at,
                     };
                     self.bindings(sub, None, v, out);
+                }
+                // `...others`: `__rest(tmp, "name", ...)`, the other fields (see the checker)
+                if let Some(r) = rest {
+                    let span = r.span();
+                    let mut args = vec![Arg { expr: read(self), by_ref: None }];
+                    for (key, kspan, _, _) in props {
+                        args.push(Arg { expr: self.mk_expr(ExprKind::Str(*key), *kspan), by_ref: None });
+                    }
+                    let name = self.interner.intern("__rest");
+                    let callee = self.mk_expr(ExprKind::Ident(name), span);
+                    let v = self.mk_expr(ExprKind::Call { callee, type_args: Vec::new(), args, optional: false }, span);
+                    self.bindings(r, None, v, out);
                 }
             }
             Pat::Name(..) => {}
@@ -2328,8 +2334,9 @@ impl<'a> Parser<'a> {
                     let const_span = self.cur_span();
                     self.bump();
                     let span = self.expr_span(lhs).to(self.prev_span());
-                    // (of an array literal, a tuple: `[k, v] as const`)
-                    if matches!(self.ast.expr(lhs).kind, ExprKind::Array(_)) {
+                    // (of an array literal, a tuple: `[k, v] as const`; of an object literal,
+                    // its strings keep their literal types)
+                    if matches!(self.ast.expr(lhs).kind, ExprKind::Array(_) | ExprKind::Object(_)) {
                         let name = self.interner.intern("const");
                         let ty = self.mk_ty(TypeExprKind::Named { ns: None, name, name_span: const_span, args: Vec::new() }, const_span);
                         lhs = self.mk_expr(ExprKind::As(lhs, ty), span);
