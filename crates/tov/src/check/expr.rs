@@ -2852,7 +2852,12 @@ impl<'a> Checker<'a> {
                             },
                             _ => false,
                         });
+                        // (`s.match(/x/g)`: the matches' strings, as JavaScript gives for a global literal)
+                        let global_lit = matches!(&self.ast().expr(a0.expr).kind, ExprKind::Call { callee, args: ra, .. }
+                            if matches!(self.ast().expr(*callee).kind, ExprKind::Ident(f) if self.name(f) == "__reLiteral")
+                            && matches!(ra.get(1).map(|a| &self.ast().expr(a.expr).kind), Some(ExprKind::Str(fl)) if self.name(*fl).contains('g')));
                         let target = match mtext.as_str() {
+                            "match" if global_lit => "__reMatchGlobal",
                             "replace" | "replaceAll" if is_fn => "__reReplaceFn",
                             "replace" | "replaceAll" => "__reReplace",
                             "split" => "__reSplit",
@@ -2870,6 +2875,10 @@ impl<'a> Checker<'a> {
                         return match mtext.as_str() {
                             "replace" | "replaceAll" => STR,
                             "split" => self.types.array(STR),
+                            "match" if global_lit => {
+                                let strs = self.types.array(STR);
+                                self.types.union(&[strs, NULL])
+                            }
                             "match" => self.types.union(&[found, NULL]),
                             "matchAll" => self.types.array(found),
                             _ => INT,
