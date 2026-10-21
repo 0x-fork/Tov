@@ -4631,6 +4631,36 @@ impl<'c, 'a> Gen<'c, 'a> {
         }
     }
 
+    /// `xs` is a local that's grown with `push` (or `unshift`, `splice`) somewhere: its index
+    /// writes don't append (code that pushes doesn't rely on `xs[xs.length] = v`), so they keep
+    /// the plain bounds check, which leaves the array unchanged for loops around it.
+    fn grown_by_push(&mut self, xs: ExprId) -> bool {
+        let m = self.cur_m();
+        let Some(IdentFact::Local(k)) = self.ident_fact(m, xs) else { return false };
+        if !self.pushed.contains_key(&m) {
+            let ast = self.ast(m);
+            let facts = self.facts(m);
+            let mut set = FxSet::default();
+            for e in ast.exprs.iter() {
+                if let ExprKind::Call { callee, .. } = &e.kind
+                    && let ExprKind::Member { obj, name, .. } = &ast.expr(*callee).kind
+                    && matches!(self.c.interner.get(*name), "push" | "unshift" | "splice")
+                    && let Some(IdentFact::Local(pk)) = facts.idents.get(obj)
+                {
+                    set.insert(*pk);
+                }
+            }
+            self.pushed.insert(m, set);
+        }
+        self.pushed[&m].contains(&k)
+    }
+
+    fn is_array(&mut self, e: ExprId) -> bool {
+        let t = self.ty(e);
+        let t = self.c.types.without_undefined(t);
+        matches!(self.tget(t), Ty::Array(_))
+    }
+
     fn is_map(&mut self, e: ExprId) -> bool {
         let t = self.ty(e);
         let t = self.c.types.without_undefined(t);
@@ -4835,6 +4865,60 @@ impl<'c, 'a> Gen<'c, 'a> {
                     v = self.assign(AssignOp::Op(bop), target, r, span);
                 }
                 v
+            }
+            // `xs[xs.length] = v`: appends, as in JavaScript (an index past that traps)
+            AssignOp::Assign if self.b().versioned.is_empty() && matches!(self.ast(m).expr(target).kind, ExprKind::Index { obj, optional: false, .. } if self.is_array(obj) && !self.grown_by_push(obj)) => {
+                let ExprKind::Index { obj, index, .. } = self.ast(m).expr(target).kind else { unreachable!() };
+                let v = self.expr(value);
+                let ap = self.place(obj);
+                let narrowed = self.ty(obj);
+                let ap = self.project_place(ap, narrowed);
+                let Ty::Array(et) = self.tget(ap.ty) else {
+                    self.unsupported(span, "assigning through this index");
+                    return Val::plain("0", VOID);
+                };
+                let v = self.coerce(v, et);
+                let code = self.consume(v);
+                let (ect, d) = (self.ctype(et), self.desc(et));
+                let nv = self.fresh("n");
+                self.line(format!("{ect} {nv} = {code};"));
+                let iv = self.expr(index);
+                let iv = self.int_code(iv);
+                let loc = self.loc(span);
+                let unique = matches!((&self.ast(m).expr(obj).kind, self.ident_fact(m, obj)), (ExprKind::Ident(_), Some(IdentFact::Local(k))) if self.b().unique.contains(&k));
+                if !self.is_rc(et) {
+                    // (plain data: the append is the bounds check's slow path)
+                    let (i, a) = (self.fresh("i"), ap.lv.clone());
+                    self.line(format!("tv_int {i} = {iv};"));
+                    if !unique {
+                        self.line(format!("tvg_make_unique(&{a}, {d});"));
+                    }
+                    self.line(format!("if (__builtin_expect((uint64_t){i} >= (uint64_t)({a}).len, 0)) {a} = tvg_put_grow({a}, {d}, sizeof({ect}), {i}, {loc});"));
+                    let store = self.store(target, et, &format!("((({ect} *)({a}).p->data)[{i}])"), &nv);
+                    self.line(store);
+                    return Val::plain(nv, et);
+                }
+                let (i, pa) = (self.fresh("i"), self.fresh("pa"));
+                self.line(format!("tv_int {i} = {iv}; tv_arr *{pa} = &{};", ap.lv));
+                self.open(&format!("if ({i} == tv_arr_len(*{pa})) {{"));
+                self.line(format!("TVG_PUSH({ect}, {pa}, {d}, {nv});"));
+                self.close("} else {");
+                self.b().indent += 1;
+                let ep = self.fresh("ep");
+                // (a local made unique before: no copy check)
+                if unique {
+                    self.line(format!("{ect} *{ep} = ({ect} *)tv_arr_at(*{pa}, sizeof({ect}), {i}, {loc});"));
+                } else {
+                    self.line(format!("{ect} *{ep} = ({ect} *)tvg_at_mut({pa}, {d}, sizeof({ect}), {i}, {loc});"));
+                }
+                if self.is_rc(et) {
+                    let r = self.release_code(et, &format!("(*{ep})"));
+                    self.line(format!("{r};"));
+                }
+                let store = self.store(target, et, &format!("(*{ep})"), &nv);
+                self.line(store);
+                self.close("}");
+                Val::plain(nv, et)
             }
             AssignOp::Assign => {
                 let v = self.expr(value);

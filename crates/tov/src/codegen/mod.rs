@@ -260,6 +260,8 @@ pub(crate) struct Gen<'c, 'a> {
     pub(crate) self_closure: Option<u32>,
     /// What `int` variables can hold (see `range`), worked out when first asked.
     pub(crate) ranges: Option<range::Ranges>,
+    /// Per module: the locals grown with `push` somewhere (see `grown_by_push`).
+    pub(crate) pushed: FxMap<u32, FxSet<u32>>,
     /// The awaited calls embedded in the async body just emitted: (union member, frame type).
     pub(crate) last_children: Vec<(String, String)>,
     /// Frame structs of async functions.
@@ -342,6 +344,7 @@ impl<'c, 'a> Gen<'c, 'a> {
             pending_async: None,
             self_closure: None,
             ranges: None,
+            pushed: FxMap::default(),
             last_children: Vec::new(),
             pending_tre: None,
             uses_tls: false,
@@ -2018,6 +2021,16 @@ static inline void tvg_make_unique(tv_arr *a, const tv_type *t) {
 static inline void *tvg_at_mut(tv_arr *a, const tv_type *t, size_t size, tv_int i, const char *loc) {
     tvg_make_unique(a, t);
     return tv_arr_at(*a, size, i, loc);
+}
+/* `xs[i] = v` of plain data when i isn't below the length: one past the end appends (a zeroed
+ * slot, written next), as in JavaScript; further out traps. The array comes back by value, so
+ * the caller's never has its address taken (and can stay in registers). */
+static __attribute__((noinline, cold)) tv_arr tvg_put_grow(tv_arr a, const tv_type *t, size_t size, tv_int i, const char *loc) {
+    if (i != a.len) tv_arr_oob(i, a.len, loc);
+    tv_arr_make_unique(&a, t, a.len + 1);
+    memset(a.p->data + (size_t)i * size, 0, size);
+    a.len++;
+    return a;
 }
 /* Sorting (radix sorts of 64-bit keys) lives in the runtime, compiled once (runtime/tov.c). */
 #define tvg_radix64 tv_radix64

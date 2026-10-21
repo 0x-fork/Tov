@@ -1,0 +1,22 @@
+// xs[xs.length] = v appends, as in JavaScript (checked against Node)
+const a: string[] = []
+a[0] = "x"
+a[1] = "y"
+a[0] = "z"
+console.log(a)
+const g: number[][] = [[1]]
+g[1] = [2]
+console.log(g)
+function editDistance(a: string, b: string): number {
+  let prev = Array.from({ length: b.length + 1 }, (_, k) => k);
+  for (let i = 1; i <= a.length; i++) {
+    const cur = [i];
+    for (let j = 1; j <= b.length; j++) {
+      const cost = a[i - 1] === b[j - 1] ? 0 : 1;
+      cur[j] = Math.min(prev[j] + 1, cur[j - 1] + 1, prev[j - 1] + cost);
+    }
+    prev = cur;
+  }
+  return prev[b.length];
+}
+console.log(editDistance("kitten", "sitting"))
