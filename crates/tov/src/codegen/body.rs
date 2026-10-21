@@ -3377,7 +3377,7 @@ impl<'c, 'a> Gen<'c, 'a> {
             if !allowed.is_empty() {
                 let loc = self.loc(span);
                 let conds: Vec<String> = allowed.iter().map(|&i| format!("!{}", self.u_is(&v.code, v.ty, i))).collect();
-                let msg = if to == self.c.types.without_undefined(v.ty) { "value is undefined (`!` assertion failed)" } else { "`as` cast failed: the value has a different type" };
+                let msg = if to == self.c.types.without_nullish(v.ty) { "value is undefined (`!` assertion failed)" } else { "`as` cast failed: the value has a different type" };
                 self.line(format!("if ({}) tv_trap({}, {loc});", conds.join(" && "), c_string(msg.as_bytes())));
                 return self.project(v, to);
             }
@@ -3450,11 +3450,11 @@ impl<'c, 'a> Gen<'c, 'a> {
             Ty::StrLit(s) => if self.sym(s).is_empty() { "false".into() } else { "true".into() },
             Ty::BigInt => format!("(!tv_big_eq({}, tv_big_small(0)))", v.code),
             Ty::Decimal => format!("(tv_dec_cmp({}, ((tv_dec){{0, 0}})) != 0)", v.code),
-            Ty::Undefined | Ty::Void => "false".into(),
+            Ty::Undefined | Ty::Null | Ty::Void => "false".into(),
             Ty::Union(_) => {
                 let ms = self.members(t);
                 // (each member that can be falsy, tested on its own)
-                let falsy: Vec<usize> = ms.iter().enumerate().filter(|(_, m)| matches!(self.tget(**m), Ty::Undefined | Ty::Void | Ty::Bool | Ty::Int | Ty::I8 | Ty::I16 | Ty::I32 | Ty::U8 | Ty::U16 | Ty::U32 | Ty::U64 | Ty::F64 | Ty::F32 | Ty::Str | Ty::StrLit(_) | Ty::BigInt | Ty::Decimal)).map(|(i, _)| i).collect();
+                let falsy: Vec<usize> = ms.iter().enumerate().filter(|(_, m)| matches!(self.tget(**m), Ty::Undefined | Ty::Null | Ty::Void | Ty::Bool | Ty::Int | Ty::I8 | Ty::I16 | Ty::I32 | Ty::U8 | Ty::U16 | Ty::U32 | Ty::U64 | Ty::F64 | Ty::F32 | Ty::Str | Ty::StrLit(_) | Ty::BigInt | Ty::Decimal)).map(|(i, _)| i).collect();
                 if falsy.is_empty() {
                     return "true".into();
                 }
@@ -3471,7 +3471,7 @@ impl<'c, 'a> Gen<'c, 'a> {
                         parts.push(is);
                         continue;
                     }
-                    if matches!(self.tget(m), Ty::Undefined | Ty::Void) {
+                    if matches!(self.tget(m), Ty::Undefined | Ty::Null | Ty::Void) {
                         continue;
                     }
                     let p = Val::plain(self.u_payload(&x, t, i), m);
@@ -3492,9 +3492,12 @@ impl<'c, 'a> Gen<'c, 'a> {
             return format!("tv_js_truthy({})", v.code);
         }
         let v = if matches!(self.tget(v.ty), Ty::Rec(..)) { return "true".into() } else { v };
-        match self.tag_of(v.ty, UNDEFINED) {
-            Some(k) => format!("(!{})", self.u_is(&v.code, v.ty, k)),
-            None => "true".into(),
+        // (present: neither `undefined` nor `null`)
+        let absent: Vec<String> = [UNDEFINED, NULL].iter().filter_map(|&n| self.tag_of(v.ty, n)).map(|k| self.u_is(&v.code, v.ty, k)).collect();
+        match absent.as_slice() {
+            [] => "true".into(),
+            [one] => format!("(!{one})"),
+            _ => format!("(!({}))", absent.join(" || ")),
         }
     }
 
@@ -3655,9 +3658,9 @@ impl<'c, 'a> Gen<'c, 'a> {
                 self.open(&format!("if ({}{c}) {{", if op == Or { "" } else { "!" }));
                 // (the left value decides: its truthy members for `||`, its falsy ones for `&&`)
                 let keep = if op == Or {
-                    self.c.types.without_undefined(lty)
+                    self.c.types.without_nullish(lty)
                 } else {
-                    let ms: Vec<TyId> = self.members(lty).into_iter().filter(|&m| m == UNDEFINED || m == BOOL || self.c.types.is_primitive(m)).collect();
+                    let ms: Vec<TyId> = self.members(lty).into_iter().filter(|&m| m == UNDEFINED || m == NULL || m == BOOL || self.c.types.is_primitive(m)).collect();
                     if ms.is_empty() { NEVER } else { self.c.types.union(&ms) }
                 };
                 if keep == NEVER {
@@ -3705,7 +3708,7 @@ impl<'c, 'a> Gen<'c, 'a> {
                 let res = self.fresh("t");
                 let ct = self.ctype(ty);
                 self.line(format!("{ct} {res};"));
-                let inner = self.c.types.without_undefined(lv.ty);
+                let inner = self.c.types.without_nullish(lv.ty);
                 let present = self.truthy(lv.clone());
                 self.open(&format!("if ({present}) {{"));
                 self.push_temps();
@@ -3728,6 +3731,13 @@ impl<'c, 'a> Gen<'c, 'a> {
                     self.b().temps.last_mut().unwrap().push((res.clone(), ty));
                 }
                 Val { code: res, ty, owned }
+            }
+            // `x == null` / `x == undefined`: either one
+            LooseEq | LooseNe if matches!(self.ast(self.cur_m()).expr(l).kind, ExprKind::Undefined | ExprKind::Null) || matches!(self.ast(self.cur_m()).expr(r).kind, ExprKind::Undefined | ExprKind::Null) => {
+                let subject = if matches!(self.ast(self.cur_m()).expr(l).kind, ExprKind::Undefined | ExprKind::Null) { r } else { l };
+                let v = self.expr(subject);
+                let present = self.truthy(v);
+                Val::plain(if op == LooseEq { format!("(!{present})") } else { present }, BOOL)
             }
             Eq | Ne | LooseEq | LooseNe => {
                 let lv = self.expr_before(l, &[r]);
@@ -4136,7 +4146,7 @@ impl<'c, 'a> Gen<'c, 'a> {
             let present = self.truthy(base.clone());
             self.open(&format!("if ({present}) {{"));
             self.push_temps();
-            let inner_ty = self.c.types.without_undefined(base.ty);
+            let inner_ty = self.c.types.without_nullish(base.ty);
             let pb = self.project(base, inner_ty);
             // Read at the expression's type (which includes `undefined` unless narrowed):
             // an optional field keeps its own presence tag.

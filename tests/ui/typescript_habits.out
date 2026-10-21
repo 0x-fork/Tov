@@ -8,21 +8,4 @@ error[X0001] typescript_habits.tov:3:35: `any` is not supported
   instead: use the precise type, a union, a generic `<T>`, or `unknown` with narrowing
   fix[maybe]: use `unknown`
 
-error[X0002] typescript_habits.tov:9:64: `null` is not supported; Tov has one "absent" value, `undefined`
-    9 | function habits(items: string[], count: number, name: string | null) {
-  fix[safe]: use `undefined`
-
-error[X0004] typescript_habits.tov:10:3: `var` is not supported
-   10 |   var total = 0
-  fix[safe]: use `let`
-
-error[X0003] typescript_habits.tov:11:13: `==` is not supported
-   11 |   if (count == 0) return
-  why: Tov has no type coercion; equality is always strict
-  fix[safe]: use `===`
-
-error[X0007] typescript_habits.tov:14:16: `for...in` is not supported
-   14 |   for (const k in items) console.log(k)
-  instead: iterate keys with `for (const k of map.keys())`, or values with `for...of`
-
-6 error(s)
+2 error(s)

@@ -1615,6 +1615,31 @@ impl<'c, 'a> Gen<'c, 'a> {
                             _ => self.map_entries(v, k, val, ty),
                         }
                     }
+                    Ty::Array(et) => {
+                        let Ty::Array(rt) = self.tget(ty) else { return Val::plain("TV_EMPTY_ARR", ty) };
+                        if name == "values" {
+                            let v = self.own(v);
+                            return self.coerce(v, ty);
+                        }
+                        let (rd, rct, ect) = (self.desc(rt), self.ctype(rt), self.ctype(et));
+                        let out = self.tmp(ty, &format!("tv_arr_with_capacity({rd}, tv_arr_len({}))", v.code), true);
+                        let i = self.fresh("i");
+                        self.open(&format!("for (tv_int {i} = 0; {i} < tv_arr_len({}); {i}++) {{", v.code));
+                        if name == "keys" {
+                            self.line(format!("TVG_PUSH(tv_str, &{}, {rd}, tv_str_from_int({i}));", out.code));
+                        } else {
+                            let f = self.tuple_of(rt).unwrap_or_default();
+                            if let [a, b] = f.as_slice() {
+                                let (fa, fb) = (self.sym(a.name).to_string(), self.sym(b.name).to_string());
+                                let x = self.fresh("x");
+                                let r = self.retain_code(et, &x);
+                                self.line(format!("{ect} {x} = (({ect} *)tv_arr_data({}))[{i}]; {r};", v.code));
+                                self.line(format!("TVG_PUSH({rct}, &{}, {rd}, (({rct}){{ .f_{fa} = tv_str_from_int({i}), .f_{fb} = {x} }}));", out.code));
+                            }
+                        }
+                        self.close("}");
+                        out
+                    }
                     Ty::Record(_) => {
                         // a record's fields, in their declared order
                         let fields = self.c.types.fields_in_order(base);

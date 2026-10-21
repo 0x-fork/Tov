@@ -2143,7 +2143,7 @@ void tv_arr_sort(tv_arr *a, const tv_type *t, double (*cmp)(void *ctx, const voi
     tv_sort_key *keys = (tv_sort_key *)tv_alloc(tv_size_mul_add((size_t)n, sizeof(tv_sort_key), 0));
     for (int64_t i = 0; i < n; i++) {
         tv_sb sb = {0};
-        if (t != &tv_type_undefined) t->to_str(&sb, d + (size_t)i * es);
+        if (t != &tv_type_undefined && t != &tv_type_null) t->to_str(&sb, d + (size_t)i * es);
         keys[i].key = tv_str_from_sb(&sb);
         keys[i].idx = i;
     }
@@ -2180,7 +2180,7 @@ static void tv_join_into(tv_sb *sb, tv_arr a, const tv_type *t, const char *sep,
     size_t es = t->size;
     for (int64_t i = 0; i < n; i++) {
         if (i) tv_sb_push(sb, sep, sep_len);
-        if (t != &tv_type_undefined) t->to_str(sb, a.p->data + (size_t)i * es);
+        if (t != &tv_type_undefined && t != &tv_type_null) t->to_str(sb, a.p->data + (size_t)i * es);
     }
 }
 
@@ -3112,6 +3112,10 @@ static bool tv_undef_eq(const void *a, const void *b) { (void)a; (void)b; return
 static uint64_t tv_undef_hash(const void *p) { (void)p; return 0x6a09e667f3bcc909ULL; }
 static void tv_undef_to_str(tv_sb *sb, const void *p) { (void)p; tv_sb_push(sb, "undefined", 9); }
 const tv_type tv_type_undefined = {0, NULL, NULL, tv_undef_eq, tv_undef_hash, tv_undef_to_str, NULL};
+static uint64_t tv_null_hash(const void *p) { (void)p; return 0xbb67ae8584caa73bULL; }
+static void tv_null_to_str(tv_sb *sb, const void *p) { (void)p; tv_sb_push(sb, "null", 4); }
+/* (one byte, a tv_unit: arrays of nulls hold their elements; undefined's 0 is for sets' values) */
+const tv_type tv_type_null = {1, NULL, NULL, tv_undef_eq, tv_null_hash, tv_null_to_str, NULL};
 
 /* ================================================================== output */
 

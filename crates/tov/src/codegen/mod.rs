@@ -665,7 +665,7 @@ impl<'c, 'a> Gen<'c, 'a> {
     }
 
     pub(crate) fn is_unit(&self, t: TyId) -> bool {
-        matches!(self.tget(t), Ty::StrLit(_) | Ty::Undefined | Ty::Void | Ty::Never)
+        matches!(self.tget(t), Ty::StrLit(_) | Ty::Undefined | Ty::Null | Ty::Void | Ty::Never)
     }
 
     /// The C type for a Tov type; defines structs on first use.
@@ -688,7 +688,7 @@ impl<'c, 'a> Gen<'c, 'a> {
             Ty::Str => "tv_str".into(),
             Ty::BigInt => "tv_big".into(),
             Ty::Decimal => "tv_dec".into(),
-            Ty::StrLit(_) | Ty::Undefined | Ty::Void | Ty::Never | Ty::Error | Ty::Unknown => "tv_unit".into(),
+            Ty::StrLit(_) | Ty::Undefined | Ty::Null | Ty::Void | Ty::Never | Ty::Error | Ty::Unknown => "tv_unit".into(),
             Ty::Array(_) => "tv_arr".into(),
             Ty::Promise(..) => "tv_promise *".into(),
             Ty::Js => "JSValueRef".into(),
@@ -1204,7 +1204,7 @@ impl<'c, 'a> Gen<'c, 'a> {
             Ty::Str => format!("tv_str_eq({a}, {b})"),
             Ty::BigInt => format!("tv_big_eq({a}, {b})"),
             Ty::Decimal => format!("tv_dec_eq({a}, {b})"),
-            Ty::StrLit(_) | Ty::Undefined | Ty::Void | Ty::Never => "true".into(),
+            Ty::StrLit(_) | Ty::Undefined | Ty::Null | Ty::Void | Ty::Never => "true".into(),
             Ty::Array(_) | Ty::Map(..) | Ty::Set(_) => {
                 let d = self.desc(t);
                 format!("({d})->eq(&({a}), &({b}))")
@@ -1249,6 +1249,7 @@ impl<'c, 'a> Gen<'c, 'a> {
             Ty::Decimal => format!("tv_sb_push_dec(sb, {place})"),
             Ty::Bool => format!("tv_sb_push_cstr(sb, ({place}) ? \"true\" : \"false\")"),
             Ty::Undefined | Ty::Void | Ty::Never => "tv_sb_push_cstr(sb, \"undefined\")".into(),
+            Ty::Null => "tv_sb_push_cstr(sb, \"null\")".into(),
             Ty::Array(e) => {
                 let d = self.desc(e);
                 format!("tv_to_str_arr(sb, {place}, {d})")
@@ -1277,7 +1278,7 @@ impl<'c, 'a> Gen<'c, 'a> {
     /// first one that goes through descriptors links the formatter in (see `TVG_INS`).
     pub(crate) fn inspect_root(&mut self, t: TyId, place: &str, depth: &str) -> String {
         let code = self.inspect_code(t, place, depth);
-        if !matches!(self.tget(t), Ty::Str | Ty::StrLit(_) | Ty::Func(..) | Ty::BigInt | Ty::Decimal | Ty::Int | Ty::F64 | Ty::F32 | Ty::I8 | Ty::I16 | Ty::I32 | Ty::U8 | Ty::U16 | Ty::U32 | Ty::U64 | Ty::Bool | Ty::Undefined | Ty::Void | Ty::Never) {
+        if !matches!(self.tget(t), Ty::Str | Ty::StrLit(_) | Ty::Func(..) | Ty::BigInt | Ty::Decimal | Ty::Int | Ty::F64 | Ty::F32 | Ty::I8 | Ty::I16 | Ty::I32 | Ty::U8 | Ty::U16 | Ty::U32 | Ty::U64 | Ty::Bool | Ty::Undefined | Ty::Null | Ty::Void | Ty::Never) {
             self.uses_inspect = true;
         }
         code
@@ -1291,7 +1292,7 @@ impl<'c, 'a> Gen<'c, 'a> {
                 let lit = self.lit(self.sym(s).to_string().as_bytes());
                 format!("tv_inspect_str(sb, {lit}, {depth})")
             }
-            Ty::Int | Ty::F64 | Ty::F32 | Ty::I8 | Ty::I16 | Ty::I32 | Ty::U8 | Ty::U16 | Ty::U32 | Ty::U64 | Ty::Bool | Ty::Undefined | Ty::Void | Ty::Never => {
+            Ty::Int | Ty::F64 | Ty::F32 | Ty::I8 | Ty::I16 | Ty::I32 | Ty::U8 | Ty::U16 | Ty::U32 | Ty::U64 | Ty::Bool | Ty::Undefined | Ty::Null | Ty::Void | Ty::Never => {
                 self.string_code(t, place)
             }
             Ty::BigInt => format!("({{ tv_sb_push_big(sb, {place}); tv_sb_push_char(sb, 'n'); }})"),
@@ -1348,6 +1349,7 @@ impl<'c, 'a> Gen<'c, 'a> {
             Ty::U32 => return "&tv_type_u32".into(),
             Ty::U64 => return "&tv_type_u64".into(),
             Ty::Undefined | Ty::Void | Ty::Never | Ty::Error | Ty::Unknown => return "&tv_type_undefined".into(),
+            Ty::Null => return "&tv_type_null".into(),
             Ty::Promise(..) => return "&tv_type_promise".into(),
             Ty::Js => return "&tv_type_js".into(),
             _ => {}

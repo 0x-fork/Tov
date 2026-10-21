@@ -1,0 +1,35 @@
+// null, ==, var and for...in, as in TypeScript.
+type Node = { value: number, next: Node | null }
+function find(xs: string[], s: string): number | null {
+  const i = xs.indexOf(s)
+  return i < 0 ? null : i
+}
+function last(n: Node): number {
+  let cur: Node | null = n
+  let v = 0
+  while (cur !== null) { v = cur.value; cur = cur.next }
+  return v
+}
+function main1() {
+  const a = find(["x", "y"], "y"), b = find(["x"], "z")
+  console.log(a, b, a ?? -1, b ?? -1, b === null, b === undefined, b == undefined, a !== null)
+  const list: Node = { value: 1, next: { value: 2, next: null } }
+  console.log(last(list), list.next?.value, list.next?.next?.value, list.next!.value)
+  let best: string | null = null
+  for (const w of ["pear", "fig", "banana"]) if (best === null || w.length > best.length) best = w
+  console.log(best, typeof null, String(null), [1, null, 3], JSON.stringify({ a: null, b: [null] }))
+  const parsed: { x: number | null } = JSON.parse('{"x": null}')
+  console.log(parsed.x === null, parsed, null || "d", !null)
+}
+function main2() {
+  const xs = ["a", "b"]
+  for (const k in xs) console.log(k, typeof k)
+  const o: Record<string, number> = { x: 1, y: 2 }
+  for (const k in o) console.log(k, o[k])
+  var t = 0
+  if (t == 0) console.log("zero")
+}
+function main() {
+  main1()
+  main2()
+}

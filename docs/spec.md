@@ -27,7 +27,7 @@ Status tags: **[M0]** checked today · **[Mn]** planned for milestone n.
 | `bool` (alias `boolean`), `string` | UTF-8 immutable string |
 | `bigint` | arbitrary-precision integer, as in TS (`123n`) |
 | `decimal` | exact base-10 number, 34 significant digits (Tov's own: `19.99m`, or `19.99` where a `decimal` is expected) |
-| `undefined`, `void`, `never`, `unknown` | as TS |
+| `undefined`, `null`, `void`, `never`, `unknown` | as TS (`??`, `?.` and `!` treat `null` like `undefined`; `x == null` matches both) |
 | `T[]` / `Array<T>` | growable array (value); `Uint8Array`, `Int32Array`, `Float64Array` and the other typed arrays are arrays of `u8`, `i32`, `f64`, ... |
 | `Map<K, V>`, `Set<T>` | hash map/set (value) |
 | `{ a: T, b?: U }` | exact record (value) |
@@ -37,7 +37,7 @@ Status tags: **[M0]** checked today · **[Mn]** planned for milestone n.
 | `Promise<T>`, `Promise<T, E>` | a promise of a `T` that never rejects, or can reject with `E` (an `Error` class); see §7b |
 
 - Tuples `[A, B]` are records whose fields are `0`, `1`, ... (`t[0]`, printed and written to JSON as arrays). Destructuring works in `let`/`const` (`const [a, b] = t`, `const { x, y: py, z = 0 } = p`, holes and `...rest` in arrays), `for...of` (`for (const [k, v] of map)`), parameters and `[a, b] = [b, a]`; a missing array element traps, where JavaScript gives `undefined`. `map.entries()`, `xs.entries()`, `new Map(entries)` and `Object.keys/values/entries` give and take `[key, value]` tuples.
-- Removed: `any`, `null` (use `undefined`), `object`, `symbol`, intersection `&`, conditional/mapped/indexed-access types, `keyof`, `typeof` in types, namespaces, decorators. `enum`s are a type (a number, or the union of their string values) and a constant holding the members (`Color.Red`); no reverse mapping (`Color[0]`).
+- Removed: `any`, `object`, `symbol`, intersection `&`, conditional/mapped/indexed-access types, `keyof`, `typeof` in types, namespaces, decorators. `enum`s are a type (a number, or the union of their string values) and a constant holding the members (`Color.Red`); no reverse mapping (`Color[0]`).
 - `boolean` is exactly `bool`. `number` is TypeScript's number: each `number` written in an annotation is an `int` when only integers ever reach it (from the program's own code: data parsed from JSON or received from JavaScript keeps it a float), and an `f64` otherwise. The program means the same either way, except that an integer past 2^63 traps where a float would round (as an `int`'s does); `fib(n: number): number` runs as fast as with `int`.
 
 ### Numbers
@@ -83,10 +83,11 @@ Status tags: **[M0]** checked today · **[Mn]** planned for milestone n.
 - `if/else`, `while`, `do/while`, `for (init; cond; step)`, `for (const x of xs)`, `switch`, `break`, `continue`, `return`, blocks.
 - Conditions, `!`, `&&` and `||` use JavaScript's truthiness: `false`, `0`, `NaN`, `""`, `0n` and `undefined` are false, everything else (objects, even empty arrays) true. `a || b` and `a && b` are values unless both are `bool` (`name || "anonymous"`, `node && node.next`); `if (x)` narrows `x` to defined.
 - A function with a non-`void` return type must return on every path.
-- Removed: `var`, `with`, labels, `for…in` (use `for (const k of map.keys())`), `delete`, `arguments`, `eval`, comma operator.
+- `var` is `let`; `for (const k in obj)` iterates `Object.keys(obj)`; `==` and `!=` are `===` and `!==` (TypeScript already rejects comparing different types), except that `x == null` and `x == undefined` match both.
+- Removed: `with`, labels, `delete`, `arguments`, `eval`, the comma operator (but for steps: `i++, j--`).
 
 ## 5. Expressions **[M0]**
-- Operators and precedence as in TS. Equality is `===` / `!==`; `==` / `!=` are errors (fix: use `===`). Equality on records/arrays compares by value.
+- Operators and precedence as in TS. Equality on records/arrays compares by value.
 - `+` concatenates when either side is a `string` (numbers/bools format as in JS).
 - `a?.b`, `a ?? b`, `c ? a : b`, `x as T` (checked cast from `unknown` or a union; traps on failure), `x!` (non-undefined assertion; traps).
 - Indexing `xs[i]` requires an integer `i` and has type `T`, as in TypeScript, trapping when out of bounds; where an absent value is expected (`xs[i] === undefined`, `xs[i] ?? d`, `xs[i]?.x`, a `T | undefined` binding or parameter) it is `T | undefined` instead. The same goes for `s[i]` on strings and `m[k]` on `Record`s. Index assignment `xs[i] = v` traps when out of bounds.

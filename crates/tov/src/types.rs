@@ -53,6 +53,8 @@ pub enum Ty {
     Unknown,
     Void,
     Undefined,
+    /// JavaScript's `null`: absent, like `undefined`, but printed and written to JSON as `null`.
+    Null,
     Bool,
     Int,
     F64,
@@ -174,6 +176,7 @@ prims! {
     JS = 17 => Ty::Js,
     BIGINT = 18 => Ty::BigInt,
     DECIMAL = 19 => Ty::Decimal,
+    NULL = 20 => Ty::Null,
 }
 
 impl Default for Types {
@@ -444,6 +447,24 @@ impl Types {
         ty == UNDEFINED || matches!(*self.get(ty), Ty::Union(ms) if self.tys(ms).contains(&UNDEFINED))
     }
 
+    /// `undefined` or `null` is a member (what `??`, `?.` and `!` treat as absent).
+    pub fn has_nullish(&self, ty: TyId) -> bool {
+        ty == UNDEFINED || ty == NULL || matches!(*self.get(ty), Ty::Union(ms) if self.tys(ms).iter().any(|&m| m == UNDEFINED || m == NULL))
+    }
+
+    /// The type without `undefined` and `null`.
+    pub fn without_nullish(&mut self, ty: TyId) -> TyId {
+        let t = self.without_undefined(ty);
+        match *self.get(t) {
+            Ty::Union(ms) if self.tys(ms).contains(&NULL) => {
+                let rest: Vec<TyId> = self.tys(ms).iter().copied().filter(|&m| m != NULL).collect();
+                self.union(&rest)
+            }
+            _ if t == NULL => NEVER,
+            _ => t,
+        }
+    }
+
     pub fn without_undefined(&mut self, ty: TyId) -> TyId {
         match *self.get(ty) {
             Ty::Union(ms) => {
@@ -621,6 +642,7 @@ impl Display<'_> {
             Ty::Js => out.push_str("Js"),
             Ty::Void => out.push_str("void"),
             Ty::Undefined => out.push_str("undefined"),
+            Ty::Null => out.push_str("null"),
             Ty::Bool => out.push_str("bool"),
             Ty::Int => out.push_str("int"),
             Ty::F64 => out.push_str("f64"),

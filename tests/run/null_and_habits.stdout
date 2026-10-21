@@ -1,0 +1,9 @@
+1 null 1 -1 true false true true
+2 2 undefined 2
+banana object null [ 1, null, 3 ] {"a":null,"b":[null]}
+true { x: null } d true
+0 string
+1 string
+x 1
+y 2
+zero

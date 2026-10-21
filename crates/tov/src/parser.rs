@@ -413,11 +413,8 @@ impl<'a> Parser<'a> {
             }
             Tok::Const => self.const_item(start, exported),
             Tok::Let => self.const_item(start, exported),
-            Tok::Var => {
-                let kw = self.cur_span();
-                self.push(Diagnostic::new("X0004", kw, "`var` is not supported").fix(Applicability::Safe, "use `let`", kw, "let"));
-                self.const_item(start, exported);
-            }
+            // (`var`: as `let`)
+            Tok::Var => self.const_item(start, exported),
             Tok::Class | Tok::Abstract => self.class_decl(start, exported, false),
             Tok::Ident if self.text(self.tok()) == "cyclic" && matches!(self.nth(1), Tok::Class | Tok::Abstract) => {
                 self.bump();
@@ -1551,10 +1548,7 @@ impl<'a> Parser<'a> {
     fn let_stmt(&mut self) -> StmtId {
         let start = self.cur_span();
         let mutable = match self.kind() {
-            Tok::Var => {
-                self.push(Diagnostic::new("X0004", start, "`var` is not supported").fix(Applicability::Safe, "use `let`", start, "let"));
-                true
-            }
+            Tok::Var => true,
             Tok::Let => true,
             _ => false,
         };
@@ -1778,19 +1772,20 @@ impl<'a> Parser<'a> {
                 let (name, name_span) = self.ident("a loop variable").unwrap();
                 let kw = self.cur_span();
                 self.bump(); // of / in
-                if is_in {
-                    self.push(
-                        Diagnostic::new("X0007", kw, "`for...in` is not supported")
-                            .note("instead", "iterate keys with `for (const k of map.keys())`, or values with `for...of`"),
-                    );
-                }
                 let iter = self.expr();
+                // `for (const k in obj)`: its keys, `Object.keys(obj)`
+                let iter = if is_in {
+                    let (object, keys) = (self.interner.intern("Object"), self.interner.intern("keys"));
+                    let isp = self.expr_span(iter);
+                    let o = self.mk_expr(ExprKind::Ident(object), kw);
+                    let callee = self.mk_expr(ExprKind::Member { obj: o, name: keys, name_span: kw, optional: false }, kw);
+                    self.mk_expr(ExprKind::Call { callee, type_args: Vec::new(), args: vec![Arg { expr: iter, by_ref: None }], optional: false }, isp)
+                } else {
+                    iter
+                };
                 self.expect(Tok::RParen, "to close the `for` header");
                 let body = self.single_stmt();
                 let span = start.to(self.prev_span());
-                if is_in {
-                    return self.mk_stmt(StmtKind::Error, span);
-                }
                 if is_await {
                     return self.for_await(mutable, name, name_span, iter, body, span);
                 }

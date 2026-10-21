@@ -106,7 +106,7 @@ typedef struct tv_type {
 void tv_inspect_value(tv_sb *sb, const tv_type *t, const void *p, int depth);
 
 /* Descriptors for primitives. */
-extern const tv_type tv_type_int, tv_type_f64, tv_type_f32, tv_type_bool, tv_type_str, tv_type_undefined;
+extern const tv_type tv_type_int, tv_type_f64, tv_type_f32, tv_type_bool, tv_type_str, tv_type_undefined, tv_type_null;
 extern const tv_type tv_type_promise;   /* every Promise<T> (a tv_promise *): Node's `Promise { ... }` */
 extern const tv_type tv_type_i8, tv_type_i16, tv_type_i32, tv_type_u8, tv_type_u16, tv_type_u32, tv_type_u64;
 

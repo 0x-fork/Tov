@@ -62,7 +62,7 @@ impl<'c, 'a> Gen<'c, 'a> {
                 let lit = self.lit(self.sym(s).to_string().as_bytes());
                 format!("    tv_json_quote(sb, {lit});\n")
             }
-            Ty::Undefined | Ty::Void | Ty::Never | Ty::Error => "    tv_sb_push_cstr(sb, \"null\");\n".into(),
+            Ty::Undefined | Ty::Null | Ty::Void | Ty::Never | Ty::Error => "    tv_sb_push_cstr(sb, \"null\");\n".into(),
             Ty::Array(e) => {
                 let w = self.json_writer(e);
                 let ect = self.ctype(e);
@@ -239,7 +239,7 @@ impl<'c, 'a> Gen<'c, 'a> {
                     text.len()
                 )
             }
-            Ty::Undefined | Ty::Void => "    return tv_jp_word(p, \"null\");\n".into(),
+            Ty::Undefined | Ty::Null | Ty::Void => "    return tv_jp_word(p, \"null\");\n".into(),
             Ty::Array(e) => {
                 let pe = self.json_parser(e);
                 let (ect, d, ed) = (self.ctype(e), self.desc(e), self.default_value(e));
@@ -332,8 +332,8 @@ impl<'c, 'a> Gen<'c, 'a> {
             let make = g.u_make(t, k, Some("x"));
             let _ = write!(b, "{{ {mct} x = {dm}; if (!{pm}(p, &x)) {{ {rel_m}; return false; }} {rel}; *out = {make}; return true; }}");
         };
-        // `undefined`: null.
-        if let Some(k) = ms.iter().position(|&m| m == UNDEFINED) {
+        // `null` (into `undefined` when the type has no `null`)
+        if let Some(k) = ms.iter().position(|&m| m == NULL).or_else(|| ms.iter().position(|&m| m == UNDEFINED)) {
             let rel = self.release_code(t, "*out");
             let make = self.u_make(t, k, None);
             let _ = writeln!(b, "    if (c == 'n') {{ if (!tv_jp_word(p, \"null\")) return false; {rel}; *out = {make}; return true; }}");

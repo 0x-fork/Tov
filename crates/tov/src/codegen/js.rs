@@ -110,6 +110,7 @@ impl<'c, 'a> Gen<'c, 'a> {
                 self.js_lit(&text)
             }
             Ty::Undefined | Ty::Void | Ty::Never | Ty::Error | Ty::Unknown => "tv_js_undefined()".to_string(),
+            Ty::Null => "tv_js_null()".to_string(),
             _ => {
                 let f = self.js_conv(from, true);
                 format!("{f}({})", v.code)
@@ -168,6 +169,7 @@ impl<'c, 'a> Gen<'c, 'a> {
                 self.js_lit(&text)
             }
             Ty::Undefined | Ty::Void | Ty::Never | Ty::Error | Ty::Unknown => "tv_js_undefined()".to_string(),
+            Ty::Null => "tv_js_null()".to_string(),
             _ => {
                 let f = self.js_conv(t, true);
                 format!("{f}({code})")
@@ -293,7 +295,7 @@ impl<'c, 'a> Gen<'c, 'a> {
                 };
                 format!("{{ double d; if (!tv_js_as_num({src}, &d) || d != (double)(int64_t)d || d < {lo} || d > {hi}) return false; {dst} = ({ct})d; }}")
             }
-            Ty::Undefined | Ty::Void => format!("if (!tv_js_is_nullish({src})) return false; {dst} = 0;"),
+            Ty::Undefined | Ty::Null | Ty::Void => format!("if (!tv_js_is_nullish({src})) return false; {dst} = 0;"),
             _ => {
                 let f = self.js_conv(t, false);
                 format!("if (!{f}({src}, &{dst})) return false;")

@@ -1684,13 +1684,7 @@ impl<'a> Checker<'a> {
             TypeExprKind::Error => ERROR,
             TypeExprKind::Undefined => UNDEFINED,
             TypeExprKind::Void => VOID,
-            TypeExprKind::Null => {
-                self.report(
-                    Diagnostic::new("X0002", span, "`null` is not supported; Tov has one \"absent\" value, `undefined`")
-                        .fix(Applicability::Safe, "use `undefined`", span, "undefined"),
-                );
-                UNDEFINED
-            }
+            TypeExprKind::Null => NULL,
             TypeExprKind::StrLit(s) => self.types.str_lit(*s),
             TypeExprKind::Array(e) => {
                 let e = self.resolve_type(*e, tscope);
@@ -2342,7 +2336,7 @@ impl<'a> Checker<'a> {
     /// Only references (class instances, promises, functions, `undefined`): changing what they
     /// point to never changes which of them a value is.
     fn references_only(&mut self, ty: TyId) -> bool {
-        self.flat_members(ty).iter().all(|&m| matches!(self.types.get(m), Ty::Class(..) | Ty::Promise(..) | Ty::Func(..) | Ty::Undefined))
+        self.flat_members(ty).iter().all(|&m| matches!(self.types.get(m), Ty::Class(..) | Ty::Promise(..) | Ty::Func(..) | Ty::Undefined | Ty::Null))
     }
 
     /// Narrows a module constant (it can't be rebound, so what a test learns holds).

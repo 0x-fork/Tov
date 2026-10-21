@@ -136,13 +136,7 @@ impl<'a> Checker<'a> {
             }
             ExprKind::Bool(_) => BOOL,
             ExprKind::Undefined => UNDEFINED,
-            ExprKind::Null => {
-                self.report(
-                    Diagnostic::new("X0002", span, "`null` is not supported; Tov has one \"absent\" value, `undefined`")
-                        .fix(Applicability::Safe, "use `undefined`", span, "undefined"),
-                );
-                UNDEFINED
-            }
+            ExprKind::Null => NULL,
             ExprKind::Ident(sym) => self.ident(e, *sym, span),
             ExprKind::Paren(x) => {
                 self.want_optional = want;
@@ -253,7 +247,7 @@ impl<'a> Checker<'a> {
             ExprKind::NonNull(x) => {
                 let hint = exp.map(|t| self.types.optional(t));
                 let t = self.expr(*x, hint);
-                self.types.without_undefined(t)
+                self.types.without_nullish(t)
             }
             ExprKind::Typeof(x) => {
                 self.expr(*x, None);
@@ -453,15 +447,6 @@ impl<'a> Checker<'a> {
         }
     }
 
-    /// Span of an operator between two operands, found in the source.
-    fn op_span(&self, l: ExprId, r: ExprId, op: &str) -> Span {
-        let (ls, rs) = (self.ast().expr(l).span, self.ast().expr(r).span);
-        let text = &self.sm.get(ls.file).text[ls.end as usize..rs.start as usize];
-        match text.find(op) {
-            Some(i) => Span::new(ls.file, ls.end + i as u32, ls.end + (i + op.len()) as u32),
-            None => ls.empty_at_end(),
-        }
-    }
 
     fn binary(&mut self, op: BinOp, l: ExprId, r: ExprId, exp: Option<TyId>, span: Span) -> TyId {
         use BinOp::*;
@@ -497,7 +482,7 @@ impl<'a> Checker<'a> {
                 let hint = exp.map(|t| self.types.optional(t));
                 self.want_optional = true;
                 let tl = self.expr(l, hint);
-                let inner = self.types.without_undefined(tl);
+                let inner = self.types.without_nullish(tl);
                 let tr = self.expr(r, exp.or(Some(inner)));
                 if self.types.is_int(inner) && self.types.is_float(tr) || self.types.is_float(inner) && self.types.is_int(tr) {
                     return F64;
@@ -507,17 +492,9 @@ impl<'a> Checker<'a> {
                 let tr = if keeps_literals { tr } else { self.types.widen(tr) };
                 self.types.union(&[inner, tr])
             }
-            LooseEq | LooseNe => {
-                let (bad, good) = if op == LooseEq { ("==", "===") } else { ("!=", "!==") };
-                let os = self.op_span(l, r, bad);
-                self.report(
-                    Diagnostic::new("X0003", os, format!("`{bad}` is not supported"))
-                        .note("why", "Tov has no type coercion; equality is always strict")
-                        .fix(Applicability::Safe, format!("use `{good}`"), os, good),
-                );
-                self.equality(l, r, span)
-            }
-            Eq | Ne => self.equality(l, r, span),
+            // (`==` as `===`: TypeScript already rejects comparing values of different types, and
+            // `x == null` tests for `undefined`)
+            Eq | Ne | LooseEq | LooseNe => self.equality(l, r, span),
             Lt | Gt | Le | Ge => {
                 let (tl, tr) = self.numeric_pair(l, r, None);
                 if tl == BIGINT || tr == BIGINT {
@@ -888,8 +865,8 @@ impl<'a> Checker<'a> {
     }
 
     fn equality(&mut self, l: ExprId, r: ExprId, span: Span) -> TyId {
-        let (lu, ru) = (matches!(self.ast().expr(l).kind, ExprKind::Undefined), matches!(self.ast().expr(r).kind, ExprKind::Undefined));
-        let (tl, tr) = if matches!(self.ast().expr(l).kind, ExprKind::Str(_) | ExprKind::Undefined) {
+        let (lu, ru) = (matches!(self.ast().expr(l).kind, ExprKind::Undefined | ExprKind::Null), matches!(self.ast().expr(r).kind, ExprKind::Undefined | ExprKind::Null));
+        let (tl, tr) = if matches!(self.ast().expr(l).kind, ExprKind::Str(_) | ExprKind::Undefined | ExprKind::Null) {
             self.want_optional = lu;
             let tr = self.expr(r, None);
             let tl = self.expr(l, Some(tr));
@@ -900,7 +877,7 @@ impl<'a> Checker<'a> {
             let tr = self.expr(r, if self.types.is_num_like(tl) { Some(tl) } else { None });
             (tl, tr)
         };
-        let undefined_literal = matches!(self.ast().expr(l).kind, ExprKind::Undefined) || matches!(self.ast().expr(r).kind, ExprKind::Undefined);
+        let undefined_literal = matches!(self.ast().expr(l).kind, ExprKind::Undefined | ExprKind::Null) || matches!(self.ast().expr(r).kind, ExprKind::Undefined | ExprKind::Null);
         if !undefined_literal && !self.comparable(tl, tr) {
             let (ls, rs) = (self.show(tl), self.show(tr));
             let mut d = Diagnostic::new("T0502", span, format!("this comparison is always false: `{ls}` and `{rs}` have no values in common"));
@@ -1370,9 +1347,9 @@ impl<'a> Checker<'a> {
     fn index(&mut self, obj: ExprId, index: ExprId, optional: bool, absent: bool, span: Span) -> TyId {
         let t = self.expr(obj, None);
         let base = if optional {
-            self.types.without_undefined(t)
+            self.types.without_nullish(t)
         } else {
-            if self.types.has_undefined(t) {
+            if self.types.has_nullish(t) {
                 let d = self.possibly_undefined(obj, span);
                 self.report(d);
             }
@@ -1541,9 +1518,9 @@ impl<'a> Checker<'a> {
             return rt;
         }
         let base = if optional {
-            self.types.without_undefined(t)
+            self.types.without_nullish(t)
         } else {
-            if self.types.has_undefined(t) {
+            if self.types.has_nullish(t) {
                 let d = self.possibly_undefined(obj, span);
                 self.report(d);
             }
@@ -2604,9 +2581,9 @@ impl<'a> Checker<'a> {
                     return self.js_call(e, Some(name), &desc, args, span, false);
                 }
                 let base = if mopt {
-                    self.types.without_undefined(recv)
+                    self.types.without_nullish(recv)
                 } else {
-                    if self.types.has_undefined(recv) {
+                    if self.types.has_nullish(recv) {
                         let d = self.possibly_undefined(obj, span);
                         self.report(d);
                     }
@@ -2822,7 +2799,7 @@ impl<'a> Checker<'a> {
     /// functions whose parameters are `Js` (JavaScript calls them back).
     pub(super) fn js_convertible(&mut self, t: TyId) -> bool {
         match *self.types.get(t) {
-            Ty::Js | Ty::Error | Ty::Never | Ty::Str | Ty::StrLit(_) | Ty::Bool | Ty::Undefined | Ty::Void => true,
+            Ty::Js | Ty::Error | Ty::Never | Ty::Str | Ty::StrLit(_) | Ty::Bool | Ty::Undefined | Ty::Null | Ty::Void => true,
             Ty::Int | Ty::F64 | Ty::F32 | Ty::I8 | Ty::I16 | Ty::I32 | Ty::U8 | Ty::U16 | Ty::U32 | Ty::U64 => true,
             Ty::Array(e) => self.js_convertible(e),
             Ty::Record(fs) => {
@@ -2865,7 +2842,7 @@ impl<'a> Checker<'a> {
     /// Can a JavaScript value be converted to `t` (`x as T`)?
     pub(super) fn js_receivable(&mut self, t: TyId) -> bool {
         match *self.types.get(t) {
-            Ty::Js | Ty::Error | Ty::Str | Ty::StrLit(_) | Ty::Bool | Ty::Undefined | Ty::Void => true,
+            Ty::Js | Ty::Error | Ty::Str | Ty::StrLit(_) | Ty::Bool | Ty::Undefined | Ty::Null | Ty::Void => true,
             Ty::Int | Ty::F64 | Ty::F32 | Ty::I8 | Ty::I16 | Ty::I32 | Ty::U8 | Ty::U16 | Ty::U32 | Ty::U64 => true,
             Ty::Array(e) => self.js_receivable(e),
             Ty::Record(fs) => {
@@ -3336,15 +3313,15 @@ impl<'a> Checker<'a> {
         t != VOID
     }
 
-    /// What of `t` is truthy (`a || b` keeps it): all but `undefined`.
+    /// What of `t` is truthy (`a || b` keeps it): all but `undefined` and `null`.
     fn truthy_part(&mut self, t: TyId) -> TyId {
-        self.types.without_undefined(t)
+        self.types.without_nullish(t)
     }
 
     /// What of `t` can be falsy (`a && b` keeps it): `undefined`, and numbers, strings and
     /// booleans (`0`, `""`, `false`); objects never are.
     fn falsy_part(&mut self, t: TyId) -> TyId {
-        let keep: Vec<TyId> = self.flat_members(t).into_iter().filter(|&m| m == UNDEFINED || self.types.is_primitive(m) || m == BOOL).collect();
+        let keep: Vec<TyId> = self.flat_members(t).into_iter().filter(|&m| m == UNDEFINED || m == NULL || self.types.is_primitive(m) || m == BOOL).collect();
         if keep.is_empty() { NEVER } else { self.types.union(&keep) }
     }
 
@@ -3415,8 +3392,31 @@ impl<'a> Checker<'a> {
             ExprKind::Binary(op @ (BinOp::Eq | BinOp::Ne | BinOp::LooseEq | BinOp::LooseNe), l, r) => {
                 let eq = matches!(op, BinOp::Eq | BinOp::LooseEq) == positive;
                 let (l, r) = (*l, *r);
-                let (subject, other) = if matches!(ast.expr(l).kind, ExprKind::Undefined | ExprKind::Str(_)) { (r, l) } else { (l, r) };
+                let (subject, other) = if matches!(ast.expr(l).kind, ExprKind::Undefined | ExprKind::Null | ExprKind::Str(_)) { (r, l) } else { (l, r) };
+                let loose = matches!(op, BinOp::LooseEq | BinOp::LooseNe);
                 match &ast.expr(other).kind {
+                    // (`x == null` and `x == undefined` match both)
+                    ExprKind::Undefined | ExprKind::Null if loose => {
+                        let Some((target, ty)) = self.target_of(subject) else { return Vec::new() };
+                        let t = if eq {
+                            let ms: Vec<TyId> = self.flat_members(ty).into_iter().filter(|&m| m == UNDEFINED || m == NULL).collect();
+                            if ms.is_empty() { NEVER } else { self.types.union(&ms) }
+                        } else {
+                            self.types.without_nullish(ty)
+                        };
+                        vec![target.with(t)]
+                    }
+                    ExprKind::Null => {
+                        let Some((target, ty)) = self.target_of(subject) else { return Vec::new() };
+                        let has = self.flat_members(ty).contains(&NULL);
+                        let t = if eq {
+                            if has { NULL } else { NEVER }
+                        } else {
+                            let ms: Vec<TyId> = self.flat_members(ty).into_iter().filter(|&m| m != NULL).collect();
+                            self.types.union(&ms)
+                        };
+                        vec![target.with(t)]
+                    }
                     ExprKind::Undefined => {
                         let Some((target, ty)) = self.target_of(subject) else { return Vec::new() };
                         let t = if eq { if self.types.has_undefined(ty) { UNDEFINED } else { NEVER } } else { self.types.without_undefined(ty) };
@@ -3502,16 +3502,21 @@ impl<'a> Checker<'a> {
             }
             ExprKind::Ident(_) | ExprKind::Member { optional: false, .. } => {
                 let Some((target, ty)) = self.target_of(e) else { return Vec::new() };
-                if !self.types.has_undefined(ty) {
+                if !self.types.has_nullish(ty) {
                     return Vec::new();
                 }
-                // (falsy: `undefined`, or `0` / `""` / `false` when it may hold one of those)
-                let inner = self.types.without_undefined(ty);
+                // (falsy: `undefined`/`null`, or `0` / `""` / `false` when it may hold one of those)
+                let inner = self.types.without_nullish(ty);
                 let can_be_falsy = self.flat_members(inner).iter().any(|&m| self.types.is_primitive(m) || m == BOOL);
                 if !positive && can_be_falsy {
                     return Vec::new();
                 }
-                let t = if positive { inner } else { UNDEFINED };
+                let t = if positive {
+                    inner
+                } else {
+                    let ms: Vec<TyId> = self.flat_members(ty).into_iter().filter(|&m| m == UNDEFINED || m == NULL).collect();
+                    self.types.union(&ms)
+                };
                 vec![target.with(t)]
             }
             _ => Vec::new(),
