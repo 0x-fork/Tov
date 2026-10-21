@@ -24,3 +24,28 @@ function main() {
     p.x = 5
   }
 }
+
+type Cell = { v: int, kids: int[] }
+class Holder { items: int[] = [] }
+
+function elementAlias() {
+  const grid: int[][] = [[0, 0], [0, 0]]
+  const row = grid[0]!
+  row[1] = 5
+  console.log(grid[0]![1])
+  grid[1] = [7]
+  console.log(row[0])
+}
+
+function storedThenChanged() {
+  const cells: Cell[] = []
+  const c: Cell = { v: 1, kids: [] }
+  cells.push(c)
+  c.v = 2
+  console.log(cells.length)
+}
+
+function fieldAlias(h: Holder) {
+  const xs = h.items
+  xs.push(1)
+}

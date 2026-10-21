@@ -23,4 +23,20 @@ error[V0104] mutation.tov:24:5: can't modify loop variable `p`: it is a copy of 
   why: changes to the copy would not reach the collection (Tov collections hold values)
   instead: loop over indices and assign `xs[i] = ...`, or build a new array with `map`
 
-5 error(s)
+error[V0120] mutation.tov:34:3: this changes `row`, but `grid` is a separate copy (TypeScript would change both)
+   34 |   row[1] = 5
+  why: `row` was initialized from `grid[0]!`: Tov arrays, records and maps are values, so assignment copies
+  if you meant a copy: say so explicitly: `row = grid[0]!.slice()` (arrays) or build a new value
+  if you meant one value: modify `grid[0]!` directly instead of going through `row`
+
+error[V0120] mutation.tov:44:3: this changes `c`, but `cells` holds a separate copy of it (TypeScript would change both)
+   44 |   c.v = 2
+  why: `c` was copied into `cells`: Tov arrays, records and maps are values
+  instead: finish changing `c` before storing it, change it through `cells`, or make it a class instance (a reference)
+
+error[V0121] mutation.tov:50:3: this changes `xs`, but `h.items` holds a separate copy (TypeScript would change both)
+   50 |   xs.push(1)
+  why: Tov arrays, records and maps are values, so assignment copies
+  instead: change `h.items` directly, or make the shared value a class instance (a reference)
+
+8 error(s)

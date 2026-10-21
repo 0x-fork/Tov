@@ -94,8 +94,38 @@ impl<'a> Checker<'a> {
                     && src_id != id
                     && self.shared_in_ts(t)
                 {
+                    let ispan = self.ast().expr(*i).span;
+                    self.fcx().aliases.push((id, src_id, ispan.end, 0, ispan));
+                }
+                // `const row = grid[0]!`, `const xs = this.items`: a copy of part of another value.
+                if let Some(i) = init
+                    && !matches!(self.ast().expr(*i).kind, crate::ast::ExprKind::Ident(_))
+                    && place_path(self.ast(), *i)
+                    && self.shared_in_ts(t)
+                {
+                    let ispan = self.ast().expr(*i).span;
+                    match self.root_of(*i) {
+                        super::expr::Root::Local(src) if src != id => {
+                            let depth = path_depth(self.ast(), *i);
+                            self.fcx().aliases.push((id, src, ispan.end, depth, ispan));
+                        }
+                        super::expr::Root::Heap | super::expr::Root::ModuleConst(..) => self.fcx().heap_links.push((id, ispan.end, ispan)),
+                        _ => {}
+                    }
+                }
+                // `const list = [node]`: the literal holds copies of the locals in it.
+                if let Some(i) = init {
+                    let mut held = Vec::new();
+                    literal_locals(self.ast(), *i, &mut held);
                     let pos = self.ast().expr(*i).span.end;
-                    self.fcx().aliases.push((id, src_id, pos));
+                    for sym in held {
+                        if let Some((v, vt)) = self.lookup(sym)
+                            && v != id
+                            && self.shared_in_ts(vt)
+                        {
+                            self.fcx().stored.push((id, v, pos));
+                        }
+                    }
                 }
             }
             StmtKind::Block(stmts) => {
@@ -1132,5 +1162,51 @@ fn collect_children(ast: &Ast, e: ExprId, out: &mut Vec<ExprId>) {
         ExprKind::Array(xs) | ExprKind::Template(_, xs) => out.extend(xs.iter().copied()),
         ExprKind::Object(fs) => out.extend(fs.iter().map(|f| f.value)),
         _ => {}
+    }
+}
+
+/// A variable, or a field or element path from one (`grid[i]!.cells`).
+pub(super) fn place_path(ast: &Ast, e: ExprId) -> bool {
+    use crate::ast::ExprKind;
+    match &ast.expr(e).kind {
+        ExprKind::Ident(_) | ExprKind::This => true,
+        ExprKind::Paren(x) | ExprKind::NonNull(x) => place_path(ast, *x),
+        ExprKind::Member { obj, .. } | ExprKind::Index { obj, .. } => place_path(ast, *obj),
+        _ => false,
+    }
+}
+
+/// Variables written directly as elements or field values of array and object literals.
+fn literal_locals(ast: &Ast, e: ExprId, out: &mut Vec<Sym>) {
+    use crate::ast::ExprKind;
+    match &ast.expr(e).kind {
+        ExprKind::Array(xs) => {
+            for &x in xs {
+                match ast.expr(x).kind {
+                    ExprKind::Ident(s) => out.push(s),
+                    _ => literal_locals(ast, x, out),
+                }
+            }
+        }
+        ExprKind::Object(fs) => {
+            for f in fs {
+                match ast.expr(f.value).kind {
+                    ExprKind::Ident(s) => out.push(s),
+                    _ => literal_locals(ast, f.value, out),
+                }
+            }
+        }
+        ExprKind::Paren(x) => literal_locals(ast, *x, out),
+        _ => {}
+    }
+}
+
+/// How many fields and elements deep a place path goes (`grid[i]!.cells` is 2).
+pub(super) fn path_depth(ast: &Ast, e: ExprId) -> u32 {
+    use crate::ast::ExprKind;
+    match &ast.expr(e).kind {
+        ExprKind::Paren(x) | ExprKind::NonNull(x) => path_depth(ast, *x),
+        ExprKind::Member { obj, .. } | ExprKind::Index { obj, .. } => 1 + path_depth(ast, *obj),
+        _ => 0,
     }
 }

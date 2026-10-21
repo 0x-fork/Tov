@@ -21,7 +21,7 @@ pub(super) struct Place {
     pub sites: Vec<super::spec::Site>,
 }
 
-enum Root {
+pub(super) enum Root {
     Local(LocalId),
     /// A module variable: (module, item).
     ModuleConst(u32, u32),
@@ -956,6 +956,9 @@ impl<'a> Checker<'a> {
         match op {
             AssignOp::Assign => {
                 let tv = self.flow(place.sites.clone(), |c| c.expr(value, Some(place.ty)));
+                if !matches!(self.ast().expr(target).kind, ExprKind::Ident(_)) {
+                    self.note_stored(target, &[value], span.end);
+                }
                 if !self.try_promote(&place, tv) {
                     self.flow(place.sites.clone(), |c| c.expect_assignable(tv, place.ty, vspan, None));
                 }
@@ -1040,7 +1043,7 @@ impl<'a> Checker<'a> {
         false
     }
 
-    fn root_of(&self, e: ExprId) -> Root {
+    pub(super) fn root_of(&self, e: ExprId) -> Root {
         match &self.ast().expr(e).kind {
             ExprKind::Paren(x) | ExprKind::NonNull(x) => self.root_of(*x),
             ExprKind::This => Root::Heap,
@@ -1100,7 +1103,8 @@ impl<'a> Checker<'a> {
                         None
                     }
                     _ => {
-                        self.fcx().mutations.push((id, span));
+                        let depth = super::stmt::path_depth(self.ast(), e);
+                        self.fcx().mutations.push((id, span, depth));
                         Some(id)
                     }
                 }
@@ -2253,6 +2257,15 @@ impl<'a> Checker<'a> {
                     self.set_call_spec((sites, Vec::new()));
                     let desc = format!("new {name}");
                     let t = self.call_sig(&cs, &desc, type_args, args, exp, span);
+                    // (the object may keep its arguments)
+                    for a in args {
+                        if let ExprKind::Ident(sym) = self.ast().expr(a.expr).kind
+                            && let Some((v, vt)) = self.lookup(sym)
+                            && self.shared_in_ts(vt)
+                        {
+                            self.fcx().heap_links.push((v, span.end, span));
+                        }
+                    }
                     let _ = targs;
                     return t;
                 }
@@ -2449,7 +2462,12 @@ impl<'a> Checker<'a> {
                     self.rec_call(e, Callee::Method(base));
                     self.pending_call = Some(e);
                     self.set_call_spec_from(obj);
-                    self.call_sig(&ms.sig, &desc, type_args, args, exp, span)
+                    let r = self.call_sig(&ms.sig, &desc, type_args, args, exp, span);
+                    if ms.mutates {
+                        let values: Vec<ExprId> = args.iter().map(|a| a.expr).collect();
+                        self.note_stored(obj, &values, span.end);
+                    }
+                    r
                 } else {
                     self.member_of(base, name, name_span, span, obj);
                     for a in args {
@@ -2904,8 +2922,9 @@ impl<'a> Checker<'a> {
                             }
                             refs.push((root, aspan));
                             // The callee may change the value in place (for V0120).
+                            let depth = super::stmt::path_depth(self.ast(), a.expr);
                             if let Some(f) = self.fcx.last_mut() {
-                                f.mutations.push((root, aspan));
+                                f.mutations.push((root, aspan, depth));
                             }
                         }
                         if t != pty && t != ERROR && pty != ERROR {
@@ -3404,4 +3423,26 @@ fn int_range(t: TyId) -> Option<(i128, i128)> {
         U64 => (0, u64::MAX as i128),
         _ => return None,
     })
+}
+
+impl<'a> Checker<'a> {
+    /// `values` (the variables among them) were put into the place `into` (`xs.push(v)`,
+    /// `p.next = v`): for the copy-then-mutate checks.
+    fn note_stored(&mut self, into: ExprId, values: &[ExprId], pos: u32) {
+        for &x in values {
+            let ExprKind::Ident(sym) = self.ast().expr(x).kind else { continue };
+            let Some((v, vt)) = self.lookup(sym) else { continue };
+            if !self.shared_in_ts(vt) {
+                continue;
+            }
+            match self.root_of(into) {
+                Root::Local(r) if r != v => self.fcx().stored.push((r, v, pos)),
+                Root::Heap | Root::ModuleConst(..) => {
+                    let place = self.ast().expr(into).span;
+                    self.fcx().heap_links.push((v, pos, place));
+                }
+                _ => {}
+            }
+        }
+    }
 }
