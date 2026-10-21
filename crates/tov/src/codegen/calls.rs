@@ -1205,25 +1205,91 @@ impl<'c, 'a> Gen<'c, 'a> {
             let v = argv[i].clone();
             g.int_code(v)
         };
+        // An optional `int` argument: (value, given).
+        let opt_int_arg = |g: &mut Self, i: usize| -> (String, String) {
+            if argv.len() <= i {
+                return ("0".into(), "false".into());
+            }
+            let v = argv[i].clone();
+            if !g.c.types.has_undefined(v.ty) {
+                return (g.int_code(v), "true".into());
+            }
+            let opt_int = g.c.types.optional(INT);
+            let v = g.coerce(v, opt_int);
+            g.optional_int(&v)
+        };
         let loc = self.loc(span);
         let code = match name {
             "chars" => format!("tv_str_chars({})", s.code),
-            "slice" => {
-                let a0 = int_arg(self, 0);
-                let (e, he) = if argv.len() > 1 {
-                    let v = argv[1].clone();
-                    let opt_int = self.c.types.optional(INT);
-                    let v = self.coerce(v, opt_int);
-                    self.optional_int(&v)
-                } else {
-                    ("0".into(), "false".into())
+            "slice" | "substring" | "substr" => {
+                let (a0, _) = opt_int_arg(self, 0);
+                let (e, he) = opt_int_arg(self, 1);
+                match name {
+                    "slice" => format!("tv_str_slice({}, {a0}, {e}, {he}, {loc})", s.code),
+                    "substring" => format!("tv_str_substring({}, {a0}, {e}, {he})", s.code),
+                    _ => format!("tv_str_substr({}, {a0}, {e}, {he})", s.code),
+                }
+            }
+            "includes" | "startsWith" | "endsWith" if argv.len() > 1 => {
+                let needle = str_arg(self, 0);
+                let (pos, given) = opt_int_arg(self, 1);
+                let code = match name {
+                    "includes" => format!("tv_str_includes_at({}, {needle}, {given} ? {pos} : 0)", s.code),
+                    "startsWith" => format!("tv_str_starts_with_at({}, {needle}, {given} ? {pos} : 0)", s.code),
+                    _ => format!("tv_str_ends_with_at({0}, {needle}, {given} ? {pos} : tv_str_length({0}))", s.code),
                 };
-                format!("tv_str_slice({}, {a0}, {e}, {he}, {loc})", s.code)
+                return Val::plain(code, BOOL);
             }
             "includes" => return Val::plain(format!("tv_str_includes({}, {})", s.code, str_arg(self, 0)), BOOL),
             "startsWith" => return Val::plain(format!("tv_str_starts_with({}, {})", s.code, str_arg(self, 0)), BOOL),
             "endsWith" => return Val::plain(format!("tv_str_ends_with({}, {})", s.code, str_arg(self, 0)), BOOL),
+            "indexOf" if argv.len() > 1 => {
+                let needle = str_arg(self, 0);
+                let (pos, given) = opt_int_arg(self, 1);
+                return Val::plain(format!("tv_str_index_of_from({}, {needle}, {given} ? {pos} : 0)", s.code), INT);
+            }
             "indexOf" => return Val::plain(format!("tv_str_index_of({}, {})", s.code, str_arg(self, 0)), INT),
+            "lastIndexOf" => {
+                let needle = str_arg(self, 0);
+                let (pos, given) = opt_int_arg(self, 1);
+                return Val::plain(format!("tv_str_last_index_of({}, {needle}, {pos}, {given})", s.code), INT);
+            }
+            "charCodeAt" => {
+                let (i, _) = opt_int_arg(self, 0);
+                return Val::plain(format!("tv_str_char_code_at({}, {i})", s.code), INT);
+            }
+            "charAt" => {
+                let (i, _) = opt_int_arg(self, 0);
+                format!("tv_str_char_at({}, {i})", s.code)
+            }
+            "codePointAt" | "at" => {
+                // -1 / out of range: undefined
+                let sv = self.fresh("s");
+                self.line(format!("tv_str {sv} = {};", s.code));
+                let i = int_arg(self, 0);
+                let iv = self.fresh("ix");
+                if name == "at" {
+                    self.line(format!("tv_int {iv} = {i}; if ({iv} < 0) {iv} += tv_str_length({sv});"));
+                } else {
+                    self.line(format!("tv_int {iv} = {i};"));
+                }
+                let (inner, call) = if name == "at" { (STR, format!("tv_str_unit_at({sv}, {iv})")) } else { (INT, format!("tv_str_code_point_at({sv}, {iv})")) };
+                let v = Val { code: call, ty: inner, owned: inner == STR };
+                return self.present_if(&format!("(uint64_t){iv} < (uint64_t)tv_str_length({sv})"), v, ty);
+            }
+            "concat" => {
+                let mut cur = Val { code: format!("tv_str_concat({}, TV_EMPTY_STR)", s.code), ty: STR, owned: true };
+                for i in 0..argv.len() {
+                    let a = str_arg(self, i);
+                    let prev = if i == 0 { s.code.clone() } else { cur.code.clone() };
+                    cur = self.tmp(STR, &format!("tv_str_concat({prev}, {a})"), true);
+                }
+                if argv.is_empty() {
+                    cur.code
+                } else {
+                    return cur;
+                }
+            }
             "split" => format!("tv_str_split({}, {})", s.code, str_arg(self, 0)),
             "trim" => format!("tv_str_trim({})", s.code),
             "trimStart" => format!("tv_str_trim_start({})", s.code),
@@ -1465,6 +1531,23 @@ impl<'c, 'a> Gen<'c, 'a> {
                     }
                     _ => Val::plain("false", BOOL),
                 }
+            }
+            (Some("String"), "fromCharCode" | "fromCodePoint") => {
+                let mut codes = Vec::new();
+                for a in args {
+                    let v = self.expr(a.expr);
+                    codes.push(if self.c.types.is_float(v.ty) { format!("(tv_int){}", self.int32_code(&v)) } else { format!("(tv_int)({})", v.code) });
+                }
+                let code = match (name, codes.as_slice()) {
+                    (_, []) => return Val::plain("TV_EMPTY_STR", STR),
+                    ("fromCharCode", [c]) => format!("tv_str_from_char_code({c})"),
+                    ("fromCharCode", _) => format!("tv_str_from_char_codes((tv_int[]){{{}}}, {})", codes.join(", "), codes.len()),
+                    _ => {
+                        let loc = self.loc(span);
+                        format!("tv_str_from_code_points((tv_int[]){{{}}}, {}, {loc})", codes.join(", "), codes.len())
+                    }
+                };
+                self.tmp(STR, &code, true)
             }
             (Some("BigInt"), "asIntN" | "asUintN") => {
                 let bits = self.expr(args[0].expr);

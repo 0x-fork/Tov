@@ -22,7 +22,7 @@ error[T0001] calls.tov:15:25: expected `string[]`, found `int[]`
 error[T0107] calls.tov:16:42: `string` has no member `startWith`
    16 |   const words = ["a", "b"].filter(w => w.startWith("a"))
   did you mean: startsWith
-  available: byteLength, chars, endsWith, includes, indexOf, padEnd, padStart, repeat, replace, replaceAll, slice, split, startsWith, toLowerCase, toString, toUpperCase, trim, trimEnd, trimStart
+  available: at, byteLength, charAt, charCodeAt, chars, codePointAt, concat, endsWith, includes, indexOf, lastIndexOf, length, padEnd, padStart, repeat, replace, replaceAll, slice, split, startsWith, substr, substring, toLowerCase, toString, toUpperCase, trim, trimEnd, trimStart
   fix[maybe]: use `startsWith`
 
 error[T0202] calls.tov:17:3: `n` is not a function (its type is `int`)

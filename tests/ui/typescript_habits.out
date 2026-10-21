@@ -45,9 +45,4 @@ error[T0120] typescript_habits.tov:15:15: `items[0]` may be `undefined`
   fix[maybe]: optional chaining: `items[0]?.length`
   fix[maybe]: assert defined (traps if not): `items[0]!.length`
 
-error[X0010] typescript_habits.tov:15:24: strings have no `.length`: it is ambiguous for UTF-8 text
-   15 |   console.log(items[0].length)
-  instead: `s.byteLength` for bytes, `s.chars().length` for characters
-  fix[maybe]: use `byteLength`
-
-11 error(s)
+10 error(s)

@@ -1359,12 +1359,8 @@ impl<'a> Checker<'a> {
                 return ERROR;
             }
             Ty::Str | Ty::StrLit(_) => {
-                self.expr(index, None);
-                self.report(
-                    Diagnostic::new("X0035", span, "strings can't be indexed by position (they are UTF-8)")
-                        .note("instead", "`s.chars()[i]` for the i-th character, or `s.slice(start, end)`"),
-                );
-                return ERROR;
+                self.index_type(index);
+                self.types.optional(STR)
             }
             Ty::Record(fields) => {
                 if let ExprKind::Str(key) = self.ast().expr(index).kind {

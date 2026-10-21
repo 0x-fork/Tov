@@ -88,7 +88,7 @@ Status tags: **[M0]** checked today · **[Mn]** planned for milestone n.
 - `+` concatenates when either side is a `string` (numbers/bools format as in JS).
 - `a?.b`, `a ?? b`, `c ? a : b`, `x as T` (checked cast from `unknown` or a union; traps on failure), `x!` (non-undefined assertion; traps).
 - Indexing `xs[i]` requires an integer `i` and has type `T | undefined`; `xs[i]!` asserts presence (traps when out of bounds). Index assignment `xs[i] = v` traps when out of bounds.
-- Strings have no `.length` (ambiguous under UTF-8). Use `s.byteLength` or `s.chars().length`.
+- Strings are JavaScript's: `s.length`, `s[i]`, `charAt`, `charCodeAt`, `codePointAt`, `at`, `indexOf`, `lastIndexOf`, `slice`, `substring`, `substr`, `padStart`/`padEnd` and `split("")` count UTF-16 code units, and `for (const c of s)` walks code points. They're stored as UTF-8: an ASCII string's indexes are its byte offsets (no cost), and others convert from a cached position, so a loop over `s.charCodeAt(i)` walks the string once. Differences: `s[i]` is `string | undefined` (like an array's); `charCodeAt` returns an `int`, `-1` out of range where JavaScript gives `NaN` (both fail `c >= 48 && c <= 57` and `c === 10`); a lone half of a surrogate pair (cut out by `slice`, `s[i]`, `split("")` or `String.fromCharCode`) becomes U+FFFD, since UTF-8 can't hold one — printed, it's what Node prints. Tov adds `s.byteLength` (UTF-8 bytes) and `s.chars()` (an array of code points).
 - `console.log(...args)` prints (Node's formatting); `Math.*` as in JS (with the int-returning rounders above); `NaN`, `Infinity`, `isFinite`, and `Number`'s constants (`MAX_SAFE_INTEGER`, `EPSILON`, ...) and predicates (`Number.isInteger`, `isSafeInteger`, `isFinite`, `isNaN`).
 - `map.keys()`, `map.values()` and `set.values()` return arrays (not iterators).
 - `parseInt(s)`, `parseFloat(s)` and `Number(s)` return `T | undefined` instead of `NaN`, so failed parses must be handled.
@@ -172,7 +172,7 @@ Node's names, so existing habits work:
 - **Running.** An async function runs until its first `await` that has to wait. Awaiting a call to an async function costs no allocation (its state lives inside the caller's); a call that isn't awaited runs as a task of its own. The program exits when nothing is left to run: no timers, tasks waiting on them, or servers.
 
 ## 7c. Web servers (Bun's API)
-`Bun.serve`, `Request`, `Response`, `Headers`, `URL` and `URLSearchParams` are globals, as in Bun (also `import { serve, ... } from "std/http"`). A Bun server ports with Tov's usual edits only — `try` on calls that can throw, `.byteLength` for `.length` on strings; `tests/parity` runs a Bun server and its port side by side and compares every response.
+`Bun.serve`, `Request`, `Response`, `Headers`, `URL` and `URLSearchParams` are globals, as in Bun (also `import { serve, ... } from "std/http"`). A Bun server ports with Tov's usual edit only — `try` on calls that can throw; `tests/parity` runs a Bun server and its port side by side and compares every response.
 ```ts
 const server = Bun.serve({
   port: Number(process.env.PORT ?? 3000),

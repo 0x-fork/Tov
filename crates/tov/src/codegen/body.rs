@@ -2067,6 +2067,14 @@ impl<'c, 'a> Gen<'c, 'a> {
                 self.push_scope();
                 self.push_temps();
                 let coll = self.expr(*iter);
+                // a string: its characters (code points), as JavaScript iterates it
+                let coll = if matches!(self.tget(coll.ty), Ty::Str | Ty::StrLit(_)) {
+                    let sv = self.coerce(coll, STR);
+                    let arr = self.c.types.array(STR);
+                    self.tmp(arr, &format!("tv_str_chars({})", sv.code), true)
+                } else {
+                    coll
+                };
                 let coll_ty = coll.ty;
                 // Iterate a snapshot (retained), so the loop is unaffected by mutation of the collection.
                 let snap = self.consume(coll);
@@ -4061,6 +4069,10 @@ impl<'c, 'a> Gen<'c, 'a> {
                 let s = self.coerce(base, STR);
                 Val::plain(format!("tv_str_byte_len({})", s.code), INT)
             }
+            Ty::Str | Ty::StrLit(_) if n == "length" => {
+                let s = self.coerce(base, STR);
+                Val::plain(format!("tv_str_length({})", s.code), INT)
+            }
             Ty::Map(..) | Ty::Set(_) if n == "size" => Val::plain(format!("tv_map_size({})", base.code), INT),
             _ => {
                 self.unsupported(span, "this member access");
@@ -4088,14 +4100,28 @@ impl<'c, 'a> Gen<'c, 'a> {
         } else {
             a
         };
-        let Ty::Array(et) = self.tget(a.ty) else {
-            self.unsupported(span, "indexing this type");
-            return Val::plain("0", ty);
+        let (et, len, elem) = match self.tget(a.ty) {
+            Ty::Array(et) => (et, format!("tv_arr_len({})", a.code), None),
+            Ty::Str | Ty::StrLit(_) => {
+                // one UTF-16 unit, as a string
+                let sv = self.fresh("s");
+                let a = self.coerce(a.clone(), STR);
+                self.line(format!("tv_str {sv} = {};", a.code));
+                (STR, format!("tv_str_length({sv})"), Some(sv))
+            }
+            _ => {
+                self.unsupported(span, "indexing this type");
+                return Val::plain("0", ty);
+            }
         };
         let i = self.expr(index);
         let i = self.int_code(i);
         let iv = self.fresh("ix");
         self.line(format!("tv_int {iv} = {i};"));
+        if let Some(sv) = elem {
+            let v = Val { code: format!("tv_str_unit_at({sv}, {iv})"), ty: STR, owned: true };
+            return self.present_if(&format!("(uint64_t){iv} < (uint64_t){len}"), v, ty);
+        }
         let res = self.fresh("t");
         let ct = self.ctype(ty);
         let ect = self.ctype(et);
@@ -4104,6 +4130,31 @@ impl<'c, 'a> Gen<'c, 'a> {
         self.push_temps();
         let ev = Val::plain(format!("(({ect} *)tv_arr_data({}))[{iv}]", a.code), et);
         let cv = self.coerce(ev, ty);
+        let code = self.consume(cv);
+        self.line(format!("{res} = {code};"));
+        self.pop_temps();
+        self.close("} else {");
+        self.b().indent += 1;
+        let u = self.coerce(Val::plain("0", UNDEFINED), ty);
+        let code = self.consume(u);
+        self.line(format!("{res} = {code};"));
+        self.close("}");
+        let owned = self.is_rc(ty);
+        if owned {
+            self.b().temps.last_mut().unwrap().push((res.clone(), ty));
+        }
+        Val { code: res, ty, owned }
+    }
+
+    /// `cond ? v : undefined` as a temporary of the optional type `ty` (`v` is computed only
+    /// when `cond` holds).
+    pub(crate) fn present_if(&mut self, cond: &str, v: Val, ty: TyId) -> Val {
+        let res = self.fresh("t");
+        let ct = self.ctype(ty);
+        self.line(format!("{ct} {res};"));
+        self.open(&format!("if ({cond}) {{"));
+        self.push_temps();
+        let cv = self.coerce(v, ty);
         let code = self.consume(cv);
         self.line(format!("{res} = {code};"));
         self.pop_temps();

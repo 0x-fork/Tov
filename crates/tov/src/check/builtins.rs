@@ -133,7 +133,7 @@ pub(super) fn is_builtin_type(name: &str) -> bool {
 }
 
 pub(super) fn is_builtin_ns(name: &str) -> bool {
-    matches!(name, "Math" | "console" | "JSON" | "process" | "Date" | "performance" | "Promise" | "BigInt" | "Array" | "Number")
+    matches!(name, "Math" | "console" | "JSON" | "process" | "Date" | "performance" | "Promise" | "BigInt" | "Array" | "Number" | "String")
 }
 
 pub(super) fn is_builtin_fn(name: &str) -> bool {
@@ -182,12 +182,6 @@ impl Hint {
 pub(super) fn member_hint(types: &Types, base: TyId, name: &str) -> Option<Hint> {
     let ty = types.get(base);
     match (ty, name) {
-        (Ty::Str | Ty::StrLit(_), "length") => Some(Hint {
-            code: "X0010",
-            msg: "strings have no `.length`: it is ambiguous for UTF-8 text".to_string(),
-            note: Some(("instead", "`s.byteLength` for bytes, `s.chars().length` for characters".to_string())),
-            fix: Some(("use `byteLength`".to_string(), "byteLength".to_string())),
-        }),
         (Ty::Array(_), "size") => Some(Hint { code: "T0107", msg: "arrays have `length`, not `size`".to_string(), note: None, fix: Some(("use `length`".to_string(), "length".to_string())) }),
         (Ty::Map(..) | Ty::Set(_), "length") => Some(Hint { code: "T0107", msg: "maps and sets have `size`, not `length`".to_string(), note: None, fix: Some(("use `size`".to_string(), "size".to_string())) }),
         _ => None,
@@ -197,7 +191,7 @@ pub(super) fn member_hint(types: &Types, base: TyId, name: &str) -> Option<Hint>
 pub(super) fn property(types: &Types, ty: TyId, name: &str) -> Option<TyId> {
     match (types.get(ty), name) {
         (Ty::Array(_), "length") => Some(INT),
-        (Ty::Str | Ty::StrLit(_), "byteLength") => Some(INT),
+        (Ty::Str | Ty::StrLit(_), "byteLength" | "length") => Some(INT),
         (Ty::Map(..) | Ty::Set(_), "size") => Some(INT),
         _ => None,
     }
@@ -208,8 +202,8 @@ const ARRAY_METHODS: &[&str] = &[
     "reverse", "sort", "at", "flatMap",
 ];
 const STRING_METHODS: &[&str] = &[
-    "chars", "slice", "includes", "startsWith", "endsWith", "indexOf", "split", "trim", "trimStart", "trimEnd", "toUpperCase", "toLowerCase", "replace", "replaceAll", "repeat",
-    "padStart", "padEnd", "toString",
+    "chars", "slice", "includes", "startsWith", "endsWith", "indexOf", "lastIndexOf", "split", "trim", "trimStart", "trimEnd", "toUpperCase", "toLowerCase", "replace",
+    "replaceAll", "repeat", "padStart", "padEnd", "toString", "charAt", "charCodeAt", "codePointAt", "at", "substring", "substr", "concat",
 ];
 const MAP_METHODS: &[&str] = &["get", "set", "has", "delete", "clear", "keys", "values", "forEach"];
 const SET_METHODS: &[&str] = &["add", "has", "delete", "clear", "values", "forEach"];
@@ -236,7 +230,7 @@ pub(super) fn is_method(c: &mut Checker, base: TyId, name: &str) -> bool {
 pub(super) fn property_names(c: &mut Checker, ty: TyId) -> Vec<&'static str> {
     let mut out: Vec<&'static str> = match c.types.get(ty) {
         Ty::Array(_) => vec!["length"],
-        Ty::Str | Ty::StrLit(_) => vec!["byteLength"],
+        Ty::Str | Ty::StrLit(_) => vec!["length", "byteLength"],
         Ty::Map(..) | Ty::Set(_) => vec!["size"],
         _ => Vec::new(),
     };
@@ -341,12 +335,32 @@ pub(super) fn method(c: &mut Checker, base: TyId, name: &str) -> Option<MethodSi
             let str_arr = c.types.array(STR);
             match name {
                 "chars" => mk(sig(vec![], str_arr), false),
-                "slice" => {
-                    let end = opt(c, INT);
-                    mk(sig(vec![(p(INT), "start"), (end, "end")], STR), false)
+                "slice" | "substring" | "substr" => {
+                    let (start, end) = (opt(c, INT), opt(c, INT));
+                    let second = if name == "substr" { "length" } else { "end" };
+                    mk(sig(vec![(start, "start"), (end, second)], STR), false)
                 }
-                "includes" | "startsWith" | "endsWith" => mk(sig(vec![(p(STR), "search")], BOOL), false),
-                "indexOf" => mk(sig(vec![(p(STR), "search")], INT), false),
+                "includes" | "startsWith" | "endsWith" => {
+                    let pos = opt(c, INT);
+                    mk(sig(vec![(p(STR), "search"), (pos, if name == "endsWith" { "endPosition" } else { "position" })], BOOL), false)
+                }
+                "indexOf" | "lastIndexOf" => {
+                    let pos = opt(c, INT);
+                    mk(sig(vec![(p(STR), "search"), (pos, "position")], INT), false)
+                }
+                "charAt" | "charCodeAt" => {
+                    let pos = opt(c, INT);
+                    mk(sig(vec![(pos, "index")], if name == "charAt" { STR } else { INT }), false)
+                }
+                "codePointAt" => {
+                    let r = c.types.optional(INT);
+                    mk(sig(vec![(p(INT), "index")], r), false)
+                }
+                "at" => {
+                    let r = c.types.optional(STR);
+                    mk(sig(vec![(p(INT), "index")], r), false)
+                }
+                "concat" => mk(CallSig { tparams: Vec::new(), params: Vec::new(), names: Vec::new(), rest: Some(STR), ret: STR, throws: NEVER }, false),
                 "split" => mk(sig(vec![(p(STR), "separator")], str_arr), false),
                 "trim" | "trimStart" | "trimEnd" | "toUpperCase" | "toLowerCase" | "toString" => mk(sig(vec![], STR), false),
                 "replace" | "replaceAll" => mk(sig(vec![(p(STR), "search"), (p(STR), "replacement")], STR), false),
@@ -492,6 +506,7 @@ impl<'a> Checker<'a> {
             "Promise" => vec!["resolve", "reject", "all", "race"],
             "BigInt" => vec!["asIntN", "asUintN"],
             "Number" => NUMBER_CONSTS.iter().chain(NUMBER_FNS).copied().collect(),
+            "String" => vec!["fromCharCode", "fromCodePoint"],
             _ => vec!["log", "error", "warn", "info"],
         };
         if known.contains(&n.as_str()) {
@@ -659,6 +674,23 @@ impl<'a> Checker<'a> {
                 }
                 let cs = CallSig { tparams: Vec::new(), params: vec![p(F64)], names: vec!["number".into()], rest: None, ret: BOOL, throws: NEVER };
                 self.call_sig(&cs, &format!("Number.{name}"), &[], args, exp, span)
+            }
+            "String" => {
+                if !matches!(name, "fromCharCode" | "fromCodePoint") {
+                    self.check_args_loose(args);
+                    self.unknown_ns_member(ns, name, &["fromCharCode", "fromCodePoint"], name_span);
+                    return ERROR;
+                }
+                // codes are numbers: integers, or floats (converted as JavaScript does)
+                for a in args {
+                    let t = self.expr(a.expr, Some(INT));
+                    if t != ERROR && !self.types.is_int(t) && !self.types.is_float(t) {
+                        let msg = format!("`String.{name}` takes numbers, found `{}`", self.show(t));
+                        let s = self.ast().expr(a.expr).span;
+                        self.report(Diagnostic::new("T0001", s, msg));
+                    }
+                }
+                STR
             }
             "BigInt" => {
                 if !matches!(name, "asIntN" | "asUintN") {

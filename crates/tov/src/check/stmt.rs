@@ -251,14 +251,8 @@ impl<'a> Checker<'a> {
                 let elem = match *self.types.get(t) {
                     Ty::Array(e) | Ty::Set(e) => e,
                     Ty::Error => ERROR,
-                    Ty::Str | Ty::StrLit(_) => {
-                        let text = self.src(ispan).to_string();
-                        self.report(
-                            Diagnostic::new("X0037", ispan, "iterate a string's characters explicitly")
-                                .fix(Applicability::Safe, format!("use `{text}.chars()`"), ispan, format!("{text}.chars()")),
-                        );
-                        STR
-                    }
+                    // a string's characters (code points), as in JavaScript
+                    Ty::Str | Ty::StrLit(_) => STR,
                     Ty::Map(..) => {
                         let text = self.src(ispan).to_string();
                         self.report(
