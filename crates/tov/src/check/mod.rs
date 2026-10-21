@@ -4,6 +4,7 @@ mod builtins;
 pub(crate) mod class;
 mod expr;
 pub mod facts;
+pub mod rewrite;
 mod spec;
 mod stmt;
 
@@ -335,6 +336,8 @@ pub struct Checker<'a> {
     /// Checking a value stored into an element of a sized-integer array (`bytes[i] = n`,
     /// `bytes.push(n)`): a number wraps into it, as into a JavaScript typed array.
     wrap_store: bool,
+    /// What the driver rewrites before checking again (see `rewrite`).
+    pub(crate) rewrites: rewrite::Rewrites,
 }
 
 /// `threads`: phase-B worker count (default: all cores). Results don't depend on it.
@@ -392,6 +395,7 @@ fn new_checker<'a>(modules: &'a [Module], interner: &'a Interner, sm: &'a Source
         spec_fields: HashMap::default(),
         call_spec: None,
         wrap_store: false,
+        rewrites: rewrite::Rewrites::default(),
     }
 }
 
@@ -448,6 +452,11 @@ pub fn check_for_build<'a>(modules: &'a [Module], interner: &'a mut Interner, sm
 }
 
 pub fn check_program(modules: &[Module], interner: &mut Interner, sm: &SourceMap, threads: Option<usize>) -> Vec<Diagnostic> {
+    check_program_rewrites(modules, interner, sm, threads).0
+}
+
+/// `check_program`, and what the driver may rewrite and check again (see `rewrite`).
+pub fn check_program_rewrites(modules: &[Module], interner: &mut Interner, sm: &SourceMap, threads: Option<usize>) -> (Vec<Diagnostic>, rewrite::Rewrites) {
     let syms = intern_syms(interner);
     let interner = &*interner;
     let mut floats: HashSet<spec::Site> = HashSet::default();
@@ -455,7 +464,7 @@ pub fn check_program(modules: &[Module], interner: &mut Interner, sm: &SourceMap
     let (mut on, mut rounds) = (true, 0);
     loop {
         rounds += 1;
-        let (out, used, hits, throws) = check_program_once(modules, interner, sm, threads, syms, Arc::new(spec::Spec { on, floats: floats.clone(), throwing: throwing.clone() }));
+        let (out, used, hits, throws, rw) = check_program_once(modules, interner, sm, threads, syms, Arc::new(spec::Spec { on, floats: floats.clone(), throwing: throwing.clone() }));
         if spec::more_throwing(&mut throwing, &throws) {
             continue;
         }
@@ -466,13 +475,13 @@ pub fn check_program(modules: &[Module], interner: &mut Interner, sm: &SourceMap
             on = again;
             continue;
         }
-        return out;
+        return (out, rw);
     }
 }
 
 /// One check of the whole program; also returns whether speculation was used and its hits.
 #[allow(clippy::type_complexity)]
-fn check_program_once(modules: &[Module], interner: &Interner, sm: &SourceMap, threads: Option<usize>, syms: Syms, spec: Arc<spec::Spec>) -> (Vec<Diagnostic>, bool, Vec<spec::Site>, Vec<(u32, StmtId)>) {
+fn check_program_once(modules: &[Module], interner: &Interner, sm: &SourceMap, threads: Option<usize>, syms: Syms, spec: Arc<spec::Spec>) -> (Vec<Diagnostic>, bool, Vec<spec::Site>, Vec<(u32, StmtId)>, rewrite::Rewrites) {
     let mut c = new_checker(modules, interner, sm, syms, spec);
     c.collect();
     c.resolve_imports();
@@ -490,6 +499,7 @@ fn check_program_once(modules: &[Module], interner: &Interner, sm: &SourceMap, t
     let mut used = c.spec_used;
     let mut hits = std::mem::take(&mut c.spec_hits);
     let mut throws = std::mem::take(&mut c.throw_hits);
+    let mut rw = std::mem::take(&mut c.rewrites);
     // Freeze phase-A results.
     c.checked_bodies = Arc::new(std::mem::take(&mut c.checked_local));
     c.checked_members_base = Arc::new(std::mem::take(&mut c.checked_members));
@@ -517,9 +527,9 @@ fn check_program_once(modules: &[Module], interner: &Interner, sm: &SourceMap, t
         }
         let mut d = std::mem::take(&mut w.done);
         d.extend(w.diags);
-        (d, w.spec_used, w.spec_hits, w.throw_hits)
+        (d, w.spec_used, w.spec_hits, w.throw_hits, w.rewrites)
     };
-    let results: Vec<(Vec<Diagnostic>, bool, Vec<spec::Site>, Vec<(u32, StmtId)>)> = if threads == 1 {
+    let results: Vec<(Vec<Diagnostic>, bool, Vec<spec::Site>, Vec<(u32, StmtId)>, rewrite::Rewrites)> = if threads == 1 {
         vec![run(base.clone())]
     } else {
         std::thread::scope(|scope| {
@@ -533,18 +543,19 @@ fn check_program_once(modules: &[Module], interner: &Interner, sm: &SourceMap, t
             handles.into_iter().map(|h| h.join().expect("checker thread panicked")).collect()
         })
     };
-    for (r, u, h, t) in results {
+    for (r, u, h, t, w) in results {
         out.extend(r);
         used |= u;
         hits.extend(h);
         throws.extend(t);
+        rw.extend(w);
     }
     if std::env::var("TOV_TRACE").is_ok() {
         eprintln!("check: phase A {:?}, phase B {:?} ({threads} threads)", tb - ta, tb.elapsed());
     }
     out.sort_by(|a, b| (a.span.file, a.span.start, a.code).cmp(&(b.span.file, b.span.start, b.code)));
     out.dedup_by(|a, b| a.span == b.span && a.code == b.code && a.message == b.message);
-    (out, used, hits, throws)
+    (out, used, hits, throws, rw)
 }
 
 impl<'a> Checker<'a> {
@@ -617,6 +628,7 @@ impl<'a> Checker<'a> {
             spec_fields: HashMap::default(),
             call_spec: None,
             wrap_store: false,
+            rewrites: rewrite::Rewrites::default(),
         }
     }
 

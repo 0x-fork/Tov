@@ -50,13 +50,19 @@ pub fn check_paths(paths: &[PathBuf], base: &Path) -> Result<CheckResult, String
 pub fn check_paths_with(paths: &[PathBuf], base: &Path, threads: Option<usize>) -> Result<CheckResult, String> {
     let t0 = std::time::Instant::now();
     let _ = &t0;
-    let Loaded { sm, mut interner, modules, mut diags } = load(paths, base)?;
+    let Loaded { sm, mut interner, mut modules, mut diags } = load(paths, base)?;
     let t1 = std::time::Instant::now();
     // Profiling aid: TOV_REPEAT_CHECK=n runs the checker n extra times.
     for _ in 0..std::env::var("TOV_REPEAT_CHECK").ok().and_then(|v| v.parse::<u32>().ok()).unwrap_or(0) {
         check::check_program(&modules, &mut interner, &sm, threads);
     }
-    diags.extend(check::check_program(&modules, &mut interner, &sm, threads));
+    let (found, rw) = check::check_program_rewrites(&modules, &mut interner, &sm, threads);
+    if found.is_empty() || rw.is_empty() {
+        diags.extend(found);
+    } else {
+        rewrite_rounds(&mut modules, &mut interner, &sm, rw);
+        diags.extend(check::check_program(&modules, &mut interner, &sm, threads));
+    }
     let t2 = std::time::Instant::now();
     diags.sort_by(|a, b| (a.span.file, a.span.start, a.code).cmp(&(b.span.file, b.span.start, b.code)));
     diags.dedup_by(|a, b| a.span == b.span && a.code == b.code && a.message == b.message);
@@ -64,6 +70,21 @@ pub fn check_paths_with(paths: &[PathBuf], base: &Path, threads: Option<usize>) 
     let files = modules.iter().filter(|m| !m.std).count();
     let lines = lines - modules.iter().filter(|m| m.std).map(|m| sm.get(m.file).line_count()).sum::<usize>();
     Ok(CheckResult { files, sm, diags, lines, phases: (t1 - t0, t2 - t1) })
+}
+
+/// Applies what a check found to rewrite (see `check::rewrite`), checking again until there's
+/// nothing more (a few rounds: each can reach callers one level further).
+pub fn rewrite_rounds(modules: &mut [Module], interner: &mut crate::intern::Interner, sm: &SourceMap, mut rw: check::rewrite::Rewrites) {
+    for _ in 0..4 {
+        if !check::rewrite::apply(modules, &rw) {
+            return;
+        }
+        let (found, next) = check::check_program_rewrites(modules, interner, sm, None);
+        if found.is_empty() || next.is_empty() {
+            return;
+        }
+        rw = next;
+    }
 }
 
 /// Parsed program: every reachable module, with parse diagnostics.

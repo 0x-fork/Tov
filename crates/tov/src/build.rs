@@ -243,14 +243,23 @@ pub fn build(paths: &[PathBuf], base: &Path, opts: &Options) -> Result<Built, Bu
     prune_cache();
     let t0 = Instant::now();
     let loaded = driver::load(paths, base).map_err(BuildError::Message)?;
-    let driver::Loaded { sm, mut interner, modules, diags } = loaded;
+    let driver::Loaded { sm, mut interner, mut modules, diags } = loaded;
     let sources = source_paths(&sm);
     if !diags.is_empty() {
         return Err(BuildError::Diagnostics(sm, diags));
     }
     // npm packages resolve from the entry file's directory
     let npm_root = modules.iter().find(|m| m.entry).and_then(|m| m.path.parent()).map(Path::to_path_buf).unwrap_or_else(|| base.to_path_buf());
-    let (diags, mut checker) = check::check_for_build(&modules, &mut interner, &sm);
+    let first = check::check_for_build(&modules, &mut interner, &sm);
+    let (diags, mut checker) = if first.0.is_empty() || first.1.rewrites.is_empty() {
+        first
+    } else {
+        // TypeScript that changes parameters in place: rewritten as `inout` and checked again
+        let rw = first.1.rewrites.clone();
+        drop(first);
+        driver::rewrite_rounds(&mut modules, &mut interner, &sm, rw);
+        check::check_for_build(&modules, &mut interner, &sm)
+    };
     if !diags.is_empty() {
         drop(checker);
         return Err(BuildError::Diagnostics(sm, diags));

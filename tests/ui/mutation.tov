@@ -49,3 +49,11 @@ function fieldAlias(h: Holder) {
   const xs = h.items
   xs.push(1)
 }
+
+// Changed in place and also reassigned: TypeScript would change the caller's array, then rebind
+// only the parameter, so it stays an error.
+function rebinds(xs: int[]) {
+  xs.push(1)
+  xs = []
+  console.log(xs.length)
+}

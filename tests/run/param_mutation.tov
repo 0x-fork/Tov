@@ -1,0 +1,38 @@
+// Parameters changed in place change the caller's value, as in TypeScript.
+type Body = { x: number, vx: number }
+const world: Body[] = [{ x: 0, vx: 1 }, { x: 5, vx: -1 }]
+function step(bodies: Body[], dt: number) {
+  for (let i = 0; i < bodies.length; i++) bodies[i]!.x += bodies[i]!.vx * dt
+}
+function addAll(out: number[], xs: number[]) {
+  for (const x of xs) out.push(x)
+}
+function bump(b: Body) { b.vx *= 2 }
+function fillTo(xs: number[], n: number) {
+  if (xs.length >= n) return
+  xs.push(xs.length)
+  fillTo(xs, n)
+}
+class Sim {
+  bodies: Body[] = [{ x: 1, vx: 1 }]
+  run(): void { step(this.bodies, 2) }
+  scale(xs: number[], k: number): void { for (let i = 0; i < xs.length; i++) xs[i] = xs[i]! * k }
+}
+function main() {
+  step(world, 0.5)
+  const local: Body[] = [{ x: 1, vx: 2 }]
+  step(local, 1)
+  const out: number[] = []
+  addAll(out, [1, 2])
+  addAll(out, [3])
+  const b: Body = { x: 0, vx: 3 }
+  bump(b)
+  bump(local[0]!)
+  const xs: number[] = []
+  fillTo(xs, 4)
+  const s = new Sim()
+  s.run()
+  const ys = [1, 2, 3]
+  s.scale(ys, 10)
+  console.log(world[0]!.x, world[1]!.x, local[0]!.x, local[0]!.vx, out.join(","), b.vx, xs.join(","), s.bodies[0]!.x, ys.join(","))
+}

@@ -96,7 +96,7 @@ Status tags: **[M0]** checked today · **[Mn]** planned for milestone n.
 
 ## 6. Values, mutation, `inout` **[M0]**
 - `let` bindings can be reassigned; `const` bindings cannot. Both can be mutated in place (`xs.push(1)`, `p.x = 2`) — same as TS.
-- Parameters are read-only views of the caller's value. Mutating one is an error. To mutate the caller's value declare `inout` and pass a `let` variable (or a field/element of one) with `&` — the callee may replace the whole value:
+- Parameters are read-only views of the caller's value. A function that changes a parameter in place (and never reassigns it) changes the caller's value, as TypeScript's shared objects would: the parameter is `inout`, and arguments are passed as if with `&` (a `const` passed this way becomes a `let`). Written explicitly, `inout` lets the callee replace the whole value:
   ```ts
   function addOne(inout xs: int[]) { xs.push(1) }
   addOne(&items)

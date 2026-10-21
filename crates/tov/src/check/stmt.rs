@@ -768,7 +768,7 @@ fn has_break(ast: &Ast, s: StmtId) -> bool {
     }
 }
 
-fn collect_assigned_stmt(ast: &Ast, s: StmtId, out: &mut Vec<Sym>) {
+pub(super) fn collect_assigned_stmt(ast: &Ast, s: StmtId, out: &mut Vec<Sym>) {
     match &ast.stmt(s).kind {
         StmtKind::Expr(e) => collect_assigned_expr(ast, *e, out),
         StmtKind::Let { init: Some(e), .. } => collect_assigned_expr(ast, *e, out),

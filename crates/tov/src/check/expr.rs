@@ -1102,6 +1102,8 @@ impl<'a> Checker<'a> {
                 let n = self.name(name).to_string();
                 match kind {
                     LocalKind::Param => {
+                        // (TypeScript changes the caller's value: make it `inout`, see `rewrite`)
+                        self.rewrites.params.push((self.cur, lspan.start));
                         self.report(
                             Diagnostic::new("V0101", span, format!("can't modify parameter `{n}`: parameters are read-only"))
                                 .note("to change the caller's value", format!("declare `inout {n}` and call with `&arg`"))
@@ -1156,6 +1158,10 @@ impl<'a> Checker<'a> {
                     let declared = self.local(id).ty;
                     let n = self.name(*sym).to_string();
                     if kind == LocalKind::Const {
+                        if _for_ref {
+                            let start = self.local(id).span.start;
+                            self.rewrites.consts.push((self.cur, start));
+                        }
                         let mut d = if _for_ref {
                             Diagnostic::new("V0001", span, format!("`{n}` is a `const`, so it can't be passed as `inout`"))
                                 .note("why", "the callee may replace the whole value, which would change a constant")
@@ -1181,6 +1187,9 @@ impl<'a> Checker<'a> {
                     Some(Decl::Const(cm, ci)) => {
                         let ItemKind::Const { mutable, name_span, .. } = &self.modules[cm as usize].ast.items[ci as usize].kind else { return None };
                         if !*mutable || cm != self.cur {
+                            if _for_ref && cm == self.cur {
+                                self.rewrites.items.push((cm, ci));
+                            }
                             let mut d = Diagnostic::new("V0102", span, format!("can't reassign module constant `{n}`"));
                             if cm == self.cur {
                                 let kw = self.modules[cm as usize].ast.items[ci as usize].span;
@@ -3012,6 +3021,9 @@ impl<'a> Checker<'a> {
             let pname = cs.names.get(i).cloned().unwrap_or_else(|| "items".to_string());
             match (p.inout, a.by_ref) {
                 (true, None) => {
+                    if super::stmt::place_path(self.ast(), a.expr) {
+                        self.rewrites.args.push((self.cur, a.expr));
+                    }
                     let text = self.src(aspan).to_string();
                     self.report(
                         Diagnostic::new("V0110", aspan, format!("parameter `{pname}` of `{desc}` is `inout`; pass the argument with `&`"))
