@@ -1140,10 +1140,24 @@ impl<'a> Parser<'a> {
                         next = -(v as i64) + 1;
                     }
                     ExprKind::Str(s) => strings.push(*s),
-                    _ => {
-                        let es = self.expr_span(e);
-                        self.err("X0005", es, "an enum member's value must be a number or a string");
-                    }
+                    // `1 << 2`, `Read | Write`: worked out here, as TypeScript does
+                    _ => match self.enum_const(e, &members, name) {
+                        Some(v) => {
+                            next = v + 1;
+                            let es = self.expr_span(e);
+                            let lit = self.mk_expr(ExprKind::Int(v.unsigned_abs()), es);
+                            let lit = if v < 0 { self.mk_expr(ExprKind::Unary(UnOp::Neg, lit), es) } else { lit };
+                            members.push((m, mspan, lit));
+                            if !self.eat(Tok::Comma) {
+                                break;
+                            }
+                            continue;
+                        }
+                        None => {
+                            let es = self.expr_span(e);
+                            self.err("X0005", es, "an enum member's value must be a number, a string or a constant expression of the members before it");
+                        }
+                    },
                 }
                 e
             } else {
@@ -1180,6 +1194,40 @@ impl<'a> Parser<'a> {
         let obj = members.iter().map(|&(m, mspan, value)| ObjField { name: m, name_span: mspan, value, quoted: false }).collect();
         let init = self.mk_expr(ExprKind::Object(obj), span);
         self.ast.items.push(Item { kind: ItemKind::Const { name, name_span, ty: Some(rec), init, mutable: false }, span, exported });
+    }
+
+    /// An enum member's constant value: integers, `+ - * / % << >> >>> & | ^ ~`, and the
+    /// enum's earlier members (`Read`, `Flags.Read`).
+    fn enum_const(&self, e: ExprId, members: &[(Sym, Span, ExprId)], enum_name: Sym) -> Option<i64> {
+        let ast = &self.ast;
+        let member = |name: Sym| members.iter().find(|m| m.0 == name).and_then(|m| self.enum_const(m.2, &members[..members.iter().position(|x| x.0 == name).unwrap()], enum_name));
+        Some(match &ast.exprs[e as usize].kind {
+            ExprKind::Int(v) => *v as i64,
+            ExprKind::Paren(x) => self.enum_const(*x, members, enum_name)?,
+            ExprKind::Unary(UnOp::Neg, x) => -self.enum_const(*x, members, enum_name)?,
+            ExprKind::Unary(UnOp::BitNot, x) => !(self.enum_const(*x, members, enum_name)? as i32) as i64,
+            ExprKind::Ident(n) => member(*n)?,
+            ExprKind::Member { obj, name, .. } if matches!(ast.exprs[*obj as usize].kind, ExprKind::Ident(o) if o == enum_name) => member(*name)?,
+            ExprKind::Binary(op, a, b) => {
+                let (a, b) = (self.enum_const(*a, members, enum_name)?, self.enum_const(*b, members, enum_name)?);
+                let (x, y) = (a as i32, b as i32);
+                match op {
+                    BinOp::Add => a.checked_add(b)?,
+                    BinOp::Sub => a.checked_sub(b)?,
+                    BinOp::Mul => a.checked_mul(b)?,
+                    BinOp::Div if b != 0 && a % b == 0 => a / b,
+                    BinOp::Rem if b != 0 => a % b,
+                    BinOp::Shl => x.wrapping_shl(y as u32 & 31) as i64,
+                    BinOp::Shr => x.wrapping_shr(y as u32 & 31) as i64,
+                    BinOp::UShr => ((x as u32) >> (y as u32 & 31)) as i64,
+                    BinOp::BitAnd => (x & y) as i64,
+                    BinOp::BitOr => (x | y) as i64,
+                    BinOp::BitXor => (x ^ y) as i64,
+                    _ => return None,
+                }
+            }
+            _ => return None,
+        })
     }
 
     fn test_item(&mut self, start: Span) {
