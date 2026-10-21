@@ -326,6 +326,11 @@ pub(super) fn method(c: &mut Checker, base: TyId, name: &str) -> Option<MethodSi
                     let f = c.types.func(vec![p(ut), p(e), FnParam { ty: INT, inout: false, optional: true }], ut);
                     mk(CallSig { tparams: vec![u], params: vec![p(f), p(ut)], names: vec!["fn".into(), "initial".into()], rest: None, ret: ut, throws: NEVER }, false)
                 }
+                // `xs.reduce(f)`: from the first element (see `call`)
+                "reduce/1" => {
+                    let f = c.types.func(vec![p(e), p(e), FnParam { ty: INT, inout: false, optional: true }], e);
+                    mk(sig(vec![(p(f), "fn")], e), false)
+                }
                 "some" | "every" => mk(sig(vec![(p(pred), "predicate")], BOOL), false),
                 "find" => mk(sig(vec![(p(pred), "predicate")], opt_e), false),
                 "findIndex" => mk(sig(vec![(p(pred), "predicate")], INT), false),

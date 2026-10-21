@@ -1044,14 +1044,25 @@ impl<'c, 'a> Gen<'c, 'a> {
             "reduce" => {
                 let cb = self.prepare_callback(args[0].expr);
                 let acc_ty = ty;
-                let init = self.expr(args[1].expr);
-                let init = self.coerce(init, acc_ty);
-                let code = self.consume(init);
                 let act = self.ctype(acc_ty);
                 let acc = self.fresh("acc");
-                self.line(format!("{act} {acc} = {code};"));
+                // (no initial value: the first element; none at all throws in JavaScript)
+                let from = if let Some(a) = args.get(1) {
+                    let init = self.expr(a.expr);
+                    let init = self.coerce(init, acc_ty);
+                    let code = self.consume(init);
+                    self.line(format!("{act} {acc} = {code};"));
+                    0
+                } else {
+                    let loc = self.loc(span);
+                    self.line(format!("if (tv_arr_len({}) == 0) tv_trap(\"reduce of an empty array with no initial value\", {loc});", arr.code));
+                    let first = Val::plain(format!("((({act} *)tv_arr_data({}))[0])", arr.code), acc_ty);
+                    let code = self.consume(first);
+                    self.line(format!("{act} {acc} = {code};"));
+                    1
+                };
                 let i = self.fresh("i");
-                self.open_block(&format!("for (tv_int {i} = 0; {i} < tv_arr_len({}); {i}++) {{", arr.code));
+                self.open_block(&format!("for (tv_int {i} = {from}; {i} < tv_arr_len({}); {i}++) {{", arr.code));
                 let r = self.invoke(&cb, vec![Val::plain(acc.clone(), acc_ty), elem(&i), Val::plain(i.clone(), INT)]);
                 let r = self.coerce(r, acc_ty);
                 let code = self.consume(r);

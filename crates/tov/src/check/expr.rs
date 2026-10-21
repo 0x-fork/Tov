@@ -2802,7 +2802,7 @@ impl<'a> Checker<'a> {
                     self.rec_call(e, Callee::Value);
                     self.pending_call = Some(e);
                     self.call_value(ft, &mtext, args, exp, span)
-                } else if let Some(ms) = builtins::method(self, base, &mtext) {
+                } else if let Some(ms) = builtins::method(self, base, if mtext == "reduce" && args.len() == 1 && matches!(self.types.get(base), Ty::Array(_)) { "reduce/1" } else { &mtext }) {
                     if ms.mutates {
                         self.check_mutable_root_ext(obj, span, true);
                     }
