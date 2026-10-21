@@ -1,0 +1,7 @@
+[ 1, 2 ]
+true bad: x
+1
+caught bad: y
+half ok 2 ok 0.5
+fail threw too big ok 1
+ok 3

@@ -658,6 +658,9 @@ impl<'a> Checker<'a> {
             return;
         }
         if !can_throw {
+            if let Some(t) = self.fcx.last().and_then(|f| f.frames.last()).and_then(|f| f.exp_fn) {
+                self.blame_fn_type(t);
+            }
             let what = callee.map(|c| format!("`{c}` can throw `{shown}`")).unwrap_or_else(|| format!("this throws `{shown}`"));
             self.report(
                 Diagnostic::new("T0832", span, format!("{what}, but this closure's type doesn't let it pass errors on"))
@@ -2357,6 +2360,7 @@ impl<'a> Checker<'a> {
         }
         let wild = exp_throws == ERROR;
         let exp_throws = declared_throws.unwrap_or(exp_throws);
+        let exp_fn_ty = exp.and_then(|e| self.flat_members(e).into_iter().find(|&m| matches!(self.types.get(m), Ty::Func(..))));
         let fcx = self.fcx.last_mut().unwrap();
         // A test's body can throw (an uncaught error fails the test); other closures only when
         // their function type says so.
@@ -2367,6 +2371,7 @@ impl<'a> Checker<'a> {
         let decl = if exp_throws != NEVER && exp_throws != ERROR { Some(exp_throws) } else { None };
         let mut frame = Frame::new(declared_ret, None, can_throw, decl);
         frame.is_async = is_async;
+        frame.exp_fn = exp_fn_ty;
         fcx.frames.push(frame);
         fcx.scopes.push(Vec::new());
         // (an unannotated parameter or result takes the sites of the context's function type)
@@ -3193,6 +3198,10 @@ impl<'a> Checker<'a> {
     fn js_read_throw(&mut self, e: ExprId, span: Span) {
         let Some(frame) = self.fcx.last().and_then(|f| f.frames.last()) else { return };
         if frame.try_frames.is_empty() && (!frame.can_throw || frame.module_init) {
+            // (a closure's function type may throw then, as in TypeScript: checked again)
+            if let Some(t) = frame.exp_fn.filter(|_| !frame.module_init) {
+                self.blame_fn_type(t);
+            }
             return;
         }
         let err = self.builtin_class("JsError");

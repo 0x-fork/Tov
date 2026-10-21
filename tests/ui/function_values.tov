@@ -50,7 +50,8 @@ function countdownDeclared(n: int): int throws Big {
   return again(n - 1)
 }
 
-// a throwing function passed where a non-throwing function type is expected: refused
+// a throwing function passed where the function type says nothing about throwing: that type then
+// throws, as in TypeScript
 function apply(f: (x: int) => int, x: int): int {
   return f(x)
 }

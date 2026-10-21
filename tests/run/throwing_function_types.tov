@@ -1,0 +1,51 @@
+// Function types may throw, as in TypeScript: a throwing function or closure goes where a
+// function type without `throws` is expected, and calls through it pass the error on.
+class ParseError extends Error {}
+
+function parse(s: string): number {
+  const n = Number(s)
+  if (Number.isNaN(n)) throw new ParseError(`bad: ${s}`)
+  return n
+}
+
+function apply(xs: string[], f: (s: string) => number): number[] {
+  return xs.map(f)
+}
+
+type Handler = (x: number) => number
+
+const handlers: Record<string, Handler> = {
+  half: (x) => x / 2,
+  fail: (x) => {
+    if (x > 1) throw new Error("too big")
+    return x
+  },
+}
+
+function run(h: Handler, x: number): string {
+  try {
+    return `ok ${h(x)}`
+  } catch (e) {
+    return `threw ${(e as Error).message}`
+  }
+}
+
+function main() {
+  console.log(apply(["1", "2"], parse))
+  try {
+    apply(["1", "x"], parse)
+  } catch (e) {
+    console.log(e instanceof ParseError, (e as Error).message)
+  }
+  const fs: Array<() => number> = [() => 1, () => parse("y")]
+  for (const f of fs) {
+    try {
+      console.log(f())
+    } catch (e) {
+      console.log("caught", (e as Error).message)
+    }
+  }
+  for (const k of ["half", "fail"]) console.log(k, run(handlers[k]!, 4), run(handlers[k]!, 1))
+  const g: (s: string) => number = parse
+  console.log(run((x) => g(String(x)) + 1, 2))
+}

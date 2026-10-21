@@ -177,6 +177,8 @@ impl<'a> Checker<'a> {
                 }
             }
             (Ty::Array(a), Ty::Array(b)) => self.spec_diff(a, b, out, depth + 1),
+            // a function that throws where one that doesn't is expected
+            (Ty::Func(_, _, ta), Ty::Func(_, _, tb)) if ta != NEVER && tb == NEVER => self.blame_fn_type(e),
             (Ty::Map(k1, v1), Ty::Map(k2, v2)) => {
                 self.spec_diff(k1, k2, out, depth + 1);
                 self.spec_diff(v1, v2, out, depth + 1);
@@ -218,6 +220,18 @@ impl<'a> Checker<'a> {
                 }
             }
             _ => {}
+        }
+    }
+
+    /// A function that throws went where the function type `t` (written without `throws`) is
+    /// expected: the annotations that wrote it may throw, as in TypeScript (checked again).
+    pub(super) fn blame_fn_type(&mut self, t: TyId) {
+        let t = self.types.without_undefined(t);
+        for m in self.flat_members(t) {
+            if let Some(ks) = self.fn_sites.get(&m).or_else(|| self.fn_sites_base.get(&m)) {
+                let ks = ks.clone();
+                self.global_hits.extend(ks);
+            }
         }
     }
 
@@ -504,6 +518,12 @@ impl<'a> Checker<'a> {
 /// (module, item).
 pub(crate) fn field_key(class: u32, member: u32) -> (u32, u32) {
     (u32::MAX - class, member)
+}
+
+/// A function type annotation's key among `float_globals` (written without `throws`, given a
+/// function that throws: it throws `Error`): (2^29 + module, the type node).
+pub(crate) fn fn_type_key(m: u32, te: ast::TypeId) -> (u32, u32) {
+    (0x2000_0000 + m, te)
 }
 
 /// An integer literal's key among `float_globals` (a field of an inferred record literal,

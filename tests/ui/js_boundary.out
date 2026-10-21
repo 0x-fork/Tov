@@ -1,18 +1,13 @@
-error[T0832] js_boundary.tov:34:42: `x.name` can throw `JsError`, but this closure's type doesn't let it pass errors on
-   34 |   const call: (x: Js) => Js = (x: Js) => x.name()
-  instead: catch it inside the closure: `try { ... } catch (e) { ... }`
-  or: let the function type throw: `(...) => T throws JsError`
-
-error[T0833] js_boundary.tov:39:10: this can throw `JsError`, but the function declares `throws NotFound`
-   39 |   return lib.params
+error[T0833] js_boundary.tov:40:10: this can throw `JsError`, but the function declares `throws NotFound`
+   40 |   return lib.params
   instead: widen the declaration (`throws NotFound | JsError`), or catch it here
 
-error[T0901] js_boundary.tov:44:11: a `(int) => Js` can't be passed to JavaScript
-   44 |   lib.run((n: int) => n)
+error[T0901] js_boundary.tov:45:11: a `(int) => Js` can't be passed to JavaScript
+   45 |   lib.run((n: int) => n)
   why: values are converted for JavaScript: numbers, strings, booleans, `undefined`, arrays, records, `Js` values, and functions taking `Js`
 
-error[T0901] js_boundary.tov:45:11: a `(Js) => Map<string, int>` can't be passed to JavaScript
-   45 |   lib.run((ctx: Js) => new Map<string, int>())
+error[T0901] js_boundary.tov:46:11: a `(Js) => Map<string, int>` can't be passed to JavaScript
+   46 |   lib.run((ctx: Js) => new Map<string, int>())
   why: values are converted for JavaScript: numbers, strings, booleans, `undefined`, arrays, records, `Js` values, and functions taking `Js`
 
-4 error(s)
+3 error(s)

@@ -1,5 +1,5 @@
-// An arrow that declares `throws` is a throwing function type: it does not fit
-// a parameter whose type doesn't let it throw.
+// An arrow that declares `throws` fits a parameter whose function type says nothing about
+// throwing: that type then throws, as in TypeScript.
 function run(f: () => int): int {
   return f()
 }

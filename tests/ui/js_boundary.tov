@@ -27,7 +27,8 @@ export function accepted(lib: Js): void throws JsError {
   const n = lib["name"]
 }
 
-// where errors can't pass on, a read stays a trap (nothing to report), while a call is refused
+// in a closure whose function type says nothing about throwing, a read or a call that can throw
+// makes that type throw, as in TypeScript
 const maxListeners = EventEmitter.defaultMaxListeners
 export function inClosures(lib: Js): void {
   const read: (x: Js) => Js = (x: Js) => x.name

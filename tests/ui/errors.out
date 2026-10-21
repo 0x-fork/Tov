@@ -2,13 +2,8 @@ error[T0833] errors.tov:18:14: this can throw `Timeout`, but the function declar
    18 |   return try connect("x")
   instead: widen the declaration (`throws Refused | Timeout`), or catch it here
 
-error[T0832] errors.tov:33:30: `connect` can throw `Timeout`, but this closure's type doesn't let it pass errors on
-   33 |   return each(xs, (h) => try connect(h))
-  instead: catch it inside the closure: `try { ... } catch (e) { ... }`
-  or: let the function type throw: `(...) => T throws Timeout`
-
 error[T0834] errors.tov:37:9: can only throw `Error` objects, found `"just a string"`
    37 |   throw "just a string"
   fix[maybe]: throw an Error: `new Error("just a string")`
 
-3 error(s)
+2 error(s)

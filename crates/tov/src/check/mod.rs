@@ -176,11 +176,13 @@ struct Frame {
     module_init: bool,
     /// An async function or arrow (or an async script's top level): `await` is allowed.
     is_async: bool,
+    /// A closure's expected function type (for `spec::blame_fn_type` when it throws).
+    exp_fn: Option<TyId>,
 }
 
 impl Frame {
     fn new(ret: Option<TyId>, name: Option<Sym>, can_throw: bool, throws_decl: Option<TyId>) -> Frame {
-        Frame { ret, ret_sites: Vec::new(), returns: Vec::new(), loops: 0, switches: 0, labels: Vec::new(), name, can_throw, throws_decl, thrown: Vec::new(), try_frames: Vec::new(), try_expr: 0, module_init: false, is_async: false }
+        Frame { ret, ret_sites: Vec::new(), returns: Vec::new(), loops: 0, switches: 0, labels: Vec::new(), name, can_throw, throws_decl, thrown: Vec::new(), try_frames: Vec::new(), try_expr: 0, module_init: false, is_async: false, exp_fn: None }
     }
 }
 
@@ -325,6 +327,10 @@ pub struct Checker<'a> {
     global_hits: Vec<(u32, u32)>,
     /// Inferred records' `int` fields from integer literals (`{ n: 0 }`): their `lit_key`s.
     lit_fields: HashMap<(TyId, Sym), Vec<(u32, u32)>>,
+    /// Function types written without `throws`: the `fn_type_key`s of the annotations that gave
+    /// each (frozen phase-A base, then this checker's own).
+    fn_sites_base: Arc<HashMap<TyId, Vec<(u32, u32)>>>,
+    fn_sites: HashMap<TyId, Vec<(u32, u32)>>,
     spec_flow: Vec<Vec<spec::Site>>,
     spec_srcs_base: Arc<HashMap<Span, Vec<spec::Site>>>,
     spec_srcs: HashMap<Span, Vec<spec::Site>>,
@@ -407,6 +413,8 @@ fn new_checker<'a>(modules: &'a [Module], interner: &'a Interner, sm: &'a Source
         throw_hits: Vec::new(),
         global_hits: Vec::new(),
         lit_fields: HashMap::default(),
+        fn_sites_base: Arc::default(),
+        fn_sites: HashMap::default(),
         spec_flow: Vec::new(),
         spec_srcs_base: Arc::default(),
         spec_srcs: HashMap::default(),
@@ -536,6 +544,7 @@ fn check_program_once(modules: &[Module], interner: &Interner, sm: &SourceMap, t
     c.gparams_base = Arc::new(std::mem::take(&mut c.gparams));
     c.param_names_base = Arc::new(std::mem::take(&mut c.param_names));
     c.spec_fields_base = Arc::new(std::mem::take(&mut c.spec_fields));
+    c.fn_sites_base = Arc::new(std::mem::take(&mut c.fn_sites));
     c.spec_srcs_base = Arc::new(std::mem::take(&mut c.spec_srcs));
     let base = Arc::new(std::mem::take(&mut c.types));
     let tb = std::time::Instant::now();
@@ -654,6 +663,8 @@ impl<'a> Checker<'a> {
             throw_hits: Vec::new(),
             global_hits: Vec::new(),
             lit_fields: HashMap::default(),
+            fn_sites_base: self.fn_sites_base.clone(),
+            fn_sites: HashMap::default(),
             spec_flow: Vec::new(),
             spec_srcs_base: self.spec_srcs_base.clone(),
             spec_srcs: HashMap::default(),
@@ -682,6 +693,7 @@ impl<'a> Checker<'a> {
         self.checked_members.clear();
         self.spec_fields.clear();
         self.lit_fields.clear();
+        self.fn_sites.clear();
     }
 
     #[inline]
@@ -1894,6 +1906,9 @@ impl<'a> Checker<'a> {
                     })
                     .collect();
                 let r = self.resolve_type(*ret, tscope);
+                // (written without `throws`: as TypeScript's, it may throw once a function that
+                // does is given to it, see `spec::blame_fn_type`)
+                let key = spec::fn_type_key(self.cur, te);
                 let th = match throws {
                     Some(t) => {
                         let th = self.resolve_type(*t, tscope);
@@ -1901,9 +1916,14 @@ impl<'a> Checker<'a> {
                         self.check_throws_type(th, span);
                         th
                     }
+                    None if self.spec.float_globals.contains(&key) => self.error_class(),
                     None => NEVER,
                 };
-                self.types.func_throws(ps, r, th)
+                let t = self.types.func_throws(ps, r, th);
+                if throws.is_none() && th == NEVER {
+                    self.fn_sites.entry(t).or_default().push(key);
+                }
+                t
             }
             TypeExprKind::Named { ns: None, name, args, .. } if *name == self.syms.number && args.is_empty() && self.spec_int(te) && !tscope.iter().any(|(s, _)| s == name) => {
                 self.spec_used = true;
