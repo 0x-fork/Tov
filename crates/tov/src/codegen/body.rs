@@ -4548,6 +4548,11 @@ impl<'c, 'a> Gen<'c, 'a> {
                     }
                 }
             }
+            ExprKind::Call { callee, args, .. } if args.len() == 1 && matches!(ast.expr(*callee).kind, ExprKind::Member { obj, name, optional: false, .. } if self.sym(name) == "get" && self.is_map(obj)) => {
+                let ExprKind::Member { obj, .. } = ast.expr(*callee).kind else { unreachable!() };
+                self.map_value_place(obj, args[0].expr, span)
+            }
+            ExprKind::Index { obj, index, .. } if self.is_map(*obj) => self.map_value_place(*obj, *index, span),
             ExprKind::Index { obj, index, .. } => {
                 let p = self.place(*obj);
                 let narrowed = self.ty(*obj);
@@ -4586,6 +4591,36 @@ impl<'c, 'a> Gen<'c, 'a> {
                 Place { lv: v.code, ty: v.ty, weak: false }
             }
         }
+    }
+
+    fn is_map(&mut self, e: ExprId) -> bool {
+        let t = self.ty(e);
+        let t = self.c.types.without_undefined(t);
+        matches!(self.tget(t), Ty::Map(..))
+    }
+
+    /// `m.get(k)!` / `m[k]` to change in place: the value's slot in the map (made unique), which
+    /// must be there (TypeScript would throw reading a member of `undefined`).
+    fn map_value_place(&mut self, obj: ExprId, key: ExprId, span: Span) -> Place {
+        let p = self.place(obj);
+        let narrowed = self.ty(obj);
+        let p = self.project_place(p, narrowed);
+        let Ty::Map(k, v) = self.tget(p.ty) else {
+            self.unsupported(span, "changing this map's value");
+            return Place { lv: "tv__dummy".into(), ty: ERROR, weak: false };
+        };
+        let (kd, vd, vct) = (self.desc(k), self.desc(v), self.ctype(v));
+        let kv = self.expr(key);
+        let kv = self.coerce(kv, k);
+        let kc = kv.code;
+        let kn = self.fresh("k");
+        let kct = self.ctype(k);
+        self.line(format!("{kct} {kn} = {kc};"));
+        let loc = self.loc(span);
+        let pv = self.fresh("mp");
+        self.line(format!("{vct} *{pv} = ({vct} *)tv_map_get_mut(&{}, {kd}, {vd}, &{kn});", p.lv));
+        self.line(format!("if (!{pv}) tv_trap(\"no such key in the map\", {loc});"));
+        Place { lv: format!("(*{pv})"), ty: v, weak: false }
     }
 
     /// Narrows a place to a union member (payload lvalue), unboxing recursive aliases.

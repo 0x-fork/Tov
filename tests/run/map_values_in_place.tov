@@ -1,0 +1,32 @@
+// A map's value changed through `m.get(k)!` or `m[k]` changes the one in the map, as in
+// TypeScript (checked against Node).
+const groups = new Map<string, number[]>()
+for (const n of [1, 2, 3, 4, 5, 6]) {
+  const k = n % 2 === 0 ? "even" : "odd"
+  if (!groups.has(k)) groups.set(k, [])
+  groups.get(k)!.push(n)
+}
+console.log(groups)
+
+const tags = new Map<string, Set<string>>()
+tags.set("x", new Set())
+tags.get("x")!.add("a")
+tags.get("x")!.add("b")
+console.log(tags.get("x")!.size)
+
+const recs = new Map<string, { n: number }>()
+recs.set("k", { n: 1 })
+recs.get("k")!.n += 5
+recs.get("k")!.n *= 2
+console.log(recs.get("k"))
+
+function main() {
+  const byLen = new Map<number, string[]>()
+  for (const w of ["a", "bb", "cc", "d"]) {
+    if (!byLen.has(w.length)) byLen.set(w.length, [])
+    byLen.get(w.length)!.push(w)
+  }
+  byLen.get(1)!.push("e")
+  console.log(byLen)
+}
+main()

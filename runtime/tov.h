@@ -371,6 +371,8 @@ void tv_map_release(tv_map m, const tv_type *kt, const tv_type *vt);
 tv_int tv_map_size(tv_map m);
 /* Borrowed pointer to the value for key, or NULL. Valid until the map is next mutated. */
 void *tv_map_get(tv_map m, const tv_type *kt, const tv_type *vt, const void *key);
+/* The same, to change in place (`m.get(k)!.push(x)`): the map is made unique first. */
+void *tv_map_get_mut(tv_map *mp, const tv_type *kt, const tv_type *vt, const void *key);
 void tv_map_set(tv_map *m, const tv_type *kt, const tv_type *vt, void *key, void *value);   /* moves key and value; replaces (and releases) an existing value, keeps insertion position */
 bool tv_map_has(tv_map m, const tv_type *kt, const tv_type *vt, const void *key);
 /* `m.set(k, (m.get(k) ?? d) op e)` in one probe: k's value slot, added zeroed (*inserted) when

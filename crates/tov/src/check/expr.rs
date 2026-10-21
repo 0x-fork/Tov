@@ -1069,6 +1069,11 @@ impl<'a> Checker<'a> {
                 }
                 self.root_of(*obj)
             }
+            // `m.get(k)!.push(x)`: the value in the map, changed where it is
+            ExprKind::Call { callee, args, .. } if args.len() == 1 => match &self.ast().expr(*callee).kind {
+                ExprKind::Member { obj, name, optional: false, .. } if self.name(*name) == "get" && self.is_map_expr(*obj) => self.root_of(*obj),
+                _ => Root::Temp,
+            },
             ExprKind::Ident(s) => match self.lookup(*s) {
                 // (a script-local standing in for a top-level binding is still a global)
                 Some((id, _)) => match self.local(id).global {
@@ -1082,6 +1087,22 @@ impl<'a> Checker<'a> {
             },
             _ => Root::Temp,
         }
+    }
+
+    /// `e` (already checked) is a map.
+    fn is_map_expr(&self, e: ExprId) -> bool {
+        let t = match self.facts.as_ref() {
+            Some(f) => f[self.cur as usize].expr_ty.get(e as usize).copied(),
+            None => match self.ast().expr(e).kind {
+                ExprKind::Ident(s) => self.lookup(s).map(|(_, t)| t),
+                _ => None,
+            },
+        };
+        t.is_some_and(|t| match *self.types.get(t) {
+            Ty::Map(..) => true,
+            Ty::Union(ms) => self.types.tys(ms).iter().all(|&m| m == UNDEFINED || matches!(self.types.get(m), Ty::Map(..))),
+            _ => false,
+        })
     }
 
     /// Reports an error if the value rooted at `e` can't be modified in place.

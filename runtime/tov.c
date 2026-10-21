@@ -2484,6 +2484,15 @@ void tv_map_set(tv_map *mp, const tv_type *kt, const tv_type *vt, void *key, voi
 }
 
 /* Find-or-insert, for `m.set(k, (m.get(k) ?? d) op e)`: one probe. */
+void *tv_map_get_mut(tv_map *mp, const tv_type *kt, const tv_type *vt, const void *key) {
+    if (!mp->p) return NULL;
+    tv_mlayout L = tv_mlay(kt, vt);
+    tv_mapbuf *m = tv_map_unique(mp, kt, vt, L);
+    bool found;
+    uint64_t pos = tv_map_find(m, L, kt, key, tv_key_hash(kt, key), &found);
+    return found ? tv_entry(m, L, m->index[pos] - 1) + L.voff : NULL;
+}
+
 void *tv_map_slot(tv_map *mp, const tv_type *kt, const tv_type *vt, void *key, bool *inserted) {
     tv_mlayout L = tv_mlay(kt, vt);
     tv_mapbuf *m = tv_map_unique(mp, kt, vt, L);
