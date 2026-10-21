@@ -133,7 +133,6 @@ pub const CODES: &[(&str, &str)] = &[
     ("X0032", "This JavaScript global isn't available in Tov."),
     ("X0033", "`satisfies` is not supported; annotate the binding."),
     ("X0034", "An array's `length` can't be assigned."),
-    ("X0036", "`new Array(...)` is not supported; use an array literal."),
     ("X0038", "Iterate a map with `keys()` or `values()`."),
     ("X0039", "Truthiness matchers are not supported; compare explicitly."),
     ("X0040", "Definite-assignment assertions (`x!: T`) are not supported: initialize the field, assign it in the constructor, or make it optional."),

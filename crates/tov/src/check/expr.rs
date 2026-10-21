@@ -845,6 +845,9 @@ impl<'a> Checker<'a> {
         if tl == ERROR || tr == ERROR {
             return ERROR;
         }
+        // Sized integers (`u8`, `i32`, ... but not `u64`) compute as `int`, as C promotes them:
+        // a typed array's elements are numbers.
+        let (tl, tr) = (promoted(tl), promoted(tr));
         if !self.types.is_numeric(tl) || !self.types.is_numeric(tr) {
             let msg = format!("can't apply `{}` to `{}` and `{}`", op.as_str(), self.show(tl), self.show(tr));
             let mut d = Diagnostic::new("T0501", span, msg);
@@ -965,7 +968,12 @@ impl<'a> Checker<'a> {
                     self.note_stored(target, &[value], span.end);
                 }
                 if !self.try_promote(&place, tv) {
-                    self.flow(place.sites.clone(), |c| c.expect_assignable(tv, place.ty, vspan, None));
+                    let wrap = self.is_elem_place(target);
+                    self.flow(place.sites.clone(), |c| {
+                        c.wrap_store = wrap;
+                        c.expect_assignable(tv, place.ty, vspan, None);
+                        c.wrap_store = false;
+                    });
                 }
                 if let Some(local) = place.local
                     && self.assignable(tv, place.ty) && matches!(self.types.get(self.local(local).ty), Ty::Union(_)) {
@@ -1021,8 +1029,11 @@ impl<'a> Checker<'a> {
                     let r = self.arith(bop, place.ty, tv, span);
                     if bop == BinOp::Div && r != ERROR { if r == F32 { F32 } else { F64 } } else { r }
                 };
+                self.wrap_store = self.is_elem_place(target);
+                let fits = self.assignable(result, place.ty);
+                self.wrap_store = false;
                 if !self.try_promote(&place, result)
-                    && result != ERROR && !self.assignable(result, place.ty) {
+                    && result != ERROR && !fits {
                         self.blame(&place.sites);
                         let msg = format!("`{}=` produces `{}`, which can't be stored in `{}`", bop.as_str(), self.show(result), self.show(place.ty));
                         let mut d = Diagnostic::new("T0001", span, msg);
@@ -1901,7 +1912,7 @@ impl<'a> Checker<'a> {
         None
     }
 
-    fn array_lit(&mut self, elems: &[ExprId], exp: Option<TyId>, span: Span) -> TyId {
+    pub(super) fn array_lit(&mut self, elems: &[ExprId], exp: Option<TyId>, span: Span) -> TyId {
         let elem_exp = exp.and_then(|e| {
             self.flat_members(e).into_iter().find_map(|m| match self.types.get(m) {
                 Ty::Array(t) => Some(*t),
@@ -2261,9 +2272,51 @@ impl<'a> Checker<'a> {
                     }
                 }
             }
-            "Array" => {
-                self.report(Diagnostic::new("X0036", span, "`new Array(...)` is not supported").note("instead", "use an array literal: `const xs: T[] = []`"));
-                ERROR
+            n if n == "Array" || builtins::typed_array_elem(n).is_some() => {
+                // `new Uint8Array(n)`, `new Float64Array(xs)`, `new Array<number>(n)`: an array of
+                // n zeros (or the element type's empty value), or a converted copy
+                let typed = builtins::typed_array_elem(n);
+                let elem = typed.or(targs.first().copied()).or_else(|| from_exp(self, &|t| matches!(t, Ty::Array(_))).and_then(|t| match self.types.get(t) {
+                    Ty::Array(e) => Some(*e),
+                    _ => None,
+                }));
+                if n == "Array" && args.len() > 1 {
+                    let elems: Vec<ExprId> = args.iter().map(|a| a.expr).collect();
+                    let hint = elem.map(|e| self.types.array(e));
+                    return self.array_lit(&elems, hint, span);
+                }
+                if let Some(a) = args.first() {
+                    // (elements are numbers, converted as they're stored: `new Uint8Array([300])` wraps)
+                    let hint = elem.map(|e| self.types.array(promoted(e)));
+                    let t = self.expr(a.expr, if typed.is_some() { hint } else { Some(INT) });
+                    let s = self.ast().expr(a.expr).span;
+                    let base = self.types.without_undefined(t);
+                    match *self.types.get(base) {
+                        _ if self.types.is_int(t) => {}
+                        Ty::Array(e) | Ty::Set(e) if typed.is_some() && self.types.is_numeric(e) => {}
+                        Ty::Error => {}
+                        _ => {
+                            let what = if typed.is_some() { "a length or an array of numbers" } else { "a length (an integer)" };
+                            let shown = self.show(t);
+                            self.report(Diagnostic::new("T0001", s, format!("`new {n}(...)` takes {what}, found `{shown}`")));
+                        }
+                    }
+                }
+                match elem {
+                    Some(e) if typed.is_some() || self.has_default(e) => self.types.array(e),
+                    Some(e) => {
+                        let shown = self.show(e);
+                        self.report(
+                            Diagnostic::new("T0301", span, format!("`new Array(n)` of `{shown}` would hold `undefined`s"))
+                                .note("instead", format!("`Array.from({{ length: n }}, () => value)`, or `new Array<{shown}>(n).fill(value)`")),
+                        );
+                        ERROR
+                    }
+                    None => {
+                        self.report(Diagnostic::new("T0301", span, "can't infer the element type of this array").note("instead", "`new Array<number>(n)`, `new Array(n).fill(0)`, or annotate the binding"));
+                        ERROR
+                    }
+                }
             }
             "Promise" if !self.scopes[self.cur as usize].values.contains_key(&s) => self.new_promise(e, &targs, args, exp, span),
             _ => {
@@ -2404,7 +2457,28 @@ impl<'a> Checker<'a> {
                 if matches!(self.ast().expr(obj).kind, ExprKind::Super) {
                     return self.super_method_call(e, name, name_span, type_args, args, exp, span);
                 }
-                let recv = self.expr(obj, None);
+                // `new Array(n).fill(v)`: the array's type is the value's
+                let mut recv_hint = None;
+                if mtext == "fill"
+                    && let ExprKind::New { callee: nc, type_args: nta, .. } = &self.ast().expr(obj).kind
+                    && nta.is_empty()
+                    && matches!(self.ast().expr(*nc).kind, ExprKind::Ident(s) if self.name(s) == "Array")
+                    && let Some(a) = args.first()
+                {
+                    let exp_elem = exp.and_then(|x| self.flat_members(x).into_iter().find_map(|m| match *self.types.get(m) {
+                        Ty::Array(t) => Some(t),
+                        _ => None,
+                    }));
+                    let vt = match exp_elem {
+                        Some(t) => t,
+                        None => {
+                            let t = self.expr(a.expr, None);
+                            self.types.widen(t)
+                        }
+                    };
+                    recv_hint = Some(self.types.array(vt));
+                }
+                let recv = self.expr(obj, recv_hint);
                 if recv == ERROR {
                     for a in args {
                         self.expr(a.expr, None);
@@ -2488,7 +2562,10 @@ impl<'a> Checker<'a> {
                     self.rec_call(e, Callee::Method(base));
                     self.pending_call = Some(e);
                     self.set_call_spec_from(obj);
+                    let wrap = matches!(*self.types.get(base), Ty::Array(el) if promoted(el) == INT && el != INT) && matches!(mtext.as_str(), "push" | "unshift" | "fill");
+                    let saved = std::mem::replace(&mut self.wrap_store, wrap);
                     let r = self.call_sig(&ms.sig, &desc, type_args, args, exp, span);
+                    self.wrap_store = saved;
                     if ms.mutates {
                         let values: Vec<ExprId> = args.iter().map(|a| a.expr).collect();
                         self.note_stored(obj, &values, span.end);
@@ -3480,5 +3557,26 @@ impl<'a> Checker<'a> {
                 _ => {}
             }
         }
+    }
+}
+
+/// A sized integer as arithmetic sees it: `int` (all but `u64` fit).
+pub(super) fn promoted(t: TyId) -> TyId {
+    if matches!(t, I8 | I16 | I32 | U8 | U16 | U32) { INT } else { t }
+}
+
+impl<'a> Checker<'a> {
+    /// `xs[i]` (through parentheses and `!`): an element of an array.
+    fn is_elem_place(&self, e: ExprId) -> bool {
+        match &self.ast().expr(e).kind {
+            ExprKind::Paren(x) | ExprKind::NonNull(x) => self.is_elem_place(*x),
+            ExprKind::Index { .. } => true,
+            _ => false,
+        }
+    }
+
+    /// Element types `new Array(n)` can fill with an empty value (numbers, booleans, strings).
+    fn has_default(&self, t: TyId) -> bool {
+        self.types.is_numeric(t) || matches!(*self.types.get(t), Ty::Bool | Ty::Str)
     }
 }

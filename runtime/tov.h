@@ -312,6 +312,8 @@ void tv_arr_unshift(tv_arr *a, const tv_type *t, void *elem);      /* moves elem
 tv_arr tv_arr_slice(tv_arr a, const tv_type *t, tv_int start, tv_int end, bool has_start, bool has_end); /* JS semantics incl. negatives */
 tv_arr tv_arr_concat(tv_arr a, tv_arr b, const tv_type *t);
 void tv_arr_extend(tv_arr *a, const tv_type *t, tv_arr b);         /* appends b's elements (retained) */
+tv_arr tv_arr_make(const tv_type *t, tv_int n, const void *elem, const char *loc);   /* n copies of elem (retained); traps if n < 0 */
+void tv_arr_fill(tv_arr *a, const tv_type *t, const void *elem, tv_int start, bool has_start, tv_int end, bool has_end);   /* JS fill: copies of elem */
 void tv_arr_reverse(tv_arr *a, const tv_type *t);
 /* Stable sort. cmp returns <0, 0, >0 like a JS comparator (a double). NULL cmp = JS default
  * (compare String(x) of each element). */

@@ -777,6 +777,35 @@ impl<'c, 'a> Gen<'c, 'a> {
                 self.line(format!("{ect} {out}; bool {ok} = tv_arr_{name}(&{lv}, {d}, &{out});"));
                 self.optional_from(&ok, Val { code: out, ty: et, owned: true }, ty)
             }
+            (Ty::Array(et), "fill") => {
+                let (d, ect) = (self.desc(et), self.ctype(et));
+                let v = self.expr(args[0].expr);
+                let v = self.coerce(v, et);
+                let code = self.consume(v);
+                let x = self.fresh("x");
+                self.line(format!("{ect} {x} = {code};"));
+                let bound = |g: &mut Self, i: usize| -> (String, String) {
+                    match args.get(i) {
+                        Some(a) => {
+                            let b = g.expr(a.expr);
+                            let oi = g.c.types.optional(INT);
+                            let b = g.coerce(b, oi);
+                            g.optional_int(&b)
+                        }
+                        None => ("0".into(), "false".into()),
+                    }
+                };
+                let (s0, hs) = bound(self, 1);
+                let (e0, he) = bound(self, 2);
+                self.line(format!("tv_arr_fill(&{lv}, {d}, &{x}, {s0}, {hs}, {e0}, {he});"));
+                let r = self.release_code(et, &x);
+                if !r.is_empty() {
+                    self.line(format!("{r};"));
+                }
+                let v = Val::plain(lv.to_string(), recv);
+                let v = self.own(v);
+                self.coerce(v, ty)
+            }
             (Ty::Array(et), "reverse") => {
                 let d = self.desc(et);
                 self.line(format!("tv_arr_reverse(&{lv}, {d});"));
@@ -1519,6 +1548,11 @@ impl<'c, 'a> Gen<'c, 'a> {
                 let v = self.expr(args[0].expr);
                 self.to_bigint(v)
             }
+            (Some("Array"), "of") => {
+                let elems: Vec<ExprId> = args.iter().map(|a| a.expr).collect();
+                self.build_spread(&elems, ty)
+            }
+            (Some("Array"), "from") => self.array_from(args, ty, span),
             (Some("Array"), "isArray") => {
                 let v = self.expr(args[0].expr);
                 match self.tget(v.ty) {
@@ -1987,6 +2021,87 @@ impl<'c, 'a> Gen<'c, 'a> {
             }
         }
         arr
+    }
+
+    /// `new Uint8Array(n)`, `new Float64Array(xs)`, `new Array<number>(n)`, `new Array(a, b)`.
+    pub(crate) fn new_array(&mut self, args: &[Arg], ty: TyId, span: Span) -> Val {
+        let Ty::Array(et) = self.tget(ty) else { return Val::plain("TV_EMPTY_ARR", ty) };
+        if args.len() > 1 {
+            let elems: Vec<ExprId> = args.iter().map(|a| a.expr).collect();
+            return self.build_spread(&elems, ty);
+        }
+        let Some(a) = args.first() else { return Val::plain("TV_EMPTY_ARR", ty) };
+        let at = self.ty(a.expr);
+        if self.c.types.is_int(at) {
+            let n = self.expr(a.expr);
+            let n = self.int_code(n);
+            let (d, ect) = (self.desc(et), self.ctype(et));
+            let zero = self.default_value(et);
+            let loc = self.loc(span);
+            return self.tmp(ty, &format!("tv_arr_make({d}, {n}, &({ect}){{{zero}}}, {loc})"), true);
+        }
+        let src = self.spread_array(a.expr);
+        self.convert_array(src, ty)
+    }
+
+    /// An array of `ty`'s elements made from one of other elements (converted one by one; a
+    /// number stored into a sized integer wraps).
+    fn convert_array(&mut self, src: Val, ty: TyId) -> Val {
+        if src.ty == ty {
+            let v = self.own(src);
+            return self.coerce(v, ty);
+        }
+        let (Ty::Array(et), Ty::Array(se)) = (self.tget(ty), self.tget(src.ty)) else { return Val::plain("TV_EMPTY_ARR", ty) };
+        let (d, ect, sct) = (self.desc(et), self.ctype(et), self.ctype(se));
+        let out = self.tmp(ty, &format!("tv_arr_with_capacity({d}, tv_arr_len({}))", src.code), true);
+        let i = self.fresh("i");
+        self.open(&format!("for (tv_int {i} = 0; {i} < tv_arr_len({}); {i}++) {{", src.code));
+        let v = Val::plain(format!("((({sct} *)tv_arr_data({}))[{i}])", src.code), se);
+        let v = self.coerce(v, et);
+        self.line(format!("TVG_PUSH({ect}, &{}, {d}, {});", out.code, v.code));
+        self.close("}");
+        out
+    }
+
+    /// `Array.from(xs)`, `Array.from(xs, f)` (a `map` of its elements), `Array.from({ length: n }, f)`.
+    fn array_from(&mut self, args: &[Arg], ty: TyId, span: Span) -> Val {
+        let m = self.cur_m();
+        let src = args[0].expr;
+        let length = match &self.ast(m).expr(src).kind {
+            ExprKind::Object(fs) if fs.len() == 1 && self.sym(fs[0].name) == "length" => Some(fs[0].value),
+            _ => None,
+        };
+        let Ty::Array(rt) = self.tget(ty) else { return Val::plain("TV_EMPTY_ARR", ty) };
+        match (length, args.get(1)) {
+            (Some(n), Some(f)) => {
+                let n = self.expr(n);
+                let n = self.int_code(n);
+                let cb = self.prepare_callback(f.expr);
+                let (rd, rct) = (self.desc(rt), self.ctype(rt));
+                let nv = self.fresh("n");
+                self.line(format!("tv_int {nv} = {n};"));
+                let loc = self.loc(span);
+                self.line(format!("if ({nv} < 0) tv_trap(\"Invalid array length\", {loc});"));
+                let out = self.tmp(ty, &format!("tv_arr_with_capacity({rd}, {nv})"), true);
+                let i = self.fresh("i");
+                self.open_block(&format!("for (tv_int {i} = 0; {i} < {nv}; {i}++) {{"));
+                let r = self.invoke(&cb, vec![Val::plain("0", UNDEFINED), Val::plain(i.clone(), INT)]);
+                let v = self.coerce(r, rt);
+                let code = self.consume(v);
+                self.line(format!("TVG_PUSH({rct}, &{}, {rd}, {code});", out.code));
+                self.close_block("}");
+                out
+            }
+            (_, Some(f)) => {
+                let xs = self.spread_array(src);
+                let Ty::Array(se) = self.tget(xs.ty) else { return Val::plain("TV_EMPTY_ARR", ty) };
+                self.array_method(xs, se, "map", std::slice::from_ref(f), &[], ty, span)
+            }
+            _ => {
+                let xs = self.spread_array(src);
+                self.convert_array(xs, ty)
+            }
+        }
     }
 
     /// `...x` as an array: an array itself, a set's values, a string's characters.

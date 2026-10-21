@@ -934,7 +934,7 @@ impl<'c, 'a> Gen<'c, 'a> {
                 Some((p, ExprKind::Member { obj, name, .. })) if *obj == e => {
                     let n = self.c.interner.get(*name);
                     let method_call = parent.get(&p).map(|&c| matches!(&ast.expr(c).kind, ExprKind::Call { callee, .. } if *callee == p) && matches!(facts.calls.get(&c).map(|f| &f.callee), Some(Callee::Method(_)))).unwrap_or(false);
-                    n == "length" || (method_call && !matches!(n, "slice" | "concat" | "reverse" | "sort"))
+                    n == "length" || (method_call && !matches!(n, "slice" | "concat" | "reverse" | "sort" | "fill"))
                 }
                 Some((c, ExprKind::Call { args, .. })) => {
                     let idx = args.iter().position(|a| a.expr == e && a.by_ref.is_some());
@@ -2704,6 +2704,9 @@ impl<'c, 'a> Gen<'c, 'a> {
                     ExprKind::Ident(s) => self.sym(*s).to_string(),
                     _ => String::new(),
                 };
+                if name == "Array" || crate::check::typed_array_elem(&name).is_some() {
+                    return self.new_array(args, ty, span);
+                }
                 if name == "Set" && !args.is_empty() {
                     let Ty::Set(elem) = self.tget(ty) else { return Val::plain("TV_EMPTY_MAP", ty) };
                     let arr = self.expr(args[0].expr);
@@ -3011,6 +3014,17 @@ impl<'c, 'a> Gen<'c, 'a> {
             (Ty::Int | Ty::I8 | Ty::I16 | Ty::I32 | Ty::U8 | Ty::U16 | Ty::U32 | Ty::U64, Ty::F64) => return Val::plain(format!("((double)({}))", v.code), to),
             (Ty::Int | Ty::I8 | Ty::I16 | Ty::I32 | Ty::U8 | Ty::U16 | Ty::U32 | Ty::U64 | Ty::F64, Ty::F32) => return Val::plain(format!("((float)({}))", v.code), to),
             (Ty::F32, Ty::F64) => return Val::plain(format!("((double)({}))", v.code), to),
+            // (sized integers compute as `int`; a number stored into a sized element wraps, as a
+            // typed array's does in JavaScript)
+            (Ty::I8 | Ty::I16 | Ty::I32 | Ty::U8 | Ty::U16 | Ty::U32, Ty::Int) => return Val::plain(format!("((tv_int)({}))", v.code), to),
+            (Ty::Int | Ty::I8 | Ty::I16 | Ty::I32 | Ty::U8 | Ty::U16 | Ty::U32, Ty::I8 | Ty::I16 | Ty::I32 | Ty::U8 | Ty::U16 | Ty::U32) => {
+                let ct = self.ctype(to);
+                return Val::plain(format!("(({ct})({}))", v.code), to);
+            }
+            (Ty::F64 | Ty::F32, Ty::I8 | Ty::I16 | Ty::I32 | Ty::U8 | Ty::U16 | Ty::U32) => {
+                let ct = self.ctype(to);
+                return Val::plain(format!("(({ct})tv_f64_to_i32({}))", v.code), to);
+            }
             (Ty::Int | Ty::I8 | Ty::I16 | Ty::I32 | Ty::U8 | Ty::U16 | Ty::U32 | Ty::U64, Ty::Decimal) => return Val::plain(format!("tv_dec_make((__int128)({}), 0)", v.code), to),
             (Ty::StrLit(s), Ty::Str) => {
                 let text = self.sym(s).to_string();
@@ -4706,7 +4720,7 @@ fn is_trivial(code: &str) -> bool {
 }
 
 pub(crate) fn is_mutating_method(name: &str) -> bool {
-    matches!(name, "push" | "pop" | "shift" | "unshift" | "reverse" | "sort" | "set" | "delete" | "clear" | "add")
+    matches!(name, "push" | "pop" | "shift" | "unshift" | "reverse" | "sort" | "fill" | "set" | "delete" | "clear" | "add")
 }
 
 /// Locals referenced inside an arrow (including nested arrows) but declared outside it.

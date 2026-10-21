@@ -6,8 +6,23 @@ use crate::ast::{Arg, ExprKind};
 
 pub(super) const BUILTIN_TYPES: &[&str] = &[
     "int", "i64", "f64", "number", "f32", "i8", "i16", "i32", "u8", "u16", "u32", "u64", "bool", "boolean", "string", "never", "unknown", "Js", "undefined", "void", "Array", "Map",
-    "Set", "Promise", "Record", "bigint", "decimal",
+    "Set", "Promise", "Record", "bigint", "decimal", "Uint8Array", "Int8Array", "Uint16Array", "Int16Array", "Uint32Array", "Int32Array", "Float32Array", "Float64Array",
 ];
+
+/// JavaScript's typed arrays: Tov arrays of the element type (a number stored wraps into it).
+pub(super) fn typed_array_elem(name: &str) -> Option<TyId> {
+    Some(match name {
+        "Uint8Array" => U8,
+        "Int8Array" => I8,
+        "Uint16Array" => U16,
+        "Int16Array" => I16,
+        "Uint32Array" => U32,
+        "Int32Array" => I32,
+        "Float32Array" => F32,
+        "Float64Array" => F64,
+        _ => return None,
+    })
+}
 
 pub(super) const GLOBAL_NAMES: &[&str] = &[
     "Math", "console", "expect", "String", "Number", "parseInt", "parseFloat", "isNaN", "isFinite", "NaN", "Infinity", "int", "f64", "f32", "i8", "i16", "i32", "u8", "u16", "u32", "u64", "process", "Date",
@@ -199,7 +214,7 @@ pub(super) fn property(types: &Types, ty: TyId, name: &str) -> Option<TyId> {
 
 const ARRAY_METHODS: &[&str] = &[
     "push", "pop", "shift", "unshift", "map", "filter", "forEach", "reduce", "some", "every", "find", "findIndex", "indexOf", "lastIndexOf", "includes", "join", "slice", "concat",
-    "reverse", "sort", "at", "flatMap",
+    "reverse", "sort", "at", "flatMap", "fill",
 ];
 const STRING_METHODS: &[&str] = &[
     "chars", "slice", "includes", "startsWith", "endsWith", "indexOf", "lastIndexOf", "split", "trim", "trimStart", "trimEnd", "toUpperCase", "toLowerCase", "replace",
@@ -328,6 +343,10 @@ pub(super) fn method(c: &mut Checker, base: TyId, name: &str) -> Option<MethodSi
                     mk(sig(vec![(cmp, "compare")], arr), true)
                 }
                 "at" => mk(sig(vec![(p(INT), "index")], opt_e), false),
+                "fill" => {
+                    let (a, b) = (opt(c, INT), opt(c, INT));
+                    mk(sig(vec![(p(e), "value"), (a, "start"), (b, "end")], arr), true)
+                }
                 _ => None,
             }
         }
@@ -651,6 +670,11 @@ impl<'a> Checker<'a> {
             }
             "JSON" => self.json_call(name, name_span, args, exp, span),
             "Promise" => self.promise_call(name, name_span, args, exp, span),
+            "Array" if name == "of" => {
+                let elems: Vec<ExprId> = args.iter().map(|a| a.expr).collect();
+                self.array_lit(&elems, exp, span)
+            }
+            "Array" if name == "from" => self.array_from(args, exp, span),
             "Array" => {
                 if name != "isArray" {
                     self.check_args_loose(args);
@@ -1200,5 +1224,64 @@ impl<'a> Checker<'a> {
             }
         }
         VOID
+    }
+}
+
+impl<'a> Checker<'a> {
+    /// `Array.from(xs)`, `Array.from(xs, (x, i) => ...)`, `Array.from({ length: n }, (_, i) => ...)`.
+    fn array_from(&mut self, args: &[Arg], exp: Option<TyId>, span: Span) -> TyId {
+        if args.is_empty() || args.len() > 2 {
+            self.report(Diagnostic::new("T0201", span, format!("`Array.from` takes 1 or 2 arguments, found {}", args.len())));
+            self.check_args_loose(args);
+            return ERROR;
+        }
+        let exp_elem = exp.and_then(|e| self.flat_members(e).into_iter().find_map(|m| match *self.types.get(m) {
+            Ty::Array(t) => Some(t),
+            _ => None,
+        }));
+        let src = args[0].expr;
+        // `{ length: n }`: n elements made by the callback from their index
+        let length_only = matches!(&self.ast().expr(src).kind, ExprKind::Object(fs) if fs.len() == 1 && self.name(fs[0].name) == "length");
+        let elem = if length_only {
+            let ExprKind::Object(fs) = &self.ast().expr(src).kind else { unreachable!() };
+            let n = fs[0].value;
+            let t = self.expr(n, Some(INT));
+            let s = self.ast().expr(n).span;
+            self.expect_assignable(t, INT, s, Some("the length".into()));
+            if let Some(f) = self.facts_mut() {
+                f.expr_ty[src as usize] = INT;
+            }
+            UNDEFINED
+        } else {
+            let hint = exp_elem.map(|e| self.types.array(e));
+            let t = self.expr(src, hint);
+            let base = self.types.without_undefined(t);
+            match *self.types.get(base) {
+                Ty::Array(e) | Ty::Set(e) => e,
+                Ty::Str | Ty::StrLit(_) => STR,
+                Ty::Error => return ERROR,
+                _ => {
+                    let shown = self.show(t);
+                    let s = self.ast().expr(src).span;
+                    self.report(Diagnostic::new("T0001", s, format!("`Array.from` takes an array, a set, a string or `{{ length: n }}`, found `{shown}`")));
+                    return ERROR;
+                }
+            }
+        };
+        let Some(f) = args.get(1) else {
+            if length_only {
+                self.report(Diagnostic::new("T0201", span, "`Array.from({ length: n })` needs a function making each element").note("instead", "`Array.from({ length: n }, (_, i) => i)`"));
+                return ERROR;
+            }
+            return self.types.array(exp_elem.unwrap_or(elem));
+        };
+        // the callback: (element, index) => U
+        let u_name = self.syms.u;
+        let u = self.new_gparam(u_name, None);
+        let ut = self.types.intern(Ty::Param(u));
+        let fty = self.types.func(vec![FnParam { ty: elem, inout: false, optional: false }, FnParam { ty: INT, inout: false, optional: true }], ut);
+        let ret = self.types.array(ut);
+        let cs = CallSig { tparams: vec![u], params: vec![p(fty)], names: vec!["fn".into()], rest: None, ret, throws: NEVER };
+        self.call_sig(&cs, "Array.from", &[], std::slice::from_ref(f), exp, span)
     }
 }

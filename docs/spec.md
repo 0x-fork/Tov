@@ -28,7 +28,7 @@ Status tags: **[M0]** checked today · **[Mn]** planned for milestone n.
 | `bigint` | arbitrary-precision integer, as in TS (`123n`) |
 | `decimal` | exact base-10 number, 34 significant digits (Tov's own: `19.99m`, or `19.99` where a `decimal` is expected) |
 | `undefined`, `void`, `never`, `unknown` | as TS |
-| `T[]` / `Array<T>` | growable array (value) |
+| `T[]` / `Array<T>` | growable array (value); `Uint8Array`, `Int32Array`, `Float64Array` and the other typed arrays are arrays of `u8`, `i32`, `f64`, ... |
 | `Map<K, V>`, `Set<T>` | hash map/set (value) |
 | `{ a: T, b?: U }` | exact record (value) |
 | `A \| B` | union; `"lit"` string-literal types |
@@ -44,6 +44,7 @@ Status tags: **[M0]** checked today · **[Mn]** planned for milestone n.
 - `int` widens implicitly to `f64` (in arithmetic and assignment). `f64` → `int` is never implicit: use `Math.trunc/floor/ceil/round(x)`, which return `int` (trap on NaN/overflow).
 - Float arithmetic is IEEE 754 with every operation rounded separately, exactly as in JavaScript: `a * b + c` is never fused into one multiply-add.
 - Bitwise operators on `int` and floats are JavaScript's: both sides wrap to 32 bits (ToInt32), shift counts are taken mod 32 and `>>>` is unsigned, giving an `int` (`(h * 31 + c) | 0`, `x | 0` to truncate). Sized integers keep their own width.
+- Sized integers compute as `int` (`u8 + u8` is an `int`, as C promotes them; not `u64`), and a number stored into an element of a sized array wraps into it, as into a JavaScript typed array (`bytes[i] = 300` stores 44).
 - `/` always produces `f64` (as in TS). `%`, `+ - *` on two ints produce `int`. Sized integers don't mix implicitly; convert with `u8(x)`, `i32(x)` etc. (trap if out of range).
 
 ### bigint
@@ -90,7 +91,7 @@ Status tags: **[M0]** checked today · **[Mn]** planned for milestone n.
 - Indexing `xs[i]` requires an integer `i` and has type `T | undefined`; `xs[i]!` asserts presence (traps when out of bounds). Index assignment `xs[i] = v` traps when out of bounds.
 - Strings are JavaScript's: `s.length`, `s[i]`, `charAt`, `charCodeAt`, `codePointAt`, `at`, `indexOf`, `lastIndexOf`, `slice`, `substring`, `substr`, `padStart`/`padEnd` and `split("")` count UTF-16 code units, and `for (const c of s)` walks code points. They're stored as UTF-8: an ASCII string's indexes are its byte offsets (no cost), and others convert from a cached position, so a loop over `s.charCodeAt(i)` walks the string once. Differences: `s[i]` is `string | undefined` (like an array's); `charCodeAt` returns an `int`, `-1` out of range where JavaScript gives `NaN` (both fail `c >= 48 && c <= 57` and `c === 10`); a lone half of a surrogate pair (cut out by `slice`, `s[i]`, `split("")` or `String.fromCharCode`) becomes U+FFFD, since UTF-8 can't hold one — printed, it's what Node prints. Tov adds `s.byteLength` (UTF-8 bytes) and `s.chars()` (an array of code points).
 - `console.log(...args)` prints (Node's formatting); `Math.*` as in JS (with the int-returning rounders above); `NaN`, `Infinity`, `isFinite`, and `Number`'s constants (`MAX_SAFE_INTEGER`, `EPSILON`, ...) and predicates (`Number.isInteger`, `isSafeInteger`, `isFinite`, `isNaN`).
-- `map.keys()`, `map.values()` and `set.values()` return arrays (not iterators).
+- `map.keys()`, `map.values()` and `set.values()` return arrays (not iterators). `new Array<T>(n)` holds `n` zeros (`""`, `false`) where JavaScript has holes; `new Array(n).fill(v)`, `Array.from(xs, f)`, `Array.from({ length: n }, (_, i) => ...)`, `Array.of(...)` and `[...xs]` work as in JavaScript.
 - `parseInt(s)`, `parseFloat(s)` and `Number(s)` return `T | undefined` instead of `NaN`, so failed parses must be handled.
 
 ## 6. Values, mutation, `inout` **[M0]**

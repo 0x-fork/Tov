@@ -9,6 +9,11 @@ mod stmt;
 
 pub use facts::{CallFact, Callee, IdentFact, MemberFact, ModuleFacts, NpmName};
 
+/// A JavaScript typed array's element type (`Float64Array` → `f64`), for code generation.
+pub fn typed_array_elem(name: &str) -> Option<TyId> {
+    builtins::typed_array_elem(name)
+}
+
 /// `__native.name`'s parameter types and result (for code generation).
 pub fn native_sig_pub(types: &mut Types, name: &str) -> Option<(Vec<TyId>, TyId)> {
     builtins::native_sig(types, name)
@@ -327,6 +332,9 @@ pub struct Checker<'a> {
     spec_fields: HashMap<(TyId, Sym), Vec<spec::Site>>,
     /// Parameter and return sites of the callee `call_sig` is about to check.
     call_spec: Option<(Vec<Vec<spec::Site>>, Vec<spec::Site>)>,
+    /// Checking a value stored into an element of a sized-integer array (`bytes[i] = n`,
+    /// `bytes.push(n)`): a number wraps into it, as into a JavaScript typed array.
+    wrap_store: bool,
 }
 
 /// `threads`: phase-B worker count (default: all cores). Results don't depend on it.
@@ -383,6 +391,7 @@ fn new_checker<'a>(modules: &'a [Module], interner: &'a Interner, sm: &'a Source
         spec_fields_base: Arc::default(),
         spec_fields: HashMap::default(),
         call_spec: None,
+        wrap_store: false,
     }
 }
 
@@ -607,6 +616,7 @@ impl<'a> Checker<'a> {
             spec_fields_base: self.spec_fields_base.clone(),
             spec_fields: HashMap::default(),
             call_spec: None,
+            wrap_store: false,
         }
     }
 
@@ -1883,6 +1893,9 @@ impl<'a> Checker<'a> {
             }
             return Some(p);
         }
+        if let Some(e) = builtins::typed_array_elem(text) {
+            return Some(self.types.array(e));
+        }
         let arity = |c: &mut Self, n: usize| -> bool {
             if targs.len() != n {
                 c.report(Diagnostic::new("T0010", span, format!("`{text}` takes {n} type argument{}, found {}", if n == 1 { "" } else { "s" }, targs.len())));
@@ -1986,6 +1999,7 @@ impl<'a> Checker<'a> {
         let (s, d) = (*self.types.get(src), *self.types.get(dst));
         match (&s, &d) {
             (Ty::Int, Ty::F64 | Ty::F32) if top => return true,
+            (Ty::Int | Ty::F64 | Ty::F32 | Ty::I8 | Ty::I16 | Ty::I32 | Ty::U8 | Ty::U16 | Ty::U32, Ty::I8 | Ty::I16 | Ty::I32 | Ty::U8 | Ty::U16 | Ty::U32) if top && self.wrap_store => return true,
             (Ty::Int | Ty::I8 | Ty::I16 | Ty::I32 | Ty::U8 | Ty::U16 | Ty::U32 | Ty::U64, Ty::Decimal) if top => return true,
             (Ty::StrLit(_), Ty::Str) => return true,
             (Ty::Undefined, Ty::Void) => return true,

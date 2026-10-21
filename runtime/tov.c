@@ -1930,6 +1930,30 @@ tv_arr tv_arr_concat(tv_arr a, tv_arr b, const tv_type *t) {
     return (tv_arr){r, na + nb};
 }
 
+tv_arr tv_arr_make(const tv_type *t, tv_int n, const void *elem, const char *loc) {
+    if (n < 0) tv_trap("Invalid array length", loc);
+    if (n == 0) return TV_EMPTY_ARR;
+    tv_arrbuf *b = tv_arrbuf_new(t->size, n);
+    unsigned char *d = b->data;
+    bool zero = true;
+    for (size_t k = 0; k < t->size; k++) zero &= ((const unsigned char *)elem)[k] == 0;
+    if (zero && !t->retain) memset(d, 0, (size_t)n * t->size);
+    else for (tv_int i = 0; i < n; i++) tv_copy_retain(d + (size_t)i * t->size, elem, 1, t);
+    return (tv_arr){b, n};
+}
+
+void tv_arr_fill(tv_arr *a, const tv_type *t, const void *elem, tv_int start, bool has_start, tv_int end, bool has_end) {
+    int64_t len = tv_arr_len(*a);
+    int64_t s = has_start ? tv_clamp_index(start, len) : 0, e = has_end ? tv_clamp_index(end, len) : len;
+    if (s >= e) return;
+    tv_arr_make_unique(a, t, len);
+    unsigned char *d = a->p->data;
+    for (int64_t i = s; i < e; i++) {
+        if (t->release) t->release(d + (size_t)i * t->size);
+        tv_copy_retain(d + (size_t)i * t->size, elem, 1, t);
+    }
+}
+
 void tv_arr_extend(tv_arr *a, const tv_type *t, tv_arr b) {
     int64_t nb = tv_arr_len(b);
     if (nb == 0) return;
