@@ -31,11 +31,22 @@ pub(crate) fn next_round(floats: &mut HashSet<Site>, hits: &[Site], failed: bool
     None
 }
 
+/// What a round of checking leaves for the next: (as for `number`) function bodies that
+/// throw only by calling something that does. Their signatures were taken not to throw, so
+/// their callers are checked again (a few rounds at most: each adds callers one level up).
+pub(crate) fn more_throwing(throwing: &mut HashSet<(u32, StmtId)>, hits: &[(u32, StmtId)]) -> bool {
+    let before = throwing.len();
+    throwing.extend(hits.iter().copied());
+    throwing.len() > before
+}
+
 #[derive(Default)]
 pub(crate) struct Spec {
     pub(crate) on: bool,
     /// Sites a float flows into: checked as `f64`.
     pub(crate) floats: HashSet<Site>,
+    /// Bodies that throw without a `throw` of their own: (module, body).
+    pub(crate) throwing: HashSet<(u32, StmtId)>,
 }
 
 impl<'a> Checker<'a> {

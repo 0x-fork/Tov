@@ -137,7 +137,7 @@ function lookup(m: Map<string, int>, k: string): int throws NotFound {
   return v
 }
 function total(m: Map<string, int>): int {   // throws NotFound (inferred)
-  return try lookup(m, "a") + try lookup(m, "b")
+  return lookup(m, "a") + lookup(m, "b")
 }
 try {
   console.log(total(m))
@@ -148,7 +148,7 @@ try {
 }
 ```
 - Only `Error` objects (the built-in `Error`, `TypeError`, `RangeError`, `SyntaxError`, or classes extending them) are thrown. `e.message`, `e.name`, and `String(e)` / `${e}` (`"Name: message"`) work as in JavaScript.
-- A call that can throw is either inside a `try { }` block, or marked `try f(x)`: the error then passes on to the caller. Unmarked calls are errors with the fix. `throws E` declares what a function can throw; unexported functions and methods infer it, exported ones must declare it.
+- As in TypeScript, an error a call throws passes on to the caller unless a `try { }` block catches it. `try f(x)` marks such a call (optional: it documents that the error passes on). `throws E` declares what a function can throw; without it, functions and methods infer it, as they infer their return types.
 - `catch (e)` gives `e` the most specific class covering everything the block can throw (else `Error`); narrow with `instanceof`. `finally` runs on every path out of the block (no `return`/`break` inside a `try` that has `finally` yet).
 - A closure can pass errors on only when its function type says so: `type Handler = (req: Request) => Response throws Error`. An arrow checked against that type may `throw` and use `try f()`; calls through a value of that type are calls that can throw. Otherwise catch inside the closure. An error that escapes a script or `main` prints `uncaught Name: message` to stderr and exits with status 1; in a test it fails the test.
 - Errors are return values underneath (no unwinding): a call that can throw costs one branch.
@@ -161,13 +161,13 @@ Node's names, so existing habits work:
 - `import * as path from "node:path"`: `join`, `resolve`, `normalize`, `basename`, `dirname`, `extname`, `isAbsolute`, `sep` (POSIX).
 - `process.argv` (`[binary, binary, ...args]`, so `process.argv.slice(2)` are the arguments), `process.env.NAME` (`string | undefined`), `process.exit(code?)`, `process.cwd()`, `process.platform`, `process.arch`, `process.pid`, `process.stdout.write(s)`, `process.stderr.write(s)`; `console.error` / `console.warn` write to stderr.
 - `Date.now()` and `performance.now()` (milliseconds).
-- `JSON.stringify(value, undefined, indent?)` as in JavaScript (maps with string keys are written as objects, where JavaScript writes `{}`). `JSON.parse(text)` takes its type from context — `const c: Config = try JSON.parse(text)` or `try JSON.parse(text) as Config` — and **checks** the input against it (exact integers, string literals, discriminants, required fields; extra keys ignored, `null` and missing keys read as `undefined`), throwing `SyntaxError` otherwise.
+- `JSON.stringify(value, undefined, indent?)` as in JavaScript (maps with string keys are written as objects, where JavaScript writes `{}`). `JSON.parse(text)` takes its type from context — `const c: Config = JSON.parse(text)` or `JSON.parse(text) as Config` — and **checks** the input against it (exact integers, string literals, discriminants, required fields; extra keys ignored, `null` and missing keys read as `undefined`), throwing `SyntaxError` otherwise.
 - Rest parameters: `function f(first: T, ...rest: U[])` (not in methods yet).
 - Web servers: see §7c.
 
 ## 7b. Async
 `async` functions, arrows and methods (class, static and object-literal), and `await`, work as in JavaScript, including the order things run in: microtasks run in order after each timer or request, and an `await` takes the same number of ticks as in Node and Bun (`tests/async` compares every program's output with Node's). A script's top level can `await`, and `main` can be `async`. Not yet: `for await`, `Promise.allSettled`/`any`, `.then`/`.catch`/`.finally`.
-- **Promises.** An async function returns `Promise<T>`; its errors reject the promise instead of being thrown at the call: `async function load(id: string): Promise<User> throws NotFound` has type `(id: string) => Promise<User, NotFound>`. `await p` gives the `T`; if `p` can reject, `await` throws, so it's marked `try` (or caught) like a call: `const u = try await load(id)`. Awaiting a value that isn't a promise gives the value. `new Promise<T>((resolve, reject) => ...)` (it can reject only if the executor takes `reject`), `Promise.resolve(v)` and `Promise.reject(e)` make promises, `Promise.all(ps)` (every value, in order; the first rejection) and `Promise.race(ps)` (the first to settle) combine an array of them (their types merge: `Promise<A, E1> | Promise<B, E2>` is `Promise<A | B, E1 | E2>`); a rejection nobody awaits is reported like an uncaught error.
+- **Promises.** An async function returns `Promise<T>`; its errors reject the promise instead of being thrown at the call: `async function load(id: string): Promise<User> throws NotFound` has type `(id: string) => Promise<User, NotFound>`. `await p` gives the `T`; if `p` can reject, `await` throws, like a call: `const u = await load(id)`. Awaiting a value that isn't a promise gives the value. `new Promise<T>((resolve, reject) => ...)` (it can reject only if the executor takes `reject`), `Promise.resolve(v)` and `Promise.reject(e)` make promises, `Promise.all(ps)` (every value, in order; the first rejection) and `Promise.race(ps)` (the first to settle) combine an array of them (their types merge: `Promise<A, E1> | Promise<B, E2>` is `Promise<A | B, E1 | E2>`); a rejection nobody awaits is reported like an uncaught error.
 - **Timers.** `setTimeout(f, ms)` and `setInterval(f, ms)` return an id for `clearTimeout`/`clearInterval`; `queueMicrotask(f)`. Timers keep time as Node's do (whole milliseconds on the loop's clock) and fire within about 0.1 ms of it.
 - **Running.** An async function runs until its first `await` that has to wait. Awaiting a call to an async function costs no allocation (its state lives inside the caller's); a call that isn't awaited runs as a task of its own. The program exits when nothing is left to run: no timers, tasks waiting on them, or servers.
 

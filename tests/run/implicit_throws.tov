@@ -1,0 +1,51 @@
+// Errors pass on through unmarked calls, as in TypeScript.
+class Oops extends Error {
+  constructor(message: string) {
+    super(message)
+    this.name = "Oops"
+  }
+}
+
+function parse(s: string): number {
+  if (s === "") throw new Oops("empty")
+  return Number(s) ?? 0
+}
+
+function total(xs: string[]): number {
+  let t = 0
+  for (const x of xs) t += parse(x)
+  return t
+}
+
+function depth(n: number): number {
+  if (n < 0) throw new RangeError("negative")
+  return n === 0 ? 0 : 1 + depth(n - 1)
+}
+
+class Reader {
+  items: string[]
+  constructor(items: string[]) {
+    if (items.length === 0) throw new Oops("no items")
+    this.items = items
+  }
+  first(): number { return parse(this.items[0]!) }
+  sum(): number { return this.first() + total(this.items.slice(1)) }
+}
+
+function attempt(label: string, f: () => number throws Error) {
+  try {
+    console.log(label, f())
+  } catch (e) {
+    console.log(label, "failed:", e.name, e.message)
+  }
+}
+
+function main() {
+  attempt("total", () => total(["1", "2.5"]))
+  attempt("total empty", () => total(["1", ""]))
+  attempt("depth", () => depth(3))
+  attempt("depth negative", () => depth(-1))
+  attempt("reader", () => new Reader(["1", "2", "3"]).sum())
+  attempt("reader bad", () => new Reader(["1", ""]).sum())
+  attempt("reader none", () => new Reader([]).sum())
+}

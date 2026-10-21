@@ -449,7 +449,7 @@ impl<'a> Checker<'a> {
                 self.check_throws_type(ty, span);
                 Some(ty)
             }
-            None if super::may_throw(self.ast(), f.body) => None,
+            None if super::may_throw(self.ast(), f.body) || self.spec.throwing.contains(&(self.cur, f.body)) => None,
             None => Some(NEVER),
         }
     }
@@ -585,6 +585,19 @@ impl<'a> Checker<'a> {
     /// Infers an unannotated method's return type from its body (phase A).
     fn infer_method(&mut self, c: u32, member: u32) -> TyId {
         if self.checked_members.contains(&(c, member)) || self.checked_members_base.contains(&(c, member)) {
+            // (a recursive call while its errors are inferred: assume it may throw, when its
+            // return type is declared)
+            let declared = self.classes[c as usize].methods.iter().chain(self.classes[c as usize].statics.iter()).find(|x| x.owner == c && x.member == member).and_then(|x| x.ret);
+            if let Some(r) = declared {
+                let err = self.error_class();
+                let info = &mut Arc::make_mut(&mut self.classes)[c as usize];
+                for x in info.methods.iter_mut().chain(info.statics.iter_mut()) {
+                    if x.owner == c && x.member == member && x.throws.is_none() {
+                        x.throws = Some(err);
+                    }
+                }
+                return r;
+            }
             // Being inferred right now (recursion), or already failed.
             let f = self.member_fn(c, member);
             let n = self.name(f.name).to_string();

@@ -43,13 +43,7 @@ error[T0601] bigint.tov:13:13: can't cast `int` to `bigint`
   why: `as` only narrows (e.g. from `unknown` or a union); it never converts values
   fix[maybe]: convert: `BigInt(n)`
 
-error[T0831] bigint.tov:14:13: `BigInt` can throw `SyntaxError`; mark the call `try` to pass the error on, or catch it
-   14 |   const m = BigInt(s)
-  why: errors are values in Tov: every call that can fail is marked, so control flow is visible
-  or: wrap it in `try { ... } catch (e) { ... }`
-  fix[safe]: pass it on: `try BigInt(s)`
-
 error[L0006] bigint.tov:15:13: a bigint literal must be an integer
    15 |   const o = 1.5n
 
-12 error(s)
+11 error(s)

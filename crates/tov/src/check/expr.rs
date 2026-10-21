@@ -629,7 +629,7 @@ impl<'a> Checker<'a> {
             }
             return;
         }
-        let (can_throw, marked, decl, module_init) = (frame.can_throw, frame.try_expr > 0, frame.throws_decl, frame.module_init);
+        let (can_throw, decl, module_init) = (frame.can_throw, frame.throws_decl, frame.module_init);
         let shown = self.show(t);
         if !can_throw && module_init {
             let what = callee.map(|c| format!("`{c}` can throw `{shown}`")).unwrap_or_else(|| format!("this throws `{shown}`"));
@@ -647,17 +647,6 @@ impl<'a> Checker<'a> {
                     .note("or", format!("let the function type throw: `(...) => T throws {shown}`")),
             );
             return;
-        }
-        if let Some(c) = callee
-            && !marked
-        {
-            let text = self.src(span).to_string();
-            self.report(
-                Diagnostic::new("T0831", span, format!("`{c}` can throw `{shown}`; mark the call `try` to pass the error on, or catch it"))
-                    .note("why", "errors are values in Tov: every call that can fail is marked, so control flow is visible")
-                    .fix(Applicability::Safe, format!("pass it on: `try {text}`"), span.empty_at_start(), "try ")
-                    .note("or", "wrap it in `try { ... } catch (e) { ... }`"),
-            );
         }
         if let Some(d) = decl
             && !self.assignable(t, d)

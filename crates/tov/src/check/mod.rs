@@ -278,6 +278,8 @@ pub struct Checker<'a> {
     module_names: Arc<Vec<String>>,
     pub(crate) sigs: Arc<HashMap<(u32, u32), Sig>>,
     sig_in_progress: HashSet<(u32, u32)>,
+    /// Signatures (assumed to throw) for recursive calls made while a body is inferred.
+    sig_provisional: HashMap<(u32, u32), Sig>,
     /// Bodies checked in phase A (read-only in phase B) and by this checker.
     checked_bodies: Arc<HashSet<(u32, u32)>>,
     checked_local: HashSet<(u32, u32)>,
@@ -309,6 +311,8 @@ pub struct Checker<'a> {
     spec: Arc<spec::Spec>,
     spec_used: bool,
     spec_hits: Vec<spec::Site>,
+    /// Bodies found to throw though their signatures were taken not to: (module, body).
+    throw_hits: Vec<(u32, StmtId)>,
     spec_flow: Vec<Vec<spec::Site>>,
     spec_srcs_base: Arc<HashMap<Span, Vec<spec::Site>>>,
     spec_srcs: HashMap<Span, Vec<spec::Site>>,
@@ -346,6 +350,7 @@ fn new_checker<'a>(modules: &'a [Module], interner: &'a Interner, sm: &'a Source
         module_names: Arc::new(modules.iter().map(|m| m.name.clone()).collect()),
         sigs: Arc::default(),
         sig_in_progress: HashSet::default(),
+        sig_provisional: HashMap::default(),
         checked_bodies: Arc::default(),
         checked_local: HashSet::default(),
         route_key: None,
@@ -364,6 +369,7 @@ fn new_checker<'a>(modules: &'a [Module], interner: &'a Interner, sm: &'a Source
         spec,
         spec_used: false,
         spec_hits: Vec::new(),
+        throw_hits: Vec::new(),
         spec_flow: Vec::new(),
         spec_srcs_base: Arc::default(),
         spec_srcs: HashMap::default(),
@@ -379,10 +385,11 @@ pub fn check_for_build<'a>(modules: &'a [Module], interner: &'a mut Interner, sm
     let syms = intern_syms(interner);
     let interner: &'a Interner = interner;
     let mut floats: HashSet<spec::Site> = HashSet::default();
+    let mut throwing: HashSet<(u32, StmtId)> = HashSet::default();
     let (mut on, mut rounds) = (true, 0);
     loop {
         rounds += 1;
-        let mut c = new_checker(modules, interner, sm, syms, Arc::new(spec::Spec { on, floats: floats.clone() }));
+        let mut c = new_checker(modules, interner, sm, syms, Arc::new(spec::Spec { on, floats: floats.clone(), throwing: throwing.clone() }));
         c.facts = Some(modules.iter().map(|m| ModuleFacts::new(m.ast.exprs.len())).collect());
         c.collect();
         c.resolve_imports();
@@ -399,6 +406,9 @@ pub fn check_for_build<'a>(modules: &'a [Module], interner: &'a mut Interner, sm
         }
         let mut out = std::mem::take(&mut c.done);
         out.extend(std::mem::take(&mut c.diags));
+        if spec::more_throwing(&mut throwing, &c.throw_hits) {
+            continue;
+        }
         if on && c.spec_used && std::env::var("TOV_TRACE").is_ok() {
             eprintln!("check: `number` as `int`, round {rounds}: {} new float site(s), {} error(s)", c.spec_hits.iter().filter(|s| !floats.contains(s)).count(), out.len());
             for d in &out {
@@ -425,10 +435,14 @@ pub fn check_program(modules: &[Module], interner: &mut Interner, sm: &SourceMap
     let syms = intern_syms(interner);
     let interner = &*interner;
     let mut floats: HashSet<spec::Site> = HashSet::default();
+    let mut throwing: HashSet<(u32, StmtId)> = HashSet::default();
     let (mut on, mut rounds) = (true, 0);
     loop {
         rounds += 1;
-        let (out, used, hits) = check_program_once(modules, interner, sm, threads, syms, Arc::new(spec::Spec { on, floats: floats.clone() }));
+        let (out, used, hits, throws) = check_program_once(modules, interner, sm, threads, syms, Arc::new(spec::Spec { on, floats: floats.clone(), throwing: throwing.clone() }));
+        if spec::more_throwing(&mut throwing, &throws) {
+            continue;
+        }
         if on
             && used
             && let Some(again) = spec::next_round(&mut floats, &hits, !out.is_empty(), rounds)
@@ -441,7 +455,8 @@ pub fn check_program(modules: &[Module], interner: &mut Interner, sm: &SourceMap
 }
 
 /// One check of the whole program; also returns whether speculation was used and its hits.
-fn check_program_once(modules: &[Module], interner: &Interner, sm: &SourceMap, threads: Option<usize>, syms: Syms, spec: Arc<spec::Spec>) -> (Vec<Diagnostic>, bool, Vec<spec::Site>) {
+#[allow(clippy::type_complexity)]
+fn check_program_once(modules: &[Module], interner: &Interner, sm: &SourceMap, threads: Option<usize>, syms: Syms, spec: Arc<spec::Spec>) -> (Vec<Diagnostic>, bool, Vec<spec::Site>, Vec<(u32, StmtId)>) {
     let mut c = new_checker(modules, interner, sm, syms, spec);
     c.collect();
     c.resolve_imports();
@@ -458,6 +473,7 @@ fn check_program_once(modules: &[Module], interner: &Interner, sm: &SourceMap, t
     out.extend(std::mem::take(&mut c.diags));
     let mut used = c.spec_used;
     let mut hits = std::mem::take(&mut c.spec_hits);
+    let mut throws = std::mem::take(&mut c.throw_hits);
     // Freeze phase-A results.
     c.checked_bodies = Arc::new(std::mem::take(&mut c.checked_local));
     c.checked_members_base = Arc::new(std::mem::take(&mut c.checked_members));
@@ -485,9 +501,9 @@ fn check_program_once(modules: &[Module], interner: &Interner, sm: &SourceMap, t
         }
         let mut d = std::mem::take(&mut w.done);
         d.extend(w.diags);
-        (d, w.spec_used, w.spec_hits)
+        (d, w.spec_used, w.spec_hits, w.throw_hits)
     };
-    let results: Vec<(Vec<Diagnostic>, bool, Vec<spec::Site>)> = if threads == 1 {
+    let results: Vec<(Vec<Diagnostic>, bool, Vec<spec::Site>, Vec<(u32, StmtId)>)> = if threads == 1 {
         vec![run(base.clone())]
     } else {
         std::thread::scope(|scope| {
@@ -501,17 +517,18 @@ fn check_program_once(modules: &[Module], interner: &Interner, sm: &SourceMap, t
             handles.into_iter().map(|h| h.join().expect("checker thread panicked")).collect()
         })
     };
-    for (r, u, h) in results {
+    for (r, u, h, t) in results {
         out.extend(r);
         used |= u;
         hits.extend(h);
+        throws.extend(t);
     }
     if std::env::var("TOV_TRACE").is_ok() {
         eprintln!("check: phase A {:?}, phase B {:?} ({threads} threads)", tb - ta, tb.elapsed());
     }
     out.sort_by(|a, b| (a.span.file, a.span.start, a.code).cmp(&(b.span.file, b.span.start, b.code)));
     out.dedup_by(|a, b| a.span == b.span && a.code == b.code && a.message == b.message);
-    (out, used, hits)
+    (out, used, hits, throws)
 }
 
 impl<'a> Checker<'a> {
@@ -557,6 +574,7 @@ impl<'a> Checker<'a> {
             module_names: self.module_names.clone(),
             sigs: self.sigs.clone(),
             sig_in_progress: HashSet::default(),
+            sig_provisional: HashMap::default(),
             checked_bodies: self.checked_bodies.clone(),
             checked_local: HashSet::default(),
             route_key: None,
@@ -575,6 +593,7 @@ impl<'a> Checker<'a> {
             spec: self.spec.clone(),
             spec_used: false,
             spec_hits: Vec::new(),
+            throw_hits: Vec::new(),
             spec_flow: Vec::new(),
             spec_srcs_base: self.spec_srcs_base.clone(),
             spec_srcs: HashMap::default(),
@@ -1186,10 +1205,11 @@ impl<'a> Checker<'a> {
         }
         let ItemKind::Function(f) = &self.modules[m as usize].ast.items[ii as usize].kind else { return None };
         if self.sig_in_progress.contains(&(m, ii)) {
-            return None;
+            // A recursive call while the body is checked for what it throws: the declared
+            // signature, assuming it may throw.
+            return self.sig_provisional.get(&(m, ii)).cloned();
         }
         self.sig_in_progress.insert((m, ii));
-        let exported = self.modules[m as usize].ast.items[ii as usize].exported;
         let sig = self.committed(|c| {
             c.with_module(m, |c| {
                 let mut tscope = Vec::new();
@@ -1259,8 +1279,16 @@ impl<'a> Checker<'a> {
             })
         });
         let (tparams, params, param_names, ret, declared_throws, tscope) = sig;
-        let body_throws = may_throw(&self.modules[m as usize].ast, f.body);
+        let body_throws = may_throw(&self.modules[m as usize].ast, f.body) || self.spec.throwing.contains(&(m, f.body));
         let mut throws = declared_throws.unwrap_or(if body_throws { UNKNOWN } else { NEVER });
+        if let Some(r) = ret
+            && throws == UNKNOWN
+        {
+            let err = self.error_class();
+            let rest = f.params.last().map(|p| p.rest).unwrap_or(false);
+            let (r, t) = if f.is_async { (self.types.promise(r, err), NEVER) } else { (r, err) };
+            self.sig_provisional.insert((m, ii), Sig { tparams: tparams.clone(), params: params.clone(), param_names: param_names.clone(), ret: r, throws: t, rest });
+        }
         let ret = match ret {
             Some(r) if throws != UNKNOWN => r,
             // No `return <value>` anywhere: `void`, and the body can wait for phase B.
@@ -1271,33 +1299,11 @@ impl<'a> Checker<'a> {
                 let (inferred, errs) = self.check_body_of(m, ii, &partial, &tscope, declared.or(if returns_value(&self.modules[m as usize].ast, f.body) { None } else { Some(VOID) }));
                 if throws == UNKNOWN {
                     throws = errs;
-                    if exported && errs != NEVER && errs != ERROR {
-                        let shown = self.show(errs);
-                        let n = self.name(f.name).to_string();
-                        let body_span = self.modules[m as usize].ast.stmt(f.body).span;
-                        let at = Span::new(body_span.file, body_span.start, body_span.start);
-                        self.done.push(
-                            Diagnostic::new("T0830", f.name_span, format!("exported function `{n}` can throw `{shown}` but doesn't declare it"))
-                                .note("why", "exported signatures are the module's interface; callers need to know what can go wrong")
-                                .fix(Applicability::Safe, format!("declare `throws {shown}`"), at, format!("throws {shown} ")),
-                        );
-                    }
                 }
                 if let Some(r) = declared {
                     r
                 } else {
                     let inferred = if returns_value(&self.modules[m as usize].ast, f.body) { inferred } else { VOID };
-                if exported && inferred != VOID {
-                    let body_span = self.modules[m as usize].ast.stmt(f.body).span;
-                    let at = self.before_body(body_span);
-                    let shown = self.show(inferred);
-                    let n = self.name(f.name).to_string();
-                    self.done.push(
-                        Diagnostic::new("T0302", f.name_span, format!("exported function `{n}` needs a return type annotation"))
-                            .note("why", "exported signatures are the module's interface; they are never inferred")
-                            .fix(Applicability::Safe, format!("annotate the inferred type `{shown}`"), at, format!(": {shown}")),
-                    );
-                }
                 inferred
                 }
             }
@@ -1309,13 +1315,6 @@ impl<'a> Checker<'a> {
         self.sig_in_progress.remove(&(m, ii));
         Arc::make_mut(&mut self.sigs).insert((m, ii), sig.clone());
         Some(sig)
-    }
-
-    /// Position right after the `)` that precedes a function body.
-    fn before_body(&self, body_span: Span) -> Span {
-        let text = &self.sm.get(body_span.file).text[..body_span.start as usize];
-        let pos = text.rfind(')').map(|p| p + 1).unwrap_or(body_span.start as usize) as u32;
-        Span::new(body_span.file, pos, pos)
     }
 
     fn check_fn_body(&mut self, m: u32, ii: u32) {
@@ -1400,7 +1399,7 @@ impl<'a> Checker<'a> {
             let mut fcx = FnCtx { tscope: tscope.to_vec(), promoted: promoted.clone(), ..Default::default() };
             (fcx.closure_mutated, fcx.closure_assigned) = stmt::closure_mutated_stmt(&self.modules[m as usize].ast, f.body);
             fcx.scopes.push(Vec::new());
-            // Without a `throws` clause the body's own `try`/`throw` decide (T0831 covers unmarked calls).
+            // Without a `throws` clause the body's own `throw`s and the calls it makes decide.
             let decl = if sig.throws == UNKNOWN || (f.throws.is_none() && sig.throws == NEVER) { None } else { Some(sig.throws) };
             let mut frame = Frame::new(ret, Some(f.name), true, decl);
             frame.is_async = f.is_async;
@@ -1454,6 +1453,11 @@ impl<'a> Checker<'a> {
             self.check_shared_copies();
             let fcx = self.fcx.pop().unwrap();
             result = r;
+            // A body that throws where its signature was taken not to (it only calls something
+            // that throws): its callers are checked again knowing it can.
+            if thrown != NEVER && f.throws.is_none() && sig.throws == NEVER {
+                self.throw_hits.push((m, f.body));
+            }
             let new: Vec<u32> = fcx.pending.difference(&promoted).copied().collect();
             if new.is_empty() {
                 break;

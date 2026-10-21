@@ -1,0 +1,7 @@
+total 3.5
+total empty failed: Oops empty
+depth 3
+depth negative failed: RangeError negative
+reader 6
+reader bad failed: Oops empty
+reader none failed: Oops no items
