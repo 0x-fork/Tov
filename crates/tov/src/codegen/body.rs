@@ -108,7 +108,8 @@ pub(crate) struct Body {
     /// The function's body statement (for facts about the whole function).
     pub root: Option<StmtId>,
     /// `const` array locals whose length never changes in the function (see `fixed_lens`).
-    pub fixed: Option<FxMap<u32, u64>>,
+    /// Arrays of a fixed length: (length, where in the source it holds from).
+    pub fixed: Option<FxMap<u32, (u64, u32)>>,
 }
 
 /// A `for` loop emitted twice (see `Gen::version_plan`): its index local, whether its test is
@@ -1675,7 +1676,7 @@ impl<'c, 'a> Gen<'c, 'a> {
     /// length is a constant `N` the whole time: initialized with a literal of N elements (or a call to a function that always
     /// returns one), in a function where nothing may resize an array (see `resize`). Told to the
     /// C compiler before each loop, it can unroll by them (as it would with a fixed-size array).
-    fn fixed_lens(&mut self) -> FxMap<u32, u64> {
+    fn fixed_lens(&mut self) -> FxMap<u32, (u64, u32)> {
         if let Some(f) = &self.b().fixed {
             return f.clone();
         }
@@ -1683,21 +1684,87 @@ impl<'c, 'a> Gen<'c, 'a> {
         let mut out = FxMap::default();
         if let Some(root) = self.b().root {
             let ast = self.ast(m);
+            let span = ast.stmt(root).span;
+            let inside = |sp: Span| sp.start >= span.start && sp.end <= span.end && sp.file == span.file;
+            // (a `let` the function never reassigns is as fixed as a `const`)
+            let reassigned = self.reassigned_locals(&FnBodyKind::Block(root));
+            let boxed = self.b().boxed.clone();
+            let facts = self.facts(m);
+            let local = |e: ExprId| match (&ast.expr(e).kind, facts.idents.get(&e)) {
+                (ExprKind::Ident(_), Some(IdentFact::Local(k))) => Some(*k),
+                _ => None,
+            };
+            // Arrays filled by a loop that pushes once a round onto each of them, from empty, a
+            // fixed number of times (`for (let i = 0; i < n; i++) { a.push(0); b.push(i) }`): that
+            // many long after it. (local, (length, the loop's end); the loop's expressions)
+            let empty: FxSet<u32> = ast
+                .stmts
+                .iter()
+                .filter(|st| inside(st.span))
+                .filter_map(|st| match &st.kind {
+                    StmtKind::Let { name_span, init: Some(i), .. } if matches!(&ast.expr(*i).kind, ExprKind::Array(xs) if xs.is_empty()) => Some(name_span.start),
+                    _ => None,
+                })
+                .collect();
+            let mut loops: Vec<(Vec<u32>, ExprId, u32, StmtId)> = Vec::new();
+            for st in ast.stmts.iter().filter(|st| inside(st.span)) {
+                let StmtKind::For { init: Some(init), cond: Some(cond), step: Some(step), body } = &st.kind else { continue };
+                let StmtKind::Let { name_span, init: Some(i0), .. } = &ast.stmt(*init).kind else { continue };
+                if !matches!(ast.expr(*i0).kind, ExprKind::Int(0)) {
+                    continue;
+                }
+                let ik = name_span.start;
+                let ExprKind::Binary(BinOp::Lt, l, r) = &ast.expr(*cond).kind else { continue };
+                if local(*l) != Some(ik) || !matches!(&ast.expr(*step).kind, ExprKind::Update { target, inc: true, .. } if local(*target) == Some(ik)) {
+                    continue;
+                }
+                let StmtKind::Block(ss) = &ast.stmt(*body).kind else { continue };
+                // (the body: only pushes, of values that call nothing, onto distinct arrays)
+                let mut arrays = Vec::new();
+                let all_pushes = ss.iter().all(|&s| {
+                    let StmtKind::Expr(e) = &ast.stmt(s).kind else { return false };
+                    let ExprKind::Call { callee, args, .. } = &ast.expr(*e).kind else { return false };
+                    let ExprKind::Member { obj, name, .. } = &ast.expr(*callee).kind else { return false };
+                    let Some(k) = local(*obj) else { return false };
+                    if self.sym(*name) != "push" || args.len() != 1 || super::asyncfn::has_call(ast, args[0].expr) || matches!(ast.expr(args[0].expr).kind, ExprKind::Spread(_) | ExprKind::Assign(..) | ExprKind::Update { .. }) || arrays.contains(&k) {
+                        return false;
+                    }
+                    arrays.push(k);
+                    true
+                });
+                if !all_pushes || arrays.is_empty() || arrays.iter().any(|k| !empty.contains(k) || reassigned.contains(k) || boxed.contains(k)) {
+                    continue;
+                }
+                loops.push((arrays, *r, st.span.end, *body));
+            }
+            // (the count: a literal, or a value range analysis knows exactly)
+            let mut filled: Vec<(u32, u64, u32)> = Vec::new();
+            let mut skip: FxSet<ExprId> = FxSet::default();
+            for (arrays, r, end, body) in loops {
+                let n = match self.int_range(r) {
+                    super::range::R::In(lo, hi) if lo == hi && lo >= 0 => lo as u64,
+                    _ => continue,
+                };
+                for &k in &arrays {
+                    filled.push((k, n, end));
+                }
+                let mut es = Vec::new();
+                collect_exprs_stmt(self.ast(m), body, &mut es);
+                skip.extend(es);
+            }
+            let ast = self.ast(m);
             let mut exprs = Vec::new();
             collect_exprs_stmt(ast, root, &mut exprs);
+            exprs.retain(|e| !skip.contains(e));
             if !self.may_resize(m, &exprs, &[]) {
-                let span = ast.stmt(root).span;
-                // (a `let` the function never reassigns is as fixed as a `const`)
-                let reassigned = self.reassigned_locals(&FnBodyKind::Block(root));
-                for (si, st) in ast.stmts.iter().enumerate() {
+                for (k, n, from) in filled {
+                    out.insert(k, (n, from));
+                }
+                for st in ast.stmts.iter() {
                     let StmtKind::Let { name_span, init: Some(i), .. } = &st.kind else { continue };
-                    if reassigned.contains(&name_span.start) || self.b().boxed.contains(&name_span.start) {
+                    if reassigned.contains(&name_span.start) || self.b().boxed.contains(&name_span.start) || !inside(st.span) {
                         continue;
                     }
-                    if !(st.span.start >= span.start && st.span.end <= span.end && st.span.file == span.file) {
-                        continue;
-                    }
-                    let _ = si;
                     let n = match &ast.expr(*i).kind {
                         ExprKind::Array(xs) if !xs.is_empty() && !xs.iter().any(|&x| matches!(ast.expr(x).kind, ExprKind::Spread(_))) => Some(xs.len() as u64),
                         ExprKind::Call { .. } => match self.facts(m).calls.get(i).map(|f| f.callee.clone()) {
@@ -1707,7 +1774,7 @@ impl<'c, 'a> Gen<'c, 'a> {
                         _ => None,
                     };
                     if let Some(n) = n {
-                        out.insert(name_span.start, n);
+                        out.insert(name_span.start, (n, 0));
                     }
                 }
             }
@@ -2136,7 +2203,9 @@ impl<'c, 'a> Gen<'c, 'a> {
         let m = self.cur_m();
         if matches!(self.ast(m).stmt(s).kind, StmtKind::For { .. } | StmtKind::ForOf { .. } | StmtKind::While(..) | StmtKind::DoWhile(..)) {
             let fixed = self.fixed_lens();
-            let mut facts: Vec<(String, u64)> = fixed.iter().filter_map(|(k, &n)| self.b().locals.get(k).map(|l| (l.access.clone(), n))).collect();
+            // (from where each holds: an array a loop fills, after that loop)
+            let at = self.ast(m).stmt(s).span.start;
+            let mut facts: Vec<(String, u64)> = fixed.iter().filter(|(_, (_, from))| at >= *from).filter_map(|(k, (n, _))| self.b().locals.get(k).map(|l| (l.access.clone(), *n))).collect();
             facts.sort();
             for (access, n) in facts {
                 self.line(format!("__builtin_assume(({access}).p->len == {n});"));
