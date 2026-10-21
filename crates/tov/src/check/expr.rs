@@ -1280,13 +1280,14 @@ impl<'a> Checker<'a> {
                         e
                     }
                     Ty::Error => return None,
-                    Ty::Map(..) => {
-                        let (o, i) = (self.src(self.ast().expr(*obj).span).to_string(), self.src(self.ast().expr(*index).span).to_string());
-                        self.report(
-                            Diagnostic::new("X0017", span, "maps are not indexed with `[]`")
-                                .note("instead", format!("`{o}.set({i}, value)`")),
-                        );
-                        return None;
+                    Ty::Map(k, v) => {
+                        // `counts[w] = n`: sets the key
+                        let it = self.expr(*index, Some(k));
+                        let s = self.ast().expr(*index).span;
+                        self.expect_assignable(it, k, s, Some("the key".into()));
+                        let root = self.check_mutable_root(*obj, span)?;
+                        let sites = self.sources(self.ast().expr(*obj).span);
+                        return Some(Place { ty: v, local: None, root: Some(root), sites, global: None });
                     }
                     _ => {
                         let msg = format!("can't index into `{}`", self.show(t));
@@ -1388,14 +1389,12 @@ impl<'a> Checker<'a> {
                 self.index_type(index);
                 self.types.optional(e)
             }
-            Ty::Map(..) => {
-                self.expr(index, None);
-                let (o, i) = (self.src(self.ast().expr(obj).span).to_string(), self.src(self.ast().expr(index).span).to_string());
-                self.report(
-                    Diagnostic::new("X0017", span, "maps are not indexed with `[]`")
-                        .fix(Applicability::Safe, format!("use `{o}.get({i})`"), span, format!("{o}.get({i})")),
-                );
-                return ERROR;
+            Ty::Map(k, v) => {
+                // `counts[w]` on a `Record<string, V>` (a map): its value, if any
+                let t = self.expr(index, Some(k));
+                let s = self.ast().expr(index).span;
+                self.expect_assignable(t, k, s, Some("the key".into()));
+                self.types.optional(v)
             }
             Ty::Str | Ty::StrLit(_) => {
                 self.index_type(index);
@@ -1999,12 +1998,24 @@ impl<'a> Checker<'a> {
             return ERROR;
         }
         let mut tys = Vec::new();
+        // (`[[1, 2], []]`: an empty array takes its type from the others)
+        let empty = |c: &Self, x: ExprId| matches!(&c.ast().expr(x).kind, ExprKind::Array(xs) if xs.is_empty());
         for &x in elems {
+            if empty(self, x) {
+                continue;
+            }
             let t = match self.ast().expr(x).kind {
                 ExprKind::Spread(inner) => self.spread_elem(inner, None),
                 _ => self.expr(x, None),
             };
             tys.push(self.types.widen(t));
+        }
+        let others = (!tys.is_empty()).then(|| self.types.union(&tys));
+        for &x in elems {
+            if empty(self, x) {
+                let t = self.expr(x, others);
+                tys.push(t);
+            }
         }
         if tys.iter().all(|&t| self.types.is_numeric(t)) && tys.iter().any(|&t| self.types.is_float(t)) && tys.iter().all(|&t| t == INT || t == F64) {
             return self.types.array(F64);

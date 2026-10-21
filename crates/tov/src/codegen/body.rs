@@ -4180,6 +4180,10 @@ impl<'c, 'a> Gen<'c, 'a> {
             let v = Val { code: format!("({}).f_{}", a.code, self.sym(f.name)), ty: f.ty, owned: false };
             return self.project(v, ty);
         }
+        if let Ty::Map(k, v) = self.tget(a.ty) {
+            let arg = [crate::ast::Arg { expr: index, by_ref: None }];
+            return self.map_method_pub(a, k, v, "get", &arg, ty);
+        }
         let (et, len, elem) = match self.tget(a.ty) {
             Ty::Array(et) => (et, format!("tv_arr_len({})", a.code), None),
             Ty::Str | Ty::StrLit(_) => {
@@ -4464,6 +4468,51 @@ impl<'c, 'a> Gen<'c, 'a> {
                 let ty = self.ty(target);
                 return self.js_assign(&js_op, target, value, ty, span);
             }
+        }
+        // `counts[w] = n` / `counts[w] += 1` on a map: set (after reading, for `+=`)
+        let map_target = match self.ast(m).expr(target).kind {
+            ExprKind::Index { obj, index, .. } => {
+                let ot = self.ty(obj);
+                let ot = self.c.types.without_undefined(ot);
+                match self.tget(ot) {
+                    Ty::Map(k, v) => Some((obj, index, k, v)),
+                    _ => None,
+                }
+            }
+            _ => None,
+        };
+        if let Some((obj, index, k, v)) = map_target {
+            let (kd, vd, kct, vct) = (self.desc(k), self.desc(v), self.ctype(k), self.ctype(v));
+            let mp = self.place(obj);
+            let kv = self.expr(index);
+            let kv = self.coerce(kv, k);
+            let kv = self.own(kv);
+            let kc = self.consume(kv);
+            let kn = self.fresh("k");
+            self.line(format!("{kct} {kn} = {kc};"));
+            let nv = match op {
+                AssignOp::Assign => {
+                    let vv = self.expr(value);
+                    self.coerce(vv, v)
+                }
+                AssignOp::Op(bop) => {
+                    // the current value (traps if missing: `undefined + 1` has no value of its type)
+                    let loc = self.loc(span);
+                    let p = self.fresh("p");
+                    self.line(format!("{vct} *{p} = ({vct} *)tv_map_get({}, {kd}, {vd}, &{kn});", mp.lv));
+                    self.line(format!("if (!{p}) tv_trap(\"no such key in the map\", {loc});"));
+                    let cur = Val::plain(format!("(*{p})"), v);
+                    let rv = self.expr(value);
+                    let r = self.arith(bop, cur, rv, v, span);
+                    self.coerce(r, v)
+                }
+            };
+            let nv = self.own(nv);
+            let vc = self.consume(nv);
+            let vn = self.fresh("v");
+            self.line(format!("{vct} {vn} = {vc};"));
+            self.line(format!("tv_map_set(&{}, {kd}, {vd}, &{kn}, &{vn});", mp.lv));
+            return Val::plain("0", VOID);
         }
         match op {
             AssignOp::Assign if let Some(chain) = self.big_chain(target, value) => {

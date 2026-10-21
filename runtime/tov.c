@@ -1035,6 +1035,88 @@ tv_str tv_f64_to_fixed(double v, tv_int digits, const char *loc) {
     return tv_str_from_ascii(buf, (size_t)len);
 }
 
+tv_str tv_f64_to_precision(double v, tv_int digits, const char *loc) {
+    if (digits < 1 || digits > 100) tv_trap("RangeError: toPrecision() argument must be between 1 and 100", loc);
+    if (v != v || isinf(v)) return tv_str_from_f64(v);
+    if (v == 0) v = 0.0;
+    int p = (int)digits;
+    /* p significant digits in scientific form; printf rounds exact ties to even, JS away from zero */
+    char sci[160], wide[200];
+    snprintf(sci, sizeof sci, "%.*e", p - 1, v);
+    snprintf(wide, sizeof wide, "%.*e", p + 40, v);
+    char d[120];
+    int nd = 0, neg = v < 0;
+    const char *q = sci + neg;
+    for (; *q && *q != 'e'; q++)
+        if (*q >= '0' && *q <= '9') d[nd++] = *q;
+    int e = atoi(q + 1);
+    /* a tie: the wide form's digits past p are 5 then only zeros */
+    const char *w = wide + neg;
+    int k = 0, tie = 1, seen = 0;
+    for (; *w && *w != 'e'; w++) {
+        if (*w < '0' || *w > '9') continue;
+        if (k == p) tie &= *w == '5', seen = 1;
+        else if (k > p) tie &= *w == '0';
+        k++;
+    }
+    if (tie && seen) {
+        /* round up from the truncated digits */
+        snprintf(wide, sizeof wide, "%.*e", p + 40, v);
+        nd = 0;
+        for (w = wide + neg; *w && *w != 'e' && nd < p; w++)
+            if (*w >= '0' && *w <= '9') d[nd++] = *w;
+        e = atoi(strchr(wide, 'e') + 1);
+        int i = nd - 1;
+        while (i >= 0 && d[i] == '9') d[i--] = '0';
+        if (i >= 0) d[i]++;
+        else { memmove(d + 1, d, (size_t)nd - 1); d[0] = '1'; e++; }
+    }
+    char out[200];
+    int n = 0;
+    if (neg) out[n++] = '-';
+    if (e < -6 || e >= p) {
+        out[n++] = d[0];
+        if (p > 1) { out[n++] = '.'; memcpy(out + n, d + 1, (size_t)p - 1); n += p - 1; }
+        n += snprintf(out + n, sizeof out - (size_t)n, "e%c%d", e < 0 ? '-' : '+', e < 0 ? -e : e);
+    } else if (e >= 0) {
+        memcpy(out + n, d, (size_t)e + 1); n += e + 1;
+        if (p > e + 1) { out[n++] = '.'; memcpy(out + n, d + e + 1, (size_t)(p - e - 1)); n += p - e - 1; }
+    } else {
+        out[n++] = '0'; out[n++] = '.';
+        for (int z = 0; z < -e - 1; z++) out[n++] = '0';
+        memcpy(out + n, d, (size_t)p); n += p;
+    }
+    return tv_str_from_ascii(out, (size_t)n);
+}
+
+/* ICU's root collation order of printable ASCII (letters by their lowercase): space,
+ * punctuation, symbols, digits, letters. */
+static const char tv_collate_ascii[] = " _-,;:!?.'\"()[]{}@*/\\&#%`^+<=>|~$0123456789abcdefghijklmnopqrstuvwxyz";
+
+static int tv_collate_weight(unsigned char c) {
+    static int16_t w[128];
+    if (!w['a']) for (int i = 0; tv_collate_ascii[i]; i++) w[(unsigned char)tv_collate_ascii[i]] = (int16_t)(i + 1);
+    if (c >= 'A' && c <= 'Z') c += 32;
+    return c < 128 && w[c] ? w[c] : 1000 + c;
+}
+
+tv_int tv_str_locale_compare(tv_str a, tv_str b) {
+    /* (an approximation of ICU's root collation: ASCII by its order, ignoring case first, then a
+     * lowercase letter before its uppercase; anything else by code point) */
+    const unsigned char *x = (const unsigned char *)a.p->data, *y = (const unsigned char *)b.p->data;
+    size_t na = (size_t)a.p->len, nb = (size_t)b.p->len, n = na < nb ? na : nb;
+    int tert = 0;
+    for (size_t i = 0; i < n; i++) {
+        unsigned char c = x[i], d = y[i];
+        if (c == d) continue;
+        int wc = tv_collate_weight(c), wd = tv_collate_weight(d);
+        if (wc != wd) return wc < wd ? -1 : 1;
+        if (!tert) tert = (c >= 'a' && c <= 'z') ? -1 : 1;
+    }
+    if (na != nb) return na < nb ? -1 : 1;
+    return tert;
+}
+
 tv_str tv_int_to_fixed(tv_int v, tv_int digits, const char *loc) {
     tv_toFixed_check(digits, loc);
     tv_sb sb = {0};

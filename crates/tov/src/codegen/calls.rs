@@ -673,6 +673,16 @@ impl<'c, 'a> Gen<'c, 'a> {
                 self.tmp(STR, &format!("tv_big_to_string({}, {radix}, {loc})", rv.code), true)
             }
             _ if self.c.types.is_numeric(recv) => match name {
+                "toPrecision" => {
+                    let x = self.coerce(rv, F64);
+                    let Some(a) = args.first() else { return self.tmp(STR, &format!("tv_str_from_f64({})", x.code), true) };
+                    let d = self.expr(a.expr);
+                    let oi = self.c.types.optional(INT);
+                    let d = self.coerce(d, oi);
+                    let (d, present) = self.optional_int(&d);
+                    let loc = self.loc(span);
+                    self.tmp(STR, &format!("({present} ? tv_f64_to_precision({}, {d}, {loc}) : tv_str_from_f64({}))", x.code, x.code), true)
+                }
                 "toFixed" => {
                     let d = self.expr(args[0].expr);
                     let d = self.int_code(d);
@@ -1092,6 +1102,23 @@ impl<'c, 'a> Gen<'c, 'a> {
                 let o = self.coerce(o, ty);
                 self.tmp(ty, &format!("tv_arr_concat({}, {}, {d})", arr.code, o.code), true)
             }
+            "flat" => {
+                // one level: each nested array's elements, in order
+                let Ty::Array(rt) = self.tget(ty) else { return Val::plain("TV_EMPTY_ARR", ty) };
+                let rd = self.desc(rt);
+                let out = self.tmp(ty, "TV_EMPTY_ARR", true);
+                let i = self.fresh("i");
+                self.open(&format!("for (tv_int {i} = 0; {i} < tv_arr_len({}); {i}++) {{", arr.code));
+                if matches!(self.tget(et), Ty::Array(_)) {
+                    self.line(format!("tv_arr_extend(&{}, {rd}, {});", out.code, elem(&i).code));
+                } else {
+                    let x = self.fresh("x");
+                    let r = self.retain_code(et, &x);
+                    self.line(format!("{ect} {x} = {}; {r}; tv_arr_push(&{}, {rd}, &{x});", elem(&i).code, out.code));
+                }
+                self.close("}");
+                out
+            }
             "entries" | "keys" => {
                 // `[index, element]` pairs, or the indexes
                 let Ty::Array(rt) = self.tget(ty) else { return Val::plain("TV_EMPTY_ARR", ty) };
@@ -1172,6 +1199,10 @@ impl<'c, 'a> Gen<'c, 'a> {
             Some(k) => format!("(!{})", self.u_is(&v.code, v.ty, k)),
             None => "true".into(),
         }
+    }
+
+    pub(crate) fn map_method_pub(&mut self, mv: Val, k: TyId, v: TyId, name: &str, args: &[Arg], ty: TyId) -> Val {
+        self.map_method(mv, k, v, name, args, ty)
     }
 
     fn map_method(&mut self, mv: Val, k: TyId, v: TyId, name: &str, args: &[Arg], ty: TyId) -> Val {
@@ -1347,6 +1378,7 @@ impl<'c, 'a> Gen<'c, 'a> {
             "trimStart" => format!("tv_str_trim_start({})", s.code),
             "trimEnd" => format!("tv_str_trim_end({})", s.code),
             "toUpperCase" => format!("tv_str_to_upper({})", s.code),
+            "localeCompare" => return Val::plain(format!("tv_str_locale_compare({}, {})", s.code, str_arg(self, 0)), INT),
             "toLowerCase" => format!("tv_str_to_lower({})", s.code),
             "replace" => format!("tv_str_replace({}, {}, {})", s.code, str_arg(self, 0), str_arg(self, 1)),
             "replaceAll" => format!("tv_str_replace_all({}, {}, {})", s.code, str_arg(self, 0), str_arg(self, 1)),

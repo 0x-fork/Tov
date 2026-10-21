@@ -1,0 +1,26 @@
+// toPrecision, flat, localeCompare, index signatures and map indexing, destructuring at the top level.
+function main1() {
+  const xs = [123.456, 0.000012345, 1e21, 2.5, 1.45, 0, -9.999, 1234567, 0.1 + 0.2]
+  for (const x of xs) console.log(x.toPrecision(3), x.toPrecision(1), x.toPrecision(6))
+  console.log((5).toPrecision(2), (99.95).toPrecision(3))
+  console.log([[1, 2], [3], []].flat(), [["a"], ["b", "c"]].flat().join(""))
+  const words = ["banana", "Apple", "cherry", "apple", "Banana", "a1", "a_b", "10", "9"]
+  console.log([...words].sort((a, b) => a.localeCompare(b)).join(" "))
+  console.log("a".localeCompare("b"), "b".localeCompare("a"), "a".localeCompare("a"), "a".localeCompare("A"))
+}
+function main2() {
+  const users: User[] = [{ name: "a", age: 30 }, { name: "b", age: 25, email: "b@x" }]
+  const byName: Record<string, User> = {}
+  for (const u of users) byName[u.name] = u
+  console.log(Object.keys(byName).join(","), users.filter(u => u.age > 26).length, users[1]?.email?.length ?? 0)
+  const counts: { [k: string]: number } = {}
+  for (const w of "a b a c b a".split(" ")) counts[w] = (counts[w] ?? 0) + 1
+  console.log(Object.entries(counts).map(([k, v]) => `${k}=${v}`).join(" "))
+}
+type User = { name: string, age: number, email?: string }
+const [lo, hi] = [3, 9]
+function main() {
+  main1()
+  main2()
+  console.log(lo, hi)
+}

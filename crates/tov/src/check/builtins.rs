@@ -214,15 +214,15 @@ pub(super) fn property(types: &Types, ty: TyId, name: &str) -> Option<TyId> {
 
 const ARRAY_METHODS: &[&str] = &[
     "push", "pop", "shift", "unshift", "map", "filter", "forEach", "reduce", "some", "every", "find", "findIndex", "indexOf", "lastIndexOf", "includes", "join", "slice", "concat",
-    "reverse", "sort", "at", "flatMap", "fill", "entries", "keys",
+    "reverse", "sort", "at", "flatMap", "fill", "entries", "keys", "flat",
 ];
 const STRING_METHODS: &[&str] = &[
-    "chars", "slice", "includes", "startsWith", "endsWith", "indexOf", "lastIndexOf", "split", "trim", "trimStart", "trimEnd", "toUpperCase", "toLowerCase", "replace",
+    "chars", "slice", "localeCompare", "includes", "startsWith", "endsWith", "indexOf", "lastIndexOf", "split", "trim", "trimStart", "trimEnd", "toUpperCase", "toLowerCase", "replace",
     "replaceAll", "repeat", "padStart", "padEnd", "toString", "charAt", "charCodeAt", "codePointAt", "at", "substring", "substr", "concat",
 ];
 const MAP_METHODS: &[&str] = &["get", "set", "has", "delete", "clear", "keys", "values", "entries", "forEach"];
 const SET_METHODS: &[&str] = &["add", "has", "delete", "clear", "values", "forEach"];
-const NUMBER_METHODS: &[&str] = &["toFixed", "toString"];
+const NUMBER_METHODS: &[&str] = &["toFixed", "toPrecision", "toString"];
 
 fn methods_of(types: &Types, ty: TyId) -> &'static [&'static str] {
     match types.get(ty) {
@@ -343,6 +343,15 @@ pub(super) fn method(c: &mut Checker, base: TyId, name: &str) -> Option<MethodSi
                     mk(sig(vec![(cmp, "compare")], arr), true)
                 }
                 "at" => mk(sig(vec![(p(INT), "index")], opt_e), false),
+                "flat" => {
+                    // one level of nested arrays
+                    let inner = match *c.types.get(e) {
+                        Ty::Array(x) => x,
+                        _ => e,
+                    };
+                    let a = c.types.array(inner);
+                    mk(sig(vec![], a), false)
+                }
                 "entries" => {
                     let t = c.tuple_ty(&[INT, e]);
                     let a = c.types.array(t);
@@ -368,6 +377,7 @@ pub(super) fn method(c: &mut Checker, base: TyId, name: &str) -> Option<MethodSi
                     let second = if name == "substr" { "length" } else { "end" };
                     mk(sig(vec![(start, "start"), (end, second)], STR), false)
                 }
+                "localeCompare" => mk(sig(vec![(p(STR), "that")], INT), false),
                 "includes" | "startsWith" | "endsWith" => {
                     let pos = opt(c, INT);
                     mk(sig(vec![(p(STR), "search"), (pos, if name == "endsWith" { "endPosition" } else { "position" })], BOOL), false)
@@ -467,6 +477,10 @@ pub(super) fn method(c: &mut Checker, base: TyId, name: &str) -> Option<MethodSi
         }
         _ if c.types.is_numeric(ty) => match name {
             "toFixed" => mk(sig(vec![(p(INT), "digits")], STR), false),
+            "toPrecision" => {
+                let digits = opt(c, INT);
+                mk(sig(vec![(digits, "precision")], STR), false)
+            }
             "toString" => {
                 let radix = opt(c, INT);
                 mk(sig(vec![(radix, "radix")], STR), false)
