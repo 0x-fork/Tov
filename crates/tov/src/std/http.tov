@@ -630,8 +630,8 @@ function multipartBoundary(contentType: string): string {
     b = b.slice(0, semi)
   }
   b = b.trim()
-  if (b.startsWith("\"") && b.endsWith("\"") && b.byteLength >= 2) {
-    b = b.slice(1, b.byteLength - 1)
+  if (b.startsWith("\"") && b.endsWith("\"") && b.length >= 2) {
+    b = b.slice(1, b.length - 1)
   }
   return b
 }
@@ -1239,7 +1239,7 @@ export function serve<T = undefined>(options: ServeOptions<T>): Server<T> {
       const value = routes.get(path)!
       if (path.includes(":") || path.endsWith("/*")) {
         const wildcard = path.endsWith("/*")
-        const segs = (wildcard ? path.slice(0, path.byteLength - 2) : path).split("/")
+        const segs = (wildcard ? path.slice(0, path.length - 2) : path).split("/")
         patterns.push({ segments: segs, wildcard, value })
       } else {
         exact.set(path, value)

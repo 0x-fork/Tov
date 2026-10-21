@@ -68,13 +68,13 @@ export function resolve(...parts: string[]): string {
     result = result === "" ? cwd : cwd + "/" + result
   }
   const n = normalize(result)
-  return n.byteLength > 1 && n.endsWith("/") ? n.slice(0, n.byteLength - 1) : n
+  return n.length > 1 && n.endsWith("/") ? n.slice(0, n.length - 1) : n
 }
 
 function stripTrailing(p: string): string {
   let s = p
-  while (s.byteLength > 1 && s.endsWith("/")) {
-    s = s.slice(0, s.byteLength - 1)
+  while (s.length > 1 && s.endsWith("/")) {
+    s = s.slice(0, s.length - 1)
   }
   return s
 }
@@ -84,7 +84,7 @@ export function basename(p: string, ext?: string): string {
   const parts = s.split("/")
   let base = parts[parts.length - 1] ?? ""
   if (ext !== undefined && ext !== base && base.endsWith(ext)) {
-    base = base.slice(0, base.byteLength - ext.byteLength)
+    base = base.slice(0, base.length - ext.length)
   }
   return base
 }
