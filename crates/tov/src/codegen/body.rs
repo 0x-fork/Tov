@@ -1308,6 +1308,10 @@ impl<'c, 'a> Gen<'c, 'a> {
                 ExprKind::Assign(_, t, _) | ExprKind::Update { target: t, .. } => {
                     through.insert(*t);
                 }
+                // (read as the element type: as `xs[i]!`)
+                ExprKind::Index { optional: false, .. } if !self.c.types.has_undefined(facts.expr_ty[e as usize]) => {
+                    through.insert(e);
+                }
                 _ => {}
             }
         }
@@ -2770,6 +2774,8 @@ impl<'c, 'a> Gen<'c, 'a> {
                 Val::plain("TV_EMPTY_MAP", ty)
             }
             ExprKind::Member { obj, name, optional, .. } => self.member(e, *obj, *name, *optional, ty, span),
+            // `xs[i]` read as the element type (TypeScript's): as `xs[i]!`
+            ExprKind::Index { obj, index, optional: false } if !self.c.types.has_undefined(ty) && let Some(v) = self.element(*obj, *index, ty, span) => v,
             ExprKind::Index { obj, index, optional } => {
                 let ot = self.ty(*obj);
                 if self.c.types.without_undefined(ot) == JS
@@ -2919,31 +2925,10 @@ impl<'c, 'a> Gen<'c, 'a> {
             }
             ExprKind::NonNull(x) => {
                 // `xs[i]!`: a direct bounds-checked read.
-                if let ExprKind::Index { obj, index, optional: false } = &ast.expr(*x).kind {
-                    let ot = self.ty(*obj);
-                    if let Ty::Array(et) = self.tget(ot) {
-                        if !self.b().versioned.is_empty()
-                            && let Some(lv) = self.versioned_index(*obj, *index, span)
-                        {
-                            return self.coerce(Val::plain(lv, et), ty);
-                        }
-                        let in_bounds = match (self.ident_fact(m, *obj), self.ident_fact(m, *index)) {
-                            (Some(IdentFact::Local(xk)), Some(IdentFact::Local(ik))) => self.b().in_bounds.contains(&(ik, xk)),
-                            _ => false,
-                        };
-                        let a = self.expr(*obj);
-                        let i = self.expr(*index);
-                        let i = self.int_code(i);
-                        let ect = self.ctype(et);
-                        if in_bounds {
-                            // `xs[i]` in `for (let i = 0; i < xs.length; i++)`: always in bounds.
-                            let v = Val::plain(format!("((({ect} *)tv_arr_data({}))[{i}])", a.code), et);
-                            return self.coerce(v, ty);
-                        }
-                        let loc = self.loc(span);
-                        let v = Val::plain(format!("(*({ect} *)tv_arr_at({}, sizeof({ect}), {i}, {loc}))", a.code), et);
-                        return self.coerce(v, ty);
-                    }
+                if let ExprKind::Index { obj, index, optional: false } = &ast.expr(*x).kind
+                    && let Some(v) = self.element(*obj, *index, ty, span)
+                {
+                    return v;
                 }
                 let v = self.expr(*x);
                 self.downcast(v, ty, span)
@@ -4182,7 +4167,13 @@ impl<'c, 'a> Gen<'c, 'a> {
         }
         if let Ty::Map(k, v) = self.tget(a.ty) {
             let arg = [crate::ast::Arg { expr: index, by_ref: None }];
-            return self.map_method_pub(a, k, v, "get", &arg, ty);
+            if self.c.types.has_undefined(ty) {
+                return self.map_method_pub(a, k, v, "get", &arg, ty);
+            }
+            // read as present (TypeScript's type): traps when the key is missing
+            let ov = self.c.types.optional(v);
+            let got = self.map_method_pub(a, k, v, "get", &arg, ov);
+            return self.downcast(got, ty, span);
         }
         let (et, len, elem) = match self.tget(a.ty) {
             Ty::Array(et) => (et, format!("tv_arr_len({})", a.code), None),
@@ -4204,6 +4195,11 @@ impl<'c, 'a> Gen<'c, 'a> {
         self.line(format!("tv_int {iv} = {i};"));
         if let Some(sv) = elem {
             let v = Val { code: format!("tv_str_unit_at({sv}, {iv})"), ty: STR, owned: true };
+            if !self.c.types.has_undefined(ty) {
+                let loc = self.loc(span);
+                self.line(format!("if ((uint64_t){iv} >= (uint64_t){len}) tv_arr_oob({iv}, {len}, {loc});"));
+                return self.tmp(STR, &v.code, true);
+            }
             return self.present_if(&format!("(uint64_t){iv} < (uint64_t){len}"), v, ty);
         }
         let res = self.fresh("t");
@@ -4228,6 +4224,35 @@ impl<'c, 'a> Gen<'c, 'a> {
             self.b().temps.last_mut().unwrap().push((res.clone(), ty));
         }
         Val { code: res, ty, owned }
+    }
+
+    /// `xs[i]` known present (`xs[i]!`, or read as the element type): a bounds-checked read
+    /// (`None` when `obj` isn't an array).
+    fn element(&mut self, obj: ExprId, index: ExprId, ty: TyId, span: Span) -> Option<Val> {
+        let m = self.cur_m();
+        let ot = self.ty(obj);
+        let Ty::Array(et) = self.tget(ot) else { return None };
+        if !self.b().versioned.is_empty()
+            && let Some(lv) = self.versioned_index(obj, index, span)
+        {
+            return Some(self.coerce(Val::plain(lv, et), ty));
+        }
+        let in_bounds = match (self.ident_fact(m, obj), self.ident_fact(m, index)) {
+            (Some(IdentFact::Local(xk)), Some(IdentFact::Local(ik))) => self.b().in_bounds.contains(&(ik, xk)),
+            _ => false,
+        };
+        let a = self.expr(obj);
+        let i = self.expr(index);
+        let i = self.int_code(i);
+        let ect = self.ctype(et);
+        if in_bounds {
+            // `xs[i]` in `for (let i = 0; i < xs.length; i++)`: always in bounds.
+            let v = Val::plain(format!("((({ect} *)tv_arr_data({}))[{i}])", a.code), et);
+            return Some(self.coerce(v, ty));
+        }
+        let loc = self.loc(span);
+        let v = Val::plain(format!("(*({ect} *)tv_arr_at({}, sizeof({ect}), {i}, {loc}))", a.code), et);
+        Some(self.coerce(v, ty))
     }
 
     /// `cond ? v : undefined` as a temporary of the optional type `ty` (`v` is computed only

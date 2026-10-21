@@ -74,7 +74,8 @@ impl<'a> Checker<'a> {
     }
 
     pub(super) fn expr(&mut self, e: ExprId, exp: Option<TyId>) -> TyId {
-        let t = self.expr_inner(e, exp);
+        let want = std::mem::take(&mut self.want_optional) || exp.is_some_and(|x| self.types.has_undefined(x));
+        let t = self.expr_inner(e, exp, want);
         if self.spec.on {
             self.derive_sites(e);
         }
@@ -89,7 +90,9 @@ impl<'a> Checker<'a> {
         t
     }
 
-    fn expr_inner(&mut self, e: ExprId, exp: Option<TyId>) -> TyId {
+    /// `want`: the value may be absent here (`xs[i] ?? d`, `xs[i] === undefined`), so an
+    /// element read is `T | undefined` rather than a `T` that traps when out of bounds.
+    fn expr_inner(&mut self, e: ExprId, exp: Option<TyId>, want: bool) -> TyId {
         let ast = self.ast();
         let node = ast.expr(e);
         let span = node.span;
@@ -141,7 +144,10 @@ impl<'a> Checker<'a> {
                 UNDEFINED
             }
             ExprKind::Ident(sym) => self.ident(e, *sym, span),
-            ExprKind::Paren(x) => self.expr(*x, exp),
+            ExprKind::Paren(x) => {
+                self.want_optional = want;
+                self.expr(*x, exp)
+            }
             ExprKind::Await(x) => self.await_expr(e, *x, exp, span),
             ExprKind::Unary(op, x) => self.unary(*op, *x, exp, span),
             ExprKind::Binary(op, l, r) => self.binary(*op, *l, *r, exp, span),
@@ -171,7 +177,7 @@ impl<'a> Checker<'a> {
                 t
             }
             ExprKind::Member { obj, name, name_span, optional } => self.member(e, *obj, *name, *name_span, *optional, span),
-            ExprKind::Index { obj, index, optional } => self.index(*obj, *index, *optional, span),
+            ExprKind::Index { obj, index, optional } => self.index(*obj, *index, *optional, *optional || want, span),
             ExprKind::Object(fields) => self.object(fields, exp, span),
             ExprKind::Array(elems) => self.array_lit(elems, exp, span),
             ExprKind::Seq(xs) => {
@@ -478,6 +484,7 @@ impl<'a> Checker<'a> {
             }
             Nullish => {
                 let hint = exp.map(|t| self.types.optional(t));
+                self.want_optional = true;
                 let tl = self.expr(l, hint);
                 let inner = self.types.without_undefined(tl);
                 let tr = self.expr(r, exp.or(Some(inner)));
@@ -887,11 +894,14 @@ impl<'a> Checker<'a> {
     }
 
     fn equality(&mut self, l: ExprId, r: ExprId, span: Span) -> TyId {
+        let (lu, ru) = (matches!(self.ast().expr(l).kind, ExprKind::Undefined), matches!(self.ast().expr(r).kind, ExprKind::Undefined));
         let (tl, tr) = if matches!(self.ast().expr(l).kind, ExprKind::Str(_) | ExprKind::Undefined) {
+            self.want_optional = lu;
             let tr = self.expr(r, None);
             let tl = self.expr(l, Some(tr));
             (tl, tr)
         } else {
+            self.want_optional = ru;
             let tl = self.expr(l, None);
             let tr = self.expr(r, if self.types.is_num_like(tl) { Some(tl) } else { None });
             (tl, tr)
@@ -1363,7 +1373,7 @@ impl<'a> Checker<'a> {
         self.report(d);
     }
 
-    fn index(&mut self, obj: ExprId, index: ExprId, optional: bool, span: Span) -> TyId {
+    fn index(&mut self, obj: ExprId, index: ExprId, optional: bool, absent: bool, span: Span) -> TyId {
         let t = self.expr(obj, None);
         let base = if optional {
             self.types.without_undefined(t)
@@ -1385,20 +1395,21 @@ impl<'a> Checker<'a> {
         }
         let result = match *self.types.get(base) {
             Ty::Error => return ERROR,
+            // (TypeScript's type for an element: present, as it assumes; out of bounds traps)
             Ty::Array(e) => {
                 self.index_type(index);
-                self.types.optional(e)
+                if absent { self.types.optional(e) } else { e }
             }
             Ty::Map(k, v) => {
                 // `counts[w]` on a `Record<string, V>` (a map): its value, if any
                 let t = self.expr(index, Some(k));
                 let s = self.ast().expr(index).span;
                 self.expect_assignable(t, k, s, Some("the key".into()));
-                self.types.optional(v)
+                if absent { self.types.optional(v) } else { v }
             }
             Ty::Str | Ty::StrLit(_) => {
                 self.index_type(index);
-                self.types.optional(STR)
+                if absent { self.types.optional(STR) } else { STR }
             }
             Ty::Record(fields) if self.tuple_of(base).is_some() => {
                 // `t[0]`: a tuple's element (the index is a constant)
@@ -1501,6 +1512,7 @@ impl<'a> Checker<'a> {
             self.report(Diagnostic::new("T0801", span, format!("`super.{n}` must be called; base fields are read through `this.{n}`")));
             return ERROR;
         }
+        self.want_optional = optional;
         let t = self.expr(obj, None);
         if t == ERROR {
             return ERROR;
@@ -2585,6 +2597,7 @@ impl<'a> Checker<'a> {
                     };
                     recv_hint = Some(self.types.array(vt));
                 }
+                self.want_optional = mopt;
                 let recv = self.expr(obj, recv_hint);
                 if recv == ERROR {
                     for a in args {

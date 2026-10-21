@@ -1,0 +1,15 @@
+// Element reads typed as TypeScript types them.
+function main() {
+  const items = ["apple", "kiwi"]
+  console.log(items[0].length, items[1].toUpperCase())
+  const nums = [1, 2, 3]
+  let s = 0
+  for (let i = 0; i < nums.length; i++) s += nums[i] * 2
+  console.log(s, nums[5] === undefined, nums[1] ?? 0, nums[9] ?? -1, nums[0]?.toFixed(1))
+  const grid = [[1, 2], [3, 4]]
+  console.log(grid[1][0] + grid[0][1])
+  const m: Record<string, number> = { a: 1 }
+  console.log(m["a"] + 1, m["b"] === undefined, (m["z"] ?? 7))
+  const word = "hey"
+  console.log(word[0] + word[2], word[5] === undefined)
+}

@@ -35,10 +35,4 @@ error[X0007] typescript_habits.tov:14:16: `for...in` is not supported
    14 |   for (const k in items) console.log(k)
   instead: iterate keys with `for (const k of map.keys())`, or values with `for...of`
 
-error[T0120] typescript_habits.tov:15:15: `items[0]` may be `undefined`
-   15 |   console.log(items[0].length)
-  narrow first: `if (items[0] !== undefined) { ... }`
-  fix[maybe]: optional chaining: `items[0]?.length`
-  fix[maybe]: assert defined (traps if not): `items[0]!.length`
-
-9 error(s)
+8 error(s)

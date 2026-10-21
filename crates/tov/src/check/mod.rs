@@ -343,6 +343,8 @@ pub struct Checker<'a> {
     wrap_store: bool,
     /// What the driver rewrites before checking again (see `rewrite`).
     pub(crate) rewrites: rewrite::Rewrites,
+    /// The next expression checked may be absent (see `expr_inner`).
+    want_optional: bool,
 }
 
 /// `threads`: phase-B worker count (default: all cores). Results don't depend on it.
@@ -402,6 +404,7 @@ fn new_checker<'a>(modules: &'a [Module], interner: &'a Interner, sm: &'a Source
         call_spec: None,
         wrap_store: false,
         rewrites: rewrite::Rewrites::default(),
+        want_optional: false,
     }
 }
 
@@ -640,6 +643,7 @@ impl<'a> Checker<'a> {
             call_spec: None,
             wrap_store: false,
             rewrites: rewrite::Rewrites::default(),
+            want_optional: false,
         }
     }
 
