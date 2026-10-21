@@ -209,7 +209,14 @@ impl<'c, 'a> Gen<'c, 'a> {
         let has_inout = params.iter().any(|p| p.inout);
         for (i, a) in args.iter().enumerate() {
             let p = params.get(i).copied().unwrap_or(FnParam { ty: ERROR, inout: false, optional: false });
-            if p.inout {
+            if p.inout && a.by_ref.is_none() && !self.is_place_expr(a.expr) {
+                // `walk(3, [])`: a fresh value, changed by the callee where only it sees it
+                let v = self.expr(a.expr);
+                let v = self.coerce(v, p.ty);
+                let code = self.consume(v);
+                let t = self.tmp(p.ty, &code, true);
+                out.push(format!("&{}", t.code));
+            } else if p.inout {
                 let pl = self.place(a.expr);
                 // Leak-free `inout` array parameters expect a uniquely owned buffer.
                 if let (Ty::Array(et), Some((fm, fi))) = (self.tget(pl.ty), callee)

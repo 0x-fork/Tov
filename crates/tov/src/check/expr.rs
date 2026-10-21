@@ -3191,10 +3191,10 @@ impl<'a> Checker<'a> {
             let aspan = self.ast().expr(a.expr).span;
             let pname = cs.names.get(i).cloned().unwrap_or_else(|| "items".to_string());
             match (p.inout, a.by_ref) {
+                // (a fresh value, `walk(3, [])`: the callee's changes are its own, as in TypeScript)
+                (true, None) if !super::stmt::place_path(self.ast(), a.expr) => {}
                 (true, None) => {
-                    if super::stmt::place_path(self.ast(), a.expr) {
-                        self.rewrites.args.push((self.cur, a.expr));
-                    }
+                    self.rewrites.args.push((self.cur, a.expr));
                     let text = self.src(aspan).to_string();
                     self.report(
                         Diagnostic::new("V0110", aspan, format!("parameter `{pname}` of `{desc}` is `inout`; pass the argument with `&`"))
