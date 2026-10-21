@@ -21,18 +21,8 @@ error[X0003] typescript_habits.tov:11:13: `==` is not supported
   why: Tov has no type coercion; equality is always strict
   fix[safe]: use `===`
 
-error[T0401] typescript_habits.tov:12:7: condition must be `bool`, found `f64`
-   12 |   if (count) console.log("nonzero")
-  why: no implicit truthiness: `0`, `""` and `undefined` are not `false`
-  fix[maybe]: `count !== 0`
-
-error[T0401] typescript_habits.tov:13:17: `||` needs `bool` operands, found `string | undefined`
-   13 |   const label = name || "anonymous"
-  why: no implicit truthiness: `0`, `""` and `undefined` are not `false`
-  fix[maybe]: for a default value, use `??`
-
 error[X0007] typescript_habits.tov:14:16: `for...in` is not supported
    14 |   for (const k in items) console.log(k)
   instead: iterate keys with `for (const k of map.keys())`, or values with `for...of`
 
-8 error(s)
+6 error(s)

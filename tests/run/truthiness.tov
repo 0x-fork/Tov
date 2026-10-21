@@ -1,0 +1,21 @@
+// JavaScript truthiness in conditions, ! and the value forms of || and &&.
+function label(name?: string): string { return name || "anonymous" }
+function count(xs: number[]): number { let n = 0; for (const x of xs) if (x) n++; return n }
+type Node = { value: number, next?: Node }
+function main() {
+  console.log(label(), label(""), label("ada"), count([0, 1, 2, 0, NaN, -1]))
+  const s = ""
+  if (!s) console.log("empty")
+  let n = 3
+  while (n) n--
+  console.log(n)
+  const list: Node = { value: 1, next: { value: 2 } }
+  let cur: Node | undefined = list
+  let total = 0
+  while (cur) { total += cur.value; cur = cur.next }
+  console.log(total, 0 || 5, 7 || 5, "" || "x", undefined || 3, 4 && 8, 0 && 8)
+  const maybe: number | undefined = 0
+  console.log(maybe || -1, maybe ?? -1, [1] ? "arr" : "no", list.next && list.next.value)
+  const opt: { a: number } | undefined = undefined
+  console.log(opt && opt.a)
+}

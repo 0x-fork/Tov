@@ -3434,7 +3434,54 @@ impl<'c, 'a> Gen<'c, 'a> {
     /// A C boolean for a condition (`bool`, or an optional value tested for presence).
     pub(crate) fn cond(&mut self, e: ExprId) -> String {
         let v = self.expr(e);
-        self.truthy(v)
+        self.js_truthy(v)
+    }
+
+    /// JavaScript's truthiness of a value: `false`, `0`, `NaN`, `""`, `0n` and `undefined` are
+    /// false; objects (even empty arrays) are true.
+    pub(crate) fn js_truthy(&mut self, v: Val) -> String {
+        let t = v.ty;
+        match self.tget(t) {
+            Ty::Bool => v.code,
+            Ty::Js => format!("tv_js_truthy({})", v.code),
+            Ty::Int | Ty::I8 | Ty::I16 | Ty::I32 | Ty::U8 | Ty::U16 | Ty::U32 | Ty::U64 => format!("(({}) != 0)", v.code),
+            Ty::F64 | Ty::F32 => format!("tv_f64_truthy({})", v.code),
+            Ty::Str => format!("(tv_str_byte_len({}) != 0)", v.code),
+            Ty::StrLit(s) => if self.sym(s).is_empty() { "false".into() } else { "true".into() },
+            Ty::BigInt => format!("(!tv_big_eq({}, tv_big_small(0)))", v.code),
+            Ty::Decimal => format!("(tv_dec_cmp({}, ((tv_dec){{0, 0}})) != 0)", v.code),
+            Ty::Undefined | Ty::Void => "false".into(),
+            Ty::Union(_) => {
+                let ms = self.members(t);
+                // (each member that can be falsy, tested on its own)
+                let falsy: Vec<usize> = ms.iter().enumerate().filter(|(_, m)| matches!(self.tget(**m), Ty::Undefined | Ty::Void | Ty::Bool | Ty::Int | Ty::I8 | Ty::I16 | Ty::I32 | Ty::U8 | Ty::U16 | Ty::U32 | Ty::U64 | Ty::F64 | Ty::F32 | Ty::Str | Ty::StrLit(_) | Ty::BigInt | Ty::Decimal)).map(|(i, _)| i).collect();
+                if falsy.is_empty() {
+                    return "true".into();
+                }
+                if falsy.iter().all(|&i| matches!(self.tget(ms[i]), Ty::Undefined | Ty::Void)) {
+                    return self.truthy(v);
+                }
+                let x = self.fresh("tr");
+                let ct = self.ctype(t);
+                self.line(format!("{ct} {x} = {};", v.code));
+                let mut parts = Vec::new();
+                for (i, &m) in ms.iter().enumerate() {
+                    let is = self.u_is(&x, t, i);
+                    if !falsy.contains(&i) {
+                        parts.push(is);
+                        continue;
+                    }
+                    if matches!(self.tget(m), Ty::Undefined | Ty::Void) {
+                        continue;
+                    }
+                    let p = Val::plain(self.u_payload(&x, t, i), m);
+                    let c = self.js_truthy(p);
+                    parts.push(format!("({is} && {c})"));
+                }
+                if parts.is_empty() { "false".into() } else { format!("({})", parts.join(" || ")) }
+            }
+            _ => self.truthy(v),
+        }
     }
 
     fn truthy(&mut self, v: Val) -> String {
@@ -3592,6 +3639,55 @@ impl<'c, 'a> Gen<'c, 'a> {
     fn binary(&mut self, op: BinOp, l: ExprId, r: ExprId, ty: TyId, span: Span) -> Val {
         use BinOp::*;
         match op {
+            // `a || b`, `a && b` as values (not both `bool`): `a` if it decides, else `b`
+            And | Or if ty != BOOL => {
+                let lv = self.expr(l);
+                let lv = self.own(lv);
+                let x = self.fresh("x");
+                let lct = self.ctype(lv.ty);
+                let lty = lv.ty;
+                let lc = self.consume(lv);
+                self.line(format!("{lct} {x} = {lc};"));
+                let c = self.js_truthy(Val::plain(x.clone(), lty));
+                let res = self.fresh("t");
+                let ct = self.ctype(ty);
+                self.line(format!("{ct} {res};"));
+                self.open(&format!("if ({}{c}) {{", if op == Or { "" } else { "!" }));
+                // (the left value decides: its truthy members for `||`, its falsy ones for `&&`)
+                let keep = if op == Or {
+                    self.c.types.without_undefined(lty)
+                } else {
+                    let ms: Vec<TyId> = self.members(lty).into_iter().filter(|&m| m == UNDEFINED || m == BOOL || self.c.types.is_primitive(m)).collect();
+                    if ms.is_empty() { NEVER } else { self.c.types.union(&ms) }
+                };
+                if keep == NEVER {
+                    let d = self.default_value(ty);
+                    self.line(format!("{res} = {d};"));
+                } else {
+                    let kv = self.project(Val { code: x.clone(), ty: lty, owned: true }, keep);
+                    let kv = self.coerce(kv, ty);
+                    let kc = self.consume(kv);
+                    self.line(format!("{res} = {kc};"));
+                }
+                self.close("} else {");
+                self.b().indent += 1;
+                let rel = self.release_code(lty, &x);
+                if !rel.is_empty() {
+                    self.line(format!("{rel};"));
+                }
+                self.push_temps();
+                let rv = self.expr(r);
+                let rv = self.coerce(rv, ty);
+                let rc = self.consume(rv);
+                self.line(format!("{res} = {rc};"));
+                self.pop_temps();
+                self.close("}");
+                let owned = self.is_rc(ty);
+                if owned {
+                    self.b().temps.last_mut().unwrap().push((res.clone(), ty));
+                }
+                Val { code: res, ty, owned }
+            }
             And | Or => {
                 let lc = self.cond(l);
                 let res = self.fresh("b");

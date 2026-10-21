@@ -467,20 +467,31 @@ impl<'a> Checker<'a> {
         use BinOp::*;
         match op {
             And | Or => {
-                let left_ok = self.logical_operand(l, op, r);
+                // JavaScript's: operands by their truthiness; a value unless both are `bool` or
+                // it's a condition (`if (a || b)`)
+                let want_bool = exp == Some(BOOL);
+                let hint = if want_bool { Some(BOOL) } else { exp };
+                let tl = self.expr(l, hint);
                 let n = self.narrowings(l, op == And);
                 let fx = super::stmt::effects_of_expr(self.ast(), r);
                 let entry = self.fcx().locals.len();
                 self.push_scope();
                 self.apply(&n);
-                if left_ok {
-                    self.logical_operand(r, op, r);
-                } else {
-                    self.expr(r, None);
-                }
+                let tr = self.expr(r, if tl == BOOL && hint.is_none() { Some(BOOL) } else { hint });
                 self.pop_scope();
                 self.apply_effects(&fx, entry, &[]);
-                BOOL
+                if want_bool || (tl == BOOL && tr == BOOL) || tl == ERROR || tr == ERROR {
+                    return BOOL;
+                }
+                let kept = if op == Or { self.truthy_part(tl) } else { self.falsy_part(tl) };
+                match kept {
+                    NEVER => tr,
+                    k if self.types.is_int(k) && self.types.is_float(tr) || self.types.is_float(k) && self.types.is_int(tr) => F64,
+                    k => {
+                        let w = self.types.widen(tr);
+                        self.types.union(&[k, w])
+                    }
+                }
             }
             Nullish => {
                 let hint = exp.map(|t| self.types.optional(t));
@@ -747,23 +758,6 @@ impl<'a> Checker<'a> {
     }
 
     /// Returns false if an error was reported.
-    fn logical_operand(&mut self, e: ExprId, op: BinOp, rhs: ExprId) -> bool {
-        let t = self.expr(e, Some(BOOL));
-        if t == BOOL || t == ERROR || self.condition_ok(t) {
-            return true;
-        }
-        let span = self.ast().expr(e).span;
-        let shown = self.show(t);
-        let mut d = Diagnostic::new("T0401", span, format!("`{}` needs `bool` operands, found `{shown}`", op.as_str()))
-            .note("why", "no implicit truthiness: `0`, `\"\"` and `undefined` are not `false`");
-        if op == BinOp::Or && self.types.has_undefined(t) && rhs != e {
-            let os = self.op_span(e, rhs, "||");
-            d = d.fix(Applicability::Maybe, "for a default value, use `??`", os, "??");
-        }
-        self.report(d);
-        false
-    }
-
     /// Checks two operands so an integer literal on either side adopts the other side's numeric type.
     fn numeric_pair(&mut self, l: ExprId, r: ExprId, exp: Option<TyId>) -> (TyId, TyId) {
         if self.is_num_literal(l) && !self.is_num_literal(r) {
@@ -3338,15 +3332,20 @@ impl<'a> Checker<'a> {
     // ---------------------------------------------------------------- conditions and narrowing
 
     fn condition_ok(&mut self, t: TyId) -> bool {
-        if t == BOOL || t == ERROR || t == JS {
-            // (a JavaScript value: its truthiness, as in JavaScript)
-            return true;
-        }
-        if self.types.has_undefined(t) {
-            let inner = self.types.without_undefined(t);
-            return self.flat_members(inner).iter().all(|&m| !self.types.is_primitive(m) && m != BOOL);
-        }
-        false
+        // any value, by its truthiness, as in JavaScript
+        t != VOID
+    }
+
+    /// What of `t` is truthy (`a || b` keeps it): all but `undefined`.
+    fn truthy_part(&mut self, t: TyId) -> TyId {
+        self.types.without_undefined(t)
+    }
+
+    /// What of `t` can be falsy (`a && b` keeps it): `undefined`, and numbers, strings and
+    /// booleans (`0`, `""`, `false`); objects never are.
+    fn falsy_part(&mut self, t: TyId) -> TyId {
+        let keep: Vec<TyId> = self.flat_members(t).into_iter().filter(|&m| m == UNDEFINED || self.types.is_primitive(m) || m == BOOL).collect();
+        if keep.is_empty() { NEVER } else { self.types.union(&keep) }
     }
 
     pub(super) fn cond(&mut self, e: ExprId) {
@@ -3506,7 +3505,13 @@ impl<'a> Checker<'a> {
                 if !self.types.has_undefined(ty) {
                     return Vec::new();
                 }
-                let t = if positive { self.types.without_undefined(ty) } else { UNDEFINED };
+                // (falsy: `undefined`, or `0` / `""` / `false` when it may hold one of those)
+                let inner = self.types.without_undefined(ty);
+                let can_be_falsy = self.flat_members(inner).iter().any(|&m| self.types.is_primitive(m) || m == BOOL);
+                if !positive && can_be_falsy {
+                    return Vec::new();
+                }
+                let t = if positive { inner } else { UNDEFINED };
                 vec![target.with(t)]
             }
             _ => Vec::new(),

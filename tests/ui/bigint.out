@@ -17,11 +17,6 @@ error[T0501] bigint.tov:5:13: `>>>` doesn't apply to `bigint`: a bigint has no f
     5 |   const e = x >>> 2n
   instead: `>>` (it rounds toward negative infinity), or `BigInt.asUintN(bits, x) >> n`
 
-error[T0401] bigint.tov:6:7: condition must be `bool`, found `bigint`
-    6 |   if (x) {
-  why: no implicit truthiness: `0`, `""` and `undefined` are not `false`
-  fix[maybe]: `x !== 0n`
-
 error[T0502] bigint.tov:9:13: this comparison is always false: `bigint` and `int` have no values in common
     9 |   const g = x === 0
   fix[safe]: make it a bigint literal: `0n`
@@ -46,4 +41,4 @@ error[T0601] bigint.tov:13:13: can't cast `int` to `bigint`
 error[L0006] bigint.tov:15:13: a bigint literal must be an integer
    15 |   const o = 1.5n
 
-11 error(s)
+10 error(s)

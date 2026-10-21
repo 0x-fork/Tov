@@ -81,7 +81,7 @@ Status tags: **[M0]** checked today · **[Mn]** planned for milestone n.
 - `function`, `const`, `let`, `type`, `interface`, arrow functions `(x: T) => expr` / `=> { ... }`, and methods in object literals (`{ fetch(req) { ... } }`, a field holding an arrow function).
 - Exported functions must annotate every parameter and the return type (unannotated return means `void`). Local and unexported functions may omit the return type when it can be inferred.
 - `if/else`, `while`, `do/while`, `for (init; cond; step)`, `for (const x of xs)`, `switch`, `break`, `continue`, `return`, blocks.
-- Conditions must be `bool`, or an optional of a non-primitive type (tests "is defined"). `if (n)` on a number or `if (s)` on a string is an error with the explicit rewrite (`n !== 0`, `s !== ""`).
+- Conditions, `!`, `&&` and `||` use JavaScript's truthiness: `false`, `0`, `NaN`, `""`, `0n` and `undefined` are false, everything else (objects, even empty arrays) true. `a || b` and `a && b` are values unless both are `bool` (`name || "anonymous"`, `node && node.next`); `if (x)` narrows `x` to defined.
 - A function with a non-`void` return type must return on every path.
 - Removed: `var`, `with`, labels, `for…in` (use `for (const k of map.keys())`), `delete`, `arguments`, `eval`, comma operator.
 
