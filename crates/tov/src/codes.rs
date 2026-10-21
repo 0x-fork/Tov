@@ -103,6 +103,7 @@ pub const CODES: &[(&str, &str)] = &[
     ("V0113", "The same variable can't be passed as two `inout` arguments in one call."),
     ("V0120", "A copy of an array, record or map is changed while the original is still used (or vice versa). TypeScript would share one value; Tov copies. Change the original directly, or copy explicitly (`a.slice()`)."),
     ("V0121", "A value copied from (or stored into) a class instance or module variable is changed afterwards. TypeScript would change that one too; Tov copied it. Change it there directly, or make it a class instance."),
+    ("V0122", "A parameter with a default value is changed in place; TypeScript would change the caller's value, but a Tov parameter is a copy."),
     ("V0201", "Mutable module-level state (`let` at the top level) is not allowed."),
     ("X0001", "`any` is not supported. Use a precise type, a union, a generic, or `unknown` with narrowing."),
     ("X0005", "`enum` is not supported; use a union of string literals."),

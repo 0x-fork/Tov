@@ -1215,6 +1215,20 @@ impl<'a> Checker<'a> {
                         );
                         None
                     }
+                    // a parameter with a default, changed in place: TypeScript changes the
+                    // caller's value (when it passes one), which a copy can't do
+                    _ if self.fcx().default_shadows.contains(&id) && {
+                        let t = self.local(id).ty;
+                        self.shared_in_ts(t)
+                    } =>
+                    {
+                        self.report(
+                            Diagnostic::new("V0122", span, format!("this changes parameter `{n}`, which has a default value: TypeScript would change the caller's value too"))
+                                .note("why", "Tov arrays, sets, maps and records are values: the function has its own copy")
+                                .note("instead", format!("drop the default and pass the value (`inout {n}` is then made for you), or return the changed value")),
+                        );
+                        None
+                    }
                     _ => {
                         let depth = super::stmt::path_depth(self.ast(), e);
                         self.fcx().mutations.push((id, span, depth));

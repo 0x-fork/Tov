@@ -211,6 +211,9 @@ struct FnCtx {
     /// place's span): TypeScript would share them with it.
     heap_links: Vec<(LocalId, u32, Span)>,
     mutations: Vec<(LocalId, Span, u32)>,
+    /// `let x = x ?? d` starting a body, for a parameter `x = d` (see `parser::with_defaults`):
+    /// such a local and the parameter's name.
+    default_shadows: Vec<LocalId>,
     reads: Vec<(LocalId, u32)>,
     /// Names of locals assigned or changed (through a field, an element or a method call) inside a
     /// closure: never narrowed (the closure may run between the check and the use)...

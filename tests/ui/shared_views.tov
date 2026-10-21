@@ -25,3 +25,8 @@ function group() {
   // (changed where it is: fine)
   m.get("a")!.push(4)
 }
+
+// A parameter with a default, changed in place: TypeScript changes the caller's set.
+function visit(node: string, seen: Set<string> = new Set()): void {
+  seen.add(node)
+}

@@ -246,7 +246,12 @@ impl<'a> Checker<'a> {
                     }
                 };
                 self.rec_binding(s, t);
+                // (`let x = x ?? d` for a parameter's default: the parameter, under another name)
+                let shadow = init.is_some_and(|i| matches!(&self.ast().expr(i).kind, ExprKind::Binary(crate::ast::BinOp::Nullish, l, _) if matches!(self.ast().expr(*l).kind, ExprKind::Ident(n) if n == *name && self.lookup(n).is_some_and(|(pid, _)| self.local(pid).kind == LocalKind::Param))));
                 let id = self.declare(*name, t, kind, *name_span, if *mutable { None } else { Some(kw) }, promotable);
+                if shadow {
+                    self.fcx().default_shadows.push(id);
+                }
                 if self.spec.on {
                     let sites = match (ty, init) {
                         (Some(te), _) => self.type_sites(self.cur, *te),
