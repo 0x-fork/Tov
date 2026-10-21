@@ -22,6 +22,8 @@ pub(super) struct Place {
     pub sites: Vec<super::spec::Site>,
     /// The place is this module variable: (module, item).
     pub global: Option<(u32, u32)>,
+    /// The place is this class field (`spec::field_key`), declared `x = <integer>`.
+    pub int_field: Option<(u32, u32)>,
 }
 
 pub(super) enum Root {
@@ -1055,6 +1057,13 @@ impl<'a> Checker<'a> {
             self.global_hits.push((m, ii));
             return true;
         }
+        if let Some(key) = place.int_field
+            && place.ty == INT
+            && self.types.is_float(value)
+        {
+            self.global_hits.push(key);
+            return true;
+        }
         let Some(local) = place.local else { return false };
         let l = self.local(local);
         if l.promotable && l.ty == INT && self.types.is_float(value) {
@@ -1258,7 +1267,7 @@ impl<'a> Checker<'a> {
                     }
                     let _ = ty;
                     let sites = self.local(id).sites.clone();
-                    return Some(Place { ty: declared, local: Some(id), root: Some(id), sites, global: None });
+                    return Some(Place { ty: declared, local: Some(id), root: Some(id), sites, global: None, int_field: None });
                 }
                 let n = self.name(*sym).to_string();
                 match self.scopes[self.cur as usize].values.get(sym).map(|d| d.0) {
@@ -1292,7 +1301,7 @@ impl<'a> Checker<'a> {
                             .then(|| self.fcx().locals.iter().position(|l| l.global == Some((cm, ci))))
                             .flatten();
                         let sites = self.const_sites(cm, ci);
-                        Some(Place { ty, local, root: local, sites, global: Some((cm, ci)) })
+                        Some(Place { ty, local, root: local, sites, global: Some((cm, ci)), int_field: None })
                     }
                     Some(Decl::Fn(..)) => {
                         self.report(Diagnostic::new("V0105", span, format!("can't assign to function `{n}`")));
@@ -1329,12 +1338,12 @@ impl<'a> Checker<'a> {
                     && n != "size"
                 {
                     self.rewrites.keys.push((self.cur, e));
-                    return Some(Place { ty: v, local: None, root: None, sites: Vec::new(), global: None });
+                    return Some(Place { ty: v, local: None, root: None, sites: Vec::new(), global: None, int_field: None });
                 }
                 let ft = self.member_of(t, *name, *name_span, span, *obj)?;
                 let root = self.check_mutable_root(*obj, span)?;
                 let sites = self.member_sites_of(t, *name);
-                Some(Place { ty: ft, local: None, root: Some(root), sites, global: None })
+                Some(Place { ty: ft, local: None, root: Some(root), sites, global: None, int_field: None })
             }
             ExprKind::Index { obj, index, optional } => {
                 if *optional {
@@ -1355,7 +1364,7 @@ impl<'a> Checker<'a> {
                         self.expect_assignable(it, k, s, Some("the key".into()));
                         let root = self.check_mutable_root(*obj, span)?;
                         let sites = self.sources(self.ast().expr(*obj).span);
-                        return Some(Place { ty: v, local: None, root: Some(root), sites, global: None });
+                        return Some(Place { ty: v, local: None, root: Some(root), sites, global: None, int_field: None });
                     }
                     _ => {
                         let msg = format!("can't index into `{}`", self.show(t));
@@ -1365,7 +1374,7 @@ impl<'a> Checker<'a> {
                 };
                 let root = self.check_mutable_root(*obj, span)?;
                 let sites = self.sources(self.ast().expr(*obj).span);
-                Some(Place { ty: elem, local: None, root: Some(root), sites, global: None })
+                Some(Place { ty: elem, local: None, root: Some(root), sites, global: None, int_field: None })
             }
             _ => {
                 self.expr(e, None);
@@ -1392,7 +1401,13 @@ impl<'a> Checker<'a> {
                     }
                 }
                 let sites = self.class_field_sites(&f);
-                Some(Place { ty: f.ty, local: None, root: None, sites, global: None })
+                // (an unannotated field with an integer initializer, which a float can widen)
+                let int_field = f.member.filter(|&mi| {
+                    let decl = self.class_decl(f.owner);
+                    let m = self.classes[f.owner as usize].module;
+                    matches!(&decl.members[mi as usize].kind, crate::ast::MemberKind::Field { ty: None, init: Some(i), .. } if matches!(self.modules[m as usize].ast.expr(*i).kind, ExprKind::Int(_)))
+                }).map(|mi| super::spec::field_key(f.owner, mi));
+                Some(Place { ty: f.ty, local: None, root: None, sites, global: None, int_field })
             }
             Some(super::class::ClassMemberRef::Getter(_)) => {
                 self.report(Diagnostic::new("U0019", name_span, format!("`{n}` is a getter; setters are not supported yet")));

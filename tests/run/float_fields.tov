@@ -1,0 +1,10 @@
+// A field initialized with an integer and given a fraction is a float, as in TypeScript
+// (checked against Node)
+class Acc { n = 0; count = 0; add(x: number): void { this.n += x; this.count++ } }
+const acc = new Acc(); acc.add(1.5); acc.add(2); console.log(acc.n, acc.count, acc)
+class P { x = 0; y = 0 }
+const p = new P()
+p.x = 1.25
+function move(q: P, d: number): void { q.y = q.y + d }
+move(p, 0.5)
+console.log(p)

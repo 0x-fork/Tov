@@ -268,7 +268,9 @@ impl<'a> Checker<'a> {
                             self.fcx.pop();
                             let span = self.ast().expr(*e).span;
                             let t = self.check_inferred_binding(t, span);
-                            self.types.widen(t)
+                            let t = self.types.widen(t);
+                            // (`total = 0` that's given a float: an `f64`, as `let x = 0` is)
+                            if t == INT && self.spec.float_globals.contains(&super::spec::field_key(c, mi as u32)) { F64 } else { t }
                         }
                         (None, None) => {
                             self.report(

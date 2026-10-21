@@ -48,6 +48,8 @@ pub(crate) struct Spec {
     /// Bodies that throw without a `throw` of their own: (module, body).
     pub(crate) throwing: HashSet<(u32, StmtId)>,
     /// Module variables `let x = 0` that a float is stored into: `f64`s. (module, item)
+    /// Module variables (module, item) and class fields (`field_key`) initialized with an
+    /// integer and given a float: `f64`s.
     pub(crate) float_globals: HashSet<(u32, u32)>,
 }
 
@@ -428,4 +430,10 @@ impl<'a> Checker<'a> {
         }
         out
     }
+}
+
+/// A class field's key among `float_globals`: (u32::MAX - class, member), apart from every
+/// (module, item).
+pub(crate) fn field_key(class: u32, member: u32) -> (u32, u32) {
+    (u32::MAX - class, member)
 }
