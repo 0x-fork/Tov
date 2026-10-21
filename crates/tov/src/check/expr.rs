@@ -2137,6 +2137,17 @@ impl<'a> Checker<'a> {
             ArrowBody::Expr(x) => {
                 let ret_sites = self.fcx().frames.last().unwrap().ret_sites.clone();
                 let t = self.flow(ret_sites.clone(), |c| c.expr(*x, ret));
+                // `async () => promise`: its value (`async () => await promise`, see `rewrite`)
+                let t = if is_async && matches!(self.types.get(t), Ty::Promise(..)) && !ret.is_some_and(|r| self.flat_members(r).iter().any(|&m| matches!(self.types.get(m), Ty::Promise(..)))) {
+                    let m = self.cur;
+                    self.rewrites.awaits.push((m, *x));
+                    match *self.types.get(t) {
+                        Ty::Promise(v, _) => v,
+                        _ => t,
+                    }
+                } else {
+                    t
+                };
                 if let Some(r) = declared_ret {
                     let s = self.ast().expr(*x).span;
                     self.flow(ret_sites, |c| c.expect_assignable(t, r, s, None));

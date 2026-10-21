@@ -1,0 +1,19 @@
+// Async functions and arrows that return promises: their values, as in JavaScript.
+const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms))
+async function value(n: number): Promise<number> { return Promise.resolve(n * 2) }
+const later = async (n: number) => value(n + 1)
+async function main() {
+  await sleep(1)
+  console.log(await value(3), await later(1))
+  await second()
+}
+
+async function delay2(ms: number): Promise<void> { return new Promise(r => setTimeout(r, ms)) }
+async function work2(id: number): Promise<number> { await delay2(1); return id * 2 }
+async function second() {
+  const results = await Promise.all([1, 2, 3].map(work2))
+  console.log(results.join(","))
+  const start = performance.now()
+  await delay2(5)
+  console.log(performance.now() - start >= 4)
+}

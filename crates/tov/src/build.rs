@@ -251,10 +251,11 @@ pub fn build(paths: &[PathBuf], base: &Path, opts: &Options) -> Result<Built, Bu
     // npm packages resolve from the entry file's directory
     let npm_root = modules.iter().find(|m| m.entry).and_then(|m| m.path.parent()).map(Path::to_path_buf).unwrap_or_else(|| base.to_path_buf());
     let first = check::check_for_build(&modules, &mut interner, &sm);
-    let (diags, mut checker) = if first.0.is_empty() || first.1.rewrites.is_empty() {
+    let (diags, mut checker) = if first.1.rewrites.is_empty() {
         first
     } else {
-        // TypeScript that changes parameters in place: rewritten as `inout` and checked again
+        // TypeScript that changes parameters in place, or returns promises from async functions:
+        // rewritten (`inout`, `await`) and checked again
         let rw = first.1.rewrites.clone();
         drop(first);
         driver::rewrite_rounds(&mut modules, &mut interner, &sm, rw);

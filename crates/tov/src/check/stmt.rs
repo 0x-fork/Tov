@@ -294,10 +294,21 @@ impl<'a> Checker<'a> {
                 };
                 let who = fname.map(|n| format!("`{}`", self.name(n))).unwrap_or_else(|| "this function".to_string());
                 let ret_sites = self.fcx.last().unwrap().frames[frame_idx].ret_sites.clone();
+                let is_async = self.fcx.last().unwrap().frames[frame_idx].is_async;
                 match (ret, v) {
                     (Some(r), Some(x)) => self.flow(ret_sites, |c| {
                         let t = c.expr(*x, Some(r));
                         let xspan = c.ast().expr(*x).span;
+                        // an async function returning a promise: its value, as `return await p`
+                        // (see `rewrite`)
+                        if is_async
+                            && matches!(c.types.get(t), Ty::Promise(..))
+                            && !c.flat_members(r).iter().any(|&m| matches!(c.types.get(m), Ty::Promise(..)))
+                        {
+                            let m = c.cur;
+                            c.rewrites.awaits.push((m, *x));
+                            return;
+                        }
                         if r == VOID {
                             if t != VOID && t != UNDEFINED && t != ERROR {
                                 c.report(

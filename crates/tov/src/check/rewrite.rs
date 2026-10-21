@@ -19,11 +19,13 @@ pub struct Rewrites {
     pub(crate) consts: Vec<(u32, u32)>,
     /// Module constants (module, item) passed to `inout` parameters.
     pub(crate) items: Vec<(u32, u32)>,
+    /// Promises returned by async functions (module, the returned expression): `return await p`.
+    pub(crate) awaits: Vec<(u32, ExprId)>,
 }
 
 impl Rewrites {
     pub fn is_empty(&self) -> bool {
-        self.params.is_empty() && self.args.is_empty() && self.consts.is_empty() && self.items.is_empty()
+        self.params.is_empty() && self.args.is_empty() && self.consts.is_empty() && self.items.is_empty() && self.awaits.is_empty()
     }
 
     pub(crate) fn extend(&mut self, o: Rewrites) {
@@ -31,6 +33,7 @@ impl Rewrites {
         self.args.extend(o.args);
         self.consts.extend(o.consts);
         self.items.extend(o.items);
+        self.awaits.extend(o.awaits);
     }
 }
 
@@ -105,6 +108,16 @@ pub fn apply(modules: &mut [Module], rw: &Rewrites) -> bool {
                 changed = true;
             }
         }
+    }
+    for &(m, x) in &rw.awaits {
+        // `return p` → `return await p`: the returned expression's node becomes the await of a
+        // copy of itself
+        let ast = &mut modules[m as usize].ast;
+        let inner = crate::ast::Expr { kind: std::mem::replace(&mut ast.exprs[x as usize].kind, ExprKind::Error), span: ast.exprs[x as usize].span };
+        ast.exprs.push(inner);
+        let copy = ast.exprs.len() as ExprId - 1;
+        ast.exprs[x as usize].kind = ExprKind::Await(copy);
+        changed = true;
     }
     for &(m, ii) in &rw.items {
         if let ItemKind::Const { mutable, .. } = &mut modules[m as usize].ast.items[ii as usize].kind

@@ -57,7 +57,7 @@ pub fn check_paths_with(paths: &[PathBuf], base: &Path, threads: Option<usize>) 
         check::check_program(&modules, &mut interner, &sm, threads);
     }
     let (found, rw) = check::check_program_rewrites(&modules, &mut interner, &sm, threads);
-    if found.is_empty() || rw.is_empty() {
+    if rw.is_empty() {
         diags.extend(found);
     } else {
         rewrite_rounds(&mut modules, &mut interner, &sm, rw);
@@ -79,8 +79,8 @@ pub fn rewrite_rounds(modules: &mut [Module], interner: &mut crate::intern::Inte
         if !check::rewrite::apply(modules, &rw) {
             return;
         }
-        let (found, next) = check::check_program_rewrites(modules, interner, sm, None);
-        if found.is_empty() || next.is_empty() {
+        let (_, next) = check::check_program_rewrites(modules, interner, sm, None);
+        if next.is_empty() {
             return;
         }
         rw = next;
