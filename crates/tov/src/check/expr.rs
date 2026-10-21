@@ -4035,8 +4035,10 @@ impl<'a> Checker<'a> {
                         let lit = *lit;
                         let lit_ty = self.types.str_lit(lit);
                         match &ast.expr(subject).kind {
-                            ExprKind::Member { obj, name, optional: false, .. } => {
+                            // (`t?.type === "op"`: t isn't `undefined` when it holds)
+                            ExprKind::Member { obj, name, optional, .. } if !*optional || eq => {
                                 let Some((target, ty)) = self.target_of(*obj) else { return Vec::new() };
+                                let ty = if *optional { self.types.without_nullish(ty) } else { ty };
                                 let members = self.flat_members(ty);
                                 let keep: Vec<TyId> = members
                                     .into_iter()

@@ -3826,6 +3826,32 @@ impl<'c, 'a> Gen<'c, 'a> {
             self.line(format!("if (!{isa}) tv_trap(\"`as` cast failed: the object is a different class\", {loc});"));
             return self.class_cast(v, to);
         }
+        // `ch as "+" | "-"`: the string compared with each literal (a failed `as` traps)
+        if self.c.types.is_string(v.ty)
+            && !matches!(self.tget(v.ty), Ty::StrLit(_))
+            && let lits = self.members(to)
+            && !lits.is_empty()
+            && lits.iter().all(|&m| matches!(self.tget(m), Ty::StrLit(_)))
+        {
+            let ct = self.ctype(to);
+            let (res, sv) = (self.fresh("t"), self.fresh("s"));
+            // (each literal's value first: making one may take lines of its own)
+            let mut arms = Vec::new();
+            for &m in &lits {
+                let Ty::StrLit(sym) = self.tget(m) else { continue };
+                let lit = self.lit(self.sym(sym).to_string().as_bytes());
+                let one = self.coerce(Val::plain("0", m), to);
+                arms.push((lit, one.code));
+            }
+            self.line(format!("{ct} {res}; tv_str {sv} = {};", v.code));
+            for (i, (lit, one)) in arms.into_iter().enumerate() {
+                let eq = self.eq_code(STR, &sv, &lit);
+                self.line(format!("{}if ({eq}) {res} = {one};", if i == 0 { "" } else { "else " }));
+            }
+            let loc = self.loc(span);
+            self.line(format!("else tv_trap(\"`as` cast failed: the string is none of the type's\", {loc});"));
+            return Val::plain(res, to);
+        }
         let v = if matches!(self.tget(v.ty), Ty::Rec(..)) { self.unfold_val(v) } else { v };
         if let Ty::Union(_) = self.tget(v.ty) {
             let fms = self.members(v.ty);
