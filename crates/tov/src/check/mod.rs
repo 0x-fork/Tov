@@ -158,6 +158,8 @@ struct Frame {
     returns: Vec<TyId>,
     loops: u32,
     switches: u32,
+    /// Labels of the enclosing loops (`outer: for`), innermost last.
+    labels: Vec<Sym>,
     name: Option<Sym>,
     /// Functions and methods can throw; closures can't (yet).
     can_throw: bool,
@@ -177,7 +179,7 @@ struct Frame {
 
 impl Frame {
     fn new(ret: Option<TyId>, name: Option<Sym>, can_throw: bool, throws_decl: Option<TyId>) -> Frame {
-        Frame { ret, ret_sites: Vec::new(), returns: Vec::new(), loops: 0, switches: 0, name, can_throw, throws_decl, thrown: Vec::new(), try_frames: Vec::new(), try_expr: 0, module_init: false, is_async: false }
+        Frame { ret, ret_sites: Vec::new(), returns: Vec::new(), loops: 0, switches: 0, labels: Vec::new(), name, can_throw, throws_decl, thrown: Vec::new(), try_frames: Vec::new(), try_expr: 0, module_init: false, is_async: false }
     }
 }
 

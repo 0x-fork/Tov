@@ -131,6 +131,19 @@ impl<'a> Checker<'a> {
     }
 
     pub(super) fn stmt(&mut self, s: StmtId) {
+        // (a labelled loop: its label, for `break outer` / `continue outer` inside)
+        let label = self.ast().labels.iter().find(|(st, _)| *st == s).map(|x| x.1);
+        let in_fn = self.fcx.last().is_some_and(|f| !f.frames.is_empty());
+        if let Some(l) = label.filter(|_| in_fn) {
+            self.cur_frame().labels.push(l);
+        }
+        self.stmt_inner(s);
+        if label.is_some() && in_fn {
+            self.cur_frame().labels.pop();
+        }
+    }
+
+    fn stmt_inner(&mut self, s: StmtId) {
         let ast = self.ast();
         let node = ast.stmt(s);
         let span = node.span;
@@ -565,16 +578,22 @@ impl<'a> Checker<'a> {
                 // Any part of the `try` may have run: forget what it changed.
                 self.apply_effects(&fx, entry, &[]);
             }
-            StmtKind::Break => {
+            StmtKind::Break(label) | StmtKind::Continue(label) => {
+                let brk = matches!(node.kind, StmtKind::Break(_));
                 let f = self.fcx.last().unwrap().frames.last().unwrap();
-                if f.loops == 0 && f.switches == 0 {
-                    self.report(Diagnostic::new("F0201", span, "`break` outside of a loop or `switch`"));
-                }
-            }
-            StmtKind::Continue => {
-                let f = self.fcx.last().unwrap().frames.last().unwrap();
-                if f.loops == 0 {
-                    self.report(Diagnostic::new("F0202", span, "`continue` outside of a loop"));
+                match label {
+                    Some(l) if !f.labels.contains(l) => {
+                        let n = self.name(*l).to_string();
+                        self.report(Diagnostic::new("F0203", span, format!("no enclosing loop is labelled `{n}`")));
+                    }
+                    Some(_) => {}
+                    None if brk && f.loops == 0 && f.switches == 0 => {
+                        self.report(Diagnostic::new("F0201", span, "`break` outside of a loop or `switch`"));
+                    }
+                    None if !brk && f.loops == 0 => {
+                        self.report(Diagnostic::new("F0202", span, "`continue` outside of a loop"));
+                    }
+                    None => {}
                 }
             }
         }
@@ -867,7 +886,7 @@ impl<'a> Checker<'a> {
     /// Control never reaches the statement after `s`.
     pub(super) fn always_jumps(&self, s: StmtId) -> bool {
         match &self.ast().stmt(s).kind {
-            StmtKind::Return(_) | StmtKind::Break | StmtKind::Continue | StmtKind::Throw(_) => true,
+            StmtKind::Return(_) | StmtKind::Break(_) | StmtKind::Continue(_) | StmtKind::Throw(_) => true,
             StmtKind::Block(ss) => ss.iter().any(|&x| self.always_jumps(x)),
             StmtKind::If(_, t, Some(e)) => self.always_jumps(*t) && self.always_jumps(*e),
             _ => self.always_returns(s),
@@ -934,14 +953,24 @@ impl<'a> Checker<'a> {
     }
 }
 
-/// A `break` that exits this loop (not a nested loop or switch).
+/// A `break` that exits this loop (not a nested loop or switch), or a labelled `break` /
+/// `continue` anywhere in it (which leaves it too, unless it names a loop inside: counted anyway).
 fn has_break(ast: &Ast, s: StmtId) -> bool {
     match &ast.stmt(s).kind {
-        StmtKind::Break => true,
+        StmtKind::Break(_) => true,
         StmtKind::Block(ss) => ss.iter().any(|&x| has_break(ast, x)),
         StmtKind::If(_, t, e) => has_break(ast, *t) || e.map(|e| has_break(ast, e)).unwrap_or(false),
-        _ => false,
+        _ => has_labelled_jump(ast, s),
     }
+}
+
+/// A `break outer` / `continue outer` anywhere in `s`.
+pub(crate) fn has_labelled_jump(ast: &Ast, s: StmtId) -> bool {
+    if ast.labels.is_empty() {
+        return false;
+    }
+    let sp = ast.stmt(s).span;
+    ast.stmts.iter().any(|x| matches!(x.kind, StmtKind::Break(Some(_)) | StmtKind::Continue(Some(_))) && x.span.file == sp.file && x.span.start >= sp.start && x.span.end <= sp.end)
 }
 
 pub(super) fn collect_assigned_stmt(ast: &Ast, s: StmtId, out: &mut Vec<Sym>) {

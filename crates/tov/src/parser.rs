@@ -1590,13 +1590,10 @@ impl<'a> Parser<'a> {
             Tok::Break | Tok::Continue => {
                 let brk = self.at(Tok::Break);
                 self.bump();
-                if self.at(Tok::Ident) && !self.tok().nl_before {
-                    let span = self.cur_span();
-                    self.err("X0018", span, "labels are not supported; restructure the loop or move it into a function and `return`");
-                    self.bump();
-                }
+                let label = if self.at(Tok::Ident) && !self.tok().nl_before { self.ident("a label").map(|l| l.0) } else { None };
                 self.terminator();
-                self.mk_stmt(if brk { StmtKind::Break } else { StmtKind::Continue }, start)
+                let span = start.to(self.prev_span());
+                self.mk_stmt(if brk { StmtKind::Break(label) } else { StmtKind::Continue(label) }, span)
             }
             Tok::Semi => {
                 self.bump();
@@ -1652,10 +1649,15 @@ impl<'a> Parser<'a> {
                 self.mk_stmt(StmtKind::Error, start)
             }
             Tok::Ident if self.nth(1) == Tok::Colon => {
-                self.err("X0018", start, "labels are not supported");
-                self.bump();
-                self.bump();
-                self.stmt()
+                let (label, _) = self.ident("a label").unwrap();
+                self.bump(); // :
+                let body = self.stmt();
+                if matches!(self.ast.stmts[body as usize].kind, StmtKind::While(..) | StmtKind::DoWhile(..) | StmtKind::For { .. } | StmtKind::ForOf { .. }) {
+                    self.ast.labels.push((body, label));
+                } else {
+                    self.err("X0018", start, "labels are only supported on loops");
+                }
+                body
             }
             _ => {
                 let e = self.expr();
@@ -2032,7 +2034,7 @@ impl<'a> Parser<'a> {
         let t = self.mk_expr(ExprKind::Bool(true), sp);
         let set = self.mk_expr(ExprKind::Assign(AssignOp::Assign, d_e, t), sp);
         let set = self.mk_stmt(StmtKind::Expr(set), sp);
-        let brk = self.mk_stmt(StmtKind::Break, sp);
+        let brk = self.mk_stmt(StmtKind::Break(None), sp);
         let then = self.mk_stmt(StmtKind::Block(vec![set, brk]), sp);
         let if_done = self.mk_stmt(StmtKind::If(cond, then, None), sp);
         // const x = r.value!
@@ -2925,6 +2927,6 @@ fn top_level_await(ast: &Ast, s: StmtId) -> bool {
         }
         // `const x = await f()` at the top level of a script: the initializer is on the item
         StmtKind::InitGlobal(ii) => matches!(&ast.items[*ii as usize].kind, ItemKind::Const { init, .. } if expr(ast, *init)),
-        StmtKind::Break | StmtKind::Continue | StmtKind::Empty | StmtKind::Error => false,
+        StmtKind::Break(_) | StmtKind::Continue(_) | StmtKind::Empty | StmtKind::Error => false,
     }
 }

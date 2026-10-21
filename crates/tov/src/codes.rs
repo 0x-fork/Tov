@@ -88,6 +88,7 @@ pub const CODES: &[(&str, &str)] = &[
     ("F0102", "This code can never run."),
     ("F0201", "`break` is only valid inside a loop or `switch`."),
     ("F0202", "`continue` is only valid inside a loop."),
+    ("F0203", "`break` or `continue` names a label that no enclosing loop has."),
     ("F0301", "A `switch` over a union must handle every variant, or have `default`."),
     ("F0302", "Cases must end with `break`, `return` or `continue`; implicit fallthrough isn't allowed (empty cases may be grouped)."),
     ("F0303", "The same case label appears twice."),

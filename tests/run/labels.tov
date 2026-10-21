@@ -1,0 +1,27 @@
+// Labelled loops: break outer, continue outer (checked against Node)
+function find(grid: number[][], target: number): string {
+  let found = "none"
+  outer: for (let r = 0; r < grid.length; r++) {
+    for (let c = 0; c < grid[r].length; c++) {
+      if (grid[r][c] === target) { found = `${r},${c}`; break outer }
+    }
+  }
+  return found
+}
+console.log(find([[1, 2], [3, 4]], 3), find([[1]], 9))
+const out: string[] = []
+rows: for (const row of [["a", "skip", "b"], ["c", "d"]]) {
+  let i = 0
+  while (i < row.length) {
+    const w = row[i++]
+    if (w === "skip") continue rows
+    out.push(w)
+  }
+}
+console.log(out)
+let n = 0
+loop: while (true) {
+  n++
+  if (n > 3) break loop
+}
+console.log(n)

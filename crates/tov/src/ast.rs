@@ -18,6 +18,8 @@ pub struct Ast {
     pub script: Option<u32>,
     /// Where the first top-level statement is (for "statements only in the entry file").
     pub script_span: Option<Span>,
+    /// Labelled loops (`outer: for (...)`): the loop statement and its label.
+    pub labels: Vec<(StmtId, Sym)>,
 }
 
 impl Ast {
@@ -223,8 +225,10 @@ pub enum StmtKind {
     ForOf { mutable: bool, name: Sym, name_span: Span, iter: ExprId, body: StmtId },
     Switch(ExprId, Vec<Case>),
     Return(Option<ExprId>),
-    Break,
-    Continue,
+    /// `break` / `break outer`.
+    Break(Option<Sym>),
+    /// `continue` / `continue outer`.
+    Continue(Option<Sym>),
     Block(Vec<StmtId>),
     Throw(ExprId),
     Try { body: StmtId, catch: Option<Catch>, finally: Option<StmtId> },

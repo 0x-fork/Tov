@@ -49,6 +49,9 @@ pub(crate) struct Body {
     ret: TyId,
     /// (continue label, scope depth at loop body entry)
     loops: Vec<(String, usize)>,
+    /// Enclosing labelled loops: (label, the label after it, its entry in `loops`, the scope
+    /// depth outside it).
+    pub labeled: Vec<(crate::intern::Sym, String, usize, usize)>,
     /// (target, scope depth to unwind to)
     breaks: Vec<(BreakTarget, usize)>,
     /// Locals (by declaration offset) that live in heap cells because a heap closure captures them and they change.
@@ -246,6 +249,7 @@ impl<'c, 'a> Gen<'c, 'a> {
             temps: vec![Vec::new()],
             ret: VOID,
             loops: Vec::new(),
+            labeled: Vec::new(),
             breaks: Vec::new(),
             boxed: FxSet::default(),
             stack_arrows: FxSet::default(),
@@ -439,6 +443,7 @@ impl<'c, 'a> Gen<'c, 'a> {
             temps: vec![Vec::new()],
             ret,
             loops: Vec::new(),
+            labeled: Vec::new(),
             breaks: Vec::new(),
             boxed,
             stack_arrows,
@@ -1723,7 +1728,7 @@ impl<'c, 'a> Gen<'c, 'a> {
         // Every iteration reaches every top-level statement.
         fn exits(ast: &ast::Ast, s: StmtId) -> bool {
             match &ast.stmt(s).kind {
-                StmtKind::Break | StmtKind::Continue | StmtKind::Return(_) | StmtKind::Throw(_) | StmtKind::Try { .. } => true,
+                StmtKind::Break(_) | StmtKind::Continue(_) | StmtKind::Return(_) | StmtKind::Throw(_) | StmtKind::Try { .. } => true,
                 StmtKind::If(_, t, e) => exits(ast, *t) || e.is_some_and(|e| exits(ast, e)),
                 StmtKind::While(_, b) | StmtKind::DoWhile(b, _) | StmtKind::For { body: b, .. } | StmtKind::ForOf { body: b, .. } => exits(ast, *b),
                 StmtKind::Block(xs) => xs.iter().any(|&x| exits(ast, x)),
@@ -1915,6 +1920,20 @@ impl<'c, 'a> Gen<'c, 'a> {
     // ------------------------------------------------------------ statements
 
     pub(crate) fn stmt(&mut self, s: StmtId) {
+        // `outer: for (...)`: `break outer` jumps past it, `continue outer` to its next round
+        let m = self.cur_m();
+        let label = self.ast(m).labels.iter().find(|(st, _)| *st == s).map(|x| x.1);
+        let Some(label) = label else { return self.stmt_inner(s) };
+        let end = self.fresh("lend");
+        let at = self.b().loops.len();
+        let depth = self.b().scopes.len();
+        self.b().labeled.push((label, end.clone(), at, depth));
+        self.stmt_inner(s);
+        self.b().labeled.pop();
+        self.line(format!("{end}:;"));
+    }
+
+    fn stmt_inner(&mut self, s: StmtId) {
         let m = self.cur_m();
         let ast = self.ast(m);
         let node = ast.stmt(s);
@@ -2338,7 +2357,18 @@ impl<'c, 'a> Gen<'c, 'a> {
                     }
                 }
             }
-            StmtKind::Break => {
+            StmtKind::Break(Some(l)) => {
+                let (_, target, _, depth) = self.b().labeled.iter().rev().find(|x| x.0 == *l).cloned().expect("label");
+                self.unwind_for_exit(depth);
+                self.line(format!("goto {target};"));
+            }
+            StmtKind::Continue(Some(l)) => {
+                let (_, _, at, _) = self.b().labeled.iter().rev().find(|x| x.0 == *l).cloned().expect("label");
+                let (label, depth) = self.b().loops[at].clone();
+                self.unwind_for_exit(depth);
+                self.line(format!("goto {label};"));
+            }
+            StmtKind::Break(None) => {
                 let (target, depth) = self.b().breaks.last().cloned().expect("break target");
                 self.unwind_for_exit(depth);
                 match target {
@@ -2346,7 +2376,7 @@ impl<'c, 'a> Gen<'c, 'a> {
                     BreakTarget::Goto(l) => self.line(format!("goto {l};")),
                 }
             }
-            StmtKind::Continue => {
+            StmtKind::Continue(None) => {
                 let (label, depth) = self.b().loops.last().cloned().expect("continue target");
                 self.unwind_for_exit(depth);
                 self.line(format!("goto {label};"));
@@ -5140,6 +5170,7 @@ impl<'c, 'a> Gen<'c, 'a> {
             temps: vec![Vec::new()],
             ret,
             loops: Vec::new(),
+            labeled: Vec::new(),
             breaks: Vec::new(),
             boxed: outer_boxed.union(&inner_boxed).copied().collect(),
             stack_arrows: outer_stack.union(&inner_stack).copied().collect(),
