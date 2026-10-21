@@ -794,6 +794,7 @@ extern char **tv_argv;
 /* Errors are reported through a per-process slot read by tv_native_takeError (Node-style messages:
  * "ENOENT: no such file or directory, open 'x'"). */
 tv_str tv_native_takeError(void);
+__attribute__((noreturn)) unsigned char tv_native_trap(tv_str msg); /* returns `never` (tv_unit) */
 tv_str tv_native_readFile(tv_str path);
 tv_str tv_native_statInfo(tv_str path);
 void tv_native_access(tv_str path, tv_int mode);

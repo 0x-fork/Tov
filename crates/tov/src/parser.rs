@@ -2696,15 +2696,16 @@ impl<'a> Parser<'a> {
                 self.skip_balanced();
                 self.mk_expr(ExprKind::Error, start)
             }
-            // `/re/flags`: `new RegExp("re", "flags")`
+            // `/re/flags`: `__reLiteral("re", "flags")`, a `new RegExp` that can't throw (an invalid
+            // literal is a syntax error in JavaScript: the program doesn't run at all)
             Tok::Regex => {
                 let t = self.bump();
                 let (pattern, flags) = (self.strings[t.val as usize].clone(), self.strings[t.val as usize + 1].clone());
-                let (p, f, r) = (self.interner.intern(&pattern), self.interner.intern(&flags), self.interner.intern("RegExp"));
+                let (p, f, r) = (self.interner.intern(&pattern), self.interner.intern(&flags), self.interner.intern("__reLiteral"));
                 let callee = self.mk_expr(ExprKind::Ident(r), start);
                 let pe = self.mk_expr(ExprKind::Str(p), start);
                 let fe = self.mk_expr(ExprKind::Str(f), start);
-                self.mk_expr(ExprKind::New { callee, type_args: Vec::new(), args: vec![Arg { expr: pe, by_ref: None }, Arg { expr: fe, by_ref: None }] }, start)
+                self.mk_expr(ExprKind::Call { callee, type_args: Vec::new(), args: vec![Arg { expr: pe, by_ref: None }, Arg { expr: fe, by_ref: None }], optional: false }, start)
             }
             _ => {
                 let msg = format!("expected an expression, found {}", self.found());

@@ -3431,6 +3431,10 @@ void tv_native_error(const char *msg) {
     tv_sb_push_cstr(&tv_native_err, msg);
 }
 
+__attribute__((noreturn)) unsigned char tv_native_trap(tv_str msg) {
+    tv_trap(msg.p ? msg.p->data : "", NULL);
+}
+
 tv_str tv_native_takeError(void) {
     if (!tv_native_err.len) return TV_EMPTY_STR;
     return tv_str_from_sb(&tv_native_err);

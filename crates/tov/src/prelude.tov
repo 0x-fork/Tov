@@ -114,6 +114,18 @@ export class RegExpExecArray {
   }
 }
 
+/** (a regular expression literal: JavaScript checks its pattern before the program runs, so
+ * making it can't throw; an invalid one traps) */
+export function __reLiteral(pattern: string, flags: string): RegExp {
+  let re: RegExp | undefined = undefined
+  try {
+    re = new RegExp(pattern, flags)
+  } catch (e) {
+    __native.trap(e.message)
+  }
+  return re!
+}
+
 /** (an invalid pattern) */
 export function __reInvalid(message: string): never {
   throw new SyntaxError(message)

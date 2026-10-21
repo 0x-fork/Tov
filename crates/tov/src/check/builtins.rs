@@ -35,6 +35,7 @@ pub(super) fn native_sig(types: &mut Types, name: &str) -> Option<(Vec<TyId>, Ty
     Some(match name {
         "takeError" | "cwd" => (vec![], STR),
         "reCompile" => (vec![STR, STR], INT),
+        "trap" => (vec![STR], NEVER),
         "reFlags" => (vec![INT], STR),
         "reExec" => (vec![INT, STR, INT], types.array(INT)),
         "reNames" => (vec![INT], str_arr),
