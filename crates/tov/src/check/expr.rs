@@ -205,6 +205,23 @@ impl<'a> Checker<'a> {
             ExprKind::As(x, te) => {
                 if let TypeExprKind::Named { name, ns: None, args, .. } = &self.ast().ty(*te).kind
                     && self.name(*name) == "const" && args.is_empty() {
+                        // `[k, v] as const`: a tuple, as TypeScript's (readonly) one
+                        if let ExprKind::Array(xs) = &self.ast().expr(*x).kind
+                            && (2..=4).contains(&xs.len())
+                            && !xs.iter().any(|&el| matches!(self.ast().expr(el).kind, ExprKind::Spread(_)))
+                            && exp.is_none_or(|e| self.tuple_of(e).is_none())
+                        {
+                            let xs = xs.clone();
+                            let tys: Vec<TyId> = xs.iter().map(|&el| self.expr(el, None)).collect();
+                            // (of values of one type, `["red", "green"] as const`, an array: it's
+                            // used as one; a tuple of a key and a value, `[k, v] as const`)
+                            let wide: Vec<TyId> = tys.iter().map(|&t| self.types.widen(t)).collect();
+                            let one_type = wide.iter().all(|&t| t == wide[0]) || wide.iter().all(|&t| self.types.is_numeric(t));
+                            if !tys.contains(&ERROR) && !one_type {
+                                let tuple = self.tuple_ty(&tys);
+                                return self.expr(*x, Some(tuple));
+                            }
+                        }
                         return self.expr(*x, exp);
                     }
                 let tscope = self.tscope();

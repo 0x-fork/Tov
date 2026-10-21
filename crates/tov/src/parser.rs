@@ -2318,8 +2318,16 @@ impl<'a> Parser<'a> {
             let Some(op) = op else {
                 // `x as const`: x (its literals keep their types)
                 if !is_satisfies && self.at(Tok::Const) {
+                    let const_span = self.cur_span();
                     self.bump();
                     let span = self.expr_span(lhs).to(self.prev_span());
+                    // (of an array literal, a tuple: `[k, v] as const`)
+                    if matches!(self.ast.expr(lhs).kind, ExprKind::Array(_)) {
+                        let name = self.interner.intern("const");
+                        let ty = self.mk_ty(TypeExprKind::Named { ns: None, name, name_span: const_span, args: Vec::new() }, const_span);
+                        lhs = self.mk_expr(ExprKind::As(lhs, ty), span);
+                        continue;
+                    }
                     lhs = self.mk_expr(ExprKind::Paren(lhs), span);
                     continue;
                 }

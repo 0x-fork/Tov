@@ -1827,6 +1827,13 @@ impl<'a> Checker<'a> {
         {
             return e;
         }
+        // (of a tuple, `as const`'s: any of its elements)
+        if self.types.is_numeric(k)
+            && let Some(fs) = self.tuple_of(t)
+        {
+            let tys: Vec<TyId> = fs.iter().map(|f| f.ty).collect();
+            return self.types.union(&tys);
+        }
         let mut out = Vec::new();
         for key in self.flat_members(k) {
             let Ty::StrLit(name) = *self.types.get(key) else {

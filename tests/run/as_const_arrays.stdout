@@ -1,0 +1,7 @@
+red
+green
+blue
+3 green [ 'RED', 'GREEN', 'BLUE' ] true 2 false
+red 3 red+green+blue
+green
+2 2 x Infinity -Infinity

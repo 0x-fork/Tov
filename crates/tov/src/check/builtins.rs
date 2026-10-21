@@ -1037,9 +1037,9 @@ impl<'a> Checker<'a> {
                 t
             }
             "min" | "max" => {
+                // (`Math.min()` is Infinity, `Math.max()` -Infinity)
                 if args.is_empty() {
-                    self.report(Diagnostic::new("T0201", span, format!("`{desc}` takes at least 1 argument")));
-                    return ERROR;
+                    return F64;
                 }
                 let mut tys = Vec::new();
                 let mut spread = false;

@@ -2109,6 +2109,9 @@ impl<'c, 'a> Gen<'c, 'a> {
         if matches!(name, "min" | "max") && args.iter().any(|a| matches!(self.ast(self.cur_m()).expr(a.expr).kind, ExprKind::Spread(_))) {
             return self.min_max_spread(name, args, ty);
         }
+        if matches!(name, "min" | "max") && args.is_empty() {
+            return Val::plain(if name == "min" { "((double)INFINITY)" } else { "(-(double)INFINITY)" }, F64);
+        }
         let vals: Vec<Val> = args.iter().map(|a| self.expr(a.expr)).collect();
         let f64s: Vec<String> = vals.iter().map(|v| self.coerce(v.clone(), F64).code).collect();
         let loc = self.loc(span);
