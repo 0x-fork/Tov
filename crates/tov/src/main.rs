@@ -43,12 +43,21 @@ fn main() -> ExitCode {
     let lead = lead.min(args.len());
     let (flags, rest) = args.split_at(lead);
     let with = |tail: &[String]| -> Vec<String> { flags.iter().chain(tail).cloned().collect() };
+    // `tov clean --help`: help, not the command (a program's own `--help` comes after its file)
+    if matches!(rest.first().map(|s| s.as_str()), Some("check" | "build" | "run" | "test" | "explain" | "clean")) && matches!(rest.get(1).map(|s| s.as_str()), Some("--help" | "-h")) {
+        print!("{HELP}");
+        return ExitCode::SUCCESS;
+    }
     match rest.first().map(|s| s.as_str()) {
         Some("check") => check(&rest[1..]),
         Some("build") => build_cmd(&with(&rest[1..]), BuildCmd::Build),
         Some("run") => run_cmd(&with(&rest[1..]), false),
         Some("test") => build_cmd(&with(&rest[1..]), BuildCmd::Test),
         Some("explain") => explain(rest.get(1).map(|s| s.as_str())),
+        Some("clean") if rest.len() > 1 => {
+            eprintln!("error: `tov clean` takes no arguments (it empties the whole build cache)");
+            ExitCode::from(2)
+        }
         Some("clean") => {
             let freed = tov::build::clean_cache();
             println!("clean: freed {:.1} MB of cached builds ({})", freed as f64 / 1e6, tov::build::cache_dir().display());

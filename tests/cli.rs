@@ -36,3 +36,13 @@ fn tov_directories_still_check() {
     assert!(out.status.success(), "{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
     assert!(String::from_utf8_lossy(&out.stdout).contains("\"errors\":0"));
 }
+
+#[test]
+fn help_after_a_command_prints_help_instead_of_running_it() {
+    for command in ["clean", "check", "build", "run", "test", "explain"] {
+        let out = cli(command).arg("--help").output().expect("run compiler");
+        assert!(out.status.success(), "{command} --help failed");
+        assert!(String::from_utf8_lossy(&out.stdout).contains("usage:"), "{command} --help printed no help");
+        assert!(!String::from_utf8_lossy(&out.stdout).contains("freed"), "{command} --help ran the command");
+    }
+}
