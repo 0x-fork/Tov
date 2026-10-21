@@ -410,18 +410,22 @@ impl<'a> Checker<'a> {
                 }
                 t
             }
+            // `+x`: a number as it is, a string as `Number(s)` reads it (`NaN` if it isn't one),
+            // a boolean as 0 or 1
             UnOp::Plus => {
                 let t = self.expr(x, None);
-                let text = self.src(self.ast().expr(x).span).to_string();
-                let mut d = Diagnostic::new("X0028", span, "unary `+` is not supported");
-                if self.types.is_string(t) {
-                    d = d.note("instead", "parse explicitly").fix(Applicability::Maybe, format!("use `Number({text})`"), span, format!("Number({text})"));
-                    self.report(d);
-                    return self.types.optional(F64);
+                if t == ERROR || self.types.is_num_like(t) {
+                    return t;
                 }
-                d = d.fix(Applicability::Safe, "remove the `+`", span, text);
-                self.report(d);
-                t
+                if self.types.is_string(t) {
+                    return F64;
+                }
+                if t == BOOL {
+                    return INT;
+                }
+                let shown = self.show(t);
+                self.report(Diagnostic::new("X0028", span, format!("unary `+` needs a number, a string or a boolean, found `{shown}`")));
+                ERROR
             }
             UnOp::Not => {
                 self.cond(x);

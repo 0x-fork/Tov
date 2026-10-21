@@ -3651,6 +3651,13 @@ impl<'c, 'a> Gen<'c, 'a> {
             }
             UnOp::Plus => {
                 let v = self.expr(x);
+                if self.c.types.is_string(v.ty) {
+                    let v = self.coerce(v, STR);
+                    return Val::plain(format!("tv_js_number({})", v.code), F64);
+                }
+                if v.ty == BOOL {
+                    return Val::plain(format!("((tv_int)({}))", v.code), INT);
+                }
                 self.coerce(v, ty)
             }
             UnOp::BitNot => {

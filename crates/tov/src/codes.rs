@@ -121,7 +121,7 @@ pub const CODES: &[(&str, &str)] = &[
     ("X0024", "The comma operator is not supported."),
     ("X0025", "The `in` operator is not supported; use `map.has(key)`."),
     ("X0026", "`&&=` and `||=` are not supported."),
-    ("X0028", "Unary `+` is not supported; convert explicitly."),
+    ("X0028", "Unary `+` takes a number, a string (read as `Number(s)` reads it) or a boolean."),
     ("X0029", "The `void` operator is not supported."),
     ("X0030", "This TypeScript/JavaScript type isn't supported."),
     ("X0031", "Side-effect imports are not supported; modules have no initialization side effects."),
