@@ -1,0 +1,28 @@
+// More everyday TypeScript: global matches, spreading maps, sets of characters, type
+// predicates, enum constants, `this` results (checked against Node and Bun)
+const text = "Hello World"
+console.log((text.match(/[aeiou]/gi) ?? []).length, text.match(/o/g), text.match(/z/g), "x1y22".match(/\d+/g))
+const m = new Map([["a", 1], ["b", 2]])
+console.log([...m], [...m].filter(([, d]) => d > 1).map(([k]) => k))
+const s = new Set("hello")
+console.log(s.size, [...s])
+interface Fish { swim(): string; kind: "fish" }
+interface Bird { fly(): string; kind: "bird" }
+type Pet = Fish | Bird
+function isFish(p: Pet): p is Fish { return p.kind === "fish" }
+const pets2: Pet[] = [{ kind: "fish", swim: () => "splash" }, { kind: "bird", fly: () => "flap" }]
+for (const p of pets2) {
+  if (isFish(p)) console.log(p.swim())
+  else console.log(p.fly())
+}
+function isString(v: string | number): v is string { return typeof v === "string" }
+const vals2: (string | number)[] = ["a", 1, "b"]
+console.log(vals2.filter((v) => isString(v)).length)
+const statuses2 = ["open", "closed"] as const
+type Status = (typeof statuses2)[number]
+const isStatus = (s: string): s is Status => s === "open" || s === "closed"
+console.log(isStatus("open"), isStatus("x"))
+enum Flags { None = 0, Read = 1 << 0, Write = 1 << 1, Exec = 1 << 2, RW = Read | Write, All = Flags.RW | Flags.Exec, Neg = -3, After }
+console.log(Flags.RW, Flags.All, Flags.Neg, Flags.After, (Flags.RW & Flags.Write) !== 0)
+class B { n = 0; add(x: number): this { this.n += x; return this; } }
+console.log(new B().add(1).add(2).n);

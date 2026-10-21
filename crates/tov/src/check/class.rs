@@ -158,6 +158,10 @@ impl<'a> Checker<'a> {
         }
         let args: Vec<TyId> = tscope.iter().map(|(_, t)| *t).collect();
         let this_ty = self.types.class(c, &args);
+        // (`this` as a type in a member's signature: the class, here)
+        if let Some(this) = self.interner.lookup("this") {
+            tscope.push((this, this_ty));
+        }
         let class_name = self.name(cd.name).to_string();
         let mut info = ClassInfo {
             module,
@@ -656,6 +660,11 @@ impl<'a> Checker<'a> {
             self.class_decl(c).tparams.iter().zip(&info.params).map(|(tp, &id)| (tp.name, self.types.intern(Ty::Param(id)))).collect()
         };
         tscope.extend(own);
+        if !mem.is_static
+            && let Some(this) = self.interner.lookup("this")
+        {
+            tscope.push((this, info.this_ty));
+        }
         let this = if mem.is_static { None } else { Some(ThisInfo { ty: info.this_ty, ctor: is_ctor }) };
         let sig = Sig { tparams: Vec::new(), params, param_names: f.params.iter().map(|p| p.name).collect(), ret: ret.unwrap_or(ERROR), throws: throws.unwrap_or(UNKNOWN), rest: false };
         let (r, errs) = self.check_decl_body(m, f, &sig, &tscope, ret, this, Some(c));

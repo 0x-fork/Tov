@@ -1441,6 +1441,12 @@ impl<'a> Parser<'a> {
                 let span = start.to(self.prev_span());
                 self.mk_ty(TypeExprKind::Named { ns, name, name_span, args }, span)
             }
+            // `this` as a type, in a class: the class (see `check::class`)
+            Tok::This => {
+                self.bump();
+                let name = self.interner.intern("this");
+                self.mk_ty(TypeExprKind::Named { ns: None, name, name_span: start, args: Vec::new() }, start)
+            }
             _ => {
                 let msg = format!("expected a type, found {}", self.found());
                 self.err("P0003", start, msg);
