@@ -723,11 +723,21 @@ impl<'a> Checker<'a> {
                 self.array_lit(&elems, exp, span)
             }
             "Array" if name == "from" => self.array_from(args, exp, span),
+            // `Object.is(a, b)`: `===`, except that NaN is NaN and 0 isn't -0
+            "Object" if name == "is" && args.len() == 2 => {
+                let a = self.expr(args[0].expr, None);
+                let b = self.expr(args[1].expr, Some(a));
+                if a != ERROR && b != ERROR && !self.comparable(a, b) && !(self.types.is_numeric(a) && self.types.is_numeric(b)) {
+                    let (sa, sb) = (self.show(a), self.show(b));
+                    self.report(Diagnostic::new("T0502", span, format!("`Object.is` of `{sa}` and `{sb}` is always false: they have no values in common")));
+                }
+                BOOL
+            }
             "Object" => {
                 // `Object.keys/values/entries(m)` of a `Record<string, V>` (a map), or of a record
                 if !matches!(name, "keys" | "values" | "entries") || args.len() != 1 {
                     self.check_args_loose(args);
-                    self.unknown_ns_member("Object", name, &["keys", "values", "entries"], name_span);
+                    self.unknown_ns_member("Object", name, &["keys", "values", "entries", "is"], name_span);
                     return ERROR;
                 }
                 let t = self.expr(args[0].expr, None);

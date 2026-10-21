@@ -1682,6 +1682,18 @@ impl<'c, 'a> Gen<'c, 'a> {
                 let v = self.expr(args[0].expr);
                 self.to_bigint(v)
             }
+            (Some("Object"), "is") => {
+                let (l, r) = (args[0].expr, args[1].expr);
+                let (lt, rt) = (self.ty(l), self.ty(r));
+                // (numbers: SameValue; anything else is `===`)
+                if self.c.types.is_float(lt) || self.c.types.is_float(rt) {
+                    let a = self.expr_before(l, &[r]);
+                    let b = self.expr(r);
+                    let (a, b) = (self.coerce(a, F64), self.coerce(b, F64));
+                    return self.tmp(BOOL, &format!("({{ double a_ = {}, b_ = {}; a_ == b_ ? (a_ != 0 || 1 / a_ == 1 / b_) : (a_ != a_ && b_ != b_); }})", a.code, b.code), false);
+                }
+                return self.binary_pub(BinOp::Eq, l, r, BOOL, span);
+            }
             (Some("Object"), "keys" | "values" | "entries") => {
                 let v = self.expr(args[0].expr);
                 let base = self.c.types.without_undefined(v.ty);

@@ -1431,7 +1431,9 @@ impl<'c, 'a> Gen<'c, 'a> {
                 let lit = self.lit(self.sym(s).to_string().as_bytes());
                 format!("tv_inspect_str(sb, {lit}, {depth})")
             }
-            Ty::Int | Ty::F64 | Ty::F32 | Ty::I8 | Ty::I16 | Ty::I32 | Ty::U8 | Ty::U16 | Ty::U32 | Ty::U64 | Ty::Bool | Ty::Undefined | Ty::Null | Ty::Void | Ty::Never => {
+            // (console.log writes negative zero as -0; String(x) as 0)
+            Ty::F64 | Ty::F32 => format!("({{ double v_ = (double)({place}); if (v_ == 0 && signbit(v_)) tv_sb_push_cstr(sb, \"-0\"); else tv_sb_push_f64(sb, v_); }})"),
+            Ty::Int | Ty::I8 | Ty::I16 | Ty::I32 | Ty::U8 | Ty::U16 | Ty::U32 | Ty::U64 | Ty::Bool | Ty::Undefined | Ty::Null | Ty::Void | Ty::Never => {
                 self.string_code(t, place)
             }
             Ty::BigInt => format!("({{ tv_sb_push_big(sb, {place}); tv_sb_push_char(sb, 'n'); }})"),

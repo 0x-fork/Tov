@@ -4046,6 +4046,10 @@ impl<'c, 'a> Gen<'c, 'a> {
         Some(Val::plain(format!("(__builtin_expect({}, 1) ? (double)({exact}) / {c}.0 : ({{ __asm__ volatile(\"\"); {floats}; }}))", small.join(" && ")), F64))
     }
 
+    pub(crate) fn binary_pub(&mut self, op: BinOp, l: ExprId, r: ExprId, ty: TyId, span: Span) -> Val {
+        self.binary(op, l, r, ty, span)
+    }
+
     fn binary(&mut self, op: BinOp, l: ExprId, r: ExprId, ty: TyId, span: Span) -> Val {
         use BinOp::*;
         match op {

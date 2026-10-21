@@ -405,6 +405,11 @@ impl<'a> Checker<'a> {
     fn unary(&mut self, op: UnOp, x: ExprId, exp: Option<TyId>, span: Span) -> TyId {
         match op {
             UnOp::Neg => {
+                // (`-0` in TypeScript is negative zero, a float)
+                if matches!(self.ast().expr(x).kind, ExprKind::Int(0)) && matches!(self.modules[self.cur as usize].path.extension().and_then(|e| e.to_str()), Some("ts" | "tsx" | "mts" | "cts")) {
+                    self.expr(x, Some(F64));
+                    return F64;
+                }
                 let t = self.expr(x, exp);
                 if t != ERROR && !self.types.is_num_like(t) && t != BIGINT {
                     let msg = format!("unary `-` needs a number, found `{}`", self.show(t));
