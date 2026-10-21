@@ -1,0 +1,9 @@
+{ x: 1, y: 3, z: 4 }
+{ id: 1, title: 'write', done: true } { id: 1, title: 'write', done: false }
+{ id: 1, title: 'write', done: true }
+{ color: 'red', size: 5 }
+{ n: 3, tag: 'a' }
+[
+  { id: 1, title: 'WRITE', done: false },
+  { id: 2, title: 'WRITE', done: false }
+]

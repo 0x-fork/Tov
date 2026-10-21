@@ -173,6 +173,7 @@ impl<'a> Checker<'a> {
             }
             ExprKind::Member { obj, name, name_span, optional } => self.member(e, *obj, *name, *name_span, *optional, span),
             ExprKind::Index { obj, index, optional } => self.index(e, *obj, *index, *optional, *optional || want, span),
+            ExprKind::Object(fields) if fields.iter().any(|f| matches!(self.ast().expr(f.value).kind, ExprKind::Spread(_))) => self.object_spread(e, fields, span),
             ExprKind::Object(fields) => self.object(fields, exp, span),
             ExprKind::Array(elems) => self.array_lit(elems, exp, span),
             ExprKind::Seq(xs) => {
@@ -1979,6 +1980,71 @@ impl<'a> Checker<'a> {
             self.report(d);
         }
         target_ty
+    }
+
+    /// `{ ...a, y: 3 }`: the literal with a's fields written out (`{ x: a.x, y: 3 }`, see
+    /// `rewrite`), checked again; its type for now. What's spread must be a variable or a field
+    /// path (read once per field).
+    fn object_spread(&mut self, e: ExprId, fields: &[crate::ast::ObjField], span: Span) -> TyId {
+        let mut out: Vec<Field> = Vec::new();
+        let mut expansions = Vec::new();
+        let mut ok = true;
+        for f in fields {
+            let ExprKind::Spread(x) = self.ast().expr(f.value).kind else {
+                let t = self.expr(f.value, None);
+                let t = self.types.widen(t);
+                match out.iter_mut().find(|o| o.name == f.name) {
+                    Some(o) => o.ty = t,
+                    None => out.push(Field { name: f.name, ty: t, optional: false }),
+                }
+                continue;
+            };
+            let t = self.expr(x, None);
+            if t == ERROR {
+                ok = false;
+                continue;
+            }
+            let base = self.types.without_undefined(t);
+            let spread: Option<Vec<Field>> = match *self.types.get(base) {
+                Ty::Record(_) => Some(self.types.fields_in_order(base)),
+                Ty::Interface(i, args) => {
+                    let args = self.types.tys(args).to_vec();
+                    Some(self.iface_fields_inst(i, &args))
+                }
+                _ => None,
+            };
+            let xspan = self.ast().expr(x).span;
+            let Some(sf) = spread else {
+                let shown = self.show(t);
+                self.report(Diagnostic::new("U0011", xspan, format!("spreading `{shown}` into an object literal is not supported yet")).note("supported", "spreading a record or an interface value"));
+                ok = false;
+                continue;
+            };
+            if !super::stmt::place_path(self.ast(), x) || base != t {
+                self.report(
+                    Diagnostic::new("U0011", xspan, "only a variable or a field path can be spread into an object literal yet")
+                        .note("instead", "put the value in a `const` first, and spread that"),
+                );
+                ok = false;
+                continue;
+            }
+            for fl in &sf {
+                match out.iter_mut().find(|o| o.name == fl.name) {
+                    Some(o) => *o = *fl,
+                    None => out.push(*fl),
+                }
+            }
+            expansions.push(sf.iter().map(|fl| fl.name).collect::<Vec<Sym>>());
+        }
+        if !ok {
+            return ERROR;
+        }
+        self.rewrites.spreads.push((self.cur, e, expansions));
+        let order: Vec<Sym> = out.iter().map(|f| f.name).collect();
+        let t = self.types.record(out);
+        self.types.note_field_order(t, order);
+        let _ = span;
+        t
     }
 
     /// Chooses the record type an object literal should be checked against.

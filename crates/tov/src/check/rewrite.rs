@@ -29,11 +29,13 @@ pub struct Rewrites {
     pub(crate) elems: Vec<(u32, ExprId, crate::intern::Sym, bool)>,
     /// `r.key` on a `Record<string, V>` (module, the member expression), as `r["key"]`.
     pub(crate) keys: Vec<(u32, ExprId)>,
+    /// `{ ...a, y: 3 }`: (module, the literal, each spread's fields), as `{ x: a.x, y: 3 }`.
+    pub(crate) spreads: Vec<(u32, ExprId, Vec<Vec<crate::intern::Sym>>)>,
 }
 
 impl Rewrites {
     pub fn is_empty(&self) -> bool {
-        self.params.is_empty() && self.args.is_empty() && self.consts.is_empty() && self.items.is_empty() && self.awaits.is_empty() && self.calls.is_empty() && self.elems.is_empty() && self.keys.is_empty()
+        self.params.is_empty() && self.args.is_empty() && self.consts.is_empty() && self.items.is_empty() && self.awaits.is_empty() && self.calls.is_empty() && self.elems.is_empty() && self.keys.is_empty() && self.spreads.is_empty()
     }
 
     pub(crate) fn extend(&mut self, o: Rewrites) {
@@ -45,6 +47,7 @@ impl Rewrites {
         self.calls.extend(o.calls);
         self.elems.extend(o.elems);
         self.keys.extend(o.keys);
+        self.spreads.extend(o.spreads);
     }
 }
 
@@ -185,6 +188,37 @@ pub fn apply(modules: &mut [Module], rw: &Rewrites) -> bool {
         }
         changed = true;
     }
+    for (m, at, expansions) in &rw.spreads {
+        // later fields win, at the place of the first (as JavaScript's keys)
+        let ast = &mut modules[*m as usize].ast;
+        let ExprKind::Object(fields) = &ast.exprs[*at as usize].kind else { continue };
+        let entries: Vec<(crate::intern::Sym, Span, ExprId)> = fields.iter().map(|f| (f.name, f.name_span, f.value)).collect();
+        let mut out: Vec<crate::ast::ObjField> = Vec::new();
+        let mut k = 0;
+        for (name, nspan, value) in entries {
+            let ExprKind::Spread(x) = ast.exprs[value as usize].kind else {
+                match out.iter_mut().find(|o| o.name == name) {
+                    Some(o) => o.value = value,
+                    None => out.push(crate::ast::ObjField { name, name_span: nspan, value, quoted: false }),
+                }
+                continue;
+            };
+            let Some(names) = expansions.get(k) else { continue };
+            k += 1;
+            for &fname in names {
+                let obj = clone_path(ast, x);
+                let span = ast.exprs[x as usize].span;
+                ast.exprs.push(crate::ast::Expr { kind: ExprKind::Member { obj, name: fname, name_span: span, optional: false }, span });
+                let read = ast.exprs.len() as ExprId - 1;
+                match out.iter_mut().find(|o| o.name == fname) {
+                    Some(o) => o.value = read,
+                    None => out.push(crate::ast::ObjField { name: fname, name_span: nspan, value: read, quoted: false }),
+                }
+            }
+        }
+        ast.exprs[*at as usize].kind = ExprKind::Object(out);
+        changed = true;
+    }
     for &(m, at) in &rw.keys {
         let ast = &mut modules[m as usize].ast;
         let ExprKind::Member { obj, name, name_span, optional } = ast.exprs[at as usize].kind else { continue };
@@ -212,4 +246,20 @@ pub fn apply(modules: &mut [Module], rw: &Rewrites) -> bool {
         }
     }
     changed
+}
+
+/// A copy of the path `x` (`a`, `this.b.c`), for one more read of it.
+fn clone_path(ast: &mut crate::ast::Ast, x: ExprId) -> ExprId {
+    let span = ast.exprs[x as usize].span;
+    let kind = match ast.exprs[x as usize].kind {
+        ExprKind::Ident(s) => ExprKind::Ident(s),
+        ExprKind::This => ExprKind::This,
+        ExprKind::Paren(i) => ExprKind::Paren(clone_path(ast, i)),
+        ExprKind::NonNull(i) => ExprKind::NonNull(clone_path(ast, i)),
+        ExprKind::Member { obj, name, name_span, optional } => ExprKind::Member { obj: clone_path(ast, obj), name, name_span, optional },
+        ExprKind::Index { obj, index, optional } => ExprKind::Index { obj: clone_path(ast, obj), index, optional },
+        _ => return x,
+    };
+    ast.exprs.push(crate::ast::Expr { kind, span });
+    ast.exprs.len() as ExprId - 1
 }

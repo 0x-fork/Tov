@@ -1,0 +1,20 @@
+// Object spread: { ...a, y: 3 } (checked against Node)
+interface Todo { id: number; title: string; done: boolean }
+const a = { x: 1, y: 2 }
+const b = { ...a, y: 3, z: 4 }
+console.log(b)
+const t: Todo = { id: 1, title: "write", done: false }
+const t2: Todo = { ...t, done: true }
+console.log(t2, t)
+function toggle(todo: Todo): Todo {
+  return { ...todo, done: !todo.done }
+}
+console.log(toggle(t))
+const defaults = { color: "red", size: 1 }
+const opts = { size: 5 }
+const merged = { ...defaults, ...opts }
+console.log(merged)
+class S { state = { n: 1, tag: "a" }; bump(): void { this.state = { ...this.state, n: this.state.n + 1 } } }
+const s = new S(); s.bump(); s.bump(); console.log(s.state)
+const list: Todo[] = [t, { ...t, id: 2 }]
+console.log(list.map((x) => ({ ...x, title: x.title.toUpperCase() })))

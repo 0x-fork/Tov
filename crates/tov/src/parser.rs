@@ -2802,9 +2802,13 @@ impl<'a> Parser<'a> {
         while !self.at(Tok::RBrace) && !self.at(Tok::Eof) {
             let fstart = self.cur_span();
             if self.at(Tok::DotDotDot) {
-                self.err("U0011", fstart, "object spread is not supported yet; list the fields");
+                // `{ ...a, y: 3 }`: a's fields (see `check::rewrite`), named "..."
                 self.bump();
-                self.assign();
+                let x = self.assign();
+                let span = fstart.to(self.prev_span());
+                let value = self.mk_expr(ExprKind::Spread(x), span);
+                let name = self.interner.intern("...");
+                fields.push(ObjField { name, name_span: span, value, quoted: false });
             } else if self.at(Tok::Int) || self.at(Tok::LBracket) {
                 self.push(
                     Diagnostic::new("X0017", fstart, "number and computed keys are not supported in object literals")
