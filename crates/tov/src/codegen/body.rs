@@ -3693,6 +3693,12 @@ impl<'c, 'a> Gen<'c, 'a> {
             }
             _ => {}
         }
+        // (a float where `int | undefined` is wanted: an index, `s.slice(0, n / 2)`, as JavaScript's
+        // ToIntegerOrInfinity reads it)
+        if self.c.types.is_float(from) && !self.c.types.members(to).iter().any(|&m| self.c.types.is_float(m)) && self.c.types.members(to).contains(&INT) {
+            let i = self.int_code(v);
+            return self.coerce(Val::plain(i, INT), to);
+        }
         let (fs, ts) = (self.c.show(from), self.c.show(to));
         self.internal.push(format!("no conversion from `{fs}` to `{ts}`"));
         Val { ty: to, ..v }
