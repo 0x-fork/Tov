@@ -115,6 +115,9 @@ pub(crate) struct VersionPlan {
     le: bool,
     hi: ExprId,
     arrays: Vec<(u32, i64, i64)>,
+    /// Arrays the loop only reads, at other indexes: their elements and length from locals too
+    /// (each read still checked, against the local).
+    extra: Vec<u32>,
 }
 
 /// A function whose `return a + f(args)` self-calls run as a loop: the function (module,
@@ -1447,12 +1450,19 @@ impl<'c, 'a> Gen<'c, 'a> {
             }
         }
         let mut arrays = Vec::new();
+        let mut extra = Vec::new();
         for (xk, (ks, only)) in uses {
-            if !only || ks.is_empty() || boxed.contains(&xk) || !stable(xk) || (written.contains(&xk) && !unique.contains(&xk)) {
+            if !only || boxed.contains(&xk) || !stable(xk) || (written.contains(&xk) && !unique.contains(&xk)) {
                 continue;
             }
             let Some(&lt) = types.get(&xk) else { continue };
             if !matches!(self.tget(lt), Ty::Array(_)) {
+                continue;
+            }
+            if ks.is_empty() {
+                if !written.contains(&xk) {
+                    extra.push(xk);
+                }
                 continue;
             }
             let (lo, hi) = (*ks.iter().min().unwrap(), *ks.iter().max().unwrap());
@@ -1462,12 +1472,16 @@ impl<'c, 'a> Gen<'c, 'a> {
             return None;
         }
         arrays.sort();
+        extra.sort();
         // (nothing in the loop may resize them: they may be shared)
         let own: Vec<u32> = arrays.iter().map(|a| a.0).collect();
         if self.may_resize(m, &all, &own) {
             return None;
         }
-        Some(VersionPlan { ik, le, hi, arrays })
+        if !extra.is_empty() && self.may_resize(m, &all, &extra) {
+            extra.clear();
+        }
+        Some(VersionPlan { ik, le, hi, arrays, extra })
     }
 
     /// `while (i < j) { ...; i++; ...; j--; ... }` (one `i++` and one `j--` among the body's own
@@ -2322,7 +2336,7 @@ impl<'c, 'a> Gen<'c, 'a> {
                     self.open(&format!("if ({check}) {{"));
                     // (each array's elements, from a local: nothing in the loop moves them)
                     let mut ptrs = Vec::new();
-                    for &(xk, _, _) in &plan.arrays {
+                    for xk in plan.arrays.iter().map(|a| a.0).chain(plan.extra.iter().copied()) {
                         let local = self.b().locals[&xk].clone();
                         let Ty::Array(et) = self.tget(local.ty) else { continue };
                         let ect = self.ctype(et);
@@ -4182,6 +4196,16 @@ impl<'c, 'a> Gen<'c, 'a> {
                         let loc = self.loc(span);
                         return Val::plain(format!("TVG_REM_BY({}, {}, {dv}, {loc})", lv.code, rv.code), INT);
                     }
+                }
+                // `a % b` of a value that's never negative by a positive one: an unsigned remainder
+                // (no sign to fix up), of 32 bits when both fit (`seed % IM` in an LCG)
+                if op == Rem && ty == INT && lv.ty == INT && rv.ty == INT
+                    && let (super::range::R::In(a0, a1), super::range::R::In(b0, b1)) = (self.int_range(l), self.int_range(r))
+                    && a0 >= 0
+                    && b0 > 0
+                {
+                    let ut = if a1 <= u32::MAX as i128 && b1 <= u32::MAX as i128 { "uint32_t" } else { "uint64_t" };
+                    return Val::plain(format!("((tv_int)(({ut})({}) % ({ut})({})))", lv.code, rv.code), INT);
                 }
                 // (no overflow check where the operands' values can't overflow)
                 if matches!(op, Add | Sub | Mul) && ty == INT && lv.ty == INT && rv.ty == INT && self.cannot_overflow(op, l, r) {
