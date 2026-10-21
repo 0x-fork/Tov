@@ -10,7 +10,7 @@ pub(super) const BUILTIN_TYPES: &[&str] = &[
 ];
 
 pub(super) const GLOBAL_NAMES: &[&str] = &[
-    "Math", "console", "expect", "String", "Number", "parseInt", "parseFloat", "isNaN", "int", "f64", "f32", "i8", "i16", "i32", "u8", "u16", "u32", "u64", "process", "Date",
+    "Math", "console", "expect", "String", "Number", "parseInt", "parseFloat", "isNaN", "isFinite", "NaN", "Infinity", "int", "f64", "f32", "i8", "i16", "i32", "u8", "u16", "u32", "u64", "process", "Date",
     "performance", "JSON", "Promise", "BigInt", "decimal",
 ];
 
@@ -133,11 +133,11 @@ pub(super) fn is_builtin_type(name: &str) -> bool {
 }
 
 pub(super) fn is_builtin_ns(name: &str) -> bool {
-    matches!(name, "Math" | "console" | "JSON" | "process" | "Date" | "performance" | "Promise" | "BigInt" | "Array")
+    matches!(name, "Math" | "console" | "JSON" | "process" | "Date" | "performance" | "Promise" | "BigInt" | "Array" | "Number")
 }
 
 pub(super) fn is_builtin_fn(name: &str) -> bool {
-    matches!(name, "expect" | "String" | "Number" | "BigInt" | "decimal" | "parseInt" | "parseFloat" | "isNaN" | "test")
+    matches!(name, "expect" | "String" | "Number" | "BigInt" | "decimal" | "parseInt" | "parseFloat" | "isNaN" | "isFinite" | "test")
         || CONVERSIONS.contains(&name)
         || TIMER_FNS.contains(&name)
 }
@@ -431,6 +431,8 @@ pub(super) fn method(c: &mut Checker, base: TyId, name: &str) -> Option<MethodSi
 }
 
 const MATH_CONSTS: &[&str] = &["PI", "E", "LN2", "LN10", "LOG2E", "LOG10E", "SQRT2", "SQRT1_2"];
+const NUMBER_CONSTS: &[&str] = &["MAX_SAFE_INTEGER", "MIN_SAFE_INTEGER", "EPSILON", "MAX_VALUE", "MIN_VALUE", "NaN", "POSITIVE_INFINITY", "NEGATIVE_INFINITY"];
+const NUMBER_FNS: &[&str] = &["isInteger", "isSafeInteger", "isFinite", "isNaN", "parseFloat", "parseInt"];
 const MATH_F64_FNS: &[(&str, usize)] = &[
     ("sqrt", 1),
     ("cbrt", 1),
@@ -469,6 +471,9 @@ impl<'a> Checker<'a> {
         if ns == "Math" && MATH_CONSTS.contains(&n.as_str()) {
             return F64;
         }
+        if ns == "Number" && NUMBER_CONSTS.contains(&n.as_str()) {
+            return if n.ends_with("SAFE_INTEGER") { INT } else { F64 };
+        }
         if ns == "process" {
             match n.as_str() {
                 "argv" => return self.types.array(STR),
@@ -486,6 +491,7 @@ impl<'a> Checker<'a> {
             "JSON" => vec!["stringify", "parse"],
             "Promise" => vec!["resolve", "reject", "all", "race"],
             "BigInt" => vec!["asIntN", "asUintN"],
+            "Number" => NUMBER_CONSTS.iter().chain(NUMBER_FNS).copied().collect(),
             _ => vec!["log", "error", "warn", "info"],
         };
         if known.contains(&n.as_str()) {
@@ -638,6 +644,18 @@ impl<'a> Checker<'a> {
                 }
                 self.check_args_loose(args);
                 BOOL
+            }
+            "Number" => {
+                if matches!(name, "parseFloat" | "parseInt") {
+                    return self.global_call(name, name_span, &[], args, exp, span).unwrap_or(ERROR);
+                }
+                if !NUMBER_FNS.contains(&name) {
+                    self.check_args_loose(args);
+                    self.unknown_ns_member(ns, name, NUMBER_FNS, name_span);
+                    return ERROR;
+                }
+                let cs = CallSig { tparams: Vec::new(), params: vec![p(F64)], names: vec!["number".into()], rest: None, ret: BOOL, throws: NEVER };
+                self.call_sig(&cs, &format!("Number.{name}"), &[], args, exp, span)
             }
             "BigInt" => {
                 if !matches!(name, "asIntN" | "asUintN") {
@@ -1039,7 +1057,7 @@ impl<'a> Checker<'a> {
                 }
                 VOID
             }
-            "isNaN" => {
+            "isNaN" | "isFinite" => {
                 if let Some(t) = one(self) {
                     let s = self.ast().expr(args[0].expr).span;
                     self.expect_assignable(t, F64, s, None);

@@ -1493,11 +1493,26 @@ impl<'c, 'a> Gen<'c, 'a> {
                 self.line(format!("tv_queue_microtask({});", cb.code));
                 Val::plain("0", VOID)
             }
-            (None, "isNaN") => {
+            (None | Some("Number"), "isNaN" | "isFinite" | "isInteger" | "isSafeInteger") => {
                 let v = self.expr(args[0].expr);
+                if self.c.types.is_int(v.ty) {
+                    let code = match name {
+                        "isNaN" => "false".to_string(),
+                        "isSafeInteger" => format!("tv_int_is_safe({})", v.code),
+                        _ => "true".to_string(),
+                    };
+                    return Val::plain(code, BOOL);
+                }
                 let v = self.coerce(v, F64);
-                Val::plain(format!("isnan({})", v.code), BOOL)
+                let code = match name {
+                    "isNaN" => format!("isnan({})", v.code),
+                    "isFinite" => format!("isfinite({})", v.code),
+                    "isInteger" => format!("tv_f64_is_integer({})", v.code),
+                    _ => format!("tv_f64_is_safe_integer({})", v.code),
+                };
+                Val::plain(code, BOOL)
             }
+            (Some("Number"), "parseFloat" | "parseInt") => self.builtin(None, name, args, ty, span),
             (None, "expect") => {
                 // Only used through a matcher (handled at the matcher call).
                 let _ = self.expr(args[0].expr);

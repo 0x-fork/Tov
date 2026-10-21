@@ -1,0 +1,9 @@
+// NaN, Infinity and Number's constants and predicates, as in JavaScript.
+function main() {
+  console.log(Infinity, -Infinity, NaN, Number.MAX_SAFE_INTEGER, Number.MIN_SAFE_INTEGER, Number.NaN, Number.EPSILON, Number.MAX_VALUE, Number.MIN_VALUE)
+  console.log(Number.isInteger(3), Number.isInteger(3.5), Number.isInteger(Infinity), Number.isSafeInteger(2 ** 53), Number.isSafeInteger(7), isFinite(1 / 0), isFinite(2), Number.isNaN(0 / 0))
+  console.log(Number.POSITIVE_INFINITY > 1e308, Number.NEGATIVE_INFINITY, Number.parseFloat("2.5"), Number.parseInt("42"), Number("7"))
+  let best = Infinity
+  for (const x of [3, 1, 2]) if (x < best) best = x
+  console.log(best, Math.max(-Infinity, 2), 1 / Infinity)
+}

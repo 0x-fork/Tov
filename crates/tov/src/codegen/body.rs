@@ -2906,6 +2906,10 @@ impl<'c, 'a> Gen<'c, 'a> {
                 let span = self.expr_span(e);
                 self.npm_value(nm, name, span, ty)
             }
+            Some(IdentFact::Builtin) if ty == F64 => {
+                let ExprKind::Ident(s) = self.ast(m).expr(e).kind else { return Val::plain("0", ty) };
+                Val::plain(if self.sym(s) == "NaN" { "((double)NAN)" } else { "((double)INFINITY)" }, F64)
+            }
             _ => Val::plain("0", ty),
         }
     }
@@ -3941,7 +3945,15 @@ impl<'c, 'a> Gen<'c, 'a> {
                     "LOG2E" => "1.4426950408889634",
                     "LOG10E" => "0.4342944819032518",
                     "SQRT2" => "1.4142135623730951",
-                    _ => "0.7071067811865476",
+                    "SQRT1_2" => "0.7071067811865476",
+                    "MAX_SAFE_INTEGER" => return Val::plain("INT64_C(9007199254740991)", INT),
+                    "MIN_SAFE_INTEGER" => return Val::plain("INT64_C(-9007199254740991)", INT),
+                    "EPSILON" => "2.220446049250313e-16",
+                    "MAX_VALUE" => "1.7976931348623157e308",
+                    "MIN_VALUE" => "5e-324",
+                    "NaN" => "((double)NAN)",
+                    "POSITIVE_INFINITY" => "((double)INFINITY)",
+                    _ => "((double)-INFINITY)",
                 };
                 return Val::plain(v, F64);
             }

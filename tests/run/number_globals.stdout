@@ -1,0 +1,4 @@
+Infinity -Infinity NaN 9007199254740991 -9007199254740991 NaN 2.220446049250313e-16 1.7976931348623157e+308 5e-324
+true false false false true false true true
+true -Infinity 2.5 42 7
+1 2 0

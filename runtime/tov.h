@@ -31,6 +31,9 @@ typedef int64_t tv_int;
 
 /* JavaScript's ToInt32 of a number (for bitwise operators): truncated, wrapped to 32 bits;
  * NaN and the infinities give 0. */
+static inline bool tv_f64_is_integer(double d) { return d == __builtin_trunc(d) && d - d == 0; }
+static inline bool tv_f64_is_safe_integer(double d) { return tv_f64_is_integer(d) && __builtin_fabs(d) <= 9007199254740991.0; }
+static inline bool tv_int_is_safe(tv_int v) { return v >= -INT64_C(9007199254740991) && v <= INT64_C(9007199254740991); }
 int32_t tv_f64_to_i32_slow(double d);
 static inline int32_t tv_f64_to_i32(double d) {
     if (__builtin_expect(d > -9.2e18 && d < 9.2e18, 1)) return (int32_t)(uint32_t)(uint64_t)(int64_t)d;

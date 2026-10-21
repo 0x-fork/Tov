@@ -324,6 +324,9 @@ impl<'a> Checker<'a> {
             _ => {}
         }
         let text = self.name(sym).to_string();
+        if text == "NaN" || text == "Infinity" {
+            return F64;
+        }
         if self.is_ns(&text) {
             return self.types.intern(Ty::BuiltinNs(sym));
         }

@@ -89,7 +89,7 @@ Status tags: **[M0]** checked today · **[Mn]** planned for milestone n.
 - `a?.b`, `a ?? b`, `c ? a : b`, `x as T` (checked cast from `unknown` or a union; traps on failure), `x!` (non-undefined assertion; traps).
 - Indexing `xs[i]` requires an integer `i` and has type `T | undefined`; `xs[i]!` asserts presence (traps when out of bounds). Index assignment `xs[i] = v` traps when out of bounds.
 - Strings have no `.length` (ambiguous under UTF-8). Use `s.byteLength` or `s.chars().length`.
-- `console.log(...args)` prints (Node's formatting); `Math.*` as in JS (with the int-returning rounders above).
+- `console.log(...args)` prints (Node's formatting); `Math.*` as in JS (with the int-returning rounders above); `NaN`, `Infinity`, `isFinite`, and `Number`'s constants (`MAX_SAFE_INTEGER`, `EPSILON`, ...) and predicates (`Number.isInteger`, `isSafeInteger`, `isFinite`, `isNaN`).
 - `map.keys()`, `map.values()` and `set.values()` return arrays (not iterators).
 - `parseInt(s)`, `parseFloat(s)` and `Number(s)` return `T | undefined` instead of `NaN`, so failed parses must be handled.
 
