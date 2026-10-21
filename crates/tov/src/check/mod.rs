@@ -1795,6 +1795,10 @@ impl<'a> Checker<'a> {
         match &node.kind {
             TypeExprKind::Error => ERROR,
             TypeExprKind::Typeof(x) => self.typeof_type(*x, span),
+            TypeExprKind::Predicate(_, t) => {
+                self.resolve_type(*t, tscope);
+                BOOL
+            }
             TypeExprKind::Keyof(t) => {
                 let t = self.resolve_type(*t, tscope);
                 self.keyof_type(t, span)

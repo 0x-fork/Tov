@@ -273,6 +273,8 @@ pub enum TypeExprKind {
     Keyof(TypeId),
     /// `T["k"]`, `T[number]`: a field's type, an element's.
     Access(TypeId, TypeId),
+    /// `x is T` as a result: a boolean that, when true, says the parameter `x` is a `T`.
+    Predicate(Sym, TypeId),
     Error,
 }
 

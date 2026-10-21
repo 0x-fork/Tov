@@ -1116,6 +1116,26 @@ impl<'a> Checker<'a> {
         }
     }
 
+    /// A function declared `(p: A, ...): p is T`: (p's position, T).
+    fn predicate_of(&mut self, callee: ExprId) -> Option<(usize, TyId)> {
+        let ExprKind::Ident(s) = self.ast().expr(callee).kind else { return None };
+        if self.lookup(s).is_some() {
+            return None;
+        }
+        let Some(Decl::Fn(m, i)) = self.scopes[self.cur as usize].values.get(&s).map(|d| d.0) else { return None };
+        let ItemKind::Function(f) = &self.modules[m as usize].ast.items[i as usize].kind else { return None };
+        let rt = f.ret?;
+        let crate::ast::TypeExprKind::Predicate(name, t) = self.modules[m as usize].ast.ty(rt).kind else { return None };
+        let pi = f.params.iter().position(|p| p.name == name)?;
+        if !f.tparams.is_empty() {
+            return None;
+        }
+        let saved = std::mem::replace(&mut self.cur, m);
+        let t = self.resolve_type(t, &[]);
+        self.cur = saved;
+        Some((pi, t))
+    }
+
     /// A value that's part of another, reached through a call: `m.get(k)` on a map, `xs.find(f)`,
     /// `xs.findLast(f)` or `xs.at(i)` on an array (with `!`): `m` / `xs`.
     pub(super) fn view_of(&self, e: ExprId) -> Option<ExprId> {
@@ -2106,20 +2126,20 @@ impl<'a> Checker<'a> {
     /// Chooses the record type an object literal should be checked against.
     fn pick_record(&mut self, fields: &[crate::ast::ObjField], exp: TyId, span: Span) -> Option<(TyId, Vec<Field>)> {
         let members = self.flat_members(exp);
-        let records: Vec<(TyId, Vec<Field>)> = members
-            .iter()
-            .filter_map(|&m| match *self.types.get(m) {
-                Ty::Record(fs) => Some((m, self.types.fields(fs).to_vec())),
-                _ => None,
-            })
-            .collect();
-        if records.is_empty() {
-            if let Some(&m) = members.iter().find(|&&m| matches!(self.types.get(m), Ty::Interface(..)))
-                && let Ty::Interface(i, args) = *self.types.get(m) {
+        // (the record and interface members of the expected type: candidates alike)
+        let mut records: Vec<(TyId, Vec<Field>)> = Vec::new();
+        for &m in &members {
+            match *self.types.get(m) {
+                Ty::Record(fs) => records.push((m, self.types.fields(fs).to_vec())),
+                Ty::Interface(i, args) => {
                     let args = self.types.tys(args).to_vec();
                     let fs = self.iface_fields_inst(i, &args);
-                    return Some((m, fs));
+                    records.push((m, fs));
                 }
+                _ => {}
+            }
+        }
+        if records.is_empty() {
             return None;
         }
         if records.len() == 1 {
@@ -2162,6 +2182,12 @@ impl<'a> Checker<'a> {
             }
             let _ = span;
             return Some((ERROR, Vec::new()));
+        }
+        // No discriminant: the one variant whose fields the literal's fit.
+        let names: Vec<Sym> = fields.iter().map(|f| f.name).collect();
+        let fitting: Vec<&(TyId, Vec<Field>)> = records.iter().filter(|(_, fs)| names.iter().all(|n| fs.iter().any(|x| x.name == *n)) && fs.iter().all(|x| x.optional || names.contains(&x.name))).collect();
+        if let [one] = fitting.as_slice() {
+            return Some(((*one).0, (*one).1.clone()));
         }
         None
     }
@@ -3858,6 +3884,20 @@ impl<'a> Checker<'a> {
                         keep.push(m);
                     }
                 }
+                vec![target.with(self.types.union(&keep))]
+            }
+            // `isFish(pet)` where `isFish(p: ...): p is Fish`: pet is a `Fish`, or not
+            ExprKind::Call { callee, args, .. } if self.predicate_of(*callee).is_some() => {
+                let (pi, pt) = self.predicate_of(*callee).unwrap();
+                let Some(a) = args.get(pi) else { return Vec::new() };
+                let Some((target, ty)) = self.target_of(a.expr) else { return Vec::new() };
+                let members = self.flat_members(ty);
+                let keep: Vec<TyId> = if positive {
+                    let fits: Vec<TyId> = members.iter().copied().filter(|&m| self.assignable(m, pt)).collect();
+                    if fits.is_empty() { vec![pt] } else { fits }
+                } else {
+                    members.into_iter().filter(|&m| !self.assignable(m, pt)).collect()
+                };
                 vec![target.with(self.types.union(&keep))]
             }
             // `Array.isArray(x)`: the array members of x's union, or the others

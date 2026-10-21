@@ -1207,6 +1207,14 @@ impl<'a> Parser<'a> {
 
     fn ty(&mut self) -> TypeId {
         let start = self.cur_span();
+        // `x is T` (a type predicate, as a function's result)
+        if matches!(self.kind(), Tok::Ident) && self.nth(1) == Tok::Ident && self.text(self.toks[self.pos + 1]) == "is" && !self.toks[self.pos + 1].nl_before {
+            let (name, _) = self.ident("a parameter name").unwrap();
+            self.bump(); // is
+            let t = self.ty();
+            let span = start.to(self.prev_span());
+            return self.mk_ty(TypeExprKind::Predicate(name, t), span);
+        }
         self.eat(Tok::Pipe);
         let first = self.postfix_ty();
         if self.at(Tok::Amp) {
