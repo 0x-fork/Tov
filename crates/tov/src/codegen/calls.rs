@@ -2306,13 +2306,18 @@ impl<'c, 'a> Gen<'c, 'a> {
         match (length, args.get(1)) {
             (Some(n), Some(f)) => {
                 let n = self.expr(n);
-                let n = self.int_code(n);
+                // (JavaScript's ToLength: truncated, and 0 below zero or for NaN)
+                let n = if self.c.types.is_float(n.ty) {
+                    format!("({{ double d_ = {}; d_ > 0 ? (d_ < 9007199254740991.0 ? (tv_int)d_ : INT64_C(9007199254740991)) : 0; }})", n.code)
+                } else {
+                    self.int_code(n)
+                };
                 let cb = self.prepare_callback(f.expr);
                 let (rd, rct) = (self.desc(rt), self.ctype(rt));
                 let nv = self.fresh("n");
                 self.line(format!("tv_int {nv} = {n};"));
-                let loc = self.loc(span);
-                self.line(format!("if ({nv} < 0) tv_trap(\"Invalid array length\", {loc});"));
+                let _ = span;
+                self.line(format!("if ({nv} < 0) {nv} = 0;"));
                 let out = self.tmp(ty, &format!("tv_arr_with_capacity({rd}, {nv})"), true);
                 let i = self.fresh("i");
                 self.open_block(&format!("for (tv_int {i} = 0; {i} < {nv}; {i}++) {{"));

@@ -1376,7 +1376,10 @@ impl<'a> Checker<'a> {
             let n = fs[0].value;
             let t = self.expr(n, Some(INT));
             let s = self.ast().expr(n).span;
-            self.expect_assignable(t, INT, s, Some("the length".into()));
+            // (any number: JavaScript's ToLength truncates it)
+            if !self.types.is_numeric(t) {
+                self.expect_assignable(t, INT, s, Some("the length".into()));
+            }
             if let Some(f) = self.facts_mut() {
                 f.expr_ty[src as usize] = INT;
             }

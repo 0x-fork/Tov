@@ -1379,7 +1379,7 @@ impl<'c, 'a> Gen<'c, 'a> {
                 let text = self.sym(s).to_string();
                 format!("tv_sb_push_cstr(sb, {})", c_string(text.as_bytes()))
             }
-            Ty::Int if self.js_ints(self.cur_m()) => format!("tv_sb_push_jint(sb, {place})"),
+            Ty::Int if self.bodies.last().is_some_and(|b| self.js_ints(b.m)) => format!("tv_sb_push_jint(sb, {place})"),
             Ty::Int => format!("tv_sb_push_int(sb, {place})"),
             Ty::F64 | Ty::F32 => format!("tv_sb_push_f64(sb, {place})"),
             Ty::I8 | Ty::I16 | Ty::I32 | Ty::U8 | Ty::U16 | Ty::U32 => format!("tv_sb_push_int(sb, (tv_int)({place}))"),

@@ -2938,6 +2938,34 @@ impl<'a> Checker<'a> {
                     }
                     self.types.without_undefined(recv)
                 };
+                // `p.then(f)`, `p.catch(g)`, `p.finally(h)`: the prelude's `__then(p, f)` and so on
+                if let Ty::Promise(v, _) = *self.types.get(base)
+                    && matches!(mtext.as_str(), "then" | "catch" | "finally")
+                    && (1..=2).contains(&args.len())
+                    && args.iter().all(|a| a.by_ref.is_none() && !matches!(self.ast().expr(a.expr).kind, ExprKind::Spread(_)))
+                {
+                    let target = match (mtext.as_str(), args.len()) {
+                        ("then", 1) => {
+                            // (a callback returning a promise: its value)
+                            let hint = self.types.func(vec![FnParam { ty: v, inout: false, optional: false }], VOID);
+                            let ft = self.expr(args[0].expr, Some(hint));
+                            let ret = match *self.types.get(ft) {
+                                Ty::Func(_, r, _) => Some(r),
+                                _ => None,
+                            };
+                            let promised = ret.is_some_and(|r| self.flat_members(r).iter().any(|&m| matches!(self.types.get(m), Ty::Promise(..))));
+                            if promised { "__thenP" } else { "__then" }
+                        }
+                        ("then", _) => "__then2",
+                        ("catch", 1) => "__catch",
+                        ("finally", 1) => "__finally",
+                        _ => "",
+                    };
+                    if let Some(f) = self.interner.lookup(target).filter(|_| !target.is_empty()) {
+                        self.rewrites.calls.push((self.cur, e, f));
+                        return ERROR;
+                    }
+                }
                 // `s.replace(/x/g, y)` and the other string methods given a RegExp: the prelude's
                 // `__reReplace(s, re, y)` and so on
                 if matches!(*self.types.get(base), Ty::Str | Ty::StrLit(_))

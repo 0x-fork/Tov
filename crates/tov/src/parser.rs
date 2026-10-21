@@ -910,6 +910,13 @@ impl<'a> Parser<'a> {
 
     /// The type a parameter takes from its default value when it has no annotation (`n = 10`).
     fn literal_type(&mut self, e: ExprId) -> Option<TypeId> {
+        // `visiting = new Set<string>()`: the class, with its type arguments
+        if let ExprKind::New { callee, type_args, .. } = &self.ast.exprs[e as usize].kind
+            && let ExprKind::Ident(name) = self.ast.exprs[*callee as usize].kind
+        {
+            let (args, span) = (type_args.clone(), self.expr_span(*callee));
+            return Some(self.mk_ty(TypeExprKind::Named { ns: None, name, name_span: span, args }, span));
+        }
         let name = match &self.ast.exprs[e as usize].kind {
             ExprKind::Int(_) | ExprKind::Float(_) => "number",
             ExprKind::Str(_) | ExprKind::Template(..) => "string",

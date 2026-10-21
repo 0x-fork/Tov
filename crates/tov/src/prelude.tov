@@ -362,3 +362,52 @@ export function __reSearch(s: string, re: RegExp): int {
   const p = __native.reExec(re.__id(), s, 0)
   return p.length === 0 ? -1 : p[0]!
 }
+
+// A promise's then/catch/finally (`p.then(f)` is checked as `__then(p, f)`): the callbacks run
+// once it settles, and what they return (or throw) settles the promise these return.
+
+/** `p.then(f)`. */
+export async function __then<T, R>(p: Promise<T, Error>, f: (v: T) => R throws Error): Promise<R, Error> {
+  return f(await p)
+}
+
+/** `p.then(f)`, f returning a promise: its value. */
+export async function __thenP<T, R>(p: Promise<T, Error>, f: (v: T) => Promise<R, Error> throws Error): Promise<R, Error> {
+  return await f(await p)
+}
+
+/** `p.then(f, g)`: g only for p's own rejection. */
+export async function __then2<T, R>(p: Promise<T, Error>, f: (v: T) => R throws Error, g: (e: Error) => R throws Error): Promise<R, Error> {
+  try {
+    await p
+  } catch (e) {
+    return g(e)
+  }
+  return f(await p)
+}
+
+/** `p.catch(g)`. */
+export async function __catch<T, R>(p: Promise<T, Error>, g: (e: Error) => R throws Error): Promise<T | R, Error> {
+  try {
+    return await p
+  } catch (e) {
+    return g(e)
+  }
+}
+
+/** `p.finally(h)`: h either way, then p's own outcome. */
+export async function __finally<T>(p: Promise<T, Error>, h: () => void throws Error): Promise<T, Error> {
+  let failed = false
+  let err = new Error("")
+  try {
+    await p
+  } catch (e) {
+    failed = true
+    err = e
+  }
+  h()
+  if (failed) {
+    throw err
+  }
+  return await p
+}
