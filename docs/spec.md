@@ -37,7 +37,7 @@ Status tags: **[M0]** checked today · **[Mn]** planned for milestone n.
 | `Promise<T>`, `Promise<T, E>` | a promise of a `T` that never rejects, or can reject with `E` (an `Error` class); see §7b |
 
 - Tuples `[A, B]` are records whose fields are `0`, `1`, ... (`t[0]`, printed and written to JSON as arrays). Destructuring works in `let`/`const` (`const [a, b] = t`, `const { x, y: py, z = 0 } = p`, holes and `...rest` in arrays), `for...of` (`for (const [k, v] of map)`), parameters and `[a, b] = [b, a]`; a missing array element traps, where JavaScript gives `undefined`. `map.entries()`, `xs.entries()`, `new Map(entries)` and `Object.keys/values/entries` give and take `[key, value]` tuples.
-- Removed: `any`, `null` (use `undefined`), `object`, `symbol`, intersection `&`, conditional/mapped/indexed-access types, `keyof`, `typeof` in types, enums (use literal unions), namespaces, decorators.
+- Removed: `any`, `null` (use `undefined`), `object`, `symbol`, intersection `&`, conditional/mapped/indexed-access types, `keyof`, `typeof` in types, namespaces, decorators. `enum`s are a type (a number, or the union of their string values) and a constant holding the members (`Color.Red`); no reverse mapping (`Color[0]`).
 - `boolean` is exactly `bool`. `number` is TypeScript's number: each `number` written in an annotation is an `int` when only integers ever reach it (from the program's own code: data parsed from JSON or received from JavaScript keeps it a float), and an `f64` otherwise. The program means the same either way, except that an integer past 2^63 traps where a float would round (as an `int`'s does); `fib(n: number): number` runs as fast as with `int`.
 
 ### Numbers

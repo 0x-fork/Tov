@@ -407,6 +407,10 @@ impl<'a> Parser<'a> {
             }
             Tok::Type if self.nth(1) == Tok::Ident => self.type_alias(start, exported),
             Tok::Interface => self.interface(start, exported),
+            Tok::Const if self.nth(1) == Tok::Enum => {
+                self.bump(); // const
+                self.enum_decl(start, exported)
+            }
             Tok::Const => self.const_item(start, exported),
             Tok::Let => self.const_item(start, exported),
             Tok::Var => {
@@ -419,14 +423,7 @@ impl<'a> Parser<'a> {
                 self.bump();
                 self.class_decl(start, exported, true);
             }
-            Tok::Enum => {
-                let span = self.cur_span();
-                self.push(
-                    Diagnostic::new("X0005", span, "`enum` is not supported")
-                        .note("instead", "use a union of string literals: `type Color = \"red\" | \"green\"`"),
-                );
-                self.skip_decl();
-            }
+            Tok::Enum => self.enum_decl(start, exported),
             Tok::Namespace => {
                 let span = self.cur_span();
                 self.push(Diagnostic::new("X0006", span, "namespaces are not supported").note("instead", "use one module (file) per namespace"));
@@ -1046,6 +1043,74 @@ impl<'a> Parser<'a> {
             }
             start = self.cur_span();
         }
+    }
+
+    /// `enum Color { Red, Green = 5 }` / `enum Dir { Up = "UP" }`: the type `Color` (a number,
+    /// or the union of the string values) and the constant `Color` holding the members.
+    fn enum_decl(&mut self, start: Span, exported: bool) {
+        self.bump(); // enum
+        let Some((name, name_span)) = self.ident("an enum name") else {
+            self.skip_decl();
+            return;
+        };
+        if !self.expect(Tok::LBrace, "to start the enum's members") {
+            self.skip_decl();
+            return;
+        }
+        let mut members: Vec<(Sym, Span, ExprId)> = Vec::new();
+        let mut next: i64 = 0;
+        let mut strings = Vec::new();
+        while !self.at(Tok::RBrace) && !self.at(Tok::Eof) {
+            let Some((m, mspan)) = self.prop_name() else { break };
+            let value = if self.eat(Tok::Eq) {
+                let e = self.assign();
+                match &self.ast.exprs[e as usize].kind {
+                    ExprKind::Int(v) => next = *v as i64 + 1,
+                    ExprKind::Unary(UnOp::Neg, x) if matches!(self.ast.exprs[*x as usize].kind, ExprKind::Int(_)) => {
+                        let ExprKind::Int(v) = self.ast.exprs[*x as usize].kind else { unreachable!() };
+                        next = -(v as i64) + 1;
+                    }
+                    ExprKind::Str(s) => strings.push(*s),
+                    _ => {
+                        let es = self.expr_span(e);
+                        self.err("X0005", es, "an enum member's value must be a number or a string");
+                    }
+                }
+                e
+            } else {
+                let v = next;
+                next += 1;
+                let e = self.mk_expr(ExprKind::Int(v.unsigned_abs()), mspan);
+                if v < 0 { self.mk_expr(ExprKind::Unary(UnOp::Neg, e), mspan) } else { e }
+            };
+            members.push((m, mspan, value));
+            if !self.eat(Tok::Comma) {
+                break;
+            }
+        }
+        self.expect(Tok::RBrace, "to close the enum");
+        let span = start.to(self.prev_span());
+        // the type: a number, or (all strings) the union of the values
+        let ty = if !strings.is_empty() && strings.len() == members.len() {
+            let ms: Vec<TypeId> = strings.iter().map(|&s| self.mk_ty(TypeExprKind::StrLit(s), name_span)).collect();
+            if ms.len() == 1 { ms[0] } else { self.mk_ty(TypeExprKind::Union(ms), name_span) }
+        } else {
+            let number = self.interner.intern("number");
+            self.mk_ty(TypeExprKind::Named { ns: None, name: number, name_span, args: Vec::new() }, name_span)
+        };
+        self.ast.items.push(Item { kind: ItemKind::TypeAlias { name, name_span, tparams: Vec::new(), ty }, span, exported });
+        // the members: `{ Red: Color, ... }`
+        let fields: Vec<FieldTy> = members
+            .iter()
+            .map(|&(m, mspan, _)| {
+                let t = self.mk_ty(TypeExprKind::Named { ns: None, name, name_span: mspan, args: Vec::new() }, mspan);
+                FieldTy { name: m, name_span: mspan, optional: false, ty: t }
+            })
+            .collect();
+        let rec = self.mk_ty(TypeExprKind::Record(fields), span);
+        let obj = members.iter().map(|&(m, mspan, value)| ObjField { name: m, name_span: mspan, value, quoted: false }).collect();
+        let init = self.mk_expr(ExprKind::Object(obj), span);
+        self.ast.items.push(Item { kind: ItemKind::Const { name, name_span, ty: Some(rec), init, mutable: false }, span, exported });
     }
 
     fn test_item(&mut self, start: Span) {

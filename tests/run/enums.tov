@@ -1,0 +1,18 @@
+// Numeric and string enums.
+enum Color { Red, Green, Blue }
+enum Dir { Up = "UP", Down = "DOWN" }
+enum Code { Ok = 200, NotFound = 404, Teapot = 418, Next }
+function name(c: Color): string {
+  switch (c) {
+    case Color.Red: return "red"
+    case Color.Green: return "green"
+    default: return "blue"
+  }
+}
+function flip(d: Dir): Dir { return d === Dir.Up ? Dir.Down : Dir.Up }
+function main() {
+  let c: Color = Color.Green
+  console.log(Color.Red, c, name(c), name(Color.Blue), Dir.Up, flip(Dir.Up), Code.NotFound, Code.Next)
+  const all: Color[] = [Color.Red, Color.Blue]
+  console.log(all.map(name).join(","), Code.Ok < Code.Teapot)
+}
