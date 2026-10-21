@@ -1094,6 +1094,24 @@ impl<'c, 'a> Gen<'c, 'a> {
                             let ptrs: Vec<String> = fs.iter().map(|f| format!("&x->f_{}", self.sym(f.name))).collect();
                             if fs.is_empty() {
                                 b.push_str("    tv_inspect_record(sb, depth, 0, NULL, NULL, NULL);\n");
+                            } else if fs.iter().any(|f| f.optional) {
+                                // (an optional field that's absent isn't shown, as JavaScript has no key for it)
+                                let n = fs.len();
+                                let _ = writeln!(b, "    const char *names[{n}]; const tv_type *types[{n}]; const void *fields[{n}]; int n = 0;");
+                                for (i, f) in fs.iter().enumerate() {
+                                    let place = format!("x->f_{}", self.sym(f.name));
+                                    let add = format!("names[n] = {}; types[n] = {}; fields[n] = {}; n++;", names[i], descs[i], ptrs[i]);
+                                    match self.tag_of(f.ty, UNDEFINED).filter(|_| f.optional) {
+                                        Some(k) => {
+                                            let absent = self.u_is(&place, f.ty, k);
+                                            let _ = writeln!(b, "    if (!({absent})) {{ {add} }}");
+                                        }
+                                        None => {
+                                            let _ = writeln!(b, "    {add}");
+                                        }
+                                    }
+                                }
+                                b.push_str("    tv_inspect_record(sb, depth, n, names, types, fields);\n");
                             } else {
                                 let _ = writeln!(b, "    static const char *const names[] = {{ {} }};", names.join(", "));
                                 let _ = writeln!(b, "    const tv_type *const types[] = {{ {} }};", descs.join(", "));
