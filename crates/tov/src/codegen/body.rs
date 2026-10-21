@@ -3426,6 +3426,10 @@ impl<'c, 'a> Gen<'c, 'a> {
             }
             UnOp::BitNot => {
                 let v = self.expr(x);
+                if ty == INT {
+                    let a = self.int32_code(&v);
+                    return Val::plain(format!("((tv_int)~{a})"), ty);
+                }
                 Val::plain(format!("(~{})", v.code), ty)
             }
             UnOp::Void => {
@@ -3649,17 +3653,7 @@ impl<'c, 'a> Gen<'c, 'a> {
             BitAnd | BitOr | BitXor | Shl | Shr | UShr => {
                 let lv = self.expr_before(l, &[r]);
                 let rv = self.expr(r);
-                let ct = self.ctype(ty);
-                let (a, b) = (lv.code, rv.code);
-                let code = match op {
-                    BitAnd => format!("(({ct})({a} & {b}))"),
-                    BitOr => format!("(({ct})({a} | {b}))"),
-                    BitXor => format!("(({ct})({a} ^ {b}))"),
-                    Shl => format!("(({ct})((uint64_t)({a}) << ((uint64_t)({b}) & 63)))"),
-                    Shr => format!("(({ct})(({a}) >> ((uint64_t)({b}) & 63)))"),
-                    _ => format!("(({ct})((uint64_t)({a}) >> ((uint64_t)({b}) & 63)))"),
-                };
-                Val::plain(code, ty)
+                Val::plain(self.bitop(op, &lv, &rv, ty), ty)
             }
             Instanceof => {
                 let v = self.expr(l);
@@ -3673,6 +3667,45 @@ impl<'c, 'a> Gen<'c, 'a> {
                 }
             }
             In => Val::plain("false", BOOL),
+        }
+    }
+
+    /// A bitwise operator. On `int` and floats it's JavaScript's: both sides wrap to 32 bits
+    /// (ToInt32), shift counts are taken mod 32, and `>>>` gives an unsigned 32-bit result.
+    /// Sized integers keep their own width.
+    fn bitop(&mut self, op: BinOp, l: &Val, r: &Val, ty: TyId) -> String {
+        use BinOp::*;
+        let (a, b) = (&l.code, &r.code);
+        if ty != INT {
+            let ct = self.ctype(ty);
+            return match op {
+                BitAnd => format!("(({ct})({a} & {b}))"),
+                BitOr => format!("(({ct})({a} | {b}))"),
+                BitXor => format!("(({ct})({a} ^ {b}))"),
+                Shl => format!("(({ct})((uint64_t)({a}) << ((uint64_t)({b}) & 63)))"),
+                Shr => format!("(({ct})(({a}) >> ((uint64_t)({b}) & 63)))"),
+                _ => format!("(({ct})((uint64_t)({a}) >> ((uint64_t)({b}) & 63)))"),
+            };
+        }
+        let (a, b) = (self.int32_code(l), self.int32_code(r));
+        match op {
+            BitAnd => format!("((tv_int)({a} & {b}))"),
+            BitOr => format!("((tv_int)({a} | {b}))"),
+            BitXor => format!("((tv_int)({a} ^ {b}))"),
+            Shl => format!("((tv_int)(int32_t)((uint32_t){a} << ({b} & 31)))"),
+            Shr => format!("((tv_int)({a} >> ({b} & 31)))"),
+            _ => format!("((tv_int)((uint32_t){a} >> ({b} & 31)))"),
+        }
+    }
+
+    /// A number as JavaScript's ToInt32 sees it (an `int32_t`).
+    pub(super) fn int32_code(&self, v: &Val) -> String {
+        if self.c.types.is_float(v.ty) {
+            format!("tv_f64_to_i32({})", v.code)
+        } else if v.ty == INT {
+            format!("((int32_t)({}))", v.code)
+        } else {
+            format!("((int32_t)(tv_int)({}))", v.code)
         }
     }
 
@@ -4314,7 +4347,6 @@ impl<'c, 'a> Gen<'c, 'a> {
             }
             AssignOp::Op(bop) => {
                 let p = self.place(target);
-                let ct = self.ctype(p.ty);
                 let lv = self.place_lvalue(&p);
                 let cur = Val::plain(lv.clone(), p.ty);
                 // `x += await f()` reads `x` before it waits, as JavaScript does.
@@ -4372,14 +4404,9 @@ impl<'c, 'a> Gen<'c, 'a> {
                         return cur;
                     }
                     BinOp::BitAnd | BinOp::BitOr | BinOp::BitXor | BinOp::Shl | BinOp::Shr | BinOp::UShr => {
-                        let o = match bop {
-                            BinOp::BitAnd => "&",
-                            BinOp::BitOr => "|",
-                            BinOp::BitXor => "^",
-                            BinOp::Shl => "<<",
-                            _ => ">>",
-                        };
-                        Val::plain(format!("(({ct})({} {o} {}))", cur.code, rhs.code), p.ty)
+                        let ty = if p.ty != INT && self.c.types.is_int(p.ty) { p.ty } else { INT };
+                        let code = self.bitop(bop, &cur, &rhs, ty);
+                        self.coerce(Val::plain(code, ty), p.ty)
                     }
                     _ => {
                         let arith_ty = if p.ty == DECIMAL {

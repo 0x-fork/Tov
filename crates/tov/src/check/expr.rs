@@ -389,7 +389,10 @@ impl<'a> Checker<'a> {
                 BOOL
             }
             UnOp::BitNot => {
-                let t = self.expr(x, exp);
+                let t = self.expr(x, exp.filter(|&e| e == BIGINT || self.types.is_int(e)));
+                if self.types.is_float(t) {
+                    return INT; // ToInt32, as in JavaScript
+                }
                 if t != ERROR && !self.types.is_int(t) && t != BIGINT {
                     let msg = format!("`~` needs an integer, found `{}`", self.show(t));
                     self.report(Diagnostic::new("T0501", span, msg));
@@ -543,6 +546,11 @@ impl<'a> Checker<'a> {
                         return ERROR;
                     }
                     return self.bigint_arith(op, l, r, tl, tr, span);
+                }
+                // On numbers (`int` and floats) the operators are JavaScript's: 32-bit, giving an `int`.
+                let js = |t: TyId| t == INT || self.types.is_float(t);
+                if js(tl) && js(tr) {
+                    return INT;
                 }
                 if !self.types.is_int(tl) || !self.types.is_int(tr) {
                     let msg = format!("`{}` needs integers, found `{}` and `{}`", op.as_str(), self.show(tl), self.show(tr));
@@ -977,11 +985,16 @@ impl<'a> Checker<'a> {
                     }
                     STR
                 } else if matches!(bop, BinOp::BitAnd | BinOp::BitOr | BinOp::BitXor | BinOp::Shl | BinOp::Shr | BinOp::UShr) {
+                    let js = |t: TyId| t == INT || self.types.is_float(t);
+                    if js(place.ty) && js(tv) {
+                        INT
+                    } else {
                     if place.ty != ERROR && tv != ERROR && (!self.types.is_int(place.ty) || !self.types.is_int(tv)) {
                         let msg = format!("`{}=` needs integers, found `{}` and `{}`", bop.as_str(), self.show(place.ty), self.show(tv));
                         self.report(Diagnostic::new("T0501", span, msg));
                     }
                     place.ty
+                    }
                 } else {
                     let r = self.arith(bop, place.ty, tv, span);
                     if bop == BinOp::Div && r != ERROR { if r == F32 { F32 } else { F64 } } else { r }

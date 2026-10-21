@@ -43,6 +43,7 @@ Status tags: **[M0]** checked today · **[Mn]** planned for milestone n.
 - An integer literal is `int` unless context expects a float type. An unannotated `let x = 0` becomes `f64` if any later use in the function requires it (`x += 0.5`, `return x` from an `f64` function).
 - `int` widens implicitly to `f64` (in arithmetic and assignment). `f64` → `int` is never implicit: use `Math.trunc/floor/ceil/round(x)`, which return `int` (trap on NaN/overflow).
 - Float arithmetic is IEEE 754 with every operation rounded separately, exactly as in JavaScript: `a * b + c` is never fused into one multiply-add.
+- Bitwise operators on `int` and floats are JavaScript's: both sides wrap to 32 bits (ToInt32), shift counts are taken mod 32 and `>>>` is unsigned, giving an `int` (`(h * 31 + c) | 0`, `x | 0` to truncate). Sized integers keep their own width.
 - `/` always produces `f64` (as in TS). `%`, `+ - *` on two ints produce `int`. Sized integers don't mix implicitly; convert with `u8(x)`, `i32(x)` etc. (trap if out of range).
 
 ### bigint

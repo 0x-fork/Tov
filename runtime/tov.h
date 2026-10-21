@@ -29,6 +29,14 @@
 
 typedef int64_t tv_int;
 
+/* JavaScript's ToInt32 of a number (for bitwise operators): truncated, wrapped to 32 bits;
+ * NaN and the infinities give 0. */
+int32_t tv_f64_to_i32_slow(double d);
+static inline int32_t tv_f64_to_i32(double d) {
+    if (__builtin_expect(d > -9.2e18 && d < 9.2e18, 1)) return (int32_t)(uint32_t)(uint64_t)(int64_t)d;
+    return tv_f64_to_i32_slow(d);
+}
+
 /* ------------------------------------------------------------------ traps */
 
 _Noreturn void tv_trap(const char *msg, const char *loc);

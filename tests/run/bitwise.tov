@@ -1,0 +1,19 @@
+// Bitwise operators on numbers are JavaScript's: 32-bit, shift counts mod 32.
+
+function main() {
+  let h = 0
+  for (let i = 0; i < 100; i++) h = (h * 31 + i) | 0
+  console.log(h)
+  const big = 2 ** 40
+  console.log(big | 0, big >> 1, -16 >>> 4, 1 << 33, 1 << 31, ~5, ~2.7)
+  console.log(3.9 | 0, -3.9 | 0, (2 ** 32 + 7.5) | 0, 0.5 ^ 3, 5 & 3, 255 >>> 4, -1 >>> 0)
+  let y = 7.5
+  y |= 0
+  let z = 1
+  z <<= 31
+  let w = -1
+  w >>>= 0
+  let v = 1
+  v <<= 40
+  console.log(y, z, w, v, (Math.random() * 10 | 0) < 10)
+}

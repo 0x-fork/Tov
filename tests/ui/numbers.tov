@@ -17,10 +17,6 @@ function bytes(): u8 {
   return b
 }
 
-function bits(x: f64): int {
-  return x | 0
-}
-
 function counter(): int {
   let n = 0
   n += 1

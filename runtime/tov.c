@@ -547,6 +547,13 @@ void tv_sort_f64(double *a, tv_int n, bool desc) {
     if (zs) tv_free(zs);
 }
 
+int32_t tv_f64_to_i32_slow(double d) {
+    if (!isfinite(d)) return 0;
+    double m = fmod(trunc(d), 4294967296.0);
+    if (m < 0) m += 4294967296.0;
+    return (int32_t)(uint32_t)m;
+}
+
 /* ================================================================== strings */
 
 const tv_strbuf tv_empty_strbuf = {-1, 0, {0}}; /* flexible-array initializer: GNU C (gcc, clang) */
