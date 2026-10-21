@@ -2144,6 +2144,21 @@ impl<'a> Checker<'a> {
                 }
                 continue;
             };
+            // `...{ name: "nut" }`: its fields, as written here
+            if let ExprKind::Object(inner) = &self.ast().expr(x).kind
+                && !inner.iter().any(|f| matches!(self.ast().expr(f.value).kind, ExprKind::Spread(_)))
+            {
+                let inner: Vec<(Sym, ExprId)> = inner.iter().map(|f| (f.name, f.value)).collect();
+                for (name, value) in inner {
+                    let t = self.expr(value, None);
+                    let t = self.types.widen(t);
+                    match out.iter_mut().find(|o| o.name == name) {
+                        Some(o) => o.ty = t,
+                        None => out.push(Field { name, ty: t, optional: false }),
+                    }
+                }
+                continue;
+            }
             let t = self.expr(x, None);
             if t == ERROR {
                 ok = false;
@@ -2173,13 +2188,22 @@ impl<'a> Checker<'a> {
                 ok = false;
                 continue;
             }
+            let mut names = Vec::new();
             for fl in &sf {
+                let mut keep = false;
                 match out.iter_mut().find(|o| o.name == fl.name) {
+                    // (`{ ...a, ...changes }`, `changes.f` optional: `changes.f ?? a.f`)
+                    Some(o) if fl.optional => {
+                        let later = self.types.without_undefined(fl.ty);
+                        o.ty = self.types.union(&[later, o.ty]);
+                        keep = true;
+                    }
                     Some(o) => *o = *fl,
                     None => out.push(*fl),
                 }
+                names.push((fl.name, keep));
             }
-            expansions.push(sf.iter().map(|fl| fl.name).collect::<Vec<Sym>>());
+            expansions.push(names);
         }
         if !ok {
             return ERROR;

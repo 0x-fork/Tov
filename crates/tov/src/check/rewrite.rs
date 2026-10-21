@@ -25,7 +25,8 @@ pub struct Rewrites {
     /// `r.key` on a `Record<string, V>` (module, the member expression), as `r["key"]`.
     pub(crate) keys: Vec<(u32, ExprId)>,
     /// `{ ...a, y: 3 }`: (module, the literal, each spread's fields), as `{ x: a.x, y: 3 }`.
-    pub(crate) spreads: Vec<(u32, ExprId, Vec<Vec<crate::intern::Sym>>)>,
+    /// (each spread's field names, and whether the field is optional: `b.f ?? a.f` over an earlier one)
+    pub(crate) spreads: Vec<(u32, ExprId, Vec<Vec<(crate::intern::Sym, bool)>>)>,
     /// `p[k]`, `k` one of these field names: (module, the index), as `k === "a" ? p.a : p.b`.
     pub(crate) keyed: Vec<(u32, ExprId, Vec<crate::intern::Sym>)>,
     /// A class instance where a number is wanted (`Number(x)`, `+x`): (module, the value, the
@@ -134,14 +135,32 @@ pub fn apply(modules: &mut [Module], rw: &Rewrites) -> bool {
                 }
                 continue;
             };
+            // (a literal spread: its own fields, here)
+            if let ExprKind::Object(inner) = &ast.exprs[x as usize].kind
+                && !inner.iter().any(|f| matches!(ast.exprs[f.value as usize].kind, ExprKind::Spread(_)))
+            {
+                let inner: Vec<(crate::intern::Sym, Span, ExprId)> = inner.iter().map(|f| (f.name, f.name_span, f.value)).collect();
+                for (iname, ispan, ivalue) in inner {
+                    match out.iter_mut().find(|o| o.name == iname) {
+                        Some(o) => o.value = ivalue,
+                        None => out.push(crate::ast::ObjField { name: iname, name_span: ispan, value: ivalue, quoted: false }),
+                    }
+                }
+                continue;
+            }
             let Some(names) = expansions.get(k) else { continue };
             k += 1;
-            for &fname in names {
+            for &(fname, optional) in names {
                 let obj = clone_path(ast, x);
                 let span = ast.exprs[x as usize].span;
                 ast.exprs.push(crate::ast::Expr { kind: ExprKind::Member { obj, name: fname, name_span: span, optional: false }, span });
                 let read = ast.exprs.len() as ExprId - 1;
                 match out.iter_mut().find(|o| o.name == fname) {
+                    // (an optional field kept over an earlier one where it's absent)
+                    Some(o) if optional => {
+                        ast.exprs.push(crate::ast::Expr { kind: ExprKind::Binary(crate::ast::BinOp::Nullish, read, o.value), span });
+                        o.value = ast.exprs.len() as ExprId - 1;
+                    }
                     Some(o) => o.value = read,
                     None => out.push(crate::ast::ObjField { name: fname, name_span: nspan, value: read, quoted: false }),
                 }
