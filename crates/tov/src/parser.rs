@@ -1026,6 +1026,13 @@ impl<'a> Parser<'a> {
         let ty = self.ty();
         self.terminator();
         let span = start.to(self.prev_span());
+        // `type P = { x: number }` is an interface with those members (as TypeScript's object
+        // types are structural, a class instance with them is one), a record until one is given
+        if let TypeExprKind::Record(fields) = &self.ast.ty(ty).kind {
+            let members = fields.clone();
+            self.ast.items.push(Item { kind: ItemKind::Interface { name, name_span, tparams, members, body: ty }, span, exported });
+            return;
+        }
         self.ast.items.push(Item { kind: ItemKind::TypeAlias { name, name_span, tparams, ty }, span, exported });
     }
 
