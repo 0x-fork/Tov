@@ -1,0 +1,36 @@
+import { ctx } from "fused-throw"
+
+// a read fused with the call it reads from: unmarked, its error passes on to the caller
+function params(): Js {
+  const p = ctx().params
+  console.log("never: params went on")
+  return p
+}
+
+function main() {
+  // caught where it happens: a member read, an index read, and a call (fused the same way)
+  try {
+    console.log("never:", ctx().params)
+  } catch (e) {
+    console.log("member read: caught", e.name, e.message)
+  }
+  try {
+    console.log("never:", ctx()["params"])
+  } catch (e) {
+    console.log("index read: caught", e.name, e.message)
+  }
+  try {
+    console.log("never:", ctx().boom())
+  } catch (e) {
+    console.log("call: caught", e.name, e.message)
+  }
+  // passed on from a function
+  try {
+    console.log("never:", params())
+  } catch (e) {
+    console.log("from a function: caught", e.name)
+  }
+  // nothing is left over: the next JavaScript call and read are fine
+  const c = ctx()
+  console.log("afterwards:", c.ok, ctx().ok)
+}

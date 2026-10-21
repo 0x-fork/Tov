@@ -1,0 +1,5 @@
+member read: caught TypeError bad params
+index read: caught TypeError bad params
+call: caught RangeError boom
+from a function: caught TypeError
+afterwards: 7 7

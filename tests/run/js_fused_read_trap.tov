@@ -1,0 +1,10 @@
+// Reads fused into one engine call with no call among them (`o.a.b`): a getter that throws is a
+// trap, as each read alone is (only a fused tree with a call in it passes its error on, #81).
+import { runInThisContext } from "node:vm"
+
+function main() {
+  const o = runInThisContext("({ a: { get b() { throw new TypeError('bad b') } } })")
+  console.log("before")
+  console.log(o.a.b)
+  console.log("never: after the read")
+}

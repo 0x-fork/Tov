@@ -533,6 +533,15 @@ impl<'c, 'a> Gen<'c, 'a> {
         self.line(format!("JSValueRef {x} = NULL; JSValueRef {r} = tv_js_thunk(&{slot}, {src}, {}, {argv}, &{x});", f.params.len()));
         if f.calls {
             self.line(format!("if (!{r}) {{ tvg_err = tvg_js_make_error({x}); {r} = tv_js_undefined(); }}"));
+            // (a call or `new` is among the throwing expressions, so it's checked by its own path:
+            // `call()`'s wrapper in calls.rs, the `new` case in body.rs. A read fused with the call
+            // it reads from, `ctx().params`, isn't: the checker recorded the call inside it. If
+            // reads ever become throwing expressions themselves, this stops firing for them, and
+            // the member and index cases in body.rs must check after `js_try_fuse` instead.)
+            let m = self.cur_m();
+            if !self.facts(m).throwing.contains(&e) {
+                self.error_check();
+            }
         } else {
             let loc = self.loc(span);
             self.line(format!("if (!{r}) tv_js_throw_trap({x}, {loc});"));
