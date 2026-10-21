@@ -3,7 +3,6 @@
 enum Color { Red = "red", Green = "green" }
 const hex: Record<Color, string> = { [Color.Red]: "#f00", [Color.Green]: "#0f0" }
 console.log(hex[Color.Green], hex.red)
-const hex: Record<Color, string> = { [Color.Red]: "#f00", [Color.Green]: "#0f0" }
 interface User { id: number; name: string }
 const db: Record<number, User> = { 1: { id: 1, name: "Ann" }, 2: { id: 2, name: "Ben" } }
 const k = "dyn"
