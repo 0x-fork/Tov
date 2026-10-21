@@ -1932,9 +1932,10 @@ impl<'a> Checker<'a> {
             }
         };
         match text {
-            "Array" => Some(if arity(self, 1) { self.types.array(targs[0]) } else { ERROR }),
-            "Map" => Some(if arity(self, 2) { self.types.intern(Ty::Map(targs[0], targs[1])) } else { ERROR }),
-            "Set" => Some(if arity(self, 1) { self.types.intern(Ty::Set(targs[0])) } else { ERROR }),
+            // (the read-only views are the types themselves: Tov doesn't check writes through them)
+            "Array" | "ReadonlyArray" => Some(if arity(self, 1) { self.types.array(targs[0]) } else { ERROR }),
+            "Map" | "ReadonlyMap" => Some(if arity(self, 2) { self.types.intern(Ty::Map(targs[0], targs[1])) } else { ERROR }),
+            "Set" | "ReadonlySet" => Some(if arity(self, 1) { self.types.intern(Ty::Set(targs[0])) } else { ERROR }),
             "any" => {
                 self.report(
                     Diagnostic::new("X0001", name_span, "`any` is not supported")

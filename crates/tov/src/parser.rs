@@ -1182,6 +1182,11 @@ impl<'a> Parser<'a> {
 
     fn postfix_ty(&mut self) -> TypeId {
         let start = self.cur_span();
+        // `readonly T[]`, `readonly [A, B]`: the array type (Tov checks no writes through it)
+        if self.at_word("readonly") && matches!(self.nth(1), Tok::Ident | Tok::LParen | Tok::LBracket) {
+            self.bump();
+            return self.postfix_ty();
+        }
         let mut t = self.primary_ty();
         while self.at(Tok::LBracket) && self.nth(1) == Tok::RBracket && !self.tok().nl_before {
             self.bump();
@@ -2173,6 +2178,13 @@ impl<'a> Parser<'a> {
                 self.bump();
             }
             let Some(op) = op else {
+                // `x as const`: x (its literals keep their types)
+                if !is_satisfies && self.at(Tok::Const) {
+                    self.bump();
+                    let span = self.expr_span(lhs).to(self.prev_span());
+                    lhs = self.mk_expr(ExprKind::Paren(lhs), span);
+                    continue;
+                }
                 let ty = self.ty();
                 let span = self.expr_span(lhs).to(self.prev_span());
                 if is_satisfies {
