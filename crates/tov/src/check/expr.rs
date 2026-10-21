@@ -171,7 +171,7 @@ impl<'a> Checker<'a> {
                 t
             }
             ExprKind::Member { obj, name, name_span, optional } => self.member(e, *obj, *name, *name_span, *optional, span),
-            ExprKind::Index { obj, index, optional } => self.index(*obj, *index, *optional, *optional || want, span),
+            ExprKind::Index { obj, index, optional } => self.index(e, *obj, *index, *optional, *optional || want, span),
             ExprKind::Object(fields) => self.object(fields, exp, span),
             ExprKind::Array(elems) => self.array_lit(elems, exp, span),
             ExprKind::Seq(xs) => {
@@ -1244,6 +1244,15 @@ impl<'a> Checker<'a> {
                     }
                     return self.class_field_place(self.types_without_undef(t), cls.0, *obj, *name, *name_span);
                 }
+                // `counts.apples = 3` on a `Record<string, V>`: `counts["apples"] = 3`
+                if let Ty::Map(k, v) = *self.types.get(t)
+                    && matches!(*self.types.get(k), Ty::Str)
+                    && builtins::method(self, t, &n).is_none()
+                    && n != "size"
+                {
+                    self.rewrites.keys.push((self.cur, e));
+                    return Some(Place { ty: v, local: None, root: None, sites: Vec::new(), global: None });
+                }
                 let ft = self.member_of(t, *name, *name_span, span, *obj)?;
                 let root = self.check_mutable_root(*obj, span)?;
                 let sites = self.member_sites_of(t, *name);
@@ -1345,7 +1354,7 @@ impl<'a> Checker<'a> {
         self.report(d);
     }
 
-    fn index(&mut self, obj: ExprId, index: ExprId, optional: bool, absent: bool, span: Span) -> TyId {
+    fn index(&mut self, e: ExprId, obj: ExprId, index: ExprId, optional: bool, absent: bool, span: Span) -> TyId {
         let t = self.expr(obj, None);
         let base = if optional {
             self.types.without_nullish(t)
@@ -1364,6 +1373,14 @@ impl<'a> Checker<'a> {
                 self.report(Diagnostic::new("T0902", s, format!("a JavaScript property key must be a number or a string, found `{shown}`")));
             }
             return JS;
+        }
+        // `m[1]` on a match: `m.items[1]`
+        if matches!(*self.types.get(base), Ty::Class(..)) && base == self.builtin_class("RegExpExecArray") {
+            self.index_type(index);
+            if let Some(items) = self.interner.lookup("items") {
+                self.rewrites.elems.push((self.cur, e, items, !absent));
+            }
+            return if absent { self.types.optional(STR) } else { STR };
         }
         let result = match *self.types.get(base) {
             Ty::Error => return ERROR,
@@ -1535,6 +1552,16 @@ impl<'a> Checker<'a> {
                 f.members.insert(e, MemberFact::Env(name));
             }
             return self.types.optional(STR);
+        }
+        // `groups.year` on a `Record<string, V>` (a map): `groups["year"]`, as TypeScript reads
+        // an index signature
+        if let Ty::Map(k, v) = *self.types.get(base)
+            && matches!(*self.types.get(k), Ty::Str)
+            && builtins::method(self, base, &self.name(name).to_string()).is_none()
+            && self.name(name) != "size"
+        {
+            self.rewrites.keys.push((self.cur, e));
+            return if optional { self.types.optional(v) } else { v };
         }
         // Class members: visibility, and getters are calls.
         let mut getter = false;
@@ -2601,6 +2628,50 @@ impl<'a> Checker<'a> {
                     }
                     self.types.without_undefined(recv)
                 };
+                // `s.replace(/x/g, y)` and the other string methods given a RegExp: the prelude's
+                // `__reReplace(s, re, y)` and so on
+                if matches!(*self.types.get(base), Ty::Str | Ty::StrLit(_))
+                    && matches!(mtext.as_str(), "replace" | "replaceAll" | "split" | "match" | "matchAll" | "search")
+                    && let Some(a0) = args.first()
+                    && a0.by_ref.is_none()
+                {
+                    let marks = self.diags.len();
+                    let re = self.builtin_class("RegExp");
+                    let t = self.expr(a0.expr, None);
+                    if re != ERROR && self.types.without_undefined(t) == re {
+                        let is_fn = args.get(1).is_some_and(|a| match self.ast().expr(a.expr).kind {
+                            ExprKind::Arrow(_) => true,
+                            ExprKind::Ident(s) => match self.lookup(s) {
+                                Some(l) => matches!(*self.types.get(l.1), Ty::Func(..)),
+                                None => matches!(self.scopes[self.cur as usize].values.get(&s).map(|d| d.0), Some(Decl::Fn(..))),
+                            },
+                            _ => false,
+                        });
+                        let target = match mtext.as_str() {
+                            "replace" | "replaceAll" if is_fn => "__reReplaceFn",
+                            "replace" | "replaceAll" => "__reReplace",
+                            "split" => "__reSplit",
+                            "match" => "__reMatch",
+                            "matchAll" => "__reMatchAll",
+                            _ => "__reSearch",
+                        };
+                        if let Some(f) = self.interner.lookup(target) {
+                            self.rewrites.calls.push((self.cur, e, f));
+                        }
+                        for a in &args[1..] {
+                            self.expr(a.expr, None);
+                        }
+                        let found = self.builtin_class("RegExpExecArray");
+                        return match mtext.as_str() {
+                            "replace" | "replaceAll" => STR,
+                            "split" => self.types.array(STR),
+                            "match" => self.types.union(&[found, NULL]),
+                            "matchAll" => self.types.array(found),
+                            _ => INT,
+                        };
+                    }
+                    self.diags.truncate(marks);
+                }
                 // `process.stdout.write(s)` / `process.stderr.write(s)`.
                 if let Ty::BuiltinNs(s) = *self.types.get(base) {
                     let ns = self.name(s).to_string();

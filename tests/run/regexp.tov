@@ -1,0 +1,67 @@
+// Regular expressions, as JavaScript runs them (checked against Node)
+function main() {
+  const re = /(\d+)-(?<w>[a-z]+)/g
+  console.log(re.test("x 12-ab"), re.lastIndex, re.source, re.flags, re.global)
+  const m = /(\d+)/.exec("abc 42 x")
+  console.log(m !== null)
+}
+main()
+
+function strings(): void {
+  const text = "The quick brown fox jumps over the lazy dog"
+  console.log(text.replace(/ /g, ""))
+  console.log(text.replace(/o/, "0"))
+  console.log(text.replaceAll(/o/g, "0"))
+  console.log(text.split(/\s+/).length)
+  console.log(text.split(/(o)/).join("|"))
+  const m = text.match(/(\w+) (\w+)/)
+  if (m) {
+    console.log(m[0], m[1], m[2], m.index)
+  }
+  console.log(text.search(/fox/))
+  console.log(text.search(/cat/))
+  for (const x of text.matchAll(/(\w)o/g)) {
+    console.log(x[0], x[1], x.index)
+  }
+  console.log(text.replace(/(\w+) (\w+)/, "$2 $1"))
+  console.log(text.replace(/\w+/g, (w) => w.toUpperCase()))
+  const date = /(?<y>\d{4})-(?<m>\d{2})/.exec("on 2024-05")
+  if (date) console.log(date[1], date[2], date.index)
+  console.log("aBc".replace(/b/i, "X"))
+  console.log("a1b22c333".split(/\d+/))
+  const ms = "x1y2z3".match(/\d/g)
+  console.log(ms ? ms.length : 0)
+}
+strings()
+
+function more(): void {
+  const re = /(\d+)/g
+  let m: RegExpExecArray | null
+  const s = "a1 b22 c333"
+  while ((m = re.exec(s)) !== null) {
+    console.log(m[1], m.index, re.lastIndex)
+  }
+  const d = /(?<y>\d{4})-(?<mo>\d{2})/.exec("on 2024-05")
+  if (d && d.groups) console.log(d.groups.y, d.groups["mo"])
+  console.log("héllo wörld".replace(/ö/, "o"), "héllo".search(/l/))
+  console.log("😀a😀b".split(/a|b/))
+  console.log(/^\w+@\w+\.com$/.test("x@y.com"), /^\w+@\w+\.com$/.test("x@y"))
+  const parts = "k=v; k2=v2".match(/(\w+)=(\w+)/)
+  console.log(parts ? parts.length : -1)
+  console.log("a-b_c".replace(/[-_]/g, (c) => c === "-" ? "+" : "*"))
+  console.log("2020-01-02".replace(/(\d+)-(\d+)-(\d+)/, (all, y, mo, da) => `${da}/${mo}/${y}`))
+  console.log(String(/a+/gi), /x/.source, /x/gm.flags)
+}
+more()
+
+const counts: Record<string, number> = {}
+counts.apples = 3
+counts["pears"] = 1
+counts.apples += 2
+console.log(counts.apples, counts.pears)
+
+let found: RegExpExecArray | null
+let note: string | undefined
+console.log(note)
+const words = /(\w+)/g
+while ((found = words.exec("one two")) !== null) console.log(found[1], found.index)

@@ -224,6 +224,13 @@ void tv_sb_push_str(tv_sb *sb, tv_str s);
 /* Parsing: returns false when the whole string (after trimming whitespace) isn't a number. */
 bool tv_parse_float(tv_str s, double *out);     /* JS Number(s)/parseFloat subset: decimal, exponent, Infinity */
 bool tv_parse_int(tv_str s, tv_int radix, tv_int *out);  /* radix 0 = 10 (or 16 with 0x); JS parseInt accepts a numeric prefix */
+/* Regular expressions (runtime/regexp.c, linked when a program uses them): a compiled
+ * expression's id (-1 and an error when it doesn't compile); a match's group positions. */
+tv_int tv_native_reCompile(tv_str source, tv_str flags);
+tv_str tv_native_reFlags(tv_int h);
+struct tv_arr tv_native_reExec(tv_int h, tv_str s, tv_int from);
+struct tv_arr tv_native_reNames(tv_int h);
+void tv_native_error(const char *msg);         /* the message __native.takeError() returns next */
 double tv_js_number(tv_str s);                  /* Number(s): NaN when it isn't one; "" is 0; 0x/0o/0b */
 double tv_js_parse_float(tv_str s);             /* parseFloat(s): the longest decimal prefix, else NaN */
 

@@ -19,6 +19,8 @@ pub enum Tok {
     TemplateMiddle,
     /// `` }text` ``
     TemplateTail,
+    /// `/pattern/flags`: `val` is the pattern's index in `strings`, the flags' is `val + 1`.
+    Regex,
 
     // Keywords
     Import,
@@ -138,6 +140,7 @@ impl Tok {
             BigInt => "bigint",
             Decimal => "decimal",
             Str => "string",
+            Regex => "a regular expression",
             TemplateFull | TemplateHead | TemplateMiddle | TemplateTail => "template literal",
             Eof => "end of file",
             LParen => "`(`",
@@ -518,6 +521,40 @@ impl Lexer<'_> {
     fn punct(&mut self, start: usize, nl: bool) {
         use Tok::*;
         let c = self.src[self.pos];
+        // `/re/flags` where an expression starts (after an operator, `(`, `,`, `return`, ...)
+        let expr_starts = match self.tokens.last().map(|t| t.kind) {
+            None => true,
+            Some(Ident | Int | Float | BigInt | Decimal | Str | TemplateFull | TemplateTail | Regex | RParen | RBracket | RBrace | True | False | Undefined | Null | This | Super | PlusPlus | MinusMinus) => false,
+            Some(_) => true,
+        };
+        if c == b'/' && expr_starts && self.peek(1) != b'/' && self.peek(1) != b'*' {
+            let mut i = self.pos + 1;
+            let mut class = false;
+            while i < self.src.len() && self.src[i] != b'\n' {
+                match self.src[i] {
+                    b'\\' => i += 1,
+                    b'[' => class = true,
+                    b']' => class = false,
+                    b'/' if !class => break,
+                    _ => {}
+                }
+                i += 1;
+            }
+            if i < self.src.len() && self.src[i] == b'/' {
+                let pattern = self.text[self.pos + 1..i].to_string();
+                let mut j = i + 1;
+                while j < self.src.len() && self.src[j].is_ascii_alphabetic() {
+                    j += 1;
+                }
+                let flags = self.text[i + 1..j].to_string();
+                self.strings.push(pattern);
+                self.strings.push(flags);
+                self.pos = j;
+                let val = self.strings.len() as u32 - 2;
+                self.push(Regex, start, nl, val);
+                return;
+            }
+        }
         let (kind, len) = match (c, self.peek(1), self.peek(2)) {
             (b'.', b'.', b'.') => (DotDotDot, 3),
             (b'?', b'?', b'=') => (QuestionQuestionEq, 3),

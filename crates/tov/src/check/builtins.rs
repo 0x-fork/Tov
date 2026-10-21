@@ -34,6 +34,10 @@ pub(super) fn native_sig(types: &mut Types, name: &str) -> Option<(Vec<TyId>, Ty
     let str_arr = types.array(STR);
     Some(match name {
         "takeError" | "cwd" => (vec![], STR),
+        "reCompile" => (vec![STR, STR], INT),
+        "reFlags" => (vec![INT], STR),
+        "reExec" => (vec![INT, STR, INT], types.array(INT)),
+        "reNames" => (vec![INT], str_arr),
         "statInfo" => (vec![STR], STR),
         "access" => (vec![STR, INT], VOID),
         "readFile" => (vec![STR], STR),

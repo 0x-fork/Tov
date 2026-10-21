@@ -166,6 +166,7 @@ Node's names, so existing habits work:
 - `Date.now()` and `performance.now()` (milliseconds).
 - `JSON.stringify(value, undefined, indent?)` as in JavaScript (maps with string keys are written as objects, where JavaScript writes `{}`). `JSON.parse(text)` takes its type from context — `const c: Config = JSON.parse(text)` or `JSON.parse(text) as Config` — and **checks** the input against it (exact integers, string literals, discriminants, required fields; extra keys ignored, `null` and missing keys read as `undefined`), throwing `SyntaxError` otherwise.
 - Rest parameters: `function f(first: T, ...rest: U[])` (not in methods yet). Default values: `function f(x: T = d)` (an unannotated `n = 10` takes the literal's type); `d` is evaluated when the argument is missing or `undefined`, as in JavaScript (not yet for `inout`, rest and constructor parameter properties).
+- Regular expressions: literals (`/(\d+)-(?<w>\w+)/g`) and `new RegExp(pattern, flags?)`, run by QuickJS's engine (vendored, linked only into programs that use them), with JavaScript's syntax, flags and UTF-16 positions. `test`, `exec`, `lastIndex`, `source`, `flags`; a match (`RegExpExecArray`) has `m[i]`, `index`, `input`, `groups`, `length`. Strings take them in `replace`/`replaceAll` (with `$1`, `$<name>`, `$&` or a function), `split`, `match`, `matchAll` and `search`. An invalid pattern throws `SyntaxError`.
 - Web servers: see §7c.
 
 ## 7b. Async

@@ -47,3 +47,272 @@ export class JsError extends Error {
 export function __jsError(name: string, message: string, value: Js): JsError {
   return new JsError(name, message, value)
 }
+
+/** A regular expression, as JavaScript's (QuickJS's engine underneath; positions count UTF-16
+ * code units). An invalid pattern throws a SyntaxError. */
+export class RegExp {
+  readonly source: string
+  readonly flags: string
+  lastIndex: int = 0
+  private h: int
+  constructor(pattern: string, flags?: string) {
+    this.h = __native.reCompile(pattern, flags ?? "")
+    if (this.h < 0) {
+      __reInvalid(__native.takeError())
+    }
+    this.source = pattern
+    this.flags = __native.reFlags(this.h)
+  }
+  get global(): bool { return this.flags.includes("g") }
+  get ignoreCase(): bool { return this.flags.includes("i") }
+  get multiline(): bool { return this.flags.includes("m") }
+  get sticky(): bool { return this.flags.includes("y") }
+  get unicode(): bool { return this.flags.includes("u") }
+  get dotAll(): bool { return this.flags.includes("s") }
+  get hasIndices(): bool { return this.flags.includes("d") }
+  /** (the compiled expression, for the prelude's string functions) */
+  __id(): int { return this.h }
+  test(s: string): bool {
+    return this.exec(s) !== null
+  }
+  exec(s: string): RegExpExecArray | null {
+    const keep = this.global || this.sticky
+    const p = __native.reExec(this.h, s, keep ? this.lastIndex : 0)
+    if (p.length === 0) {
+      if (keep) this.lastIndex = 0
+      return null
+    }
+    if (keep) this.lastIndex = p[1]!
+    return __reMatchOf(this.h, s, p)
+  }
+  toString(): string {
+    return `/${this.source}/${this.flags}`
+  }
+}
+
+/** A match: its groups (`m[0]` is the whole match; a group that didn't take part is
+ * `undefined`), where it starts, the string searched, and the named groups. */
+export class RegExpExecArray {
+  items: (string | undefined)[]
+  index: int
+  input: string
+  groups: Record<string, string> | undefined
+  constructor(items: (string | undefined)[], index: int, input: string, groups: Record<string, string> | undefined) {
+    this.items = items
+    this.index = index
+    this.input = input
+    this.groups = groups
+  }
+  get length(): int { return this.items.length }
+  join(separator?: string): string {
+    const parts: string[] = []
+    for (const x of this.items) parts.push(x ?? "")
+    return parts.join(separator ?? ",")
+  }
+  slice(start?: int, end?: int): (string | undefined)[] {
+    return this.items.slice(start ?? 0, end ?? this.items.length)
+  }
+}
+
+/** (an invalid pattern) */
+export function __reInvalid(message: string): never {
+  throw new SyntaxError(message)
+}
+
+/** (the match `p` of expression `h` in `s` as a RegExpExecArray) */
+export function __reMatchOf(h: int, s: string, p: int[]): RegExpExecArray {
+  const items: (string | undefined)[] = []
+  for (let i = 0; i + 1 < p.length; i += 2) {
+    if (p[i]! < 0) items.push(undefined)
+    else items.push(s.slice(p[i]!, p[i + 1]!))
+  }
+  const names = __native.reNames(h)
+  let groups: Record<string, string> | undefined = undefined
+  for (let i = 1; i < names.length; i++) {
+    const name = names[i]!
+    if (name === "") continue
+    const g: Record<string, string> = groups ?? {}
+    const v = items[i]
+    if (v !== undefined) g[name] = v
+    groups = g
+  }
+  return new RegExpExecArray(items, p[0]!, s, groups)
+}
+
+/** (what a replacement string's `$&`, `$1`, `$<name>`, ... stand for) */
+function __reSubst(h: int, s: string, p: int[], rep: string): string {
+  if (!rep.includes("$")) return rep
+  const ncap = Math.trunc(p.length / 2)
+  let out = ""
+  let i = 0
+  while (i < rep.length) {
+    const c = rep[i]!
+    if (c !== "$" || i + 1 >= rep.length) {
+      out += c
+      i++
+      continue
+    }
+    const d = rep.charCodeAt(i + 1)
+    if (d === 36) {
+      out += "$"
+      i += 2
+    } else if (d === 38) {
+      out += s.slice(p[0]!, p[1]!)
+      i += 2
+    } else if (d === 96) {
+      out += s.slice(0, p[0]!)
+      i += 2
+    } else if (d === 39) {
+      out += s.slice(p[1]!)
+      i += 2
+    } else if (d >= 48 && d <= 57) {
+      let k = d - 48
+      let len = 2
+      const e = i + 2 < rep.length ? rep.charCodeAt(i + 2) : -1
+      if (e >= 48 && e <= 57 && k * 10 + e - 48 < ncap && k * 10 + e - 48 >= 1) {
+        k = k * 10 + e - 48
+        len = 3
+      }
+      if (k >= 1 && k < ncap) {
+        if (p[2 * k]! >= 0) out += s.slice(p[2 * k]!, p[2 * k + 1]!)
+        i += len
+      } else {
+        out += "$"
+        i++
+      }
+    } else if (d === 60) {
+      const close = rep.indexOf(">", i + 2)
+      const names = __native.reNames(h)
+      if (close < 0 || !names.some((n) => n !== "")) {
+        out += "$"
+        i++
+      } else {
+        const name = rep.slice(i + 2, close)
+        const k = names.indexOf(name)
+        if (k > 0 && p[2 * k]! >= 0) out += s.slice(p[2 * k]!, p[2 * k + 1]!)
+        i = close + 1
+      }
+    } else {
+      out += "$"
+      i++
+    }
+  }
+  return out
+}
+
+/** (where the next search starts after a match: past it, or one unit on for an empty match) */
+function __reNext(s: string, p: int[], unicode: bool): int {
+  if (p[1]! > p[0]!) return p[1]!
+  const c = s.charCodeAt(p[1]!)
+  return unicode && c >= 0xd800 && c <= 0xdbff ? p[1]! + 2 : p[1]! + 1
+}
+
+/** `s.replace(re, replacement)` (every match with the `g` flag). */
+export function __reReplace(s: string, re: RegExp, rep: string): string {
+  return __reReplaceWith(s, re, rep, undefined)
+}
+
+/** `s.replace(re, (match, ...groups) => text)`. */
+export function __reReplaceFn(s: string, re: RegExp, f: (m: string, p1: string, p2: string, p3: string, p4: string, p5: string, p6: string, p7: string, p8: string, p9: string) => string): string {
+  return __reReplaceWith(s, re, "", f)
+}
+
+function __reReplaceWith(s: string, re: RegExp, rep: string, f: ((m: string, p1: string, p2: string, p3: string, p4: string, p5: string, p6: string, p7: string, p8: string, p9: string) => string) | undefined): string {
+  const h = re.__id()
+  const global = re.global
+  let from = global ? 0 : re.sticky ? re.lastIndex : 0
+  let out = ""
+  let last = 0
+  while (from <= s.length) {
+    const p = __native.reExec(h, s, from)
+    if (p.length === 0) {
+      if (global || re.sticky) re.lastIndex = 0
+      break
+    }
+    out += s.slice(last, p[0]!)
+    if (f !== undefined) {
+      const g: string[] = []
+      for (let k = 1; k < 10; k++) g.push(2 * k < p.length && p[2 * k]! >= 0 ? s.slice(p[2 * k]!, p[2 * k + 1]!) : "")
+      out += f(s.slice(p[0]!, p[1]!), g[0]!, g[1]!, g[2]!, g[3]!, g[4]!, g[5]!, g[6]!, g[7]!, g[8]!)
+    } else {
+      out += __reSubst(h, s, p, rep)
+    }
+    last = p[1]!
+    if (!global) {
+      if (re.sticky) re.lastIndex = p[1]!
+      break
+    }
+    from = __reNext(s, p, re.unicode)
+  }
+  return out + s.slice(last)
+}
+
+/** `s.split(re)`: the parts between matches, with the groups of each match between them. */
+export function __reSplit(s: string, re: RegExp, limit?: int): string[] {
+  const out: string[] = []
+  const max = limit ?? 4294967295
+  if (max === 0) return out
+  const h = re.__id()
+  if (s.length === 0) {
+    if (__native.reExec(h, s, 0).length === 0) out.push(s)
+    return out
+  }
+  let last = 0
+  let from = 0
+  while (from < s.length) {
+    const p = __native.reExec(h, s, from)
+    if (p.length === 0 || p[0]! >= s.length) break
+    if (p[1]! === p[0]! && p[0]! === last) {
+      from = p[0]! + 1
+      continue
+    }
+    if (p[1]! === p[0]! && p[0]! >= s.length) break
+    out.push(s.slice(last, p[0]!))
+    if (out.length === max) return out
+    for (let k = 2; k + 1 < p.length; k += 2) {
+      if (p[k]! >= 0) out.push(s.slice(p[k]!, p[k + 1]!))
+      if (out.length === max) return out
+    }
+    last = p[1]!
+    from = __reNext(s, p, re.unicode)
+  }
+  out.push(s.slice(last))
+  return out
+}
+
+/** `s.match(re)`: the first match, or with the `g` flag every match's text. */
+export function __reMatch(s: string, re: RegExp): RegExpExecArray | null {
+  if (!re.global) return re.exec(s)
+  const h = re.__id()
+  const all: (string | undefined)[] = []
+  let from = 0
+  while (from <= s.length) {
+    const p = __native.reExec(h, s, from)
+    if (p.length === 0) break
+    all.push(s.slice(p[0]!, p[1]!))
+    from = __reNext(s, p, re.unicode)
+  }
+  re.lastIndex = 0
+  if (all.length === 0) return null
+  return new RegExpExecArray(all, -1, s, undefined)
+}
+
+/** `s.matchAll(re)`: every match (the `g` flag is required, as in JavaScript). */
+export function __reMatchAll(s: string, re: RegExp): RegExpExecArray[] {
+  const h = re.__id()
+  const out: RegExpExecArray[] = []
+  let from = 0
+  while (from <= s.length) {
+    const p = __native.reExec(h, s, from)
+    if (p.length === 0) break
+    out.push(__reMatchOf(h, s, p))
+    from = __reNext(s, p, re.unicode)
+  }
+  return out
+}
+
+/** `s.search(re)`: where the first match starts, or -1. */
+export function __reSearch(s: string, re: RegExp): int {
+  const p = __native.reExec(re.__id(), s, 0)
+  return p.length === 0 ? -1 : p[0]!
+}

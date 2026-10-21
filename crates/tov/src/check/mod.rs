@@ -1984,7 +1984,7 @@ impl<'a> Checker<'a> {
                 self.report(Diagnostic::new("N0002", name_span, format!("unknown type `{text}`")).fix(Applicability::Safe, format!("use `{lower}`"), name_span, lower));
                 Some(ERROR)
             }
-            "bigint" | "symbol" | "Function" | "Date" | "RegExp" => {
+            "symbol" | "Function" | "Date" => {
                 let msg = match text {
                     "Function" => "`Function` is not supported; write the function type: `(x: T) => R`".to_string(),
                     _ => format!("`{text}` is not supported"),

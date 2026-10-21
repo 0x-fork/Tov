@@ -40,6 +40,20 @@ pub const RUNTIME_DEC: &str = include_str!("../../../../runtime/dec.c");
 pub const RUNTIME_NET: &str = include_str!("../../../../runtime/net.c");
 /// WebSockets (runtime/ws.c): after net.c, whose sockets they frame.
 pub const RUNTIME_WS: &str = include_str!("../../../../runtime/ws.c");
+/// Regular expressions (runtime/regexp.c and QuickJS's libregexp), compiled for programs that use them.
+pub const REGEXP_FILES: &[(&str, &str)] = &[
+    ("regexp.c", include_str!("../../../../runtime/regexp.c")),
+    ("libregexp.c", include_str!("../../../../vendor/quickjs-regexp/libregexp.c")),
+    ("libunicode.c", include_str!("../../../../vendor/quickjs-regexp/libunicode.c")),
+    ("cutils.c", include_str!("../../../../vendor/quickjs-regexp/cutils.c")),
+    ("libregexp.h", include_str!("../../../../vendor/quickjs-regexp/libregexp.h")),
+    ("libregexp-opcode.h", include_str!("../../../../vendor/quickjs-regexp/libregexp-opcode.h")),
+    ("libunicode.h", include_str!("../../../../vendor/quickjs-regexp/libunicode.h")),
+    ("libunicode-table.h", include_str!("../../../../vendor/quickjs-regexp/libunicode-table.h")),
+    ("cutils.h", include_str!("../../../../vendor/quickjs-regexp/cutils.h")),
+    ("list.h", include_str!("../../../../vendor/quickjs-regexp/list.h")),
+    ("dtoa.h", include_str!("../../../../vendor/quickjs-regexp/dtoa.h")),
+];
 /// The JavaScript bridge's interface (runtime/js.h): in every program's fixed prefix, so the
 /// prelude's `JsError` can hold a `Js`; only npm programs link its implementation.
 pub const JS_H: &str = include_str!("../../../../runtime/js.h");
@@ -104,6 +118,8 @@ pub struct Program {
     pub c: String,
     /// It calls fetch(), so it links TLS (see build.rs).
     pub uses_tls: bool,
+    /// It uses regular expressions, so it links libregexp (see build.rs).
+    pub uses_regexp: bool,
     /// The npm packages it imports (to bundle; it links runtime/js.c and JavaScriptCore).
     pub npm: Vec<String>,
 }
@@ -127,7 +143,7 @@ pub fn generate(c: &mut Checker, mode: Mode) -> Result<Program, Vec<Diagnostic>>
     if g.js.used && g.uses_inspect && !npm.iter().any(|s| s == "node:util") {
         npm.push("node:util".into());
     }
-    Ok(Program { c, uses_tls: g.uses_tls, npm })
+    Ok(Program { c, uses_tls: g.uses_tls, uses_regexp: g.uses_regexp, npm })
 }
 
 /// A value produced by an expression.
@@ -245,6 +261,7 @@ pub(crate) struct Gen<'c, 'a> {
     pub(crate) pending_tre: Option<body::Tre>,
     /// The program calls fetch(): main installs TLS (and the build links it).
     uses_tls: bool,
+    pub(crate) uses_regexp: bool,
     pub(crate) frame_defs: Vec<asyncfn::FrameDef>,
 }
 
@@ -320,6 +337,7 @@ impl<'c, 'a> Gen<'c, 'a> {
             last_children: Vec::new(),
             pending_tre: None,
             uses_tls: false,
+            uses_regexp: false,
             frame_defs: Vec::new(),
             js: js::JsGen::default(),
         }

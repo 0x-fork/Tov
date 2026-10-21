@@ -274,7 +274,7 @@ pub fn build(paths: &[PathBuf], base: &Path, opts: &Options) -> Result<Built, Bu
         }
     };
     drop(checker);
-    let codegen::Program { c: mut c_src, mut uses_tls, npm } = program;
+    let codegen::Program { c: mut c_src, mut uses_tls, uses_regexp, npm } = program;
     let mut native = false;
     let mut addons: Vec<PathBuf> = Vec::new();
     // The blob, when it's appended to the binary rather than assembled into it (see with_blob)
@@ -382,7 +382,14 @@ pub fn build(paths: &[PathBuf], base: &Path, opts: &Options) -> Result<Built, Bu
         addon_bytes.push(std::fs::read(a).map_err(|e| BuildError::Message(format!("can't read {}: {e}", a.display())))?);
     }
     let addon_key = hash_hex(&addon_bytes.iter().map(|b| b.as_slice()).collect::<Vec<_>>());
-    let key = hash_hex(&[c_src.as_bytes(), rt_key.as_bytes(), LINK_FLAGS.as_bytes(), if lld { b"lld" } else { b"ld" }, tls_key.as_bytes(), js_key.as_bytes(), addon_key.as_bytes()]);
+    let re_key = if uses_regexp {
+        let mut parts: Vec<&[u8]> = codegen::REGEXP_FILES.iter().map(|f| f.1.as_bytes()).collect();
+        parts.extend([codegen::RUNTIME_H.as_bytes(), cc.as_bytes(), flag_text.as_bytes()]);
+        hash_hex(&parts)
+    } else {
+        String::new()
+    };
+    let key = hash_hex(&[c_src.as_bytes(), rt_key.as_bytes(), LINK_FLAGS.as_bytes(), if lld { b"lld" } else { b"ld" }, tls_key.as_bytes(), js_key.as_bytes(), addon_key.as_bytes(), re_key.as_bytes()]);
     let dir = cache_dir();
     // A program with addons gets a directory of its own, the addons beside it.
     let bin_dir = if addons.is_empty() { dir.join("bin") } else { dir.join("bin").join(&key) };
@@ -431,10 +438,12 @@ pub fn build(paths: &[PathBuf], base: &Path, opts: &Options) -> Result<Built, Bu
         }
     };
     let tls_job = || -> Result<Option<[PathBuf; 2]>, String> { tls.as_ref().map(|t| t.build(&cc, &c_dir)).transpose().map_err(message) };
+    let re_job = || -> Result<Vec<PathBuf>, String> { if uses_regexp { regexp_objects(&cc, &flags, &c_dir, &re_key).map_err(message) } else { Ok(Vec::new()) } };
     let parallel = std::thread::scope(|s| {
         let rt_thread = s.spawn(rt_job);
         let js_thread = s.spawn(js_job);
         let tls_thread = s.spawn(tls_job);
+        let re_thread = s.spawn(re_job);
         // Every program starts with the same runtime interface and prelude: precompile it once
         // (per compiler and flags) and compile only the program's own code against it.
         let prefix = codegen::fixed_prefix();
@@ -451,9 +460,11 @@ pub fn build(paths: &[PathBuf], base: &Path, opts: &Options) -> Result<Built, Bu
         let rt = rt_thread.join().unwrap_or_else(|_| Err("internal error: compiling the runtime panicked".into()));
         let js = js_thread.join().unwrap_or_else(|_| Err("internal error: compiling the JavaScript bridge panicked".into()));
         let tls = tls_thread.join().unwrap_or_else(|_| Err("internal error: compiling the TLS library panicked".into()));
-        (pch, c_path, written, rt, js, tls)
+        let re = re_thread.join().unwrap_or_else(|_| Err("internal error: compiling the regular expression library panicked".into()));
+        (pch, c_path, written, rt, js, tls, re)
     });
-    let (pch, c_path, written, rt_done, js_objs, tls_archives) = parallel;
+    let (pch, c_path, written, rt_done, js_objs, tls_archives, re_objs) = parallel;
+    let re_objs = re_objs.map_err(BuildError::Message)?;
     written.map_err(BuildError::Message)?;
     rt_done.map_err(BuildError::Message)?;
     let js_objs = js_objs.map_err(BuildError::Message)?;
@@ -479,6 +490,7 @@ pub fn build(paths: &[PathBuf], base: &Path, opts: &Options) -> Result<Built, Bu
         cmd.args(extra.split_whitespace()).arg("-o").arg(&tmp).arg(&obj);
     }
     cmd.arg(&rt_obj);
+    cmd.args(&re_objs);
     if lld {
         cmd.arg("-fuse-ld=lld");
     }
@@ -910,6 +922,34 @@ impl TlsArchive {
 }
 
 /// A 128-bit content hash (two independent 64-bit lanes), hex-encoded. For cache keys, not security.
+/// The regular expression library's objects (runtime/regexp.c and QuickJS's libregexp), compiled
+/// once per compiler and flags.
+fn regexp_objects(cc: &str, flags: &[&str], c_dir: &Path, key: &str) -> Result<Vec<PathBuf>, BuildError> {
+    let units = ["regexp.c", "libregexp.c", "libunicode.c", "cutils.c"];
+    let objs: Vec<PathBuf> = units.iter().map(|u| c_dir.join(format!("re-{key}-{}.o", u.trim_end_matches(".c")))).collect();
+    if objs.iter().all(|o| cached(o)) {
+        return Ok(objs);
+    }
+    let fail = |what: String| BuildError::Message(format!("can't build the regular expression library: {what}"));
+    let dir = c_dir.join(format!("re-{key}.tmp{}", tmp_tag()));
+    std::fs::create_dir_all(&dir).map_err(|e| fail(format!("{e}")))?;
+    for (name, text) in codegen::REGEXP_FILES.iter().copied().chain([("tov.h", codegen::RUNTIME_H)]) {
+        std::fs::write(dir.join(name), text).map_err(|e| fail(format!("{e}")))?;
+    }
+    let result = (|| {
+        for (unit, obj) in units.iter().zip(&objs) {
+            let tmp = obj.with_extension(format!("tmp{}.o", tmp_tag()));
+            let mut cmd = Command::new(cc);
+            cmd.args(flags).args(["-w", "-ffunction-sections", "-fdata-sections", "-c", "-o"]).arg(&tmp).arg(format!("-I{}", dir.display())).arg(dir.join(unit));
+            run_cc(cmd, cc, &dir.join(unit))?;
+            std::fs::rename(&tmp, obj).map_err(|e| fail(format!("can't move it into the cache: {e}")))?;
+        }
+        Ok(objs.clone())
+    })();
+    let _ = std::fs::remove_dir_all(&dir);
+    result
+}
+
 /// A name for a temporary file no other build makes: the process, and a count within it (the
 /// threads of one process, `cargo test`'s say, build at once).
 pub(crate) fn tmp_tag() -> String {

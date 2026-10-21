@@ -3417,6 +3417,11 @@ static void tv_native_fail(int e, const char *op, tv_str path) {
     tv_sb_push_char(&tv_native_err, '\'');
 }
 
+void tv_native_error(const char *msg) {
+    if (tv_native_err.len) return;
+    tv_sb_push_cstr(&tv_native_err, msg);
+}
+
 tv_str tv_native_takeError(void) {
     if (!tv_native_err.len) return TV_EMPTY_STR;
     return tv_str_from_sb(&tv_native_err);

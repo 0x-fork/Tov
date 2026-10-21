@@ -6,7 +6,7 @@
 //! parameters of async functions (which can't be `inout`) and of arrow functions.
 
 use super::*;
-use crate::ast::{ExprKind, MemberKind, StmtKind};
+use crate::ast::{Arg, ExprKind, MemberKind, StmtKind};
 
 /// What a check found to rewrite.
 #[derive(Default, Clone, Debug)]
@@ -21,11 +21,18 @@ pub struct Rewrites {
     pub(crate) items: Vec<(u32, u32)>,
     /// Promises returned by async functions (module, the returned expression): `return await p`.
     pub(crate) awaits: Vec<(u32, ExprId)>,
+    /// `s.replace(re, x)` and the other string methods taking a RegExp: (module, the call, the
+    /// prelude function), as `__reReplace(s, re, x)`.
+    pub(crate) calls: Vec<(u32, ExprId, crate::intern::Sym)>,
+    /// `m[i]` on a match: (module, the index expression, `items`, assert present), as `m.items[i]` (`!`).
+    pub(crate) elems: Vec<(u32, ExprId, crate::intern::Sym, bool)>,
+    /// `r.key` on a `Record<string, V>` (module, the member expression), as `r["key"]`.
+    pub(crate) keys: Vec<(u32, ExprId)>,
 }
 
 impl Rewrites {
     pub fn is_empty(&self) -> bool {
-        self.params.is_empty() && self.args.is_empty() && self.consts.is_empty() && self.items.is_empty() && self.awaits.is_empty()
+        self.params.is_empty() && self.args.is_empty() && self.consts.is_empty() && self.items.is_empty() && self.awaits.is_empty() && self.calls.is_empty() && self.elems.is_empty() && self.keys.is_empty()
     }
 
     pub(crate) fn extend(&mut self, o: Rewrites) {
@@ -34,6 +41,9 @@ impl Rewrites {
         self.consts.extend(o.consts);
         self.items.extend(o.items);
         self.awaits.extend(o.awaits);
+        self.calls.extend(o.calls);
+        self.elems.extend(o.elems);
+        self.keys.extend(o.keys);
     }
 }
 
@@ -108,6 +118,51 @@ pub fn apply(modules: &mut [Module], rw: &Rewrites) -> bool {
                 changed = true;
             }
         }
+    }
+    for &(m, call, f) in &rw.calls {
+        // `s.replace(re, x)` → `__reReplace(s, re, x)`
+        let ast = &mut modules[m as usize].ast;
+        let ExprKind::Call { callee, args, .. } = &ast.exprs[call as usize].kind else { continue };
+        let ExprKind::Member { obj, name_span, .. } = ast.exprs[*callee as usize].kind else { continue };
+        let mut all = vec![Arg { expr: obj, by_ref: None }];
+        all.extend(args.iter().map(|a| Arg { expr: a.expr, by_ref: a.by_ref }));
+        ast.exprs.push(crate::ast::Expr { kind: ExprKind::Ident(f), span: name_span });
+        let fe = ast.exprs.len() as ExprId - 1;
+        if let ExprKind::Call { callee, args, .. } = &mut ast.exprs[call as usize].kind {
+            *callee = fe;
+            *args = all;
+        }
+        changed = true;
+    }
+    for &(m, at, items, present) in &rw.elems {
+        // `m[i]` → `m.items[i]` (`!` when it's read as present)
+        let ast = &mut modules[m as usize].ast;
+        let ExprKind::Index { obj, .. } = ast.exprs[at as usize].kind else { continue };
+        if matches!(ast.exprs[obj as usize].kind, ExprKind::Member { name, .. } if name == items) {
+            continue;
+        }
+        let span = ast.exprs[obj as usize].span;
+        ast.exprs.push(crate::ast::Expr { kind: ExprKind::Member { obj, name: items, name_span: span, optional: false }, span });
+        let member = ast.exprs.len() as ExprId - 1;
+        let at_span = ast.exprs[at as usize].span;
+        if let ExprKind::Index { obj, .. } = &mut ast.exprs[at as usize].kind {
+            *obj = member;
+        }
+        if present {
+            let index = std::mem::replace(&mut ast.exprs[at as usize].kind, ExprKind::Error);
+            ast.exprs.push(crate::ast::Expr { kind: index, span: at_span });
+            let inner = ast.exprs.len() as ExprId - 1;
+            ast.exprs[at as usize].kind = ExprKind::NonNull(inner);
+        }
+        changed = true;
+    }
+    for &(m, at) in &rw.keys {
+        let ast = &mut modules[m as usize].ast;
+        let ExprKind::Member { obj, name, name_span, optional } = ast.exprs[at as usize].kind else { continue };
+        ast.exprs.push(crate::ast::Expr { kind: ExprKind::Str(name), span: name_span });
+        let index = ast.exprs.len() as ExprId - 1;
+        ast.exprs[at as usize].kind = ExprKind::Index { obj, index, optional };
+        changed = true;
     }
     for &(m, x) in &rw.awaits {
         // `return p` → `return await p`: the returned expression's node becomes the await of a

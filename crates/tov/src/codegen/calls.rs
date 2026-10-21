@@ -1501,6 +1501,9 @@ impl<'c, 'a> Gen<'c, 'a> {
                 Val::plain("0", VOID)
             }
             (Some("__native"), _) => {
+                if name.starts_with("re") && matches!(name, "reCompile" | "reFlags" | "reExec" | "reNames") {
+                    self.uses_regexp = true;
+                }
                 let (ps, ret) = crate::check::native_sig_pub(&mut self.c.types, name).unwrap_or((Vec::new(), VOID));
                 let mut argv = Vec::new();
                 for (a, pt) in args.iter().zip(&ps) {

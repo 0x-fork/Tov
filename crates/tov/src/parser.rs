@@ -2604,18 +2604,15 @@ impl<'a> Parser<'a> {
                 self.skip_balanced();
                 self.mk_expr(ExprKind::Error, start)
             }
-            Tok::Slash | Tok::SlashEq => {
-                self.err("U0016", start, "regular expression literals are not supported yet");
-                self.bump();
-                while !self.at(Tok::Eof) && !self.tok().nl_before && !self.at(Tok::Slash) {
-                    self.bump();
-                }
-                self.eat(Tok::Slash);
-                if self.at(Tok::Ident) && self.adjacent() {
-                    self.bump();
-                }
-                let span = start.to(self.prev_span());
-                self.mk_expr(ExprKind::Error, span)
+            // `/re/flags`: `new RegExp("re", "flags")`
+            Tok::Regex => {
+                let t = self.bump();
+                let (pattern, flags) = (self.strings[t.val as usize].clone(), self.strings[t.val as usize + 1].clone());
+                let (p, f, r) = (self.interner.intern(&pattern), self.interner.intern(&flags), self.interner.intern("RegExp"));
+                let callee = self.mk_expr(ExprKind::Ident(r), start);
+                let pe = self.mk_expr(ExprKind::Str(p), start);
+                let fe = self.mk_expr(ExprKind::Str(f), start);
+                self.mk_expr(ExprKind::New { callee, type_args: Vec::new(), args: vec![Arg { expr: pe, by_ref: None }, Arg { expr: fe, by_ref: None }] }, start)
             }
             _ => {
                 let msg = format!("expected an expression, found {}", self.found());
