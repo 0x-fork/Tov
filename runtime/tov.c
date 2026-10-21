@@ -547,6 +547,12 @@ void tv_sort_f64(double *a, tv_int n, bool desc) {
     if (zs) tv_free(zs);
 }
 
+void tv_f64_index_trap(double d, const char *loc) {
+    char msg[96];
+    snprintf(msg, sizeof msg, "array index %.17g is not a whole number", d);
+    tv_trap(msg, loc);
+}
+
 int32_t tv_f64_to_i32_slow(double d) {
     if (!isfinite(d)) return 0;
     double m = fmod(trunc(d), 4294967296.0);
@@ -1826,6 +1832,66 @@ bool tv_parse_float(tv_str s, double *out) {
     if (end != e) return false;
     *out = d;
     return true;
+}
+
+double tv_js_number(tv_str s) {
+    size_t a, b;
+    tv_trim_range(s, true, true, &a, &b);
+    const char *p = s.p->data + a, *e = s.p->data + b;
+    if (p == e) return 0; /* Number("") and Number("  ") are 0 */
+    if (e - p > 2 && p[0] == '0') {
+        int base = (p[1] == 'x' || p[1] == 'X') ? 16 : (p[1] == 'o' || p[1] == 'O') ? 8 : (p[1] == 'b' || p[1] == 'B') ? 2 : 0;
+        if (base) {
+            double v = 0;
+            for (const char *q = p + 2; q < e; q++) {
+                int d = (*q >= '0' && *q <= '9') ? *q - '0' : (*q >= 'a' && *q <= 'f') ? *q - 'a' + 10 : (*q >= 'A' && *q <= 'F') ? *q - 'A' + 10 : 99;
+                if (d >= base) return NAN;
+                v = v * base + d;
+            }
+            return v;
+        }
+    }
+    double d;
+    return tv_parse_float(s, &d) ? d : NAN;
+}
+
+double tv_js_parse_float(tv_str s) {
+    /* the longest prefix that's a decimal number (after leading whitespace), else NaN */
+    size_t a, b;
+    tv_trim_range(s, true, false, &a, &b);
+    const char *p = s.p->data + a, *e = s.p->data + b, *q = p;
+    bool neg = q < e && *q == '-';
+    if (q < e && (*q == '+' || *q == '-')) q++;
+    if (e - q >= 8 && memcmp(q, "Infinity", 8) == 0) return neg ? -INFINITY : INFINITY;
+    size_t nd = 0;
+    while (q < e && tv_is_digit(*q)) q++, nd++;
+    if (q < e && *q == '.') {
+        const char *r = q + 1;
+        size_t nf = 0;
+        while (r < e && tv_is_digit(*r)) r++, nf++;
+        if (nd + nf > 0) q = r, nd += nf;
+    }
+    if (nd == 0) return NAN;
+    if (q < e && (*q == 'e' || *q == 'E')) {
+        const char *r = q + 1;
+        if (r < e && (*r == '+' || *r == '-')) r++;
+        size_t ne = 0;
+        while (r < e && tv_is_digit(*r)) r++, ne++;
+        if (ne) q = r;
+    }
+    char buf[400];
+    size_t n = (size_t)(q - p);
+    if (n >= sizeof buf) {
+        char *big = tv_alloc(n + 1);
+        memcpy(big, p, n);
+        big[n] = 0;
+        double d = strtod(big, NULL);
+        tv_free(big);
+        return d;
+    }
+    memcpy(buf, p, n);
+    buf[n] = 0;
+    return strtod(buf, NULL);
 }
 
 bool tv_parse_int(tv_str s, tv_int radix, tv_int *out) {

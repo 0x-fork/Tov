@@ -1731,7 +1731,7 @@ impl<'c, 'a> Gen<'c, 'a> {
                             let payload = self.u_payload(&v.code, v.ty, i);
                             if self.c.types.is_string(mt) {
                                 let s = self.coerce(Val::plain(payload, mt), STR);
-                                self.line(format!("case {i}: {ok} = tv_parse_float({}, &{out}); break;", s.code));
+                                self.line(format!("case {i}: {out} = tv_js_number({}); break;", s.code));
                             } else {
                                 let n = self.coerce(Val::plain(payload, mt), F64);
                                 self.line(format!("case {i}: {out} = {}; break;", n.code));
@@ -1740,11 +1740,11 @@ impl<'c, 'a> Gen<'c, 'a> {
                         self.close("}");
                     }
                     _ => {
-                        let n = self.coerce(v, F64);
-                        self.line(format!("{out} = {};", n.code));
+                        let n = self.coerce(v, ty);
+                        return n;
                     }
                 }
-                self.optional_from(&ok, Val::plain(out, F64), ty)
+                Val::plain(format!("({ok} ? {out} : (double)NAN)"), F64)
             }
             (None, "Number" | "parseFloat" | "parseInt") => {
                 let v = self.expr(args[0].expr);
@@ -1760,10 +1760,11 @@ impl<'c, 'a> Gen<'c, 'a> {
                         None => "0".into(),
                     };
                     self.line(format!("tv_int {out} = 0; bool {ok} = tv_parse_int({}, {radix}, &{out});", s.code));
-                    return self.optional_from(&ok, Val::plain(out, INT), ty);
+                    return Val::plain(format!("({ok} ? (double){out} : (double)NAN)"), F64);
                 }
-                self.line(format!("double {out} = 0; bool {ok} = tv_parse_float({}, &{out});", s.code));
-                self.optional_from(&ok, Val::plain(out, F64), ty)
+                let _ = (ok, out);
+                let f = if name == "Number" { "tv_js_number" } else { "tv_js_parse_float" };
+                Val::plain(format!("{f}({})", s.code), F64)
             }
             // Timers.
             (None, "setTimeout" | "setInterval") => {
@@ -2156,7 +2157,7 @@ impl<'c, 'a> Gen<'c, 'a> {
         }
         let Some(a) = args.first() else { return Val::plain("TV_EMPTY_ARR", ty) };
         let at = self.ty(a.expr);
-        if self.c.types.is_int(at) {
+        if self.c.types.is_int(at) || self.c.types.is_float(at) {
             let n = self.expr(a.expr);
             let n = self.int_code(n);
             let (d, ect) = (self.desc(et), self.ctype(et));

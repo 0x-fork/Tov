@@ -32,6 +32,18 @@ typedef int64_t tv_int;
 /* JavaScript's ToInt32 of a number (for bitwise operators): truncated, wrapped to 32 bits;
  * NaN and the infinities give 0. */
 static inline bool tv_f64_truthy(double d) { return d != 0 && d == d; }
+/* JavaScript's ToIntegerOrInfinity, clamped to an int: truncated toward zero, NaN is 0. */
+static inline tv_int tv_f64_to_int_js(double d) {
+    if (__builtin_expect(d > -9.2e18 && d < 9.2e18, 1)) return (tv_int)d;
+    return d != d ? 0 : d < 0 ? INT64_MIN : INT64_MAX;
+}
+_Noreturn void tv_f64_index_trap(double d, const char *loc);
+/* A float used as an array index: it must be a whole number. */
+static inline tv_int tv_f64_index(double d, const char *loc) {
+    tv_int i = (tv_int)d;
+    if (__builtin_expect((double)i == d && d > -9.2e18 && d < 9.2e18, 1)) return i;
+    tv_f64_index_trap(d, loc);
+}
 static inline bool tv_f64_is_integer(double d) { return d == __builtin_trunc(d) && d - d == 0; }
 static inline bool tv_f64_is_safe_integer(double d) { return tv_f64_is_integer(d) && __builtin_fabs(d) <= 9007199254740991.0; }
 static inline bool tv_int_is_safe(tv_int v) { return v >= -INT64_C(9007199254740991) && v <= INT64_C(9007199254740991); }
@@ -212,6 +224,8 @@ void tv_sb_push_str(tv_sb *sb, tv_str s);
 /* Parsing: returns false when the whole string (after trimming whitespace) isn't a number. */
 bool tv_parse_float(tv_str s, double *out);     /* JS Number(s)/parseFloat subset: decimal, exponent, Infinity */
 bool tv_parse_int(tv_str s, tv_int radix, tv_int *out);  /* radix 0 = 10 (or 16 with 0x); JS parseInt accepts a numeric prefix */
+double tv_js_number(tv_str s);                  /* Number(s): NaN when it isn't one; "" is 0; 0x/0o/0b */
+double tv_js_parse_float(tv_str s);             /* parseFloat(s): the longest decimal prefix, else NaN */
 
 /* String methods (JavaScript semantics: indexes count UTF-16 code units). Negative indices
  * count from the end, as in JS slice. */

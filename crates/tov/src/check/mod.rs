@@ -345,6 +345,8 @@ pub struct Checker<'a> {
     pub(crate) rewrites: rewrite::Rewrites,
     /// The next expression checked may be absent (see `expr_inner`).
     want_optional: bool,
+    /// Checking a built-in method's arguments: an integer parameter takes a number (truncated).
+    float_args: bool,
 }
 
 /// `threads`: phase-B worker count (default: all cores). Results don't depend on it.
@@ -405,6 +407,7 @@ fn new_checker<'a>(modules: &'a [Module], interner: &'a Interner, sm: &'a Source
         wrap_store: false,
         rewrites: rewrite::Rewrites::default(),
         want_optional: false,
+        float_args: false,
     }
 }
 
@@ -644,6 +647,7 @@ impl<'a> Checker<'a> {
             wrap_store: false,
             rewrites: rewrite::Rewrites::default(),
             want_optional: false,
+            float_args: false,
         }
     }
 
@@ -2023,6 +2027,7 @@ impl<'a> Checker<'a> {
         match (&s, &d) {
             (Ty::Int, Ty::F64 | Ty::F32) if top => return true,
             (Ty::Int | Ty::F64 | Ty::F32 | Ty::I8 | Ty::I16 | Ty::I32 | Ty::U8 | Ty::U16 | Ty::U32, Ty::I8 | Ty::I16 | Ty::I32 | Ty::U8 | Ty::U16 | Ty::U32) if top && self.wrap_store => return true,
+            (Ty::F64 | Ty::F32, Ty::Int) if top && self.float_args => return true,
             (Ty::Int | Ty::I8 | Ty::I16 | Ty::I32 | Ty::U8 | Ty::U16 | Ty::U32 | Ty::U64, Ty::Decimal) if top => return true,
             (Ty::StrLit(_), Ty::Str) => return true,
             (Ty::Undefined, Ty::Void) => return true,

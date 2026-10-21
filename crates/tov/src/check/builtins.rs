@@ -1134,7 +1134,8 @@ impl<'a> Checker<'a> {
                 DECIMAL
             }
             "Number" | "parseFloat" | "parseInt" => {
-                let ret = if name == "parseInt" { INT } else { F64 };
+                // a number, NaN when the text isn't one, as in JavaScript
+                let ret = F64;
                 if args.is_empty() || args.len() > 1 + usize::from(name == "parseInt") {
                     self.report(Diagnostic::new("T0201", span, format!("`{name}` takes 1 argument, found {}", args.len())));
                     self.check_args_loose(args);
@@ -1143,6 +1144,10 @@ impl<'a> Checker<'a> {
                     // `Number(x)` of a bigint or a decimal: the nearest number (never fails)
                     if name == "Number" && (t == BIGINT || t == DECIMAL) {
                         return Some(F64);
+                    }
+                    // (of a number: itself)
+                    if name == "Number" && self.types.is_numeric(t) {
+                        return Some(t);
                     }
                     // `Number(x)` also takes numbers (and `number | string`), as in JavaScript.
                     let number_ok = name == "Number" && self.flat_members(t).iter().all(|&m| self.types.is_string(m) || self.types.is_numeric(m));
@@ -1161,7 +1166,7 @@ impl<'a> Checker<'a> {
                         self.expect_assignable(t, INT, s, None);
                     }
                 }
-                self.types.optional(ret)
+                ret
             }
             // `setTimeout(callback, ms)` / `setInterval(...)`: a timer id for `clearTimeout`.
             "setTimeout" | "setInterval" => {

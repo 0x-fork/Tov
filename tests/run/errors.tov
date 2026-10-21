@@ -19,10 +19,10 @@ function lookup(m: Map<string, int>, k: string): int throws NotFound {
 
 function parsePositive(s: string): int {
   const n = parseInt(s)
-  if (n === undefined || n < 0) {
+  if (isNaN(n) || n < 0) {
     throw new BadInput(`not a positive number: ${s}`)
   }
-  return n
+  return Math.trunc(n)
 }
 
 function sum(m: Map<string, int>, keys: string[]): int {

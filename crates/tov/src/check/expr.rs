@@ -1332,7 +1332,8 @@ impl<'a> Checker<'a> {
 
     fn index_type(&mut self, index: ExprId) {
         let ti = self.expr(index, Some(INT));
-        if ti == ERROR || self.types.is_int(ti) {
+        // (a float index must be a whole number: checked when it's used)
+        if ti == ERROR || self.types.is_int(ti) || self.types.is_float(ti) {
             return;
         }
         let span = self.ast().expr(index).span;
@@ -2382,7 +2383,7 @@ impl<'a> Checker<'a> {
                     let s = self.ast().expr(a.expr).span;
                     let base = self.types.without_undefined(t);
                     match *self.types.get(base) {
-                        _ if self.types.is_int(t) => {}
+                        _ if self.types.is_int(t) || self.types.is_float(t) => {}
                         Ty::Array(e) | Ty::Set(e) if typed.is_some() && self.types.is_numeric(e) => {}
                         Ty::Error => {}
                         _ => {
@@ -2655,8 +2656,11 @@ impl<'a> Checker<'a> {
                     self.set_call_spec_from(obj);
                     let wrap = matches!(*self.types.get(base), Ty::Array(el) if promoted(el) == INT && el != INT) && matches!(mtext.as_str(), "push" | "unshift" | "fill");
                     let saved = std::mem::replace(&mut self.wrap_store, wrap);
+                    // (a built-in's integer parameters take numbers, truncated as JavaScript does)
+                    let saved_f = std::mem::replace(&mut self.float_args, true);
                     let r = self.call_sig(&ms.sig, &desc, type_args, args, exp, span);
                     self.wrap_store = saved;
+                    self.float_args = saved_f;
                     if ms.mutates {
                         let values: Vec<ExprId> = args.iter().map(|a| a.expr).collect();
                         self.note_stored(obj, &values, span.end);
@@ -2939,6 +2943,9 @@ impl<'a> Checker<'a> {
     #[allow(clippy::too_many_arguments)]
     fn call_sig_inner(&mut self, cs: &CallSig, desc: &str, type_args: &[crate::ast::TypeId], args: &[Arg], exp: Option<TyId>, span: Span, sites: &[Vec<super::spec::Site>]) -> TyId {
         let call_expr = self.pending_call.take();
+        // (a built-in's integer parameters take numbers: only the arguments themselves, not
+        // what's checked inside them)
+        let float_ok = std::mem::take(&mut self.float_args);
         let required = cs.params.iter().filter(|p| !p.optional).count();
         let max = if cs.rest.is_some() { usize::MAX } else { cs.params.len() };
         if args.len() < required || args.len() > max {
@@ -3143,7 +3150,12 @@ impl<'a> Checker<'a> {
                 }
                 (false, None) => {}
             }
-            if !self.assignable(t, pty) {
+            // (only parameters that are integers by nature: positions, counts, lengths, digits;
+            // not an element's type, which may be a `number` taken as an `int`)
+            self.float_args = float_ok && matches!(pname.as_str(), "index" | "start" | "end" | "count" | "length" | "digits" | "precision" | "radix" | "from" | "position" | "pos" | "fromIndex" | "deleteCount");
+            let fits = self.assignable(t, pty);
+            self.float_args = false;
+            if !fits {
                 let d = self.flow(Self::arg_sites(sites, i), |c| c.mismatch(t, pty, aspan, Some(format!("argument `{pname}` of `{desc}`"))));
                 self.report(d);
             } else if self.spec.on && t == JS {

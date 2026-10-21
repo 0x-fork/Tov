@@ -2986,7 +2986,8 @@ impl<'c, 'a> Gen<'c, 'a> {
 
     /// Views a value of a declared type as a narrower (flow-narrowed) type.
     pub(crate) fn project(&mut self, v: Val, to: TyId) -> Val {
-        if v.ty == to || to == ERROR {
+        // (narrowed to `never`: code that can't run)
+        if v.ty == to || to == ERROR || to == NEVER {
             return v;
         }
         // A string narrowed to a literal (`if (path === "/")`): the value is known.
@@ -3057,6 +3058,8 @@ impl<'c, 'a> Gen<'c, 'a> {
             (Ty::Int | Ty::I8 | Ty::I16 | Ty::I32 | Ty::U8 | Ty::U16 | Ty::U32 | Ty::U64, Ty::F64) => return Val::plain(format!("((double)({}))", v.code), to),
             (Ty::Int | Ty::I8 | Ty::I16 | Ty::I32 | Ty::U8 | Ty::U16 | Ty::U32 | Ty::U64 | Ty::F64, Ty::F32) => return Val::plain(format!("((float)({}))", v.code), to),
             (Ty::F32, Ty::F64) => return Val::plain(format!("((double)({}))", v.code), to),
+            // (a number passed for a built-in's integer: truncated, NaN is 0)
+            (Ty::F64 | Ty::F32, Ty::Int) => return Val::plain(format!("tv_f64_to_int_js({})", v.code), to),
             // (sized integers compute as `int`; a number stored into a sized element wraps, as a
             // typed array's does in JavaScript)
             (Ty::I8 | Ty::I16 | Ty::I32 | Ty::U8 | Ty::U16 | Ty::U32, Ty::Int) => return Val::plain(format!("((tv_int)({}))", v.code), to),
@@ -3428,7 +3431,23 @@ impl<'c, 'a> Gen<'c, 'a> {
     }
 
     pub(crate) fn int_code(&mut self, v: Val) -> String {
-        if v.ty == INT { v.code } else { format!("((tv_int)({}))", v.code) }
+        if v.ty == INT {
+            v.code
+        } else if self.c.types.is_float(v.ty) {
+            // (JavaScript's ToIntegerOrInfinity: truncated, NaN is 0)
+            format!("tv_f64_to_int_js({})", v.code)
+        } else {
+            format!("((tv_int)({}))", v.code)
+        }
+    }
+
+    /// An index: an integer, or a float that must be a whole number.
+    pub(crate) fn index_code(&mut self, v: Val, span: Span) -> String {
+        if self.c.types.is_float(v.ty) {
+            let loc = self.loc(span);
+            return format!("tv_f64_index({}, {loc})", v.code);
+        }
+        self.int_code(v)
     }
 
     /// A C boolean for a condition (`bool`, or an optional value tested for presence).
@@ -4296,7 +4315,7 @@ impl<'c, 'a> Gen<'c, 'a> {
             }
         };
         let i = self.expr(index);
-        let i = self.int_code(i);
+        let i = self.index_code(i, span);
         let iv = self.fresh("ix");
         self.line(format!("tv_int {iv} = {i};"));
         if let Some(sv) = elem {
@@ -4349,7 +4368,7 @@ impl<'c, 'a> Gen<'c, 'a> {
         };
         let a = self.expr(obj);
         let i = self.expr(index);
-        let i = self.int_code(i);
+        let i = self.index_code(i, span);
         let ect = self.ctype(et);
         if in_bounds {
             // `xs[i]` in `for (let i = 0; i < xs.length; i++)`: always in bounds.

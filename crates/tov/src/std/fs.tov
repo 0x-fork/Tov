@@ -90,7 +90,7 @@ export function statSync(path: string): Stats throws Error {
   const info = __native.statInfo(path)
   try check()
   const p = info.split(";")
-  return new Stats(parseInt(p[0]!) ?? 0, parseFloat(p[1]!) ?? 0, p[2] === "1")
+  return new Stats(Math.trunc(parseInt(p[0]!) || 0), parseFloat(p[1]!) || 0, p[2] === "1")
 }
 
 // fs.accessSync — throws when `path` isn't accessible as `mode` asks.

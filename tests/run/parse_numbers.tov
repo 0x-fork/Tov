@@ -1,0 +1,18 @@
+// parseInt, parseFloat and Number as JavaScript has them, and numbers where integers are wanted.
+function main1() {
+  console.log(parseFloat("12px"), parseInt("12px"), parseFloat(" 3.5 "), Number(" 3.5 "), Number("12px"), parseInt("0x1f"), Number("0b101"), parseFloat("-.5e1"), Number("-Infinity"), parseInt("  -42abc"), Number("\n"), parseFloat(".x"), Number("1_000"))
+}
+function main2() {
+  const nums = "3 x 7 2.5".split(" ").map((w) => parseInt(w))
+  console.log(nums, nums.filter((n) => !isNaN(n)).length, Number("12"), Number(""), parseFloat("1e3"), Number("0x10"))
+  const xs = [10, 20, 30]
+  const i = parseInt("1")
+  console.log(xs[i], xs[Number("2")], "abc".charAt(1.7), "abcdef".slice(1.9, 4.2), "ab".repeat(2.9), new Array(2.0).fill(0).length)
+  let total = 0
+  for (const w of ["1", "2", "three"]) { const n = parseInt(w); if (isNaN(n)) continue; total += n }
+  console.log(total, (3.7).toFixed(1.9))
+}
+function main() {
+  main1()
+  main2()
+}
