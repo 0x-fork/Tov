@@ -2454,7 +2454,10 @@ impl<'a> Checker<'a> {
                 ExprKind::Spread(inner) => self.spread_elem(inner, None),
                 _ => self.expr(x, None),
             };
-            tys.push(self.types.widen(t));
+            // (TypeScript widens a fresh literal, `["a"]` to `string[]`, not a declared union
+            // of them: `[Color.Red, Color.Blue]` is a `Color[]`)
+            let declared = matches!(self.types.get(t), Ty::Union(_)) && matches!(self.ast().expr(x).kind, ExprKind::Ident(_) | ExprKind::Member { .. } | ExprKind::Index { .. } | ExprKind::Call { .. });
+            tys.push(if declared { t } else { self.types.widen(t) });
         }
         let others = (!tys.is_empty()).then(|| self.types.union(&tys));
         for &x in elems {
