@@ -144,6 +144,12 @@ impl<'c, 'a> Gen<'c, 'a> {
                     }
                     return Val { code: res, ty, owned };
                 }
+                // (a union of string literals: a string)
+                if matches!(self.tget(recv), Ty::Union(_)) && self.members(recv).iter().all(|&m| self.c.types.is_string(m)) {
+                    let v = self.expr(*obj);
+                    let v = self.coerce(v, STR);
+                    return self.method_on(Some(v), *obj, STR, &name, args, &params, ty, span);
+                }
                 self.method_on(None, *obj, recv, &name, args, &params, ty, span)
             }
             Callee::ClassMethod { recv, name, sup } => {

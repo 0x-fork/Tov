@@ -293,10 +293,12 @@ fn sig(params: Vec<(FnParam, &str)>, ret: TyId) -> CallSig {
 
 pub(super) fn method(c: &mut Checker, base: TyId, name: &str) -> Option<MethodSig> {
     let members = c.flat_members(base);
-    if members.len() != 1 {
+    // (a union of string literals has string's methods)
+    let all_strings = members.len() > 1 && members.iter().all(|&m| c.types.is_string(m));
+    if members.len() != 1 && !all_strings {
         return None;
     }
-    let ty = members[0];
+    let ty = if all_strings { STR } else { members[0] };
     let mk = |sig: CallSig, mutates: bool| Some(MethodSig { sig, mutates });
     match *c.types.get(ty) {
         Ty::Array(e) => {
