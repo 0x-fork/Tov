@@ -60,8 +60,8 @@ function reassignedBound(): int[] {
   return xs
 }
 
-// A copy of a parameter shares its caller's buffer: it's copied before the first push, and the
-// caller's array keeps its elements.
+// A parameter is the caller's array (shared, as in TypeScript): pushes through a copy of it reach
+// the caller's.
 function grown(xs: int[]): int[] {
   let copy = xs
   for (let i = 0; i < 3; i++) {
@@ -89,7 +89,7 @@ function resetting(): int {
   return xs.length
 }
 
-// A closure copies the array mid-loop: later writes must not reach the copy.
+// A closure keeps the array mid-loop: later writes reach it too (one array, as in TypeScript).
 function snapshots(): string {
   let xs: int[] = [0, 0, 0, 0]
   let saved: int[] = []

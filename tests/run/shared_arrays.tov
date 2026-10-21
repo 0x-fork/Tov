@@ -1,0 +1,53 @@
+// Arrays are shared, as in TypeScript (checked against Node)
+const a = [1, 2]
+const b = a
+b.push(3)
+console.log(a, a === b, [1] === [1])
+const grid = [[1], [2]]
+const row = grid[0]
+row.push(9)
+console.log(grid)
+function add(xs: number[], x: number): void { xs.push(x) }
+const c: number[] = []
+add(c, 5); add(c, 6)
+console.log(c)
+function reset(xs: number[]): void { xs = [0] }
+reset(c)
+console.log(c)
+const m = new Map<string, number[]>()
+m.set("k", [])
+const l = m.get("k")!
+l.push(1)
+console.log(m)
+const copy = [...a]
+copy.push(4)
+console.log(a, copy, a.slice() === a)
+for (const r of grid) r.push(0)
+console.log(grid)
+const s = new Set<number[]>()
+s.add(a); s.add(a); s.add([1, 2, 3])
+console.log(s.size)
+const sharedRows: number[][] = []
+function grow(): void { const xs = sharedRows[0]!; for (let k = 0; k < 1000; k++) xs.push(k) }
+function loops(): void {
+  const xs: number[] = [1, 2, 3]
+  sharedRows.push(xs)
+  let sum = 0
+  for (let i = 0; i < xs.length; i++) {
+    sum += xs[i]!
+    if (i === 1) grow()
+  }
+  console.log(sum, xs.length)
+  const ys: number[] = [0, 0, 0, 0]
+  const alias = ys
+  for (let i = 0; i < 4; i++) {
+    ys[i] = i
+    if (i === 2) for (let k = 0; k < 100; k++) alias.push(k)
+  }
+  console.log(ys.length, ys[3], ys[103])
+  const zs: number[] = []
+  const same = zs
+  for (let i = 0; i < 50; i++) { zs.push(i); same.push(-i) }
+  console.log(zs.length, zs[49], zs[99])
+}
+loops()

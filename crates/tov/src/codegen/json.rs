@@ -246,7 +246,7 @@ impl<'c, 'a> Gen<'c, 'a> {
                 let rel = self.release_code(t, "*out");
                 let rel_e = self.release_code(e, "x");
                 format!(
-                    "    if (!tv_jp_char(p, '[')) return false;\n    tv_arr a = TV_EMPTY_ARR;\n    if (!tv_jp_try_char(p, ']')) {{\n        do {{\n            {ect} x = {ed};\n            if (!{pe}(p, &x)) {{ {rel_e}; tv_arr_release(a, {d}); return false; }}\n            TVG_PUSH({ect}, &a, {d}, x);\n        }} while (tv_jp_try_char(p, ','));\n        if (!tv_jp_char(p, ']')) {{ tv_arr_release(a, {d}); return false; }}\n    }}\n    {rel};\n    *out = a;\n    return true;\n"
+                    "    if (!tv_jp_char(p, '[')) return false;\n    tv_arr a = tv_arr_fresh();\n    if (!tv_jp_try_char(p, ']')) {{\n        do {{\n            {ect} x = {ed};\n            if (!{pe}(p, &x)) {{ {rel_e}; tv_arr_release(a, {d}); return false; }}\n            TVG_PUSH({ect}, &a, {d}, x);\n        }} while (tv_jp_try_char(p, ','));\n        if (!tv_jp_char(p, ']')) {{ tv_arr_release(a, {d}); return false; }}\n    }}\n    {rel};\n    *out = a;\n    return true;\n"
                 )
             }
             Ty::Map(k, v) => {

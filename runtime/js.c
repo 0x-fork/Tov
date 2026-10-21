@@ -1477,7 +1477,7 @@ bool tv_js_as_u8s(JSValueRef v, tv_arr *out) {
     uint8_t *p;
     size_t len;
     if (!tv_js_bytes_view(v, &p, &len)) return false;
-    tv_arr a = TV_EMPTY_ARR;
+    tv_arr a = tv_arr_fresh();
     if (len) {
         memcpy(tv_arr_reserve_tail(&a, &tv_type_u8, (tv_int)len), p, len);
         a.p->len = (tv_int)len;

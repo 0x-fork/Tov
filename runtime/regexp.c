@@ -181,7 +181,7 @@ tv_arr tv_native_reExec(tv_int h, tv_str s, tv_int from) {
         type = (r->flags & (LRE_FLAG_UNICODE | LRE_FLAG_UNICODE_SETS)) ? 2 : 1;
         shift = 1;
     }
-    tv_arr out = TV_EMPTY_ARR;
+    tv_arr out = tv_arr_fresh();
     if (from >= 0 && from <= n) {
         int ret = lre_exec(cap, r->bc, buf, (int)from, (int)n, type, NULL);
         if (ret == LRE_RET_MEMORY_ERROR) tv_trap("out of memory in a regular expression", NULL);
@@ -199,7 +199,7 @@ tv_arr tv_native_reExec(tv_int h, tv_str s, tv_int from) {
 /* Each group's name ("" for the whole match and unnamed groups). */
 tv_arr tv_native_reNames(tv_int h) {
     tv_re *r = &tv_res[h];
-    tv_arr out = TV_EMPTY_ARR;
+    tv_arr out = tv_arr_fresh();
     const char *names = (r->flags & LRE_FLAG_NAMED_GROUPS) || lre_get_flags(r->bc) & LRE_FLAG_NAMED_GROUPS ? lre_get_groupnames(r->bc) : NULL;
     for (int i = 0; i < r->ncap; i++) {
         tv_str name = TV_EMPTY_STR;

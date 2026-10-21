@@ -1179,6 +1179,53 @@ impl<'a> Checker<'a> {
         })
     }
 
+    /// The storage at path `e` (`xs`, `p.items`, `ps[0].x`'s object) is in an array, or is one:
+    /// an object every reference shares, as in JavaScript.
+    pub(super) fn inside_shared(&mut self, e: ExprId) -> bool {
+        let mut cur = e;
+        loop {
+            if let Some(t) = self.path_ty(cur)
+                && self.flat_members(t).iter().any(|&m| matches!(self.types.get(m), Ty::Array(_)))
+            {
+                return true;
+            }
+            match self.ast().expr(cur).kind {
+                ExprKind::Paren(x) | ExprKind::NonNull(x) | ExprKind::Member { obj: x, .. } | ExprKind::Index { obj: x, .. } => cur = x,
+                _ => return false,
+            }
+        }
+    }
+
+    /// The type of a path (`x`, `this.a.b`, `xs[i]`), worked out from its root's.
+    fn path_ty(&mut self, e: ExprId) -> Option<TyId> {
+        match self.ast().expr(e).kind {
+            ExprKind::Paren(x) | ExprKind::NonNull(x) => self.path_ty(x).map(|t| self.types.without_nullish(t)),
+            ExprKind::Ident(s) => match self.lookup(s) {
+                Some((_, t)) => Some(t),
+                None => match self.scopes[self.cur as usize].values.get(&s).map(|d| d.0) {
+                    Some(Decl::Const(m, i)) => Some(self.const_type(m, i)),
+                    _ => None,
+                },
+            },
+            ExprKind::This => self.lookup(super::THIS_SYM).map(|(_, t)| t),
+            ExprKind::Member { obj, name, .. } => {
+                let t = self.path_ty(obj)?;
+                let t = self.types.without_nullish(t);
+                self.field_of(t, name)
+            }
+            ExprKind::Index { obj, .. } => {
+                let t = self.path_ty(obj)?;
+                let t = self.types.without_nullish(t);
+                match *self.types.get(t) {
+                    Ty::Array(el) => Some(el),
+                    Ty::Map(_, v) => Some(v),
+                    _ => None,
+                }
+            }
+            _ => None,
+        }
+    }
+
     /// Reports an error if the value rooted at `e` can't be modified in place.
     pub(super) fn check_mutable_root(&mut self, e: ExprId, span: Span) -> Option<LocalId> {
         self.check_mutable_root_ext(e, span, false)
@@ -1186,6 +1233,10 @@ impl<'a> Checker<'a> {
 
     /// `allow_temp`: mutating a temporary (`xs.slice().sort()`) is fine for method calls.
     pub(super) fn check_mutable_root_ext(&mut self, e: ExprId, span: Span, allow_temp: bool) -> Option<LocalId> {
+        // (inside an array: shared, as in JavaScript, so changing it changes no variable)
+        if self.inside_shared(e) {
+            return None;
+        }
         match self.root_of(e) {
             Root::Temp if allow_temp => None,
             Root::Heap => None,
@@ -1375,9 +1426,9 @@ impl<'a> Checker<'a> {
                     return Some(Place { ty: v, local: None, root: None, sites: Vec::new(), global: None, int_field: None });
                 }
                 let ft = self.member_of(t, *name, *name_span, span, *obj)?;
-                let root = self.check_mutable_root(*obj, span)?;
+                let root = self.check_mutable_root(*obj, span);
                 let sites = self.member_sites_of(t, *name);
-                Some(Place { ty: ft, local: None, root: Some(root), sites, global: None, int_field: None })
+                Some(Place { ty: ft, local: None, root, sites, global: None, int_field: None })
             }
             ExprKind::Index { obj, index, optional } => {
                 if *optional {
@@ -1396,9 +1447,9 @@ impl<'a> Checker<'a> {
                         let it = self.expr(*index, Some(k));
                         let s = self.ast().expr(*index).span;
                         self.expect_assignable(it, k, s, Some("the key".into()));
-                        let root = self.check_mutable_root(*obj, span)?;
+                        let root = self.check_mutable_root(*obj, span);
                         let sites = self.sources(self.ast().expr(*obj).span);
-                        return Some(Place { ty: v, local: None, root: Some(root), sites, global: None, int_field: None });
+                        return Some(Place { ty: v, local: None, root, sites, global: None, int_field: None });
                     }
                     _ => {
                         let msg = format!("can't index into `{}`", self.show(t));
@@ -1406,9 +1457,9 @@ impl<'a> Checker<'a> {
                         return None;
                     }
                 };
-                let root = self.check_mutable_root(*obj, span)?;
+                let root = self.check_mutable_root(*obj, span);
                 let sites = self.sources(self.ast().expr(*obj).span);
-                Some(Place { ty: elem, local: None, root: Some(root), sites, global: None, int_field: None })
+                Some(Place { ty: elem, local: None, root, sites, global: None, int_field: None })
             }
             _ => {
                 self.expr(e, None);

@@ -2477,8 +2477,10 @@ impl<'a> Checker<'a> {
     }
 
     /// Would TypeScript share this value between two variables (objects, arrays, maps, sets)?
+    /// A copy of a value of `ty` would be shared in TypeScript but is its own in Tov: records
+    /// (arrays are shared in Tov too).
     fn shared_in_ts(&mut self, ty: TyId) -> bool {
-        self.flat_members(ty).iter().any(|&m| matches!(self.types.get(m), Ty::Array(_) | Ty::Map(..) | Ty::Set(_) | Ty::Record(_) | Ty::Interface(..)))
+        self.flat_members(ty).iter().any(|&m| matches!(self.types.get(m), Ty::Map(..) | Ty::Set(_) | Ty::Record(_) | Ty::Interface(..)))
     }
 
     /// V0120: `const b = a; b.push(x); use(a)` — TypeScript shares `a` and `b`, Tov copies.

@@ -585,7 +585,7 @@ static obj oat(tv_arr a, tv_int i) { return *(obj *)tv_arr_at(a, sizeof(obj), i,
 
 static void test_array_ownership(void) {
     tv_arr a = TV_EMPTY_ARR;
-    CHECK(tv_arr_len(a) == 0 && tv_arr_data(a) == NULL);
+    CHECK(tv_arr_len(a) == 0 && a.p == &tv_empty_arrbuf);
     obj first = 0;
     for (int i = 0; i < 10; i++) {
         obj o = obj_new();
@@ -596,32 +596,28 @@ static void test_array_ownership(void) {
     }
     CHECK(tv_arr_len(a) == 10 && a.p->cap == 16 && n_retain == 0);
 
-    /* copy-on-write: b shares a's buffer until b is mutated */
+    /* sharing (as JavaScript's arrays): b is a, and a push through b reaches a */
     tv_arr b = a;
     tv_arr_retain(b);
     CHECK(a.p->rc == 2);
     obj extra = obj_new();
     tv_arr_push(&b, &obj_type, &extra);
-    CHECK(a.p != b.p && a.p->rc == 1 && b.p->rc == 1);
-    CHECK(tv_arr_len(a) == 10 && tv_arr_len(b) == 11);
-    CHECK(n_retain == 10 && count_of(first) == 2 && count_of(extra) == 1);
+    CHECK(a.p == b.p && a.p->rc == 2 && tv_arr_len(a) == 11);
+    CHECK(n_retain == 0 && count_of(first) == 1 && count_of(extra) == 1);
     tv_arr_release(b, &obj_type);
-    CHECK(count_of(first) == 1 && count_of(extra) == 0);
+    CHECK(a.p->rc == 1 && tv_arr_pop(&a, &obj_type, NULL) && tv_arr_len(a) == 10 && count_of(extra) == 0);
 
-    /* mutable access on a shared array clones first */
+    /* mutable access through one reference is to the elements every reference sees */
     b = a;
     tv_arr_retain(b);
     obj *slot = (obj *)tv_arr_at_mut(&b, &obj_type, 0, "t");
-    CHECK(b.p != a.p && count_of(first) == 2);
-    obj_drop(*slot);
-    *slot = obj_new();
-    CHECK(oat(a, 0) == first && oat(b, 0) != first && count_of(first) == 1);
+    CHECK(b.p == a.p && slot == (obj *)tv_arr_data(a) && count_of(first) == 1);
     tv_arr_release(b, &obj_type);
 
-    /* pop / shift / unshift, incl. on shared buffers */
+    /* pop / shift / unshift, on a copy (its own array, sharing elements) */
     obj out = 0;
-    b = a;
-    tv_arr_retain(b);
+    b = tv_arr_slice(a, &obj_type, 0, 0, false, false);
+    CHECK(b.p != a.p && b.p->rc == 1);
     CHECK(tv_arr_pop(&b, &obj_type, &out) && out == oat(a, 9) && tv_arr_len(b) == 9 && count_of(out) == 2);
     obj_drop(out);
     CHECK(tv_arr_shift(&b, &obj_type, &out) && out == first && oat(b, 0) == oat(a, 1));
@@ -652,7 +648,7 @@ static void test_array_ownership(void) {
     tv_arr s4 = tv_arr_slice(a, &obj_type, 3, 1, true, true);
     CHECK(tv_arr_len(s4) == 0);
     tv_arr s5 = tv_arr_slice(a, &obj_type, 0, 0, false, false);
-    CHECK(s5.p == a.p && a.p->rc == 2); /* full slice shares the buffer */
+    CHECK(s5.p != a.p && a.p->rc == 1 && tv_arr_len(s5) == 10 && oat(s5, 0) == first); /* a new array */
     tv_arr s6 = tv_arr_slice(a, &obj_type, 2, -7, true, true);
     CHECK(tv_arr_len(s6) == 1 && oat(s6, 0) == oat(a, 2));
     tv_arr s7 = tv_arr_slice(a, &obj_type, 10, 20, true, true);
@@ -667,16 +663,15 @@ static void test_array_ownership(void) {
     tv_arr c = tv_arr_concat(a, a, &obj_type);
     CHECK(tv_arr_len(c) == 20 && count_of(first) == 3 && oat(c, 10) == first);
     tv_arr c2 = tv_arr_concat(a, TV_EMPTY_ARR, &obj_type);
-    CHECK(c2.p == a.p);
+    CHECK(c2.p != a.p && tv_arr_len(c2) == 10);
     tv_arr c3 = tv_arr_concat(TV_EMPTY_ARR, a, &obj_type);
-    CHECK(c3.p == a.p && a.p->rc == 3);
+    CHECK(c3.p != a.p && c3.p != c2.p && a.p->rc == 1 && tv_arr_len(c3) == 10); /* new arrays */
     tv_arr_release(c, &obj_type);
     tv_arr_release(c2, &obj_type);
     tv_arr_release(c3, &obj_type);
 
-    /* reverse (shared → clone) */
-    b = a;
-    tv_arr_retain(b);
+    /* reverse a copy */
+    b = tv_arr_slice(a, &obj_type, 0, 0, false, false);
     tv_arr_reverse(&b, &obj_type);
     CHECK(oat(b, 0) == oat(a, 9) && oat(b, 9) == first && oat(a, 0) == first);
     tv_arr_release(b, &obj_type);
@@ -695,9 +690,8 @@ static void test_array_ownership(void) {
     CHECK_CSTR(j, want);
     tv_arr_release(two, &obj_type);
 
-    /* sort with a shared buffer: the other owner keeps its order */
-    b = a;
-    tv_arr_retain(b);
+    /* sort a copy: the original keeps its order */
+    b = tv_arr_slice(a, &obj_type, 0, 0, false, false);
     int calls = 0;
     tv_arr_sort(&b, &obj_type, int_desc, &calls); /* obj is an int64 */
     CHECK(calls > 0 && oat(b, 0) == oat(a, 9) && oat(a, 0) == first);
@@ -742,8 +736,7 @@ static void test_array_misc(void) {
         tv_arr_push_fast(&r, &rec_type, &e);
     }
     CHECK(r.p->cap == 1000);
-    tv_arr rs = r;
-    tv_arr_retain(rs);
+    tv_arr rs = tv_arr_slice(r, &rec_type, 0, 0, false, false);
     tv_arr_sort(&rs, &rec_type, rec_by_key, NULL);
     bool stable = true;
     for (int i = 1; i < 1000; i++) {
@@ -826,15 +819,15 @@ static void test_array_misc(void) {
     CHECK(e.p && e.p->cap == 4 && e.p->len == 0 && e.p->rc == 1);
     tv_arr e2 = e;
     tv_arr_retain(e2);
-    tv_arr_make_unique(&e2, &tv_type_int, 0); /* shared empty header → a unique empty one */
-    CHECK(e2.p != e.p && e2.p->rc == 1 && e2.p->len == 0 && e.p->rc == 1);
+    tv_arr_make_unique(&e2, &tv_type_int, 0); /* shared: stays the one array */
+    CHECK(e2.p == e.p && e.p->rc == 2 && e.p->len == 0);
     int64_t v = 0;
     CHECK(!tv_arr_pop(&e2, &tv_type_int, &v) && !tv_arr_shift(&e2, &tv_type_int, &v));
     tv_arr_release(e, &tv_type_int);
     tv_arr_release(e2, &tv_type_int);
     tv_arr_release(TV_EMPTY_ARR, &tv_type_int);
 
-    /* arrays of strings share element strings with a clone */
+    /* an array of strings, shared: a push through one reference is seen through the other */
     tv_arr sa = TV_EMPTY_ARR;
     tv_str w = tv_str_from("shared-string", 13);
     tv_arr_push(&sa, &tv_type_str, &w);
@@ -842,9 +835,9 @@ static void test_array_misc(void) {
     tv_arr_retain(sb2);
     tv_str w2 = tv_str_from("second-string", 13);
     tv_arr_push(&sb2, &tv_type_str, &w2);
-    CHECK(w.p->rc == 2);
+    CHECK(w.p->rc == 1 && sa.p == sb2.p && tv_arr_len(sa) == 2);
     tv_arr_release(sa, &tv_type_str);
-    CHECK(w.p->rc == 1);
+    CHECK(w.p->rc == 1 && tv_arr_len(sb2) == 2);
     tv_arr_release(sb2, &tv_type_str);
     drain();
     CHECK(all_dead());
@@ -1177,7 +1170,7 @@ _Static_assert(sizeof(tv_arr) == sizeof(void *), "tv_arr is a pointer to its hea
 
 static void trap_reserve_neg(void) { (void)tv_arr_reserve_tail(&g_arr, &tv_type_int, -1); }
 
-static void test_array_len_in_value(void) {
+static void test_array_header(void) {
     int64_t r0 = n_retain, x0 = n_release;
     tv_arr a = TV_EMPTY_ARR;
     CHECK(a.p == &tv_empty_arrbuf && a.p->len == 0);
@@ -1188,21 +1181,18 @@ static void test_array_len_in_value(void) {
     }
     CHECK(a.p->len == 3 && a.p->cap == 4 && a.p->rc == 1);
 
-    /* sharers of one buffer are exact copies (same len) */
+    /* references to one array share its header: a push through one is seen through every one */
     tv_arr b = a;
     tv_arr_retain(b);
-    CHECK(b.p == a.p && b.p->len == a.p->len && a.p->rc == 2);
-    CHECK(oat(b, 2) == o[2] && n_retain == r0); /* sharing retains the buffer, not the elements */
-
-    /* push on a shared value clones exactly len elements; the other value is unchanged */
+    CHECK(b.p == a.p && a.p->rc == 2 && oat(b, 2) == o[2] && n_retain == r0); /* retains the header, not the elements */
     obj extra = obj_new();
     tv_arr_push(&b, &obj_type, &extra);
-    CHECK(b.p != a.p && a.p->rc == 1 && b.p->rc == 1 && a.p->len == 3 && b.p->len == 4);
-    CHECK(n_retain - r0 == 3 && count_of(o[0]) == 2 && count_of(extra) == 1);
+    CHECK(b.p == a.p && a.p->len == 4 && oat(a, 3) == extra && n_retain == r0);
     tv_arr_release(b, &obj_type);
-    CHECK(count_of(o[0]) == 1 && count_of(extra) == 0 && n_release - x0 == 4);
+    CHECK(a.p->rc == 1 && count_of(extra) == 1 && n_release == x0);
+    CHECK(tv_arr_pop(&a, &obj_type, NULL) && count_of(extra) == 0 && a.p->len == 3);
 
-    /* pop then push on a unique buffer: same buffer, the popped element is no longer owned */
+    /* pop then push: same header, the popped element is no longer owned */
     tv_arrbuf *buf = a.p;
     obj out = 0;
     CHECK(tv_arr_pop(&a, &obj_type, &out) && out == o[2] && a.p->len == 2 && a.p == buf && a.p->cap == 4);
@@ -1212,39 +1202,29 @@ static void test_array_len_in_value(void) {
     tv_arr_push(&a, &obj_type, &o3);
     CHECK(a.p == buf && a.p->len == 3 && oat(a, 2) == o3);
 
-    /* pop on a shared value clones; the original keeps its elements */
-    b = a;
-    tv_arr_retain(b);
-    CHECK(tv_arr_pop(&b, &obj_type, NULL) && b.p->len == 2 && a.p->len == 3 && b.p != a.p);
-    CHECK(count_of(o3) == 1 && count_of(o[0]) == 2);
-    tv_arr_release(b, &obj_type);
-
-    /* a unique buffer with spare capacity after pops: a clone copies only len elements */
-    CHECK(tv_arr_pop(&a, &obj_type, NULL) && tv_arr_pop(&a, &obj_type, NULL) && a.p->len == 1 && a.p->cap == 4);
-    CHECK(count_of(o3) == 0 && count_of(o[1]) == 0 && count_of(o[0]) == 1);
-    b = a;
-    tv_arr_retain(b);
-    int64_t r1 = n_retain;
-    obj o4 = obj_new();
-    tv_arr_push(&b, &obj_type, &o4);
-    CHECK(n_retain - r1 == 1 && b.p->len == 2 && a.p->len == 1 && oat(b, 0) == o[0] && oat(b, 1) == o4);
-    tv_arr_release(b, &obj_type);
-    CHECK(count_of(o4) == 0 && count_of(o[0]) == 1);
+    /* growing past the header's room moves the elements to a block of their own; the header,
+     * and so every reference, stays */
+    tv_arr c = a;
+    tv_arr_retain(c);
+    CHECK(buf->ext == NULL);
+    obj o4 = obj_new(), o5 = obj_new();
+    tv_arr_push(&c, &obj_type, &o4);
+    tv_arr_push(&c, &obj_type, &o5);
+    CHECK(c.p == buf && a.p == buf && buf->ext != NULL && buf->cap >= 5 && a.p->len == 5 && oat(a, 4) == o5);
+    tv_arr_release(c, &obj_type);
 
     /* shift: remaining elements move down; the shifted one moves out */
-    obj o5 = obj_new();
-    tv_arr_push(&a, &obj_type, &o5);
-    CHECK(tv_arr_shift(&a, &obj_type, &out) && out == o[0] && a.p->len == 1 && oat(a, 0) == o5);
+    CHECK(tv_arr_shift(&a, &obj_type, &out) && out == o[0] && a.p->len == 4 && oat(a, 0) == o[1]);
     obj_drop(out);
 
-    /* popping to empty keeps the buffer; releasing it releases nothing more */
-    CHECK(tv_arr_pop(&a, &obj_type, NULL) && a.p->len == 0 && a.p == buf);
-    CHECK(!tv_arr_pop(&a, &obj_type, NULL) && !tv_arr_shift(&a, &obj_type, NULL));
+    /* popping to empty keeps the header; releasing it releases nothing more */
+    while (tv_arr_pop(&a, &obj_type, NULL)) {}
+    CHECK(a.p->len == 0 && a.p == buf);
     int64_t x1 = n_release;
     tv_arr_release(a, &obj_type);
     CHECK(n_release == x1 && all_dead());
 
-    /* slice / concat return fresh buffers sized to their len, or a copy of the same value */
+    /* slice / concat return new arrays sized to their len */
     a = TV_EMPTY_ARR;
     for (int i = 0; i < 5; i++) {
         obj x = obj_new();
@@ -1253,26 +1233,26 @@ static void test_array_len_in_value(void) {
     tv_arr s = tv_arr_slice(a, &obj_type, 1, -1, true, true);
     CHECK(s.p->len == 3 && s.p != a.p && s.p->cap == 3 && s.p->rc == 1 && oat(s, 0) == oat(a, 1));
     tv_arr whole = tv_arr_slice(a, &obj_type, 0, 0, true, false);
-    CHECK(whole.p == a.p && whole.p->len == a.p->len && a.p->rc == 2);
-    tv_arr c = tv_arr_concat(s, a, &obj_type);
-    CHECK(c.p->len == 8 && c.p->cap == 8 && oat(c, 3) == oat(a, 0) && count_of(oat(a, 1)) == 4);
+    CHECK(whole.p != a.p && whole.p->len == 5 && a.p->rc == 1);
+    c = tv_arr_concat(s, a, &obj_type);
+    CHECK(c.p->len == 8 && c.p->cap == 8 && oat(c, 3) == oat(a, 0) && count_of(oat(a, 1)) == 5); /* a, s, whole, and twice in c */
     tv_arr c2 = tv_arr_concat(TV_EMPTY_ARR, s, &obj_type);
-    CHECK(c2.p == s.p && c2.p->len == s.p->len && s.p->rc == 2);
+    CHECK(c2.p != s.p && c2.p->len == 3 && s.p->rc == 1);
     tv_arr_release(c2, &obj_type);
     tv_arr_release(c, &obj_type);
     tv_arr_release(whole, &obj_type);
     tv_arr_release(s, &obj_type);
     CHECK(count_of(oat(a, 1)) == 1);
 
-    /* reserve_tail: capacity for exactly n more, pointer at element len */
-    tv_arr_retain(a); /* shared → reserve_tail clones first */
+    /* reserve_tail: capacity for exactly n more, pointer at element len, in the array itself */
     b = a;
+    tv_arr_retain(b);
     obj *tail = (obj *)tv_arr_reserve_tail(&b, &obj_type, 2);
-    CHECK(b.p != a.p && b.p->rc == 1 && b.p->cap >= 7 && tail == (obj *)(void *)b.p->data + 5);
+    CHECK(b.p == a.p && b.p->cap >= 7 && tail == (obj *)(void *)tv_arrbuf_data(b.p) + 5);
     tail[0] = obj_new();
     tail[1] = obj_new();
     b.p->len += 2;
-    CHECK(a.p->len == 5 && b.p->len == 7 && count_of(oat(a, 0)) == 2 && count_of(tail[1]) == 1);
+    CHECK(a.p->len == 7 && count_of(oat(a, 0)) == 1 && count_of(tail[1]) == 1);
     tv_arr_release(b, &obj_type);
     tv_arr_release(a, &obj_type);
     CHECK(all_dead());
@@ -1287,7 +1267,7 @@ static void test_array_len_in_value(void) {
     *w = 99;
     r.p->len++;
     CHECK_STR(tv_arr_join(r, &tv_type_int, S(",")), "0,1,4,9,16,99");
-    CHECK(tv_arr_reserve_tail(&r, &tv_type_int, 0) == r.p->data + 6 * sizeof(int64_t));
+    CHECK(tv_arr_reserve_tail(&r, &tv_type_int, 0) == tv_arrbuf_data(r.p) + 6 * sizeof(int64_t));
     g_arr = r;
     CHECK_TRAPS(trap_reserve_neg, "trap: invalid array reserve count");
     tv_arr_release(r, &tv_type_int);
@@ -1302,8 +1282,8 @@ static void test_array_len_in_value(void) {
     CHECK(f.p->len == 4 && f.p->cap == 6);
     tv_arr g = f;
     tv_arr_retain(g);
-    tv_arr_push_fast(&g, &tv_type_int, &three); /* shared: clones */
-    CHECK(g.p != f.p && g.p->len == 5 && f.p->len == 4 && f.p->rc == 1);
+    tv_arr_push_fast(&g, &tv_type_int, &three); /* shared: one array */
+    CHECK(g.p == f.p && f.p->len == 5 && f.p->rc == 2);
     tv_arr_release(g, &tv_type_int);
     tv_arr_release(f, &tv_type_int);
 
@@ -2626,7 +2606,7 @@ int main(int argc, char **argv) {
     test_string_methods();
     test_array_ownership();
     test_array_misc();
-    test_array_len_in_value();
+    test_array_header();
     test_map_basics();
     test_map_growth();
     test_map_ownership();

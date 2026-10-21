@@ -264,7 +264,7 @@ impl<'c, 'a> Gen<'c, 'a> {
     fn pack_rest(&mut self, args: &[Arg], elem: TyId) -> String {
         let arr_ty = self.c.types.array(elem);
         if args.is_empty() {
-            return "TV_EMPTY_ARR".into();
+            return self.tmp(arr_ty, "tv_arr_fresh()", true).code;
         }
         let elems: Vec<ExprId> = args.iter().map(|a| a.expr).collect();
         if elems.iter().any(|&x| matches!(self.ast(self.cur_m()).expr(x).kind, ExprKind::Spread(_))) {
@@ -281,7 +281,7 @@ impl<'c, 'a> Gen<'c, 'a> {
             self.line(format!("{ect} {n} = {code};"));
             codes.push(n);
         }
-        let arr = self.tmp(arr_ty, "TV_EMPTY_ARR", true);
+        let arr = self.tmp(arr_ty, "tv_arr_fresh()", true);
         let w = self.fresh("w");
         self.line(format!("{ect} *{w} = ({ect} *)tv_arr_reserve_tail(&{}, {d}, {});", arr.code, codes.len()));
         for (i, c) in codes.iter().enumerate() {
@@ -1169,7 +1169,7 @@ impl<'c, 'a> Gen<'c, 'a> {
                 // one level: each nested array's elements, in order
                 let Ty::Array(rt) = self.tget(ty) else { return Val::plain("TV_EMPTY_ARR", ty) };
                 let rd = self.desc(rt);
-                let out = self.tmp(ty, "TV_EMPTY_ARR", true);
+                let out = self.tmp(ty, "tv_arr_fresh()", true);
                 let i = self.fresh("i");
                 self.open(&format!("for (tv_int {i} = 0; {i} < tv_arr_len({}); {i}++) {{", arr.code));
                 if matches!(self.tget(et), Ty::Array(_)) {
@@ -2174,7 +2174,7 @@ impl<'c, 'a> Gen<'c, 'a> {
         let Ty::Array(et) = self.tget(ty) else { return Val::plain("TV_EMPTY_ARR", ty) };
         let d = self.desc(et);
         let ect = self.ctype(et);
-        let arr = self.tmp(ty, "TV_EMPTY_ARR", true);
+        let arr = self.tmp(ty, "tv_arr_fresh()", true);
         for &x in elems {
             match self.ast(self.cur_m()).expr(x).kind {
                 ExprKind::Spread(inner) => {
@@ -2221,7 +2221,7 @@ impl<'c, 'a> Gen<'c, 'a> {
             let elems: Vec<ExprId> = args.iter().map(|a| a.expr).collect();
             return self.build_spread(&elems, ty);
         }
-        let Some(a) = args.first() else { return Val::plain("TV_EMPTY_ARR", ty) };
+        let Some(a) = args.first() else { return self.tmp(ty, "tv_arr_fresh()", true) };
         let at = self.ty(a.expr);
         if self.c.types.is_int(at) || self.c.types.is_float(at) {
             let n = self.expr(a.expr);
@@ -2242,8 +2242,15 @@ impl<'c, 'a> Gen<'c, 'a> {
     /// number stored into a sized integer wraps).
     fn convert_array(&mut self, src: Val, ty: TyId) -> Val {
         if src.ty == ty {
-            let v = self.own(src);
-            return self.coerce(v, ty);
+            // (a new array: `Array.from(xs)` isn't `xs`)
+            if src.owned {
+                return src;
+            }
+            let d = match self.tget(ty) {
+                Ty::Array(et) => self.desc(et),
+                _ => return src,
+            };
+            return self.tmp(ty, &format!("tv_arr_slice({}, {d}, 0, 0, false, false)", src.code), true);
         }
         let (Ty::Array(et), Ty::Array(se)) = (self.tget(ty), self.tget(src.ty)) else { return Val::plain("TV_EMPTY_ARR", ty) };
         let (d, ect, sct) = (self.desc(et), self.ctype(et), self.ctype(se));
@@ -2348,9 +2355,27 @@ impl<'c, 'a> Gen<'c, 'a> {
 
     // ------------------------------------------------------------ test matchers
 
+    /// `t` holds arrays, records or maps (compared by identity).
+    fn has_objects(&mut self, t: TyId) -> bool {
+        self.members(t).iter().any(|&m| matches!(self.tget(m), Ty::Array(_) | Ty::Map(..) | Ty::Set(_) | Ty::Record(_) | Ty::Rec(..)))
+    }
+
     fn matcher(&mut self, s: Val, name: &str, args: &[Arg], span: Span) {
         let loc = self.loc(span);
         let (cond, expected) = match name {
+            // (deep: arrays, records, maps alike when they print alike, as Jest compares them)
+            "toEqual" if self.has_objects(s.ty) => {
+                let x = self.expr(args[0].expr);
+                let x = self.coerce(x, s.ty);
+                let (a, b) = (self.fresh("sa"), self.fresh("sb"));
+                let ia = self.inspect_code(s.ty, &s.code, "0");
+                let ib = self.inspect_code(s.ty, &x.code, "0");
+                self.line(format!("tv_sb {a} = {{0}}, {b} = {{0}};"));
+                self.line(format!("{{ tv_sb *sb = &{a}; {ia}; }} {{ tv_sb *sb = &{b}; {ib}; }}"));
+                let r = self.fresh("eq");
+                self.line(format!("bool {r} = {a}.len == {b}.len && memcmp({a}.data, {b}.data, {a}.len) == 0; tv_sb_free(&{a}); tv_sb_free(&{b});"));
+                (r, Some(x))
+            }
             "toBe" | "toEqual" => {
                 let x = self.expr(args[0].expr);
                 let x = self.coerce(x, s.ty);

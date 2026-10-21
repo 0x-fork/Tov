@@ -242,7 +242,7 @@ static void tv_ws_unsub(tv_ns *s, tv_topic *t) {
 
 static void tv_ws_emit(tv_ns *s, int kind, const uint8_t *p, size_t n, bool text, int code) {
     if (!s->bound) return;
-    tv_arr bytes = TV_EMPTY_ARR;
+    tv_arr bytes = tv_arr_fresh();
     tv_str t = TV_EMPTY_STR;
     if (text) {
         t = tv_str_from((const char *)p, n);
@@ -702,7 +702,7 @@ bool tv_native_wsSubscribed(tv_int id, tv_str topic) {
 
 tv_arr tv_native_wsTopics(tv_int id) {
     tv_ns *s = tv_ws_get(id);
-    tv_arr out = TV_EMPTY_ARR;
+    tv_arr out = tv_arr_fresh();
     if (!s) return out;
     for (int i = 0; i < s->ws->nsubs; i++) {
         tv_str name = tv_str_from(s->ws->subs[i]->name, s->ws->subs[i]->len);

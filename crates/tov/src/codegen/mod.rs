@@ -21,6 +21,7 @@ mod iface;
 mod js;
 mod json;
 mod range;
+mod resize;
 
 use crate::ast::{self, ExprId, ExprKind, ItemKind, StmtKind};
 use crate::check::{Callee, Checker, IdentFact, ModuleFacts};
@@ -262,6 +263,10 @@ pub(crate) struct Gen<'c, 'a> {
     pub(crate) ranges: Option<range::Ranges>,
     /// Per module: the locals grown with `push` somewhere (see `grown_by_push`).
     pub(crate) pushed: FxMap<u32, FxSet<u32>>,
+    /// Module functions that may resize an array they didn't make (see `resize`).
+    pub(crate) resizers: FxMap<(u32, u32), bool>,
+    /// Per module: `const` locals holding new arrays (see `resize`).
+    pub(crate) fresh_arrays: FxMap<u32, FxSet<u32>>,
     /// The awaited calls embedded in the async body just emitted: (union member, frame type).
     pub(crate) last_children: Vec<(String, String)>,
     /// Frame structs of async functions.
@@ -345,6 +350,8 @@ impl<'c, 'a> Gen<'c, 'a> {
             self_closure: None,
             ranges: None,
             pushed: FxMap::default(),
+            resizers: FxMap::default(),
+            fresh_arrays: FxMap::default(),
             last_children: Vec::new(),
             pending_tre: None,
             uses_tls: false,
@@ -1252,7 +1259,8 @@ impl<'c, 'a> Gen<'c, 'a> {
             Ty::BigInt => format!("tv_big_eq({a}, {b})"),
             Ty::Decimal => format!("tv_dec_eq({a}, {b})"),
             Ty::StrLit(_) | Ty::Undefined | Ty::Null | Ty::Void | Ty::Never => "true".into(),
-            Ty::Array(_) | Ty::Map(..) | Ty::Set(_) => {
+            Ty::Array(_) => format!("(({a}).p == ({b}).p)"),
+            Ty::Map(..) | Ty::Set(_) => {
                 let d = self.desc(t);
                 format!("({d})->eq(&({a}), &({b}))")
             }
@@ -1435,10 +1443,8 @@ impl<'c, 'a> Gen<'c, 'a> {
             let ts = self.string_code(t, &format!("*(const {ct} *)p"));
             let ins = self.inspect_code(t, &format!("*(const {ct} *)p"), "depth");
             let extra = match self.tget(t) {
-                Ty::Array(e) => {
-                    let d = self.desc(e);
-                    format!("static uint64_t {key}_hs2(const void *p) {{ const tv_arr *a = p; uint64_t h = 1469598103934665603ull; for (tv_int i = 0; i < tv_arr_len(*a); i++) h = (h ^ ({d})->hash(a->p->data + i * ({d})->size)) * 1099511628211ull; return h; }}\nstatic bool {key}_eq2(const void *x, const void *y) {{ const tv_arr *a = x, *b = y; tv_int n = tv_arr_len(*a); if (n != tv_arr_len(*b)) return false; if (a->p == b->p) return true; for (tv_int i = 0; i < n; i++) if (!({d})->eq(a->p->data + i * ({d})->size, b->p->data + i * ({d})->size)) return false; return true; }}\n")
-                }
+                // (arrays are objects: equal when they're the same one, as `===` in JavaScript)
+                Ty::Array(_) => format!("static uint64_t {key}_hs2(const void *p) {{ return (uint64_t)(uintptr_t)((const tv_arr *)p)->p * 0x9E3779B97F4A7C15ull; }}\nstatic bool {key}_eq2(const void *x, const void *y) {{ return ((const tv_arr *)x)->p == ((const tv_arr *)y)->p; }}\n"),
                 Ty::Map(k, v) => {
                     let (kd, vd) = (self.desc(k), self.desc(v));
                     format!("static uint64_t {key}_hs2(const void *p) {{ return (uint64_t)tv_map_size(*(const tv_map *)p); }}\nstatic bool {key}_eq2(const void *x, const void *y) {{ return tv_map_eq(*(const tv_map *)x, *(const tv_map *)y, {kd}, {vd}); }}\n")
@@ -1998,25 +2004,30 @@ static __attribute__((noinline)) tv_arr tvg_push_slow(tv_arr a, const tv_type *t
 static __attribute__((noinline)) tv_arrbuf *tvg_clone_buf(tv_arr a, const tv_type *t) { tv_arr_make_unique(&a, t, 0); return a.p; }
 /* Capacity for `n` elements, by value (taking the array's address would keep it in memory). */
 static __attribute__((noinline)) tv_arr tvg_reserve(tv_arr a, const tv_type *t, tv_int n) { tv_arr_make_unique(&a, t, n); return a; }
-/* Makes the header unique (copy-on-write) without changing the length. */
+/* Makes the place's array one that can be changed (its own, in place of the immortal empty
+ * array a place starts with when no value was given) without changing the length. */
 static inline void tvg_make_unique(tv_arr *a, const tv_type *t) {
-    if (__builtin_expect(!a->p || a->p->rc != 1, 0)) a->p = tvg_clone_buf(*a, t);
+    /* (in a program the only such array is the empty one: a new empty array replaces it, so the
+     * old pointer is never passed anywhere, and the C compiler can keep tracking what it knows
+     * about the array) */
+    (void)t;
+    if (__builtin_expect(!a->p || a->p->rc < 0, 0)) a->p = tv_arr_fresh().p;
 }
-/* Typed push: inline fast path when the header is unique with spare capacity. */
+/* Typed push: inline fast path when there's spare capacity. */
 #define TVG_PUSH(T, arr, desc, val) do { tv_arr *bmp_a = (arr); T bmp_v = (val); tv_arrbuf *bmp_p = bmp_a->p; \
-    if (__builtin_expect(bmp_p->rc == 1 && bmp_p->len < bmp_p->cap, 1)) ((T *)(void *)bmp_p->data)[bmp_p->len++] = bmp_v; \
+    if (__builtin_expect(bmp_p->rc > 0 && bmp_p->len < bmp_p->cap, 1)) ((T *)(void *)tv_arrbuf_data(bmp_p))[bmp_p->len++] = bmp_v; \
     else { T bmp_s = bmp_v; /* addressable only on the slow path: no spill per push */ \
         *bmp_a = tvg_push_slow(*bmp_a, (desc), &bmp_s); } } while (0)
 /* Push onto an array known to be uniquely owned (made unique before the loop). */
 #define TVG_PUSH_U(T, arr, desc, val) do { tv_arr *bmp_a = (arr); T bmp_v = (val); tv_arrbuf *bmp_p = bmp_a->p; \
-    if (__builtin_expect(bmp_p->len < bmp_p->cap, 1)) ((T *)(void *)bmp_p->data)[bmp_p->len++] = bmp_v; \
+    if (__builtin_expect(bmp_p->len < bmp_p->cap, 1)) ((T *)(void *)tv_arrbuf_data(bmp_p))[bmp_p->len++] = bmp_v; \
     else { T bmp_s = bmp_v; *bmp_a = tvg_push_slow(*bmp_a, (desc), &bmp_s); } } while (0)
 /* Push onto a unique array whose capacity is cached in `cap` (only pushes reallocate it). */
 #define TVG_PUSH_C(T, arr, capv, desc, val) do { tv_arr *bmp_a = (arr); T bmp_v = (val); \
-    if (__builtin_expect(bmp_a->p->len < (capv), 1)) ((T *)(void *)bmp_a->p->data)[bmp_a->p->len++] = bmp_v; \
+    if (__builtin_expect(bmp_a->p->len < (capv), 1)) ((T *)(void *)tv_arrbuf_data(bmp_a->p))[bmp_a->p->len++] = bmp_v; \
     else { T bmp_s = bmp_v; *bmp_a = tvg_push_slow(*bmp_a, (desc), &bmp_s); (capv) = bmp_a->p->cap; } } while (0)
 /* Push with capacity reserved for it before the loop (reserve_for_pushes). */
-#define TVG_PUSH_X(T, arr, val) do { tv_arr *bmp_a = (arr); ((T *)(void *)bmp_a->p->data)[bmp_a->p->len++] = (val); } while (0)
+#define TVG_PUSH_X(T, arr, val) do { tv_arr *bmp_a = (arr); ((T *)(void *)tv_arrbuf_data(bmp_a->p))[bmp_a->p->len++] = (val); } while (0)
 /* Mutable element access: copy-on-write, then a bounds-checked pointer. */
 static inline void *tvg_at_mut(tv_arr *a, const tv_type *t, size_t size, tv_int i, const char *loc) {
     tvg_make_unique(a, t);
@@ -2028,7 +2039,7 @@ static inline void *tvg_at_mut(tv_arr *a, const tv_type *t, size_t size, tv_int 
 static __attribute__((noinline, cold)) tv_arr tvg_put_grow(tv_arr a, const tv_type *t, size_t size, tv_int i, const char *loc) {
     if (i != a.p->len) tv_arr_oob(i, a.p->len, loc);
     tv_arr_make_unique(&a, t, a.p->len + 1);
-    memset(a.p->data + (size_t)i * size, 0, size);
+    memset(tv_arrbuf_data(a.p) + (size_t)i * size, 0, size);
     a.p->len++;
     return a;
 }

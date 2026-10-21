@@ -100,6 +100,10 @@ pub(crate) struct Body {
     /// Locals whose `++`/`--` can't overflow in the code being emitted (a two-pointer loop's
     /// unchecked copy: see `two_pointer_plan`).
     pub nowrap_locals: Vec<u32>,
+    /// The function's body statement (for facts about the whole function).
+    pub root: Option<StmtId>,
+    /// `const` array locals whose length never changes in the function (see `fixed_lens`).
+    pub fixed: Option<FxMap<u32, u64>>,
 }
 
 /// A `for` loop emitted twice (see `Gen::version_plan`): its index local, whether its test is
@@ -269,6 +273,8 @@ impl<'c, 'a> Gen<'c, 'a> {
             divs: FxMap::default(),
             versioned: Vec::new(),
             nowrap_locals: Vec::new(),
+            root: None,
+            fixed: None,
         });
     }
 
@@ -463,6 +469,8 @@ impl<'c, 'a> Gen<'c, 'a> {
             divs: FxMap::default(),
             versioned: Vec::new(),
             nowrap_locals: Vec::new(),
+            root: None,
+            fixed: None,
         };
         for (i, &(key, ty, inout)) in params.iter().enumerate() {
             let access = if inout { format!("(*p{i})") } else { format!("p{i}") };
@@ -473,6 +481,9 @@ impl<'c, 'a> Gen<'c, 'a> {
             body.params.insert(key);
         }
         body.unique.extend(entry_unique.unwrap_or_default());
+        if let FnBodyKind::Block(s) = &kind {
+            body.root = Some(*s);
+        }
         self.bodies.push(body);
         // Constructors of classes without a base class run their field initializers first.
         if let Some(cls) = ctor_class
@@ -480,6 +491,18 @@ impl<'c, 'a> Gen<'c, 'a> {
         {
             self.b().ctor_class = None;
             self.emit_field_inits(cls);
+        }
+        // A parameter the body reassigns is owned from the start (borrowed, it can't be released
+        // when replaced).
+        let reassigned = self.reassigned_locals(&kind);
+        for (i, &(key, ty, inout)) in params.iter().enumerate() {
+            if !inout && !self.b().boxed.contains(&key) && reassigned.contains(&key) && self.is_rc(ty) {
+                let r = self.retain_code(ty, &format!("p{i}"));
+                self.line(format!("{r};"));
+                let rel = format!("{};", self.release_code(ty, &format!("p{i}")));
+                self.b().scopes[0].releases.push(rel);
+                self.b().params.remove(&key);
+            }
         }
         // Parameters captured by heap closures and reassigned move into cells.
         for (i, &(key, ty, inout)) in params.iter().enumerate() {
@@ -1054,9 +1077,10 @@ impl<'c, 'a> Gen<'c, 'a> {
                 continue;
             }
             let Some(local) = self.b().locals.get(&k).cloned() else { continue };
-            let Ty::Array(et) = self.tget(local.ty) else { continue };
-            let d = self.desc(et);
-            self.line(format!("tvg_make_unique(&{}, {d});", local.access));
+            let Ty::Array(_) = self.tget(local.ty) else { continue };
+            // (arrays are shared, so there's nothing to copy first: the only one that can't be
+            // changed in place, the empty placeholder, has no capacity and no elements, so a
+            // push takes the slow path that replaces it and an index is out of bounds)
             self.b().unique.insert(k);
             added.push(k);
             if pushed.contains(&k) && self.only_push_index_length(&all, k) {
@@ -1434,6 +1458,11 @@ impl<'c, 'a> Gen<'c, 'a> {
             return None;
         }
         arrays.sort();
+        // (nothing in the loop may resize them: they may be shared)
+        let own: Vec<u32> = arrays.iter().map(|a| a.0).collect();
+        if self.may_resize(m, &all, &own) {
+            return None;
+        }
         Some(VersionPlan { ik, le, hi, arrays })
     }
 
@@ -1541,7 +1570,7 @@ impl<'c, 'a> Gen<'c, 'a> {
                     && !all.iter().any(|&e| local(e) == Some(xk) && !fine.contains(&e))
             })
             .collect();
-        if arrays.is_empty() {
+        if arrays.is_empty() || self.may_resize(m, &all, &arrays) {
             return None;
         }
         Some((up, down, arrays))
@@ -1605,6 +1634,130 @@ impl<'c, 'a> Gen<'c, 'a> {
 
     /// `for (let i = a; i < n; i++)` where `n` has `i`'s integer type and nothing in the loop
     /// assigns `i` but the step: every step starts from `i < n <= MAX`, so `i++` can't overflow.
+    /// The array locals of the current function (`const`s, or `let`s never reassigned) whose
+    /// length is a constant `N` the whole time: initialized with a literal of N elements (or a call to a function that always
+    /// returns one), in a function where nothing may resize an array (see `resize`). Told to the
+    /// C compiler before each loop, it can unroll by them (as it would with a fixed-size array).
+    fn fixed_lens(&mut self) -> FxMap<u32, u64> {
+        if let Some(f) = &self.b().fixed {
+            return f.clone();
+        }
+        let m = self.cur_m();
+        let mut out = FxMap::default();
+        if let Some(root) = self.b().root {
+            let ast = self.ast(m);
+            let mut exprs = Vec::new();
+            collect_exprs_stmt(ast, root, &mut exprs);
+            if !self.may_resize(m, &exprs, &[]) {
+                let span = ast.stmt(root).span;
+                // (a `let` the function never reassigns is as fixed as a `const`)
+                let reassigned = self.reassigned_locals(&FnBodyKind::Block(root));
+                for (si, st) in ast.stmts.iter().enumerate() {
+                    let StmtKind::Let { name_span, init: Some(i), .. } = &st.kind else { continue };
+                    if reassigned.contains(&name_span.start) || self.b().boxed.contains(&name_span.start) {
+                        continue;
+                    }
+                    if !(st.span.start >= span.start && st.span.end <= span.end && st.span.file == span.file) {
+                        continue;
+                    }
+                    let _ = si;
+                    let n = match &ast.expr(*i).kind {
+                        ExprKind::Array(xs) if !xs.is_empty() && !xs.iter().any(|&x| matches!(ast.expr(x).kind, ExprKind::Spread(_))) => Some(xs.len() as u64),
+                        ExprKind::Call { .. } => match self.facts(m).calls.get(i).map(|f| f.callee.clone()) {
+                            Some(Callee::Fn(fm, fi)) => self.fn_const_len(fm, fi),
+                            _ => None,
+                        },
+                        _ => None,
+                    };
+                    if let Some(n) = n {
+                        out.insert(name_span.start, n);
+                    }
+                }
+            }
+        }
+        self.b().fixed = Some(out.clone());
+        out
+    }
+
+    /// Function (m, i) always returns an array literal of the same length.
+    fn fn_const_len(&mut self, m: u32, i: u32) -> Option<u64> {
+        let ast = self.ast(m);
+        let ast::ItemKind::Function(f) = &ast.items[i as usize].kind else { return None };
+        let span = ast.stmt(f.body).span;
+        let mut n = None;
+        for st in ast.stmts.iter() {
+            if !(st.span.start >= span.start && st.span.end <= span.end && st.span.file == span.file) {
+                continue;
+            }
+            let StmtKind::Return(r) = &st.kind else { continue };
+            let Some(e) = r else { return None };
+            let ExprKind::Array(xs) = &ast.expr(*e).kind else { return None };
+            if xs.iter().any(|&x| matches!(ast.expr(x).kind, ExprKind::Spread(_))) || n.is_some_and(|k| k != xs.len() as u64) {
+                return None;
+            }
+            n = Some(xs.len() as u64);
+        }
+        n
+    }
+
+    /// Parameter `pi` of module function (m, i) is assigned as a whole in its body (or passed on
+    /// as `inout`): an `inout` argument may come back another value.
+    fn param_reassigned(&self, m: u32, i: u32, pi: usize) -> bool {
+        let ast = self.ast(m);
+        let ast::ItemKind::Function(f) = &ast.items[i as usize].kind else { return true };
+        let Some(p) = f.params.get(pi) else { return true };
+        let key = p.span.start;
+        let facts = self.facts(m);
+        let mut exprs = Vec::new();
+        collect_exprs_stmt(ast, f.body, &mut exprs);
+        let is_p = |e: ExprId| matches!((&ast.expr(e).kind, facts.idents.get(&e)), (ExprKind::Ident(_), Some(IdentFact::Local(k))) if *k == key);
+        exprs.iter().any(|&e| match &ast.expr(e).kind {
+            ExprKind::Assign(_, t, _) | ExprKind::Update { target: t, .. } => is_p(*t),
+            ExprKind::Call { args, .. } => args.iter().any(|a| a.by_ref.is_some() && is_p(a.expr)),
+            _ => false,
+        })
+    }
+
+    /// Locals assigned as a whole (`x = ...`, `x++`, `f(&x)`) in a body.
+    fn reassigned_locals(&self, kind: &FnBodyKind) -> FxSet<u32> {
+        let m = self.cur_m();
+        let ast = self.ast(m);
+        let facts = self.facts(m);
+        let mut exprs = Vec::new();
+        match kind {
+            FnBodyKind::Block(s) => collect_exprs_stmt(ast, *s, &mut exprs),
+            FnBodyKind::Expr(e) => collect_exprs_expr(ast, *e, &mut exprs),
+            FnBodyKind::Init => {}
+        }
+        let local = |e: ExprId| match (&ast.expr(e).kind, facts.idents.get(&e)) {
+            (ExprKind::Ident(_), Some(IdentFact::Local(k))) => Some(*k),
+            _ => None,
+        };
+        let mut out = FxSet::default();
+        for e in exprs {
+            match &ast.expr(e).kind {
+                ExprKind::Assign(_, t, _) | ExprKind::Update { target: t, .. } => out.extend(local(*t)),
+                ExprKind::Call { args, .. } => {
+                    // (`f(&x)` where f never replaces that parameter leaves x as it was)
+                    let callee = match facts.calls.get(&e).map(|f| &f.callee) {
+                        Some(Callee::Fn(fm, fi)) => Some((*fm, *fi)),
+                        _ => None,
+                    };
+                    for (pi, a) in args.iter().enumerate() {
+                        if a.by_ref.is_some()
+                            && let Some(k) = local(a.expr)
+                            && callee.is_none_or(|(fm, fi)| self.param_reassigned(fm, fi, pi))
+                        {
+                            out.insert(k);
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+        out
+    }
+
     /// `while (i < n && ...) { ...; i++; ... }`: the one `i++` (a statement of the body's own,
     /// nothing else changing `i`) comes after `i < n` held, so it can't overflow.
     fn guarded_counter(&self, cond: ExprId, body: StmtId) -> Option<u32> {
@@ -1804,8 +1957,10 @@ impl<'c, 'a> Gen<'c, 'a> {
             // only one onto `xs` in it and no heap closure can change `xs`, `i` or `n`: then the
             // reservation covers every push. (A count too large to add up can't be allocated.)
             let pushes = push_counts.get(&xk).copied().unwrap_or(0);
+            // (and nothing else can push onto it meanwhile: it may be shared)
+            let alone = !self.may_resize(m, &all, &[xk]);
             let b = self.b();
-            let exact = pushes == 1 && !b.boxed.contains(&xk) && !b.boxed.contains(&ik) && bound.is_none_or(|k| !b.mutated.contains(&k) && !b.boxed.contains(&k));
+            let exact = alone && pushes == 1 && !b.boxed.contains(&xk) && !b.boxed.contains(&ik) && bound.is_none_or(|k| !b.mutated.contains(&k) && !b.boxed.contains(&k));
             if exact {
                 self.line(format!("if ({n} > {i}) {{ tv_int need_; if ((uint64_t){n} - (uint64_t){i} > (uint64_t)INT64_MAX || __builtin_add_overflow(tv_arr_len({xs}), (tv_int)((uint64_t){n} - (uint64_t){i}), &need_)) tv_trap(\"array too large\", NULL); if (need_ > {cv}) {{ {xs} = tvg_reserve({xs}, {d}, need_); {cv} = {xs}.p->cap; }} }}"));
                 self.b().exact_pushes.insert(xk);
@@ -1920,8 +2075,17 @@ impl<'c, 'a> Gen<'c, 'a> {
     // ------------------------------------------------------------ statements
 
     pub(crate) fn stmt(&mut self, s: StmtId) {
-        // `outer: for (...)`: `break outer` jumps past it, `continue outer` to its next round
+        // (a loop: the lengths it can rely on, of arrays nothing in the function resizes)
         let m = self.cur_m();
+        if matches!(self.ast(m).stmt(s).kind, StmtKind::For { .. } | StmtKind::ForOf { .. } | StmtKind::While(..) | StmtKind::DoWhile(..)) {
+            let fixed = self.fixed_lens();
+            let mut facts: Vec<(String, u64)> = fixed.iter().filter_map(|(k, &n)| self.b().locals.get(k).map(|l| (l.access.clone(), n))).collect();
+            facts.sort();
+            for (access, n) in facts {
+                self.line(format!("__builtin_assume(({access}).p->len == {n});"));
+            }
+        }
+        // `outer: for (...)`: `break outer` jumps past it, `continue outer` to its next round
         let label = self.ast(m).labels.iter().find(|(st, _)| *st == s).map(|x| x.1);
         let Some(label) = label else { return self.stmt_inner(s) };
         let end = self.fresh("lend");
@@ -2131,6 +2295,12 @@ impl<'c, 'a> Gen<'c, 'a> {
                 let divs = self.hoist_divisors(*body, &loop_exprs);
                 self.reserve_for_pushes(*init, *cond, *step, *body);
                 let bounds = self.counted_loop(*init, *cond, *step, *body);
+                // (the array's length stays put only if nothing in the loop may resize it)
+                let bounds = bounds.filter(|&(_, xk)| {
+                    let mut all = Vec::new();
+                    collect_exprs_stmt(self.ast(m), *body, &mut all);
+                    !self.may_resize(m, &all, &[xk])
+                });
                 let nowrap = self.step_cannot_overflow(*init, *cond, *step, *body);
                 let plan = if iteration_binding.is_none() { self.version_plan(*init, *cond, *step, *body) } else { None };
                 if let Some(plan) = plan {
@@ -2974,8 +3144,9 @@ impl<'c, 'a> Gen<'c, 'a> {
                     self.unsupported(span, "an array literal of this type");
                     return Val::plain("TV_EMPTY_ARR", ty);
                 };
+                // (an array of its own: `[]` given to two variables is two arrays)
                 if elems.is_empty() {
-                    return Val::plain("TV_EMPTY_ARR", ty);
+                    return self.tmp(ty, "tv_arr_fresh()", true);
                 }
                 if elems.iter().any(|&x| matches!(self.ast(m).expr(x).kind, ExprKind::Spread(_))) {
                     return self.build_spread(elems, ty);
@@ -4636,6 +4807,10 @@ impl<'c, 'a> Gen<'c, 'a> {
     /// the plain bounds check, which leaves the array unchanged for loops around it.
     fn grown_by_push(&mut self, xs: ExprId) -> bool {
         let m = self.cur_m();
+        self.grown_by_push_in(m, xs)
+    }
+
+    pub(crate) fn grown_by_push_in(&mut self, m: u32, xs: ExprId) -> bool {
         let Some(IdentFact::Local(k)) = self.ident_fact(m, xs) else { return false };
         if !self.pushed.contains_key(&m) {
             let ast = self.ast(m);
@@ -4894,7 +5069,7 @@ impl<'c, 'a> Gen<'c, 'a> {
                         self.line(format!("tvg_make_unique(&{a}, {d});"));
                     }
                     self.line(format!("if (__builtin_expect((uint64_t){i} >= (uint64_t)tv_arr_len({a}), 0)) {a} = tvg_put_grow({a}, {d}, sizeof({ect}), {i}, {loc});"));
-                    let store = self.store(target, et, &format!("((({ect} *)({a}).p->data)[{i}])"), &nv);
+                    let store = self.store(target, et, &format!("((({ect} *)tv_arr_data({a}))[{i}])"), &nv);
                     self.line(store);
                     return Val::plain(nv, et);
                 }
@@ -5275,6 +5450,8 @@ impl<'c, 'a> Gen<'c, 'a> {
             divs: FxMap::default(),
             versioned: Vec::new(),
             nowrap_locals: Vec::new(),
+            root: None,
+            fixed: None,
         };
         for (i, &(key, ty, inout)) in params.iter().enumerate() {
             let access = if inout { format!("(*p{i})") } else { format!("p{i}") };
