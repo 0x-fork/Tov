@@ -755,6 +755,30 @@ impl<'c, 'a> Gen<'c, 'a> {
     #[allow(clippy::too_many_arguments)]
     fn mutating_method(&mut self, lv: &str, recv: TyId, name: &str, args: &[Arg], params: &[FnParam], ty: TyId, span: Span) -> Val {
         match (self.tget(recv), name) {
+            (Ty::Array(et), "splice") => {
+                let d = self.desc(et);
+                let start = self.expr(args[0].expr);
+                let start = self.int_code(start);
+                let (del, has) = match args.get(1) {
+                    Some(a) => {
+                        let v = self.expr(a.expr);
+                        let oi = self.c.types.optional(INT);
+                        let v = self.coerce(v, oi);
+                        self.optional_int(&v)
+                    }
+                    None => ("0".to_string(), "false".to_string()),
+                };
+                let arr = self.c.types.array(et);
+                let items = if args.len() > 2 {
+                    let elems: Vec<ExprId> = args[2..].iter().map(|a| a.expr).collect();
+                    self.build_spread(&elems, arr).code
+                } else {
+                    "TV_EMPTY_ARR".to_string()
+                };
+                let (sv, dv) = (self.fresh("s"), self.fresh("d"));
+                self.line(format!("tv_int {sv} = {start}; tv_int {dv} = {del};"));
+                self.tmp(arr, &format!("tv_arr_splice(&{lv}, {d}, {sv}, {dv}, {has}, {items})"), true)
+            }
             (Ty::Array(et), "push" | "unshift") => {
                 let d = self.desc(et);
                 let ect = self.ctype(et);

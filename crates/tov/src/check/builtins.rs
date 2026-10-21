@@ -218,7 +218,7 @@ pub(super) fn property(types: &Types, ty: TyId, name: &str) -> Option<TyId> {
 }
 
 const ARRAY_METHODS: &[&str] = &[
-    "push", "pop", "shift", "unshift", "map", "filter", "forEach", "reduce", "some", "every", "find", "findIndex", "indexOf", "lastIndexOf", "includes", "join", "slice", "concat",
+    "push", "pop", "shift", "unshift", "splice", "map", "filter", "forEach", "reduce", "some", "every", "find", "findIndex", "indexOf", "lastIndexOf", "includes", "join", "slice", "concat",
     "reverse", "sort", "at", "flatMap", "fill", "entries", "keys", "flat",
 ];
 const STRING_METHODS: &[&str] = &[
@@ -307,6 +307,10 @@ pub(super) fn method(c: &mut Checker, base: TyId, name: &str) -> Option<MethodSi
             let pred = c.types.func(vec![p(e), FnParam { ty: INT, inout: false, optional: true }], BOOL);
             match name {
                 "push" | "unshift" => mk(CallSig { tparams: Vec::new(), params: Vec::new(), names: Vec::new(), rest: Some(e), ret: INT, throws: NEVER }, true),
+                "splice" => {
+                    let count = opt(c, INT);
+                    mk(CallSig { tparams: Vec::new(), params: vec![p(INT), count], names: vec!["start".into(), "deleteCount".into()], rest: Some(e), ret: arr, throws: NEVER }, true)
+                }
                 "pop" | "shift" => mk(sig(vec![], opt_e), true),
                 "map" | "flatMap" => {
                     let u_name = c.syms.u;

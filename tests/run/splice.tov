@@ -1,0 +1,14 @@
+// splice, as JavaScript's (checked against Node)
+const a = ["a", "b", "c", "d"]
+const r = a.splice(1, 2)
+console.log(a, r)
+const b = [1, 2, 3, 4, 5]
+console.log(b.splice(-2), b)
+const c = [1, 2, 3]
+console.log(c.splice(1, 0, 9, 8), c)
+const d = [1, 2, 3]
+d.splice(0, 1, ...[7, 7])
+console.log(d, [1, 2].splice(5, 1), [1, 2, 3].splice(1, -1))
+const e = [[1], [2], [3]]
+const gone = e.splice(1, 1)
+console.log(e, gone)

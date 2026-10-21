@@ -5227,7 +5227,7 @@ fn is_trivial(code: &str) -> bool {
 }
 
 pub(crate) fn is_mutating_method(name: &str) -> bool {
-    matches!(name, "push" | "pop" | "shift" | "unshift" | "reverse" | "sort" | "fill" | "set" | "delete" | "clear" | "add")
+    matches!(name, "push" | "pop" | "shift" | "unshift" | "splice" | "reverse" | "sort" | "fill" | "set" | "delete" | "clear" | "add")
 }
 
 /// Locals referenced inside an arrow (including nested arrows) but declared outside it.

@@ -2056,6 +2056,29 @@ void tv_arr_unshift(tv_arr *a, const tv_type *t, void *elem) {
     a->len = len + 1;
 }
 
+tv_arr tv_arr_splice(tv_arr *a, const tv_type *t, tv_int start, tv_int del, bool has_del, tv_arr items) {
+    int64_t len = tv_arr_len(*a);
+    int64_t s = tv_clamp_index(start, len);
+    int64_t d = has_del ? (del < 0 ? 0 : (del > len - s ? len - s : del)) : len - s;
+    int64_t n = tv_arr_len(items);
+    if (d == 0 && n == 0) return TV_EMPTY_ARR;
+    tv_arr_make_unique(a, t, len - d + n > len ? len - d + n : len);
+    size_t es = t->size;
+    tv_arr removed = TV_EMPTY_ARR;
+    if (d > 0) {
+        tv_arrbuf *b = tv_arrbuf_new(es, d);
+        if (es) memcpy(b->data, a->p->data + (size_t)s * es, (size_t)d * es); /* moved out */
+        removed = (tv_arr){b, d};
+    }
+    if (es) {
+        unsigned char *data = a->p->data;
+        memmove(data + (size_t)(s + n) * es, data + (size_t)(s + d) * es, (size_t)(len - s - d) * es);
+        if (n) tv_copy_retain(data + (size_t)s * es, items.p->data, n, t);
+    }
+    a->len = len - d + n;
+    return removed;
+}
+
 tv_arr tv_arr_slice(tv_arr a, const tv_type *t, tv_int start, tv_int end, bool has_start, bool has_end) {
     int64_t len = tv_arr_len(a);
     int64_t s = has_start ? tv_clamp_index(start, len) : 0;

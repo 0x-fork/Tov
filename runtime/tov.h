@@ -344,6 +344,8 @@ static inline void tv_arr_push_fast(tv_arr *a, const tv_type *t, void *elem) {
 bool tv_arr_pop(tv_arr *a, const tv_type *t, void *out);          /* false if empty; out receives ownership */
 bool tv_arr_shift(tv_arr *a, const tv_type *t, void *out);
 void tv_arr_unshift(tv_arr *a, const tv_type *t, void *elem);      /* moves elem */
+/* a.splice(start, del, ...items): the removed elements (JavaScript's clamping; del omitted: to the end) */
+tv_arr tv_arr_splice(tv_arr *a, const tv_type *t, tv_int start, tv_int del, bool has_del, tv_arr items);
 tv_arr tv_arr_slice(tv_arr a, const tv_type *t, tv_int start, tv_int end, bool has_start, bool has_end); /* JS semantics incl. negatives */
 tv_arr tv_arr_concat(tv_arr a, tv_arr b, const tv_type *t);
 void tv_arr_extend(tv_arr *a, const tv_type *t, tv_arr b);         /* appends b's elements (retained) */
