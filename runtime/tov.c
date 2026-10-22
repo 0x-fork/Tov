@@ -335,6 +335,7 @@ static inline uint64_t tv_mix64(uint64_t x) { /* splitmix64 finalizer */
     return x;
 }
 
+
 static inline uint64_t tv_mum(uint64_t a, uint64_t b) {
 #ifdef __SIZEOF_INT128__
     __extension__ typedef unsigned __int128 tv_u128;
@@ -2839,7 +2840,9 @@ void tv_to_str_arr(tv_sb *sb, tv_arr a, const tv_type *t) { tv_join_into(sb, a, 
 
 /* One allocation: header, `cap` entries in insertion order, then 2*cap index slots.
  * Entry: uint64 hash (top bit set; 0 = deleted), key (padded to 8), value (padded to 8).
- * Index slot: entry number + 1, 0 = empty. Open addressing, linear probing, backward-shift
+ * Index slot: entry number + 1 in the low bits (emask), bits of the hash above them (so a probe
+ * passes most other keys without reading their entries); 0 = empty. Open addressing, linear
+ * probing, backward-shift
  * deletion (so the index never holds tombstones); deleted entries are compacted away when
  * the entry array fills up. */
 /* The store of a map's entries: replaced by a bigger one as the map grows (the header that
@@ -2859,7 +2862,7 @@ struct tv_mapbuf {
     uint64_t mask;    /* index slots - 1 */
     uint32_t *index;
     int64_t first;    /* entries before it are all deleted: iteration starts there */
-    int64_t _pad[1];  /* header = 64 bytes, entries stay 16-byte aligned */
+    uint64_t emask;   /* an index slot's entry-number bits (header = 64 bytes: entries stay aligned) */
     unsigned char entries[];
 };
 
@@ -2878,6 +2881,10 @@ static inline tv_mlayout tv_mlay(const tv_type *kt, const tv_type *vt) {
 static inline unsigned char *tv_entry(const tv_mapbuf *m, tv_mlayout L, int64_t i) {
     return (unsigned char *)m->entries + (size_t)i * L.stride;
 }
+/* An index slot's hash bits, its entry number, and the slot for entry i of a key hashed h. */
+static inline uint32_t tv_slot_tag(const tv_mapbuf *m, uint64_t h) { return (uint32_t)(h >> 31) & ~(uint32_t)m->emask; }
+static inline int64_t tv_slot_entry(const tv_mapbuf *m, uint32_t s) { return (int64_t)(s & (uint32_t)m->emask) - 1; }
+static inline uint32_t tv_slot_of(const tv_mapbuf *m, uint64_t h, int64_t i) { return tv_slot_tag(m, h) | (uint32_t)(i + 1); }
 static inline uint64_t tv_entry_hash(const unsigned char *e) { uint64_t h; memcpy(&h, e, 8); return h; }
 static inline void tv_entry_set_hash(unsigned char *e, uint64_t h) { memcpy(e, &h, 8); }
 
@@ -2888,6 +2895,7 @@ static inline double tv_canon_f64(double x) {
 }
 
 static inline uint64_t tv_key_hash(const tv_type *kt, const void *key) {
+    if (kt == &tv_type_int) return tv_mix64(*(const uint64_t *)key) | TV_LIVE_BIT;
     if (kt == &tv_type_str) { /* (the common key: hashed here, not through the table) */
         const tv_strbuf *b = ((const tv_str *)key)->p;
         return tv_hash_bytes(b->data, (size_t)b->len) | TV_LIVE_BIT;
@@ -2908,6 +2916,7 @@ static inline bool tv_key_eq(const tv_type *kt, const void *a, const void *b) {
             if (x->data[i] != y->data[i]) return false;
         return true;
     }
+    if (kt == &tv_type_int) return *(const int64_t *)a == *(const int64_t *)b;
     if (kt == &tv_type_f64) {
         double x = *(const double *)a, y = *(const double *)b;
         return x == y || (x != x && y != y);
@@ -2943,7 +2952,8 @@ static tv_mapbuf *tv_mapbuf_new(int64_t cap, tv_mlayout L) {
     m->cap = cap;
     m->mask = islots - 1;
     m->index = (uint32_t *)(void *)(m->entries + (size_t)cap * L.stride);
-    m->first = m->_pad[0] = 0;
+    m->first = 0;
+    m->emask = ((uint64_t)1 << (64 - __builtin_clzll((uint64_t)cap))) - 1;
     memset(m->index, 0, islots * sizeof(uint32_t));
     return m;
 }
@@ -2966,7 +2976,7 @@ static tv_mapbuf *tv_map_rebuild(const tv_mapbuf *old, tv_mlayout L, int64_t cap
         }
         uint64_t pos = h & m->mask;
         while (m->index[pos]) pos = (pos + 1) & m->mask;
-        m->index[pos] = (uint32_t)(j + 1);
+        m->index[pos] = tv_slot_of(m, h, j);
         j++;
     }
     m->count = m->used = j;
@@ -3008,11 +3018,14 @@ static tv_mapbuf *tv_map_unique(tv_map *mp, const tv_type *kt, const tv_type *vt
 static uint64_t tv_map_find(const tv_mapbuf *m, tv_mlayout L, const tv_type *kt, const void *key, uint64_t h,
                             bool *found) {
     uint64_t i = h & m->mask;
+    uint32_t tag = tv_slot_tag(m, h), emask = (uint32_t)m->emask;
     for (;;) {
         uint32_t e = m->index[i];
         if (!e) { *found = false; return i; }
-        const unsigned char *ent = tv_entry(m, L, e - 1);
-        if (tv_entry_hash(ent) == h && tv_key_eq(kt, ent + 8, key)) { *found = true; return i; }
+        if ((e & ~emask) == tag) {
+            const unsigned char *ent = tv_entry(m, L, (int64_t)(e & emask) - 1);
+            if (tv_entry_hash(ent) == h && tv_key_eq(kt, ent + 8, key)) { *found = true; return i; }
+        }
         i = (i + 1) & m->mask;
     }
 }
@@ -3050,7 +3063,7 @@ void *tv_map_get(tv_map mm, const tv_type *kt, const tv_type *vt, const void *ke
     tv_mlayout L = tv_mlay(kt, vt);
     bool found;
     uint64_t pos = tv_map_find(m, L, kt, key, tv_key_hash(kt, key), &found);
-    return found ? tv_entry(m, L, m->index[pos] - 1) + L.voff : NULL;
+    return found ? tv_entry(m, L, tv_slot_entry(m, m->index[pos])) + L.voff : NULL;
 }
 
 bool tv_map_has(tv_map m, const tv_type *kt, const tv_type *vt, const void *key) {
@@ -3072,7 +3085,7 @@ static unsigned char *tv_map_add(tv_map *mp, tv_mapbuf *m, tv_mlayout L, const t
     int64_t idx = m->used++;
     unsigned char *e = tv_entry(m, L, idx);
     tv_entry_set_hash(e, h);
-    m->index[pos] = (uint32_t)(idx + 1);
+    m->index[pos] = tv_slot_of(m, h, idx);
     m->count++;
     return e;
 }
@@ -3084,7 +3097,7 @@ void tv_map_set(tv_map *mp, const tv_type *kt, const tv_type *vt, void *key, voi
     bool found;
     uint64_t pos = tv_map_find(m, L, kt, key, h, &found);
     if (found) { /* replace the value in place; keep the original key */
-        unsigned char *e = tv_entry(m, L, m->index[pos] - 1);
+        unsigned char *e = tv_entry(m, L, tv_slot_entry(m, m->index[pos]));
         if (vt->size) {
             if (vt->release) vt->release(e + L.voff);
             memcpy(e + L.voff, value, vt->size);
@@ -3104,7 +3117,7 @@ void *tv_map_get_mut(tv_map *mp, const tv_type *kt, const tv_type *vt, const voi
     tv_mapbuf *m = tv_map_unique(mp, kt, vt, L);
     bool found;
     uint64_t pos = tv_map_find(m, L, kt, key, tv_key_hash(kt, key), &found);
-    return found ? tv_entry(m, L, m->index[pos] - 1) + L.voff : NULL;
+    return found ? tv_entry(m, L, tv_slot_entry(m, m->index[pos])) + L.voff : NULL;
 }
 
 void *tv_map_slot(tv_map *mp, const tv_type *kt, const tv_type *vt, void *key, bool *inserted) {
@@ -3116,7 +3129,7 @@ void *tv_map_slot(tv_map *mp, const tv_type *kt, const tv_type *vt, void *key, b
     if (found) {
         if (kt->release && kt->size) kt->release(key);
         *inserted = false;
-        return tv_entry(m, L, m->index[pos] - 1) + L.voff;
+        return tv_entry(m, L, tv_slot_entry(m, m->index[pos])) + L.voff;
     }
     unsigned char *e = tv_map_add(mp, m, L, kt, vt, h, pos);
     if (kt->size) memcpy(e + 8, key, kt->size);
@@ -3132,11 +3145,12 @@ static inline __attribute__((always_inline)) void *tv_map_slot_bytes(tv_map *mp,
     tv_mapbuf *m = tv_map_unique(mp, kt, vt, L);
     uint64_t h = tv_hash_bytes(p, n) | TV_LIVE_BIT;
     uint64_t pos = h & m->mask;
+    uint32_t tag = tv_slot_tag(m, h), emask = (uint32_t)m->emask;
     for (;;) {
         uint32_t i = m->index[pos];
         if (!i) break;
-        unsigned char *e = tv_entry(m, L, i - 1);
-        if (tv_entry_hash(e) == h) {
+        unsigned char *e = tv_entry(m, L, (int64_t)(i & emask) - 1);
+        if ((i & ~emask) == tag && tv_entry_hash(e) == h) {
             tv_str k;
             memcpy(&k, e + 8, sizeof k);
             if ((size_t)k.p->len == n && memcmp(k.p->data, p, n) == 0) {
@@ -3189,7 +3203,7 @@ bool tv_map_delete(tv_map *mp, const tv_type *kt, const tv_type *vt, const void 
     bool found;
     uint64_t pos = tv_map_find(m, L, kt, key, h, &found);
     if (!found) return false;
-    int64_t at = (int64_t)m->index[pos] - 1;
+    int64_t at = tv_slot_entry(m, m->index[pos]);
     unsigned char *e = tv_entry(m, L, at);
     tv_entry_set_hash(e, 0);
     m->count--;
@@ -3203,7 +3217,7 @@ bool tv_map_delete(tv_map *mp, const tv_type *kt, const tv_type *vt, const void 
         j = (j + 1) & mask;
         uint32_t s = m->index[j];
         if (!s) break;
-        uint64_t home = tv_entry_hash(tv_entry(m, L, s - 1)) & mask;
+        uint64_t home = tv_entry_hash(tv_entry(m, L, tv_slot_entry(m, s))) & mask;
         if (((j - home) & mask) >= ((j - i) & mask)) {
             m->index[i] = s;
             i = j;
