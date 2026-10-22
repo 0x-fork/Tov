@@ -1,6 +1,6 @@
 # Tov
 
-**Tov compiles TypeScript to native code.** Give it the `.ts` you'd run with Bun or Node, and you get a small native binary that does the same thing, faster and in a fraction of the memory.
+**Tov compiles TypeScript to native code.** It turns a `.ts` program into a small native binary that runs faster than Bun or Node, in a fraction of the memory. It doesn't handle all of TypeScript yet: see [where it stands](#where-it-stands).
 
 ```sh
 tov run app.ts             # build and run
@@ -10,7 +10,7 @@ tov test src/              # run every *.test.ts (Jest's API: describe, it, expe
 
 ## The goal
 
-1. **Run TypeScript as it is.** Code written for TypeScript, Bun or Node compiles unchanged and behaves exactly as it does there: the same semantics, Bun's and Node's APIs, npm packages.
+1. **Run any TypeScript as it is.** Code written for TypeScript, Bun or Node should compile unchanged and behave exactly as it does there: the same semantics, Bun's and Node's APIs, npm packages. We're not there yet.
 2. **Be the fastest way to run it.** Faster than Bun and Node, and at least as fast as C and Rust, using less memory, on every benchmark.
 
 Tov is early (version 0.0.1) and changes every day. Where it doesn't match TypeScript yet, the aim is that it tells you at compile time, with an error code and usually the fix, rather than quietly doing something different.
@@ -48,7 +48,7 @@ Memory is where the gap is widest. A small program peaks at 1.7 MB under Tov, ag
 
 **Not yet:** `any`, `Date`, classes passed around as values, function overloads, Windows.
 
-We measure TypeScript parity on real code. [TheAlgorithms/TypeScript](https://github.com/TheAlgorithms/TypeScript) is a library of 99 test files written for Jest and `tsc`; 72 of them build and pass unchanged under `tov test`. Each gap we close is tested in `tests/run/`. The full list of differences is in [docs/spec.md](docs/spec.md).
+We measure TypeScript parity on real code. [TheAlgorithms/TypeScript](https://github.com/TheAlgorithms/TypeScript) is a library of 99 test files written for Jest and `tsc`; 72 of them build and pass unchanged under `tov test`, and most of the rest stop at a compile error naming the missing feature. A few known cases still behave differently from JavaScript instead of failing to compile: reading past the end of an array outside a comparison or condition traps (JavaScript gives `undefined`), and a number variable read before it's assigned reads 0. Each gap we close is tested in `tests/run/`. The full list of differences is in [docs/spec.md](docs/spec.md).
 
 ## Install
 
