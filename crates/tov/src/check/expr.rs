@@ -79,6 +79,14 @@ impl<'a> Checker<'a> {
 
     pub(super) fn expr(&mut self, e: ExprId, exp: Option<TyId>) -> TyId {
         let want = std::mem::take(&mut self.want_optional) || exp.is_some_and(|x| self.types.has_undefined(x)) || self.absent_reads.contains(&(self.cur, e));
+        // (an untyped empty array used where an array is wanted, `return graph`: those elements)
+        if let Some(x) = exp
+            && let Ty::Array(el) = *self.types.get(x)
+            && !self.types.mentions_error(el)
+            && let Some(slot) = self.evolving_slot(e)
+        {
+            self.fcx().evolving[slot].2.push(el);
+        }
         let t = self.expr_inner(e, exp, want);
         if self.spec.on {
             self.derive_sites(e);

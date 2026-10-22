@@ -72,6 +72,17 @@ impl<'a> Checker<'a> {
         }
     }
 
+    /// `[]`, or `new Array(n)` / `Array(n)` without its element type.
+    fn untyped_array(&self, i: ExprId) -> bool {
+        match &self.ast().expr(i).kind {
+            ExprKind::Array(xs) => xs.is_empty(),
+            ExprKind::New { callee, type_args, args } => {
+                type_args.is_empty() && args.len() == 1 && matches!(self.ast().expr(*callee).kind, ExprKind::Ident(n) if self.name(n) == "Array" && self.lookup(n).is_none())
+            }
+            _ => false,
+        }
+    }
+
     /// `const fib = (n: number): number => ... fib(n - 1) ...` (a nested `function fib` too): the
     /// name is visible in its own body, with the type its annotations give. Checked again if what
     /// it throws turns out otherwise. `None` if the arrow doesn't refer to itself.
@@ -233,7 +244,8 @@ impl<'a> Checker<'a> {
                     // `const xs = []`: its elements are what it's given later (`xs.push(x)`), as
                     // TypeScript's evolving arrays (found by a first check of the body, see
                     // `settle_evolving`)
-                    (None, Some(i)) if matches!(&self.ast().expr(*i).kind, ExprKind::Array(xs) if xs.is_empty()) && !self.fcx.is_empty() => {
+                    // (`const g = Array(n)` / `new Array(n)` too)
+                    (None, Some(i)) if self.untyped_array(*i) && !self.fcx.is_empty() => {
                         let key = name_span.start;
                         let elem = match self.fcx.last().unwrap().evolved.get(&key) {
                             Some(&e) => e,
