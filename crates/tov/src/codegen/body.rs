@@ -4614,6 +4614,9 @@ impl<'c, 'a> Gen<'c, 'a> {
                 Val::plain(if matches!(op, Eq | LooseEq) { eq } else { format!("(!{eq})") }, BOOL)
             }
             Lt | Gt | Le | Ge => {
+                if let Some(v) = self.compare_past_end(op, l, r) {
+                    return v;
+                }
                 let lv = self.expr_before(l, &[r]);
                 let rv = self.expr(r);
                 let o = op.as_str();
@@ -5379,6 +5382,64 @@ impl<'c, 'a> Gen<'c, 'a> {
             self.b().temps.last_mut().unwrap().push((res.clone(), ty));
         }
         Val { code: res, ty, owned }
+    }
+
+    /// `xs[i] < x` (either side) on an array of numbers, with `i` maybe past either end: false
+    /// there, as JavaScript's `undefined < x` is (`while (xs[--j] > pivot);` stops at the start).
+    fn compare_past_end(&mut self, op: BinOp, l: ExprId, r: ExprId) -> Option<Val> {
+        let m = self.cur_m();
+        let strip = |c: &Self, mut e: ExprId| {
+            while let ExprKind::Paren(x) = c.ast(m).expr(e).kind {
+                e = x;
+            }
+            e
+        };
+        let (le, re) = (strip(self, l), strip(self, r));
+        let read = |c: &Self, e: ExprId| -> Option<(ExprId, ExprId, TyId)> {
+            let ExprKind::Index { obj, index, .. } = c.ast(m).expr(e).kind else { return None };
+            let ot = c.facts(m).expr_ty.get(obj as usize).copied().unwrap_or(ERROR);
+            let Ty::Array(et) = *c.c.types.get(ot) else { return None };
+            if !c.c.types.is_numeric(et) || !c.harmless(obj) {
+                return None;
+            }
+            // (a loop's own arrays keep their checks: those reads are in bounds or a bug)
+            if let Some(IdentFact::Local(xk)) = c.ident_fact(m, obj) {
+                let b = c.bodies.last()?;
+                if b.arr_cache.contains_key(&xk) || b.versioned.iter().any(|v| v.1.iter().any(|a| a.0 == xk)) {
+                    return None;
+                }
+                if let Some(IdentFact::Local(ik)) = c.ident_fact(m, index)
+                    && b.in_bounds.contains(&(ik, xk))
+                {
+                    return None;
+                }
+            }
+            Some((obj, index, et))
+        };
+        let num = |c: &Self, e: ExprId| c.c.types.is_numeric(c.facts(m).expr_ty.get(e as usize).copied().unwrap_or(ERROR));
+        let (left, (obj, index, et)) = match (read(self, le), read(self, re)) {
+            (Some(x), _) if num(self, re) => (true, x),
+            (None, Some(x)) if num(self, le) => (false, x),
+            _ => return None,
+        };
+        let other = if left { r } else { l };
+        let before = if left { None } else { Some(self.expr(other)) };
+        let before = before.map(|v| self.own(v));
+        let a = self.expr(obj);
+        let i = self.expr(index);
+        let i = self.int_code(i);
+        let (iv, ok, ev) = (self.fresh("ix"), self.fresh("in"), self.fresh("e"));
+        let ect = self.ctype(et);
+        self.line(format!("tv_int {iv} = {i};"));
+        self.line(format!("bool {ok} = (uint64_t){iv} < (uint64_t)tv_arr_len({});", a.code));
+        self.line(format!("{ect} {ev} = {ok} ? (({ect} *)tv_arr_data({}))[{iv}] : 0;", a.code));
+        let elem = Val::plain(ev, et);
+        let (lv, rv) = match before {
+            Some(b) => (b, elem),
+            None => (elem, self.expr(other)),
+        };
+        let (x, y) = self.numeric_operands(lv, rv);
+        Some(Val::plain(format!("({ok} && {x} {} {y})", op.as_str()), BOOL))
     }
 
     /// `xs[i]` known present (`xs[i]!`, or read as the element type): a bounds-checked read
