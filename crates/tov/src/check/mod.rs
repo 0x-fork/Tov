@@ -1423,43 +1423,58 @@ impl<'a> Checker<'a> {
         }
         let (t, throws) = self.committed(|c| {
             c.with_module(m, |c| {
-                c.fcx.push(FnCtx::default());
-                c.fcx.last_mut().unwrap().scopes.push(Vec::new());
-                let mut frame = Frame::new(None, None, script, None);
-                frame.module_init = true;
-                frame.is_async = script && c.ast().script.is_some_and(|si| matches!(&c.ast().items[si as usize].kind, ItemKind::Function(f) if f.is_async));
-                c.fcx.last_mut().unwrap().frames.push(frame);
-                let t = match ty {
-                    Some(te) => {
-                        let declared = c.resolve_type(te, &[]);
-                        let sites = c.type_sites(m, te);
-                        c.flow(sites, |c| {
-                            let found = c.expr(init, Some(declared));
-                            c.expect_assignable(found, declared, c.ast().expr(init).span, None);
-                        });
-                        declared
-                    }
-                    None => {
-                        // (`const u = db[id]` tested in the script: may be `undefined`, see `stmt::tested`)
-                        if matches!(c.ast().expr(init).kind, ast::ExprKind::Index { .. })
-                            && let Some(si) = c.ast().script
-                            && let ItemKind::Function(f) = &c.ast().items[si as usize].kind
-                            && let ast::StmtKind::Block(body) = &c.ast().stmt(f.body).kind
-                            && stmt::tested(c.ast(), *name, body)
-                        {
-                            c.want_optional = true;
+                // (checked again while its untyped empty arrays find their elements, see
+                // `settle_evolving`)
+                let mut evolved = HashMap::default();
+                let saved = std::mem::take(&mut c.diags);
+                let mut out = (ERROR, false);
+                for _round in 0..4 {
+                    c.diags.clear();
+                    c.fcx.push(FnCtx { evolved: std::mem::take(&mut evolved), ..Default::default() });
+                    c.fcx.last_mut().unwrap().scopes.push(Vec::new());
+                    let mut frame = Frame::new(None, None, script, None);
+                    frame.module_init = true;
+                    frame.is_async = script && c.ast().script.is_some_and(|si| matches!(&c.ast().items[si as usize].kind, ItemKind::Function(f) if f.is_async));
+                    c.fcx.last_mut().unwrap().frames.push(frame);
+                    let t = match ty {
+                        Some(te) => {
+                            let declared = c.resolve_type(te, &[]);
+                            let sites = c.type_sites(m, te);
+                            c.flow(sites, |c| {
+                                let found = c.expr(init, Some(declared));
+                                c.expect_assignable(found, declared, c.ast().expr(init).span, None);
+                            });
+                            declared
                         }
-                        let found = c.expr(init, None);
-                        let t = c.check_inferred_binding(found, c.ast().expr(init).span);
-                        // `let s = ""` holds any string later, as in TypeScript; `let x = 0`
-                        // that's given a float is an `f64`
-                        let t = if mutable { c.types.widen(t) } else { t };
-                        if t == INT && c.spec.float_globals.contains(&(m, ii)) { F64 } else { t }
+                        None => {
+                            // (`const u = db[id]` tested in the script: may be `undefined`, see `stmt::tested`)
+                            if matches!(c.ast().expr(init).kind, ast::ExprKind::Index { .. })
+                                && let Some(si) = c.ast().script
+                                && let ItemKind::Function(f) = &c.ast().items[si as usize].kind
+                                && let ast::StmtKind::Block(body) = &c.ast().stmt(f.body).kind
+                                && stmt::tested(c.ast(), *name, body)
+                            {
+                                c.want_optional = true;
+                            }
+                            let found = c.expr(init, None);
+                            let t = c.check_inferred_binding(found, c.ast().expr(init).span);
+                            // `let s = ""` holds any string later, as in TypeScript; `let x = 0`
+                            // that's given a float is an `f64`
+                            let t = if mutable { c.types.widen(t) } else { t };
+                            if t == INT && c.spec.float_globals.contains(&(m, ii)) { F64 } else { t }
+                        }
+                    };
+                    let throws = !c.fcx.last().unwrap().frames[0].thrown.is_empty();
+                    let fcx = c.fcx.pop().unwrap();
+                    out = (t, throws);
+                    evolved = fcx.evolved;
+                    if !c.settle_evolving(&mut evolved, fcx.evolving) {
+                        break;
                     }
-                };
-                let throws = !c.fcx.last().unwrap().frames[0].thrown.is_empty();
-                c.fcx.pop();
-                (t, throws)
+                }
+                let produced = std::mem::replace(&mut c.diags, saved);
+                c.diags.extend(produced);
+                out
             })
         });
         if throws {
