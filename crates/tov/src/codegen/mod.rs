@@ -2170,14 +2170,16 @@ static inline void *tvg_at_mut(tv_arr *a, const tv_type *t, size_t size, tv_int 
     tvg_make_unique(a, t);
     return tv_arr_at(*a, size, i, loc);
 }
-/* `xs[i] = v` of plain data when i isn't below the length: one past the end appends (a zeroed
- * slot, written next), as in JavaScript; further out traps. The array comes back by value, so
- * the caller's never has its address taken (and can stay in registers). */
+/* `xs[i] = v` of plain data when i isn't below the length: the array grows to i + 1, as in
+ * JavaScript, the slots between holding zeros (JavaScript's holes, read as `undefined`, are the
+ * element type's zero); a negative or absurdly far index traps. The array comes back by value,
+ * so the caller's never has its address taken (and can stay in registers). */
 static __attribute__((noinline, cold)) tv_arr tvg_put_grow(tv_arr a, const tv_type *t, size_t size, tv_int i, const char *loc) {
-    if (i != a.p->len) tv_arr_oob(i, a.p->len, loc);
-    tv_arr_make_unique(&a, t, a.p->len + 1);
-    memset(tv_arrbuf_data(a.p) + (size_t)i * size, 0, size);
-    a.p->len++;
+    tv_int n = a.p->len;
+    if (i < n || i - n > ((tv_int)1 << 28)) tv_arr_oob(i, n, loc);
+    tv_arr_make_unique(&a, t, i + 1);
+    memset(tv_arrbuf_data(a.p) + (size_t)n * size, 0, (size_t)(i + 1 - n) * size);
+    a.p->len = i + 1;
     return a;
 }
 /* Sorting (radix sorts of 64-bit keys) lives in the runtime, compiled once (runtime/tov.c). */
