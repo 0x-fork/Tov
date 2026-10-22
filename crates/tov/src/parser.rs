@@ -1425,6 +1425,22 @@ impl<'a> Parser<'a> {
     }
 
     /// The type a parameter takes from its default value when it has no annotation (`n = 10`).
+    /// An expression that is a number whatever its names stand for (arithmetic other than `+`,
+    /// `.length`, `Math.*`, and `+` of those).
+    fn numeric_expr(&self, e: ExprId) -> bool {
+        match &self.ast.exprs[e as usize].kind {
+            ExprKind::Int(_) | ExprKind::Float(_) => true,
+            ExprKind::Paren(x) => self.numeric_expr(*x),
+            ExprKind::Unary(_, x) => self.numeric_expr(*x),
+            ExprKind::Member { name, .. } => self.interner.get(*name) == "length",
+            ExprKind::Call { callee, .. } => matches!(&self.ast.exprs[*callee as usize].kind, ExprKind::Member { obj, .. } if matches!(self.ast.exprs[*obj as usize].kind, ExprKind::Ident(n) if self.interner.get(n) == "Math")),
+            ExprKind::Binary(BinOp::Add, a, b) => self.numeric_expr(*a) && self.numeric_expr(*b),
+            // (a bigint's too, which a default rarely is)
+            ExprKind::Binary(op, ..) => matches!(op, BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Rem | BinOp::Pow | BinOp::BitAnd | BinOp::BitOr | BinOp::BitXor | BinOp::Shl | BinOp::Shr | BinOp::UShr),
+            _ => false,
+        }
+    }
+
     fn literal_type(&mut self, e: ExprId) -> Option<TypeId> {
         // `visiting = new Set<string>()`: the class, with its type arguments
         if let ExprKind::New { callee, type_args, .. } = &self.ast.exprs[e as usize].kind
@@ -1438,6 +1454,9 @@ impl<'a> Parser<'a> {
             ExprKind::Str(_) | ExprKind::Template(..) => "string",
             ExprKind::Bool(_) => "boolean",
             ExprKind::Unary(_, x) if matches!(self.ast.exprs[*x as usize].kind, ExprKind::Int(_) | ExprKind::Float(_)) => "number",
+            // `end = xs.length - 1`, `mid = Math.floor(n / 2)`
+            _ if self.numeric_expr(e) => "number",
+            ExprKind::Binary(BinOp::Lt | BinOp::Gt | BinOp::Le | BinOp::Ge | BinOp::Eq | BinOp::Ne, ..) => "boolean",
             _ => return None,
         };
         let span = self.expr_span(e);
