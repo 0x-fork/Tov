@@ -1,0 +1,8 @@
+3 null true null null {"n":null}
+[ 'none', 1 ] null
+6
+stretch tree of depth 9	 root hash: 512 check: true
+256	 trees of depth 4	 root hash sum: 4096
+64	 trees of depth 6	 root hash sum: 4096
+16	 trees of depth 8	 root hash sum: 4096
+long lived tree of depth 8	 root hash: 256 check: true

@@ -931,10 +931,19 @@ impl<'c, 'a> Gen<'c, 'a> {
         if ms.len() != 2 {
             return None;
         }
-        let ui = ms.iter().position(|&m| m == UNDEFINED)?;
+        // (`C | null` too: NULL for `null`)
+        let ui = ms.iter().position(|&m| m == UNDEFINED || m == NULL)?;
         let pi = 1 - ui;
         // A class instance, a recursive alias's box or an object: a pointer, with NULL for `undefined`.
         (matches!(self.tget(ms[pi]), Ty::Class(..) | Ty::Rec(..)) || self.is_obj(ms[pi])).then_some((pi, ui))
+    }
+
+    /// How a niche union's absent value prints: `undefined`, or `null` for `C | null`.
+    pub(crate) fn niche_absent(&self, u: TyId) -> &'static str {
+        match self.tget(u) {
+            Ty::Union(ms) if self.c.types.tys(ms).contains(&NULL) => "null",
+            _ => "undefined",
+        }
     }
 
     /// The recursive-alias or object member of a niche union (`Tree | undefined`), if that's
@@ -1411,7 +1420,8 @@ impl<'c, 'a> Gen<'c, 'a> {
                 let (pi, _) = self.niche(t).unwrap();
                 let m = self.c.types.tys(ms)[pi];
                 let inner = if self.niche_rec(t).is_some() { self.string_code(m, place) } else { self.class_string_code(m, place) };
-                format!("({{ if (({place}) != NULL) {inner}; else tv_sb_push_cstr(sb, \"undefined\"); }})")
+                let absent = self.niche_absent(t);
+                format!("({{ if (({place}) != NULL) {inner}; else tv_sb_push_cstr(sb, \"{absent}\"); }})")
             }
             Ty::Map(..) | Ty::Set(_) => format!("({})->to_str(sb, &({place}))", self.desc(t)),
             Ty::Promise(..) => "tv_sb_push_cstr(sb, \"[object Promise]\")".into(),
@@ -1469,9 +1479,10 @@ impl<'c, 'a> Gen<'c, 'a> {
             Ty::Union(_) if self.niche_rec(t).is_some() => {
                 let m = self.niche_rec(t).unwrap();
                 let inner = self.inspect_code(m, place, depth);
-                format!("({{ if (({place}) != NULL) {inner}; else tv_sb_push_cstr(sb, \"undefined\"); }})")
+                let absent = self.niche_absent(t);
+                format!("({{ if (({place}) != NULL) {inner}; else tv_sb_push_cstr(sb, \"{absent}\"); }})")
             }
-            Ty::Union(_) if self.niche(t).is_some() => format!("({{ if (({place}) != NULL) tvg_obj_inspect(sb, (void *)({place}), {depth}); else tv_sb_push_cstr(sb, \"undefined\"); }})"),
+            Ty::Union(_) if self.niche(t).is_some() => format!("({{ if (({place}) != NULL) tvg_obj_inspect(sb, (void *)({place}), {depth}); else tv_sb_push_cstr(sb, \"{}\"); }})", self.niche_absent(t)),
             _ => {
                 self.ensure_helper(t, H_INSPECT);
                 format!("in_{}(sb, &({place}), {depth})", self.box_name(t))

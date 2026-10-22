@@ -1106,6 +1106,64 @@ impl<'a> Checker<'a> {
 
     // ------------------------------------------------------------ reference cycles
 
+    /// Field names the program assigns other than as `this.f = ...` in a constructor. The others
+    /// (parameter properties too) are as good as `readonly` for cycles: a constructor's object
+    /// can only point at objects that already exist.
+    fn written_fields(&self) -> HashSet<Sym> {
+        let (mut all, mut ctor) = (HashMap::<Sym, usize>::default(), HashMap::<Sym, usize>::default());
+        for module in self.modules.iter() {
+            let ast = &module.ast;
+            let mut ctors = Vec::new();
+            for it in &ast.items {
+                if let ItemKind::Class(cd) = &it.kind {
+                    for mem in &cd.members {
+                        if let ast::MemberKind::Constructor(f) = &mem.kind {
+                            ctors.push(ast.stmt(f.body).span);
+                        }
+                    }
+                }
+            }
+            // (a constructor that hands out `this` itself, `new Child(this)`, `this.self = this`,
+            // can close a cycle through fields set only there: then none count as frozen)
+            let in_ctor = |sp: Span| ctors.iter().any(|c| c.file == sp.file && c.start <= sp.start && sp.end <= c.end);
+            let mut member_this = HashSet::<ExprId>::default();
+            for e in &ast.exprs {
+                if let ExprKind::Member { obj, .. } = &e.kind
+                    && matches!(ast.expr(*obj).kind, ExprKind::This)
+                {
+                    member_this.insert(*obj);
+                }
+            }
+            if ast.exprs.iter().enumerate().any(|(i, e)| matches!(e.kind, ExprKind::This) && in_ctor(e.span) && !member_this.contains(&(i as ExprId))) {
+                return self.modules.iter().flat_map(|m| m.ast.exprs.iter().filter_map(|e| match e.kind {
+                    ExprKind::Member { name, .. } => Some(name),
+                    _ => None,
+                })).chain(self.classes.iter().flat_map(|c| c.fields.iter().map(|f| f.name))).collect();
+            }
+            for e in &ast.exprs {
+                let (ExprKind::Assign(_, t, _) | ExprKind::Update { target: t, .. }) = &e.kind else { continue };
+                let mut stack = vec![*t];
+                while let Some(x) = stack.pop() {
+                    match &ast.expr(x).kind {
+                        ExprKind::Member { obj, name, .. } => {
+                            *all.entry(*name).or_default() += 1;
+                            let sp = ast.expr(x).span;
+                            if matches!(ast.expr(*obj).kind, ExprKind::This) && ctors.iter().any(|c| c.file == sp.file && c.start <= sp.start && sp.end <= c.end) {
+                                *ctor.entry(*name).or_default() += 1;
+                            }
+                        }
+                        ExprKind::Array(xs) => stack.extend(xs.iter().copied()),
+                        ExprKind::Object(fs) => stack.extend(fs.iter().map(|f| f.value)),
+                        ExprKind::Paren(y) | ExprKind::NonNull(y) | ExprKind::Spread(y) => stack.push(*y),
+                        _ => {}
+                    }
+                }
+            }
+        }
+        // (the names written elsewhere: every other field is set only by constructors)
+        all.into_iter().filter(|(n, k)| ctor.get(n) != Some(k)).map(|(n, _)| n).collect()
+    }
+
     /// Reference counting can't free cycles. Reports class graphs where instances can reference
     /// each other in a cycle through strong fields, unless every field on the cycle is
     /// `readonly` and holds a class reference directly (set once, in the constructor, to an object
@@ -1118,6 +1176,11 @@ impl<'a> Checker<'a> {
         for c in 0..n as u32 {
             self.resolve_class(c);
         }
+        let written = self.written_fields();
+        // (in TypeScript, where the cycle collector covers what can form cycles, rather than a
+        // `cyclic` the program declares)
+        let ts_classes: Vec<bool> = self.classes.iter().map(|c| matches!(self.modules[c.module as usize].path.extension().and_then(|e| e.to_str()), Some("ts" | "tsx" | "mts" | "cts"))).collect();
+        let ts_owner = |c: u32| ts_classes[c as usize];
         // Instantiations reachable from field types; nodes are class types.
         let mut nodes: Vec<TyId> = Vec::new();
         let mut index: HashMap<TyId, usize> = HashMap::default();
@@ -1143,7 +1206,7 @@ impl<'a> Checker<'a> {
                 let mut nested = Vec::new();
                 self.class_refs(fty, true, &mut direct, &mut nested, 0);
                 for (tgt, is_direct) in direct.into_iter().map(|x| (x, true)).chain(nested.into_iter().map(|x| (x, false))) {
-                    edges.push((from, tgt, f.readonly && is_direct, f.owner, f.name));
+                    edges.push((from, tgt, (f.readonly || (ts_owner(f.owner) && !written.contains(&f.name))) && is_direct, f.owner, f.name));
                     work.push(tgt);
                 }
             }
