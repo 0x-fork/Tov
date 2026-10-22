@@ -5792,7 +5792,8 @@ impl<'c, 'a> Gen<'c, 'a> {
             let vn = self.fresh("v");
             self.line(format!("{vct} {vn} = {vc};"));
             self.line(format!("tv_map_set(&{}, {kd}, {vd}, &{kn}, &{vn});", mp.lv));
-            return Val::plain("0", VOID);
+            // (the assignment's value: what was stored, which the map holds)
+            return Val { code: vn, ty: v, owned: false };
         }
         match op {
             AssignOp::Assign if let Some(chain) = self.big_chain(target, value) => {

@@ -3282,6 +3282,15 @@ impl<'a> Checker<'a> {
                                     self.set_call_spec(sites);
                                     return self.call_sig(&cs, &desc, type_args, args, exp, span);
                                 }
+                                // `ns.f(x)` of an exported constant holding a function: a value call
+                                if matches!(scope.values.get(&name).filter(|_| scope.exported_values.contains(&name)).map(|d| d.0), Some(Decl::Const(..))) {
+                                    let t = self.expr(callee, None);
+                                    let text = self.src(self.ast().expr(callee).span).to_string();
+                                    self.rec_call(e, Callee::Value);
+                                    self.pending_call = Some(e);
+                                    self.set_call_spec_from(callee);
+                                    return self.call_value(t, &text, args, exp, span);
+                                }
                             }
                             None => {
                                 let ns = self.name(s).to_string();

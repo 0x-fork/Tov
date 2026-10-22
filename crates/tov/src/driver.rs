@@ -401,8 +401,39 @@ fn resolve_import(from: &Path, spec: &str, span: Span, npm: &crate::npm::resolve
         };
     }
     let dir = from.parent().unwrap_or(Path::new("."));
+    // TypeScript's own modules, as tsc and Bun find them: `./util` is util.ts (or util.tsx, or
+    // util/index.ts), `./util.js` is the util.ts it compiles to (NodeNext style), and `./util.ts`
+    // is itself.
+    let ts_candidates: Vec<String> = if let Some(stem) = spec.strip_suffix(".js").or_else(|| spec.strip_suffix(".jsx")) {
+        vec![format!("{stem}.ts"), format!("{stem}.tsx")]
+    } else if let Some(stem) = spec.strip_suffix(".mjs") {
+        vec![format!("{stem}.mts")]
+    } else if spec.ends_with(".ts") || spec.ends_with(".tsx") || spec.ends_with(".mts") {
+        vec![spec.to_string()]
+    } else if spec.ends_with(".tov") {
+        Vec::new()
+    } else {
+        vec![format!("{spec}.ts"), format!("{spec}.tsx"), format!("{spec}.mts")]
+    };
+    for c in &ts_candidates {
+        let target = dir.join(c);
+        if target.is_file() {
+            return Ok(target);
+        }
+    }
+    let has_ext = [".ts", ".js", ".tsx", ".jsx", ".mjs", ".mts"].iter().any(|e| spec.ends_with(e));
+    if !has_ext {
+        for index in ["index.ts", "index.tsx"] {
+            let target = dir.join(spec).join(index);
+            if target.is_file() {
+                return Ok(target);
+            }
+        }
+    }
     for ext in [".ts", ".js", ".tsx", ".mjs"] {
-        if let Some(stem) = spec.strip_suffix(ext) {
+        if let Some(stem) = spec.strip_suffix(ext)
+            && dir.join(format!("{stem}.tov")).is_file()
+        {
             let span_in = Span::new(span.file, span.start, span.end);
             return Err(Diagnostic::new("N0105", span, format!("imports name Tov modules without an extension, found \"{spec}\""))
                 .fix(Applicability::Safe, format!("use \"{stem}\""), span_in, format!("\"{stem}\"")));

@@ -26,8 +26,8 @@ error[N0104] imports/main.tov:5:20: can't find the npm package "lodash"
     5 | import lodash from "lodash"
   instead: install it: `bun add lodash` (or npm, pnpm, yarn)
 
-error[X0011] imports/main.tov:6:8: default imports are only for npm packages
+error[N0102] imports/main.tov:6:8: `imports/lib.tov` has no default export
     6 | import lib from "./lib"
-  instead: import named exports: `import { lib } from ...` or `import * as lib from ...`
+  instead: import its named exports: `import { name } from ...`
 
 7 error(s)

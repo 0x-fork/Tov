@@ -1,5 +1,5 @@
 use crate::ast::*;
-use crate::diag::{Applicability, Diagnostic};
+use crate::diag::Diagnostic;
 use crate::intern::{Interner, Sym};
 use crate::lexer::{self, Tok, Token};
 use crate::source::{FileId, Span};
@@ -401,31 +401,135 @@ impl<'a> Parser<'a> {
         let start = self.cur_span();
         let mut exported = false;
         if self.at(Tok::Export) {
-            let export_span = self.cur_span();
             self.bump();
             exported = true;
             if self.at(Tok::Default) {
-                let span = export_span.to(self.cur_span());
-                self.push(
-                    Diagnostic::new("X0011", span, "default exports are not supported")
-                        .note("instead", "export the declaration by name and import it with `import { name }`")
-                        .fix(Applicability::Maybe, "remove `default`", Span::new(self.file, export_span.end, self.cur_span().end), ""),
-                );
+                let dspan = self.cur_span();
                 self.bump();
-            } else if self.at(Tok::LBrace) || self.at(Tok::Star) {
-                self.push(
-                    Diagnostic::new("X0013", export_span.to(self.cur_span()), "export lists and re-exports are not supported")
-                        .note("instead", "put `export` on each declaration, and import from the module that declares it"),
-                );
-                self.skip_decl();
-                if self.at_word("from") {
-                    self.bump();
-                    self.eat(Tok::Str);
+                self.interner.intern("default"); // (the checker looks the export up by it)
+                // `export default function f() {}` / `class C {}`: the declaration, which is the default
+                let named = match self.kind() {
+                    Tok::Function => self.nth(1) == Tok::Ident,
+                    Tok::Async => self.nth(1) == Tok::Function && self.nth(2) == Tok::Ident,
+                    Tok::Class => self.nth(1) == Tok::Ident,
+                    Tok::Abstract => self.nth(1) == Tok::Class && self.nth(2) == Tok::Ident,
+                    Tok::Interface => true,
+                    _ => false,
+                };
+                if named {
+                    let before = self.ast.items.len();
+                    self.item_decl(start, true);
+                    let name = self.ast.items.get(before).and_then(|it| match &it.kind {
+                        ItemKind::Function(f) => Some((f.name, f.name_span)),
+                        ItemKind::Class(c) => Some((c.name, c.name_span)),
+                        ItemKind::Interface { name, name_span, .. } => Some((*name, *name_span)),
+                        _ => None,
+                    });
+                    self.ast.default_export = name;
+                    return;
                 }
+                // `export default value`: a name, or a hidden constant holding the value
+                let e = self.assign();
                 self.terminator();
+                if let ExprKind::Ident(n) = self.ast.exprs[e as usize].kind {
+                    self.ast.default_export = Some((n, self.expr_span(e)));
+                } else {
+                    let name = self.interner.intern("__default");
+                    let span = start.to(self.expr_span(e));
+                    self.ast.items.push(Item { kind: ItemKind::Const { name, name_span: dspan, ty: None, init: e, mutable: false }, span, exported: true });
+                    self.ast.default_export = Some((name, dspan));
+                }
+                return;
+            }
+            // `export { a, b as c }`, `export type { T }`, either `from "m"`
+            if self.at(Tok::LBrace) || (self.at(Tok::Type) && self.nth(1) == Tok::LBrace) {
+                self.eat(Tok::Type);
+                self.bump(); // {
+                let mut names = Vec::new();
+                while !self.at(Tok::RBrace) && !self.at(Tok::Eof) {
+                    if self.at(Tok::Type) && !matches!(self.nth(1), Tok::Comma | Tok::RBrace) && !(self.nth(1) == Tok::Ident && self.text(self.toks[self.pos + 1]) == "as") {
+                        self.bump(); // `{ type T }`
+                    }
+                    let Some((n, sp)) = self.prop_name() else {
+                        let span = self.cur_span();
+                        let msg = format!("expected a name in the export list, found {}", self.found());
+                        self.err("P0001", span, msg);
+                        self.recover_line();
+                        return;
+                    };
+                    let mut out = n;
+                    if self.at_word("as") {
+                        self.bump();
+                        if let Some((a, _)) = self.prop_name() {
+                            out = a;
+                        }
+                    }
+                    names.push((n, out, sp));
+                    if !self.eat(Tok::Comma) {
+                        break;
+                    }
+                }
+                self.expect(Tok::RBrace, "to close the export list");
+                let from = if self.at_word("from") {
+                    self.bump();
+                    self.reexport_import()
+                } else {
+                    None
+                };
+                self.terminator();
+                self.ast.exports.push(ExportSpec { from, names, star: false, namespace: None });
+                return;
+            }
+            // `export * from "m"`, `export * as ns from "m"`
+            if self.at(Tok::Star) {
+                self.bump();
+                let namespace = if self.at_word("as") {
+                    self.bump();
+                    self.prop_name()
+                } else {
+                    None
+                };
+                if !self.at_word("from") {
+                    let span = self.cur_span();
+                    let msg = format!("expected `from` after `export *`, found {}", self.found());
+                    self.err("P0001", span, msg);
+                    self.recover_line();
+                    return;
+                }
+                self.bump();
+                let from = self.reexport_import();
+                self.terminator();
+                if from.is_some() {
+                    self.ast.exports.push(ExportSpec { from, names: Vec::new(), star: namespace.is_none(), namespace });
+                }
                 return;
             }
         }
+        self.item_decl(start, exported);
+    }
+
+    /// The module path after an `export ... from`: a hidden import of it (its item index).
+    fn reexport_import(&mut self) -> Option<u32> {
+        if !self.at(Tok::Str) {
+            let span = self.cur_span();
+            let msg = format!("expected a module path string, found {}", self.found());
+            self.err("P0001", span, msg);
+            self.recover_line();
+            return None;
+        }
+        let t = self.bump();
+        let path = self.strings[t.val as usize].clone();
+        let path_span = self.span_of(t);
+        let idx = self.ast.items.len() as u32;
+        self.ast.items.push(Item {
+            kind: ItemKind::Import(Import { names: Vec::new(), locals: Vec::new(), reexport: true, namespace: None, default: None, path, path_span }),
+            span: path_span,
+            exported: false,
+        });
+        Some(idx)
+    }
+
+    fn item_decl(&mut self, start: Span, exported: bool) {
         match self.kind() {
             Tok::Import => {
                 if exported {
@@ -752,6 +856,7 @@ impl<'a> Parser<'a> {
             self.bump(); // `import type { ... }` is the same as `import { ... }`
         }
         let mut names = Vec::new();
+        let mut locals = Vec::new();
         let mut namespace = None;
         let mut default = None;
         if self.at(Tok::Str) {
@@ -768,12 +873,12 @@ impl<'a> Parser<'a> {
             }
             namespace = self.ident("a namespace name");
         } else if self.at(Tok::LBrace) {
-            if !self.import_list(&mut names) {
+            if !self.import_list(&mut names, &mut locals) {
                 return;
             }
         } else if self.at(Tok::Ident) {
-            // (the checker allows it only from npm packages)
             default = self.ident("a name");
+            self.interner.intern("default"); // (the checker looks the export up by it)
             // `import d, { a } from ...` / `import d, * as ns from ...`
             if self.eat(Tok::Comma) {
                 if self.eat(Tok::Star) {
@@ -781,7 +886,7 @@ impl<'a> Parser<'a> {
                         self.bump();
                     }
                     namespace = self.ident("a namespace name");
-                } else if self.at(Tok::LBrace) && !self.import_list(&mut names) {
+                } else if self.at(Tok::LBrace) && !self.import_list(&mut names, &mut locals) {
                     return;
                 }
             }
@@ -812,34 +917,37 @@ impl<'a> Parser<'a> {
         let path_span = self.span_of(t);
         self.terminator();
         let span = start.to(path_span);
-        self.ast.items.push(Item { kind: ItemKind::Import(Import { names, namespace, default, path, path_span }), span, exported: false });
+        self.ast.items.push(Item { kind: ItemKind::Import(Import { names, locals, reexport: false, namespace, default, path, path_span }), span, exported: false });
     }
 
-    /// `{ a, b }` in an import; false if it had to give up on the line.
-    fn import_list(&mut self, names: &mut Vec<(Sym, Span)>) -> bool {
+    /// `{ a, b as c }` in an import (the exported names, and what they're called here); false if
+    /// it had to give up on the line.
+    fn import_list(&mut self, names: &mut Vec<(Sym, Span)>, locals: &mut Vec<Sym>) -> bool {
         self.bump();
         while !self.at(Tok::RBrace) && !self.at(Tok::Eof) {
-            if self.at(Tok::Type) {
-                self.bump();
+            if self.at(Tok::Type) && !matches!(self.nth(1), Tok::Comma | Tok::RBrace) && !(self.nth(1) == Tok::Ident && self.text(self.toks[self.pos + 1]) == "as") {
+                self.bump(); // `{ type T }`
             }
-            let Some(name) = self.ident("an imported name") else {
+            let Some(name) = self.prop_name() else {
+                let span = self.cur_span();
+                let msg = format!("expected an imported name, found {}", self.found());
+                self.err("P0001", span, msg);
                 self.recover_line();
                 return false;
             };
-            names.push(name);
+            let mut local = name.0;
             if self.at_word("as") {
-                let as_span = self.cur_span();
                 self.bump();
-                let alias = self.ident("a name");
-                let span = as_span.to(self.prev_span());
-                let original = self.interner.get(name.0).to_string();
-                let mut d = Diagnostic::new("X0012", span, "renaming imports is not supported")
-                    .note("why", "every name has one spelling across the codebase, so search finds all uses");
-                if alias.is_some() {
-                    d = d.fix(Applicability::Maybe, format!("import `{original}` without renaming and use that name"), Span::new(self.file, name.1.end, span.end), "");
+                match self.ident("a name") {
+                    Some((a, _)) => local = a,
+                    None => {
+                        self.recover_line();
+                        return false;
+                    }
                 }
-                self.push(d);
             }
+            names.push(name);
+            locals.push(local);
             if !self.eat(Tok::Comma) {
                 break;
             }

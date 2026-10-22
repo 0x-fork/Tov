@@ -936,21 +936,149 @@ impl<'a> Checker<'a> {
         }
     }
 
+    /// Binds every module's imports, and its exports (`export { a as b }`, `export * from`,
+    /// `export default`): alternately until nothing changes (a module's exports can be another's
+    /// imports, passed on), then once more, reporting what's missing.
     fn resolve_imports(&mut self) {
+        let count = |c: &Self| c.scopes.iter().map(|s| s.values.len() + s.types.len() + s.exported_values.len() + s.exported_types.len()).sum::<usize>();
+        for _ in 0..=self.modules.len() {
+            let before = count(self);
+            self.bind_imports(false);
+            self.apply_exports(false);
+            if count(self) == before {
+                break;
+            }
+        }
+        self.bind_imports(true);
+        self.apply_exports(true);
+    }
+
+    /// Exports a module declares by list or passes on from another (see `ast::ExportSpec`).
+    fn apply_exports(&mut self, report: bool) {
         let modules = self.modules;
+        for (mi, module) in modules.iter().enumerate() {
+            let ast = &module.ast;
+            let default = self.interner.lookup("default");
+            for spec in &ast.exports {
+                let target = match spec.from {
+                    Some(item) => match module.imports.get(&item) {
+                        Some(&t) => Some(t),
+                        None => continue,
+                    },
+                    None => None,
+                };
+                if let Some(t) = target
+                    && modules[t as usize].npm.is_some()
+                {
+                    // (a package's exports: JavaScript values)
+                    for &(orig, out, span) in &spec.names {
+                        let what = if Some(orig) == default { facts::NpmName::Default } else { facts::NpmName::Named(orig) };
+                        self.add_export(mi, out, span, Decl::Npm(t, what), false);
+                        self.add_export(mi, out, span, Decl::Npm(t, what), true);
+                    }
+                    if let Some((ns, span)) = spec.namespace {
+                        self.add_export(mi, ns, span, Decl::Npm(t, facts::NpmName::Ns), false);
+                    }
+                    continue;
+                }
+                if let Some((ns, span)) = spec.namespace
+                    && let Some(t) = target
+                {
+                    self.add_export(mi, ns, span, Decl::Ns(t), false);
+                    self.add_export(mi, ns, span, Decl::Ns(t), true);
+                }
+                if spec.star
+                    && let Some(t) = target
+                {
+                    let ts = self.scopes[t as usize].clone();
+                    let span = ast.items[spec.from.unwrap() as usize].span;
+                    for &name in ts.exported_values.iter().filter(|&&n| Some(n) != default) {
+                        if let Some(&(d, _)) = ts.values.get(&name) {
+                            self.add_export(mi, name, span, d, false);
+                        }
+                    }
+                    for &name in ts.exported_types.iter().filter(|&&n| Some(n) != default) {
+                        if let Some(&(d, _)) = ts.types.get(&name) {
+                            self.add_export(mi, name, span, d, true);
+                        }
+                    }
+                }
+                for &(orig, out, span) in &spec.names {
+                    let (value, ty) = {
+                        let src = &self.scopes[target.unwrap_or(mi as u32) as usize];
+                        let exported = |set: &HashSet<Sym>| target.is_none() || set.contains(&orig);
+                        (
+                            src.values.get(&orig).filter(|_| exported(&src.exported_values)).map(|d| d.0),
+                            src.types.get(&orig).filter(|_| exported(&src.exported_types)).map(|d| d.0),
+                        )
+                    };
+                    if let Some(v) = value {
+                        self.add_export(mi, out, span, v, false);
+                    }
+                    if let Some(t) = ty {
+                        self.add_export(mi, out, span, t, true);
+                    }
+                    if report && value.is_none() && ty.is_none() {
+                        let n = self.interner.get(orig).to_string();
+                        let d = match target {
+                            Some(t) => Diagnostic::new("N0102", span, format!("`{}` has no export named `{n}`", modules[t as usize].name)),
+                            None => Diagnostic::new("N0001", span, format!("unknown name `{n}`")),
+                        };
+                        self.done.push(d);
+                    }
+                }
+            }
+            if let (Some((name, span)), Some(default)) = (ast.default_export, default) {
+                let src = &self.scopes[mi];
+                let (value, ty) = (src.values.get(&name).map(|d| d.0), src.types.get(&name).map(|d| d.0));
+                if let Some(v) = value {
+                    self.add_export(mi, default, span, v, false);
+                }
+                if let Some(t) = ty {
+                    self.add_export(mi, default, span, t, true);
+                }
+                if report && value.is_none() && ty.is_none() {
+                    let n = self.interner.get(name).to_string();
+                    self.done.push(Diagnostic::new("N0001", span, format!("unknown name `{n}`")));
+                }
+            }
+        }
+    }
+
+    /// Exports `decl` from module `m` as `name` (and makes the name known there).
+    fn add_export(&mut self, m: usize, name: Sym, span: Span, decl: Decl, is_type: bool) {
+        let scope = &mut Arc::make_mut(&mut self.scopes)[m];
+        let (table, exported) = if is_type { (&mut scope.types, &mut scope.exported_types) } else { (&mut scope.values, &mut scope.exported_values) };
+        match table.get(&name) {
+            Some((existing, _)) if *existing != decl => return,
+            Some(_) => {}
+            None => {
+                table.insert(name, (decl, span));
+            }
+        }
+        exported.insert(name);
+    }
+
+    fn bind_imports(&mut self, report: bool) {
+        let modules = self.modules;
+        let default_sym = self.interner.lookup("default");
         for (mi, module) in modules.iter().enumerate() {
             for (ii, item) in module.ast.items.iter().enumerate() {
                 let ItemKind::Import(imp) = &item.kind else { continue };
+                if imp.reexport {
+                    continue;
+                }
                 let Some(&target) = module.imports.get(&(ii as u32)) else { continue };
+                let local_of = |k: usize| imp.locals.get(k).copied().unwrap_or(imp.names[k].0);
                 if modules[target as usize].npm.is_some() {
                     // Anything a package exports is a JavaScript value; names are checked when
                     // the program runs (a missing export reads as `undefined`, as in JavaScript).
                     let binds = imp.namespace.map(|n| (n, facts::NpmName::Ns)).into_iter()
                         .chain(imp.default.map(|n| (n, facts::NpmName::Default)))
-                        .chain(imp.names.iter().map(|&(s, sp)| ((s, sp), facts::NpmName::Named(s))));
+                        .chain(imp.names.iter().enumerate().map(|(k, &(s, sp))| ((local_of(k), sp), if Some(s) == default_sym { facts::NpmName::Default } else { facts::NpmName::Named(s) })));
                     for ((name, span), what) in binds {
-                        self.bind_import(mi, name, span, Decl::Npm(target, what), false);
-                        self.bind_import(mi, name, span, Decl::Npm(target, what), true);
+                        self.bind_import(mi, name, span, Decl::Npm(target, what), false, report);
+                        self.bind_import(mi, name, span, Decl::Npm(target, what), true, report);
                     }
                     continue;
                 }
@@ -962,28 +1090,48 @@ impl<'a> Checker<'a> {
                     let value = main.and_then(|m| ts.values.get(&m)).map(|d| d.0);
                     let ty = main.and_then(|m| ts.types.get(&m)).map(|d| d.0);
                     if let Some(v) = value {
-                        self.bind_import(mi, name, span, v, false);
+                        self.bind_import(mi, name, span, v, false, report);
                     }
                     if let Some(t) = ty {
-                        self.bind_import(mi, name, span, t, true);
+                        self.bind_import(mi, name, span, t, true, report);
                     }
+                } else if let Some((name, span)) = imp.default
+                    && modules[target as usize].std
+                    && modules[target as usize].name.starts_with("node:")
+                {
+                    // `import path from "node:path"`: a built-in module's default is the module
+                    self.bind_import(mi, name, span, Decl::Ns(target), false, report);
+                    self.bind_import(mi, name, span, Decl::Ns(target), true, report);
                 } else if let Some((name, span)) = imp.default {
-                    let n = self.interner.get(name).to_string();
-                    self.done.push(
-                        Diagnostic::new("X0011", span, "default imports are only for npm packages")
-                            .note("instead", format!("import named exports: `import {{ {n} }} from ...` or `import * as {n} from ...`")),
-                    );
+                    // the module's `export default`
+                    let ts = &self.scopes[target as usize];
+                    let value = default_sym.filter(|d| ts.exported_values.contains(d)).and_then(|d| ts.values.get(&d)).map(|d| d.0);
+                    let ty = default_sym.filter(|d| ts.exported_types.contains(d)).and_then(|d| ts.types.get(&d)).map(|d| d.0);
+                    if let Some(v) = value {
+                        self.bind_import(mi, name, span, v, false, report);
+                    }
+                    if let Some(t) = ty {
+                        self.bind_import(mi, name, span, t, true, report);
+                    }
+                    if report && value.is_none() && ty.is_none() {
+                        let target_name = &modules[target as usize].name;
+                        self.done.push(Diagnostic::new("N0102", span, format!("`{target_name}` has no default export")).note("instead", "import its named exports: `import { name } from ...`"));
+                    }
                 }
                 if let Some((ns, span)) = imp.namespace {
-                    self.bind_import(mi, ns, span, Decl::Ns(target), false);
-                    self.bind_import(mi, ns, span, Decl::Ns(target), true);
+                    self.bind_import(mi, ns, span, Decl::Ns(target), false, report);
+                    self.bind_import(mi, ns, span, Decl::Ns(target), true, report);
                     continue;
                 }
-                for &(name, span) in &imp.names {
+                for (k, &(name, span)) in imp.names.iter().enumerate() {
+                    let local = local_of(k);
                     let ts = &self.scopes[target as usize];
                     let value = ts.values.get(&name).filter(|_| ts.exported_values.contains(&name)).map(|d| d.0);
                     let ty = ts.types.get(&name).filter(|_| ts.exported_types.contains(&name)).map(|d| d.0);
                     if value.is_none() && ty.is_none() {
+                        if !report {
+                            continue;
+                        }
                         let n = self.interner.get(name).to_string();
                         let mut exports: Vec<&str> = ts.exported_values.iter().chain(ts.exported_types.iter()).map(|s| self.interner.get(*s)).collect();
                         exports.sort();
@@ -1003,21 +1151,21 @@ impl<'a> Checker<'a> {
                         continue;
                     }
                     if let Some(v) = value {
-                        self.bind_import(mi, name, span, v, false);
+                        self.bind_import(mi, local, span, v, false, report);
                     }
                     if let Some(t) = ty {
-                        self.bind_import(mi, name, span, t, true);
+                        self.bind_import(mi, local, span, t, true, report);
                     }
                 }
             }
         }
     }
 
-    fn bind_import(&mut self, m: usize, name: Sym, span: Span, decl: Decl, is_type: bool) {
+    fn bind_import(&mut self, m: usize, name: Sym, span: Span, decl: Decl, is_type: bool, report: bool) {
         let scope = &mut Arc::make_mut(&mut self.scopes)[m];
         let table = if is_type { &mut scope.types } else { &mut scope.values };
         if let Some((existing, prev)) = table.get(&name) {
-            if *existing != decl {
+            if *existing != decl && report {
                 let n = self.interner.get(name).to_string();
                 let (line, _) = self.sm.get(prev.file).line_col(prev.start);
                 self.done.push(Diagnostic::new("N0003", span, format!("`{n}` is already declared in this module")).note("previous", format!("line {line}")));

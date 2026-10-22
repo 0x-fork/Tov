@@ -1,0 +1,7 @@
+region         revenue    units  top        level
+east          228547.60     4496  gizmo      mid
+south         216777.03     4268  thing      mid
+north         210944.74     4221  thing      mid
+west          203708.23     4085  thing      mid
+central       183092.00     3981  gadget     mid
+2000 rows from data.csv high

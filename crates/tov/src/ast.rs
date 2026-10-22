@@ -28,6 +28,23 @@ pub struct Ast {
     pub quiet_tests: Vec<ExprId>,
     /// The name `__iterator` (`[Symbol.iterator]` methods), for rewrites that call it.
     pub iterator_sym: Option<Sym>,
+    /// `export { a, b as c }`, `export * from "m"` and the like (see `ExportSpec`).
+    pub exports: Vec<ExportSpec>,
+    /// What `export default` names: a declaration, or the hidden constant holding its value.
+    pub default_export: Option<(Sym, Span)>,
+}
+
+/// An export list: names this module exports under other names, or another module's exports
+/// it passes on.
+pub struct ExportSpec {
+    /// `... from "m"`: the import item (hidden: it binds nothing here) naming the module.
+    pub from: Option<u32>,
+    /// (the name here, or in that module; the name it's exported as; where)
+    pub names: Vec<(Sym, Sym, Span)>,
+    /// `export * from "m"`: everything it exports but its default.
+    pub star: bool,
+    /// `export * as ns from "m"`.
+    pub namespace: Option<(Sym, Span)>,
 }
 
 impl Ast {
@@ -357,7 +374,12 @@ pub enum MemberKind {
 }
 
 pub struct Import {
+    /// The names imported, as the module exports them (`a` in `import { a as b }`).
     pub names: Vec<(Sym, Span)>,
+    /// What each is called here (`b`), aligned with `names`.
+    pub locals: Vec<Sym>,
+    /// Made for an `export ... from`: it names the module and binds nothing.
+    pub reexport: bool,
     pub namespace: Option<(Sym, Span)>,
     /// `import x from "pkg"`: only npm packages have a default export.
     pub default: Option<(Sym, Span)>,
@@ -419,11 +441,27 @@ impl Ast {
                 _ => {}
             }
         }
+        for spec in &mut self.exports {
+            spec.names.iter_mut().for_each(|(a, b, _)| {
+                *a = f(*a);
+                *b = f(*b);
+            });
+            if let Some((n, _)) = &mut spec.namespace {
+                *n = f(*n);
+            }
+        }
+        if let Some((n, _)) = &mut self.default_export {
+            *n = f(*n);
+        }
         for item in &mut self.items {
             match &mut item.kind {
                 ItemKind::Import(imp) => {
                     imp.names.iter_mut().for_each(|(n, _)| *n = f(*n));
+                    imp.locals.iter_mut().for_each(|n| *n = f(*n));
                     if let Some((n, _)) = &mut imp.namespace {
+                        *n = f(*n);
+                    }
+                    if let Some((n, _)) = &mut imp.default {
                         *n = f(*n);
                     }
                 }

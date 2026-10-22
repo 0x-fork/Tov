@@ -1,11 +1,6 @@
-error[X0011] typescript_habits.tov:3:1: default exports are not supported
-    3 | export default function helper(x: any): number {
-  instead: export the declaration by name and import it with `import { name }`
-  fix[maybe]: remove `default`
-
 error[X0001] typescript_habits.tov:3:35: `any` is not supported
     3 | export default function helper(x: any): number {
   instead: use the precise type, a union, a generic `<T>`, or `unknown` with narrowing
   fix[maybe]: use `unknown`
 
-2 error(s)
+1 error(s)
