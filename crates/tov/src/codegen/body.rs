@@ -5550,6 +5550,98 @@ impl<'c, 'a> Gen<'c, 'a> {
         }
     }
 
+    /// `value` as an append to `target` (a string path): it starts with `target` (`target + a + b`,
+    /// a template beginning with `${target}`, `target.concat(a, b)`), and the rest can't change
+    /// `target` (it's a local nothing captures, or the rest calls nothing that could). The rest
+    /// of a template's text, and the pieces to append.
+    fn self_append(&self, target: ExprId, value: ExprId) -> Option<(Option<Vec<String>>, Vec<ExprId>)> {
+        let m = self.cur_m();
+        let ast = self.ast(m);
+        let facts = self.facts(m);
+        fn same(ast: &crate::ast::Ast, facts: &crate::check::facts::ModuleFacts, a: ExprId, b: ExprId) -> bool {
+            match (&ast.expr(a).kind, &ast.expr(b).kind) {
+                (ExprKind::Paren(x), _) => same(ast, facts, *x, b),
+                (_, ExprKind::Paren(y)) => same(ast, facts, a, *y),
+                (ExprKind::Ident(x), ExprKind::Ident(y)) => x == y && facts.idents.get(&a).is_some() && facts.idents.get(&a) == facts.idents.get(&b),
+                (ExprKind::This, ExprKind::This) => true,
+                (ExprKind::Member { obj: o1, name: n1, optional: false, .. }, ExprKind::Member { obj: o2, name: n2, optional: false, .. }) => {
+                    n1 == n2 && !facts.calls.contains_key(&a) && !facts.calls.contains_key(&b) && same(ast, facts, *o1, *o2)
+                }
+                _ => false,
+            }
+        }
+        let (tparts, rest): (Option<Vec<String>>, Vec<ExprId>) = match &ast.expr(value).kind {
+            ExprKind::Binary(BinOp::Add, ..) => {
+                let mut parts = Vec::new();
+                let mut cur = value;
+                while let ExprKind::Binary(BinOp::Add, a, b) = ast.expr(cur).kind {
+                    if facts.expr_ty.get(cur as usize) != Some(&STR) {
+                        break;
+                    }
+                    parts.push(b);
+                    cur = a;
+                }
+                if !same(ast, facts, cur, target) {
+                    return None;
+                }
+                parts.reverse();
+                (None, parts)
+            }
+            ExprKind::Template(ps, xs) if ps.first().is_some_and(|p| p.is_empty()) && xs.first().is_some_and(|&x| same(ast, facts, x, target)) => (Some(ps[1..].to_vec()), xs[1..].to_vec()),
+            ExprKind::Call { callee, args, optional: false, .. }
+                if matches!(&ast.expr(*callee).kind, ExprKind::Member { obj, name, optional: false, .. } if self.sym(*name) == "concat" && same(ast, facts, *obj, target))
+                    && matches!(facts.calls.get(&value).map(|c| &c.callee), Some(Callee::Method(t)) if *t == STR)
+                    && args.iter().all(|a| !matches!(ast.expr(a.expr).kind, ExprKind::Spread(_))) =>
+            {
+                (None, args.iter().map(|a| a.expr).collect())
+            }
+            _ => return None,
+        };
+        // (a local nothing captures can only change here)
+        let own_local = match (&ast.expr(target).kind, facts.idents.get(&target)) {
+            (ExprKind::Ident(_), Some(IdentFact::Local(k))) => !self.bodies.last().is_some_and(|b| b.boxed.contains(k)),
+            _ => false,
+        };
+        if !own_local && !rest.iter().all(|&x| self.harmless(x)) {
+            return None;
+        }
+        Some((tparts, rest))
+    }
+
+    /// Can evaluating `e` change no variable or field (no assignment, and no call but built-ins on
+    /// numbers and strings)?
+    fn harmless(&self, e: ExprId) -> bool {
+        let m = self.cur_m();
+        let ast = self.ast(m);
+        let facts = self.facts(m);
+        let mut es = Vec::new();
+        collect_exprs_expr(ast, e, &mut es);
+        es.iter().all(|&x| match &ast.expr(x).kind {
+            ExprKind::Assign(..) | ExprKind::Update { .. } | ExprKind::Await(_) | ExprKind::Yield(..) | ExprKind::Arrow(_) | ExprKind::New { .. } => false,
+            ExprKind::Call { .. } => match facts.calls.get(&x).map(|c| &c.callee) {
+                Some(Callee::Method(t)) => self.c.types.is_string(*t) || self.c.types.is_numeric(*t) || *t == BOOL,
+                Some(Callee::Builtin { ns, name }) => {
+                    let n = self.sym(*name);
+                    match ns.map(|s| self.sym(s)) {
+                        Some("Math") => true,
+                        None => matches!(n, "String" | "Number" | "parseInt" | "parseFloat" | "isNaN" | "isFinite") && {
+                            let ExprKind::Call { args, .. } = &ast.expr(x).kind else { return false };
+                            args.iter().all(|a| {
+                                let t = facts.expr_ty.get(a.expr as usize).copied().unwrap_or(ERROR);
+                                self.c.types.is_string(t) || self.c.types.is_numeric(t) || t == BOOL
+                            })
+                        },
+                        _ => false,
+                    }
+                }
+                _ => false,
+            },
+            // (a getter is a call)
+            ExprKind::Member { .. } => !facts.calls.contains_key(&x),
+            _ => true,
+        })
+    }
+
     fn assign(&mut self, op: AssignOp, target: ExprId, value: ExprId, span: Span) -> Val {
         // a JavaScript property: assigned in JavaScript
         let m = self.cur_m();
@@ -5563,6 +5655,48 @@ impl<'c, 'a> Gen<'c, 'a> {
                 let ty = self.ty(target);
                 return self.js_assign(&js_op, target, value, ty, span);
             }
+        }
+        // `s = s + a + b`, `s = `${s}...``, `s = s.concat(a)`: appended in place (see
+        // `tv_str_append_bytes`), so a loop building a string is linear
+        if op == AssignOp::Assign
+            && self.ty(target) == STR
+            && let Some((tparts, rest)) = self.self_append(target, value)
+        {
+            let p = self.place(target);
+            let lv = self.place_lvalue(&p);
+            if p.weak || p.ty != STR {
+                // (held in a union or weakly: the whole value, stored as any other; the target
+                // is a plain path, so reading it after its place changes nothing)
+                let v = self.expr(value);
+                if p.weak {
+                    return self.weak_store(&p.lv, p.ty, v);
+                }
+                let v = self.coerce(v, p.ty);
+                let code = self.consume(v);
+                let ct = self.ctype(p.ty);
+                let nv = self.fresh("n");
+                self.line(format!("{ct} {nv} = {code};"));
+                let r = self.release_code(p.ty, &lv);
+                self.line(format!("{r}; {lv} = {nv};"));
+                return Val::plain(lv, p.ty);
+            }
+            let vals: Vec<Val> = self.exprs_in_order(&rest);
+            let sbv = self.fresh("sb");
+            self.line(format!("tv_sb {sbv} = {{0}};"));
+            self.open("{");
+            self.line(format!("tv_sb *sb = &{sbv};"));
+            match tparts {
+                Some(parts) => self.template_into(&parts, &vals),
+                None => {
+                    for v in &vals {
+                        let c = self.string_code(v.ty, &v.code);
+                        self.line(format!("{c};"));
+                    }
+                }
+            }
+            self.close("}");
+            self.line(format!("tv_str_append_bytes(&({lv}), {sbv}.data, {sbv}.len, 0); tv_sb_free(&{sbv});"));
+            return Val::plain(lv, STR);
         }
         // `xs.length = n` (`xs.length -= k`): drops the elements from n on
         if let ExprKind::Member { obj, name, .. } = self.ast(m).expr(target).kind
