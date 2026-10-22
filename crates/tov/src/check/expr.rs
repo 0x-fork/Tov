@@ -217,6 +217,11 @@ impl<'a> Checker<'a> {
                 if let Some(ty) = self.keyed_place(e, *t, Some(*v)) {
                     return ty;
                 }
+                if *op == AssignOp::Assign
+                    && let Some(slot) = self.evolving_let(*t)
+                {
+                    self.evolve(slot, &[Arg { expr: *v, by_ref: None }]);
+                }
                 // `xs[i] = x` on an untyped `const xs = []`: its elements are what it's given
                 if *op == AssignOp::Assign
                     && let ExprKind::Index { obj, .. } = self.ast().expr(*t).kind
@@ -1368,7 +1373,16 @@ impl<'a> Checker<'a> {
         let (id, _) = self.lookup(s)?;
         let fcx = self.fcx.last()?;
         let key = fcx.locals[id].span.start;
-        fcx.evolving.iter().position(|e| e.0 == key)
+        fcx.evolving.iter().position(|e| e.0 == key && !e.3)
+    }
+
+    /// `x` (an expression), when it's a `let x` still finding its type.
+    fn evolving_let(&self, x: ExprId) -> Option<usize> {
+        let ExprKind::Ident(s) = self.ast().expr(x).kind else { return None };
+        let (id, _) = self.lookup(s)?;
+        let fcx = self.fcx.last()?;
+        let key = fcx.locals[id].span.start;
+        fcx.evolving.iter().position(|e| e.0 == key && e.3)
     }
 
     /// The array at `slot` is given the values `args`: their types join its elements'.

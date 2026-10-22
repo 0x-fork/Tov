@@ -207,7 +207,8 @@ struct FnCtx {
     /// what it's given (`xs.push(x)`, `xs[i] = x`): the element type, by declaration.
     evolved: HashMap<u32, TyId>,
     /// Such arrays this check: what they're given so far (see `evolve`), and where they are.
-    evolving: Vec<(u32, Span, Vec<TyId>)>,
+    /// (`true`: a `let x` with neither type nor value, typed by what's assigned to it)
+    evolving: Vec<(u32, Span, Vec<TyId>, bool)>,
     /// A non-exhaustive `switch` was reported; "missing return" would only repeat it.
     reported_nonexhaustive: bool,
     /// Narrowings of field paths (`t.left`): (local, path, narrowed type or `None` = invalidated).
@@ -1365,9 +1366,17 @@ impl<'a> Checker<'a> {
     /// After a check of a body: the element types its untyped empty arrays were given join
     /// `evolved` (true when any did: the body is checked again with them); one given nothing
     /// is reported, as TypeScript can't type it either.
-    fn settle_evolving(&mut self, evolved: &mut HashMap<u32, TyId>, evolving: Vec<(u32, Span, Vec<TyId>)>) -> bool {
+    fn settle_evolving(&mut self, evolved: &mut HashMap<u32, TyId>, evolving: Vec<(u32, Span, Vec<TyId>, bool)>) -> bool {
         let mut grew = false;
-        for (key, span, given) in evolving {
+        for (key, span, given, whole) in evolving {
+            if given.is_empty() && whole {
+                let n = self.src(span).to_string();
+                self.report(
+                    Diagnostic::new("T0301", span, format!("`{n}` needs a type annotation or an initial value"))
+                        .fix(Applicability::Placeholder, format!("annotate `{n}: T`"), span.empty_at_end(), ": T"),
+                );
+                continue;
+            }
             if given.is_empty() {
                 self.report(
                     Diagnostic::new("T0301", span, "can't infer the element type of an empty array")

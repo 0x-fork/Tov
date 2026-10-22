@@ -239,7 +239,7 @@ impl<'a> Checker<'a> {
                             Some(&e) => e,
                             None => {
                                 let span = self.ast().expr(*i).span;
-                                self.fcx().evolving.push((key, span, Vec::new()));
+                                self.fcx().evolving.push((key, span, Vec::new(), false));
                                 ERROR
                             }
                         };
@@ -260,6 +260,19 @@ impl<'a> Checker<'a> {
                             (F64, false)
                         } else {
                             (t, promotable)
+                        }
+                    }
+                    // `let x`: what's assigned to it, as TypeScript's evolving `let` (see
+                    // `settle_evolving`)
+                    (None, None) if *mutable && !self.fcx.is_empty() => {
+                        let key = name_span.start;
+                        // (`undefined` until assigned: assignments narrow it, as TypeScript's do)
+                        match self.fcx.last().unwrap().evolved.get(&key) {
+                            Some(&t) => (self.types.union(&[t, UNDEFINED]), false),
+                            None => {
+                                self.fcx().evolving.push((key, *name_span, Vec::new(), true));
+                                (ERROR, false)
+                            }
                         }
                     }
                     (None, None) => {
