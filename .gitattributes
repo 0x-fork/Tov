@@ -1,2 +1,5 @@
 # Use TypeScript syntax highlighting for Tov source files on GitHub.
 *.tov linguist-language=TypeScript
+
+# Node.js's own library, copied in for npm packages: not counted in the language stats.
+runtime/node/** linguist-vendored
