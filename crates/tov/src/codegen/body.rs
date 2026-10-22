@@ -4886,7 +4886,7 @@ impl<'c, 'a> Gen<'c, 'a> {
                 Sub => format!("({} - {})", a.code, b.code),
                 Mul => format!("({} * {})", a.code, b.code),
                 Div => format!("({} / {})", a.code, b.code),
-                Rem => format!("fmod({}, {})", a.code, b.code),
+                Rem => format!("tv_fmod({}, {})", a.code, b.code),
                 _ => format!("pow({}, {})", a.code, b.code),
             };
             return Val::plain(code, ty);

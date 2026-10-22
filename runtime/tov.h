@@ -32,6 +32,18 @@ typedef int64_t tv_int;
 /* JavaScript's ToInt32 of a number (for bitwise operators): truncated, wrapped to 32 bits;
  * NaN and the infinities give 0. */
 static inline bool tv_f64_truthy(double d) { return d != 0 && d == d; }
+/* JavaScript's `%` on numbers: integer division when both are whole (as most are, `n % i`
+ * after `n = n / i`), fmod otherwise. The result has the dividend's sign, -0 included. */
+static inline double tv_fmod(double a, double b) {
+    if (__builtin_expect(__builtin_fabs(a) < 9007199254740992.0 && __builtin_fabs(b) < 9007199254740992.0 && b != 0, 1)) {
+        int64_t x = (int64_t)a, y = (int64_t)b;
+        if ((double)x == a && (double)y == b) {
+            int64_t r = x % y;
+            return r == 0 ? __builtin_copysign(0.0, a) : (double)r;
+        }
+    }
+    return __builtin_fmod(a, b);
+}
 /* JavaScript's ToIntegerOrInfinity, clamped to an int: truncated toward zero, NaN is 0. */
 static inline tv_int tv_f64_to_int_js(double d) {
     if (__builtin_expect(d > -9.2e18 && d < 9.2e18, 1)) return (tv_int)d;
