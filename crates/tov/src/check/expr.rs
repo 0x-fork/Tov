@@ -1226,6 +1226,11 @@ impl<'a> Checker<'a> {
                 }
                 if let Some(local) = place.local
                     && self.assignable(tv, place.ty) && matches!(self.types.get(self.local(local).ty), Ty::Union(_)) {
+                        // (a literal the declared type doesn't name is its primitive: `s = "a"` on
+                        // a `string | undefined` leaves a `string`, as TypeScript's does)
+                        let declared = self.types.members(self.local(local).ty);
+                        let ms: Vec<TyId> = self.types.members(tv).into_iter().map(|m| if declared.contains(&m) { m } else { self.types.widen(m) }).collect();
+                        let tv = self.types.union(&ms);
                         self.narrow(local, tv);
                     }
             }
