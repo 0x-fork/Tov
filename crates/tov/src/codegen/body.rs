@@ -4874,6 +4874,16 @@ impl<'c, 'a> Gen<'c, 'a> {
             }
             Some(MemberFact::NsConst(cm, ci)) => return self.const_ref(cm, ci),
             Some(MemberFact::StaticField(c, mi)) => return self.static_field_ref(c, mi),
+            Some(MemberFact::TupleLength(n)) => {
+                let v = self.expr(obj);
+                if optional && self.c.types.has_nullish(v.ty) {
+                    let present = self.truthy(v);
+                    let some = self.coerce(Val::plain(format!("INT64_C({n})"), INT), ty);
+                    let none = self.coerce(Val::plain("0", UNDEFINED), ty);
+                    return Val::plain(format!("(({present}) ? {} : {})", some.code, none.code), ty);
+                }
+                return Val::plain(format!("INT64_C({n})"), INT);
+            }
             Some(MemberFact::ClassName(inst)) => {
                 let v = self.expr(inst);
                 let Some((decl, _)) = self.c.class_of(v.ty) else { return Val::plain("TV_EMPTY_STR", STR) };

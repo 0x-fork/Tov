@@ -1960,6 +1960,15 @@ impl<'a> Checker<'a> {
             }
             return self.types.optional(STR);
         }
+        // `t.length` on a tuple `[A, B]` (a record of fields `0`, `1`): known
+        if self.name(name) == "length"
+            && let Some(fs) = self.tuple_of(base)
+        {
+            if let Some(f) = self.facts_mut() {
+                f.members.insert(e, MemberFact::TupleLength(fs.len() as u32));
+            }
+            return if optional { self.types.optional(INT) } else { INT };
+        }
         // `groups.year` on a `Record<string, V>` (a map): `groups["year"]`, as TypeScript reads
         // an index signature
         if let Ty::Map(k, v) = *self.types.get(base)

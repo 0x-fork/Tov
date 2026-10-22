@@ -88,6 +88,8 @@ pub enum MemberFact {
     ClassName(ExprId),
     /// `process.env.NAME` (the variable's name).
     Env(Sym),
+    /// `t.length` on a tuple: its number of elements.
+    TupleLength(u32),
     /// `req.params` in a `routes` handler: the route's `:name` segments as this record type,
     /// read from the request's params map.
     RouteParams(TyId),
