@@ -62,6 +62,24 @@ impl<'c, 'a> Gen<'c, 'a> {
                     argv.push(arr);
                 }
                 let ret = self.inst(fact.ret);
+                // `/re/g`: each evaluation makes a new RegExp; the site keeps its first, and gives
+                // it out again whenever nothing else holds it (lastIndex back at 0, it's as good
+                // as new: nothing can tell)
+                if matches!(ast.expr(*callee).kind, ExprKind::Ident(f) if self.sym(f) == "__reLiteral")
+                    && args.len() == 2
+                    && args.iter().all(|a| matches!(ast.expr(a.expr).kind, ExprKind::Str(_)))
+                    && self.c.class_of(ret).is_some()
+                {
+                    let ct = self.ctype(ret);
+                    let (cache, v) = (self.fresh("rec"), self.fresh("re"));
+                    let call = format!("{cname}({})", argv.join(", "));
+                    self.line(format!("static {ct} {cache}; {ct} {v};"));
+                    self.line(format!(
+                        "if ({cache} && ((tvg_obj *){cache})->rc == 1) {{ {v} = {cache}; {v}->f_lastIndex = 0; tvg_obj_retain({v}); }} else {{ {v} = {call}; if (!{cache}) {{ {cache} = {v}; tvg_obj_retain({v}); }} }}"
+                    ));
+                    let r = self.tmp(ret, &v, true);
+                    return self.coerce(r, ty);
+                }
                 self.finish_call(&format!("{cname}({})", argv.join(", ")), ret, ty)
             }
             Callee::Value => {
@@ -1627,7 +1645,7 @@ impl<'c, 'a> Gen<'c, 'a> {
                 Val::plain("0", VOID)
             }
             (Some("__native"), _) => {
-                if name.starts_with("re") && matches!(name, "reCompile" | "reFlags" | "reExec" | "reNames") {
+                if name.starts_with("re") && matches!(name, "reCompile" | "reFlags" | "reExec" | "reNames" | "reSplit" | "reReplace") {
                     self.uses_regexp = true;
                 }
                 let (ps, ret) = crate::check::native_sig_pub(&mut self.c.types, name).unwrap_or((Vec::new(), VOID));

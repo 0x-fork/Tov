@@ -92,7 +92,15 @@ export class RegExp {
   /** (the compiled expression, for the prelude's string functions) */
   __id(): int { return this.h }
   test(s: string): bool {
-    return this.exec(s) !== null
+    // (as exec, without making the match)
+    const keep = this.global || this.sticky
+    const p = __native.reExec(this.h, s, keep ? this.lastIndex : 0)
+    if (p.length === 0) {
+      if (keep) this.lastIndex = 0
+      return false
+    }
+    if (keep) this.lastIndex = p[1]!
+    return true
   }
   exec(s: string): RegExpExecArray | null {
     const keep = this.global || this.sticky
@@ -251,6 +259,12 @@ export function __reReplaceFn(s: string, re: RegExp, f: (m: string, p1: string, 
 function __reReplaceWith(s: string, re: RegExp, rep: string, f: ((m: string, p1: string, p2: string, p3: string, p4: string, p5: string, p6: string, p7: string, p8: string, p9: string) => string) | undefined): string {
   const h = re.__id()
   const global = re.global
+  // (a plain replacement: the runtime's loop)
+  if (f === undefined && !re.sticky && !rep.includes("$")) {
+    const out = __native.reReplace(h, s, rep)
+    if (global) re.lastIndex = 0
+    return out
+  }
   let from = global ? 0 : re.sticky ? re.lastIndex : 0
   let out = ""
   let last = 0
@@ -280,8 +294,9 @@ function __reReplaceWith(s: string, re: RegExp, rep: string, f: ((m: string, p1:
 
 /** `s.split(re)`: the parts between matches, with the groups of each match between them. */
 export function __reSplit(s: string, re: RegExp, limit?: int): string[] {
-  const out: string[] = []
   const max = limit ?? 4294967295
+  if (!re.sticky) return __native.reSplit(re.__id(), s, max)
+  const out: string[] = []
   if (max === 0) return out
   const h = re.__id()
   if (s.length === 0) {

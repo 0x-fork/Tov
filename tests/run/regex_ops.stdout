@@ -1,0 +1,17 @@
+["","The","quick","brown","fox","jumps,","over;","the","lazy","dog.",""] ["The","quick","brown","fox","jumps,","over;","the","lazy","dog."] ["","","The","quick"]
+["a","b","","c"] ["a","b","c",""] ["a","b","c"] [""] []
+["a","1","b","2","c","3",""] ["one"," ",""," ","two"] ["x","y","z"]
+ The quick brown fox jumps, over; the lazy dog.  | _The quick	brown  fox
+jumps, over; the lazy dog.   | elloorld | HelloWorld
+a/b/c a-b tab->here x bbbbbb
+price: USD 5 a[b]c a<b>c a$c
+[ 'ÀbcÀ', 'éé' ] navecaf 3
+true false false true false true
+3
+false false
+true 2 true 3 false 0
+3,3,3
+[ 'A', 'B' ] [ 'a', 'b' ] x [ 'a', 'b' ] ###
+ lots of space  _amel_ase_tring [ '1', '2' ] 2
+20 [ 'Mi', 'i', 'ippi' ] MiSSiSSippi
+[ 'x', 'y', 'z' ] a-b true 2 true [ 'a', '' ]

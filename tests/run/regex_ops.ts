@@ -1,0 +1,24 @@
+const s = "  The quick\tbrown  fox\njumps, over; the lazy dog.  ";
+console.log(JSON.stringify(s.split(/\s+/)), JSON.stringify(s.trim().split(/\s+/)), JSON.stringify(s.split(/\s/, 4)));
+console.log(JSON.stringify("a,b,,c".split(/,/)), JSON.stringify("a1b22c333".split(/\d+/)), JSON.stringify("abc".split(/x*/)), JSON.stringify("".split(/,/)), JSON.stringify("".split(/x*/)));
+console.log(JSON.stringify("a1b2c3".split(/(\d)/)), JSON.stringify("one  two".split(/( )/)), JSON.stringify("x-y_z".split(/[-_]/)));
+console.log(s.replace(/\s+/g, " "), "|", s.replace(/\s+/, "_"), "|", "Hello World".replace(/[^a-z]/g, ""), "|", "Hello World".replace(/[^a-z]/gi, ""));
+console.log("a.b.c".replace(/\./g, "/"), "a+b".replace(/\+/, "-"), "tab\there".replace(/\t/, "->"), "x".replace(/y/g, "z"), "aaa".replace(/a/g, "bb"));
+console.log("price: $5".replace(/\$/, "USD "), "abc".replace(/b/, "[$&]"), "abc".replace(/(b)/, "<$1>"), "abc".replace(/b/g, "$$"));
+console.log("ÀbcÀ éé".split(/\s+/), "naïve café".replace(/[^a-z]/g, ""), "a😀b".split(/(?:)/u).length);
+console.log(/\d+/.test("abc123"), /^\d+$/.test("123a"), /[A-Z]/.test("abc"), /[a-z]/i.test("ABC"), /./.test("\n"), /./s.test("\n"));
+let n = 0;
+for (let i = 0; i < 3; i++) if (/a/g.test("banana")) n++;
+console.log(n);
+const kept: RegExp[] = [];
+for (let i = 0; i < 3; i++) kept.push(/x/g);
+console.log(kept[0] === kept[1], kept[1] === kept[2]);
+const re = /o/g;
+console.log(re.test("foo"), re.lastIndex, re.test("foo"), re.lastIndex, re.test("foo"), re.lastIndex);
+const lits: number[] = [];
+for (let i = 0; i < 3; i++) { const r = /n/g; r.test("banana"); lits.push(r.lastIndex); }
+console.log(lits.join(","));
+console.log("A-B-C".split(/-/, 2), "a\\b".split(/\\/), "[x]".replace(/[\[\]]/g, ""), "a]b".split(/]/), "1-2".replace(/[0-9-]/g, "#"));
+console.log("  lots   of   space  ".replace(/ +/g, " "), "CamelCaseString".replace(/[A-Z]/g, "_"), "a1b2".match(/\d/g), "abc".search(/c/));
+console.log("x".repeat(10).replace(/x/g, "yz").length, "Mississippi".split(/s+/), "Mississippi".replace(/s/gi, "S"));
+console.log("x😀y😀z".split(/😀/), "a😀b".replace(/😀/g, "-"), /😀/.test("hi 😀"), "😀😀".match(/😀/g)?.length, /[😀]/.test("😀"), "a😀".split(/😀/u));
