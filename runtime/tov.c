@@ -2791,12 +2791,25 @@ static inline bool tv_key_eq(const tv_type *kt, const void *a, const void *b) {
     return kt->eq(a, b);
 }
 
+/* A store's size: small ones (most maps: 8 entries) come from the small-object free lists, in
+ * sizes of 16 bytes so their entries stay aligned. */
+enum { TV_MAPBUF_SMALL = 512 };
+static size_t tv_mapbuf_bytes(int64_t cap, tv_mlayout L) {
+    size_t bytes = tv_size_mul_add((size_t)cap, L.stride, sizeof(tv_mapbuf));
+    bytes = tv_size_mul_add((size_t)cap * 2, sizeof(uint32_t), bytes);
+    return bytes <= TV_MAPBUF_SMALL ? (bytes + 15) & ~(size_t)15 : bytes;
+}
+static void tv_mapbuf_free(tv_mapbuf *m, tv_mlayout L) {
+    size_t bytes = tv_mapbuf_bytes(m->cap, L);
+    if (bytes <= TV_MAPBUF_SMALL) tv_small_free(m, bytes);
+    else free(m);
+}
+
 static tv_mapbuf *tv_mapbuf_new(int64_t cap, tv_mlayout L) {
     if (cap > ((int64_t)1 << 31)) tv_trap("map too large", NULL);
     size_t islots = (size_t)cap * 2;
-    size_t bytes = tv_size_mul_add((size_t)cap, L.stride, sizeof(tv_mapbuf));
-    bytes = tv_size_mul_add(islots, sizeof(uint32_t), bytes);
-    tv_mapbuf *m = (tv_mapbuf *)tv_alloc(bytes);
+    size_t bytes = tv_mapbuf_bytes(cap, L);
+    tv_mapbuf *m = (tv_mapbuf *)(bytes <= TV_MAPBUF_SMALL ? tv_small_alloc(bytes) : tv_alloc(bytes));
     m->rc = 1;
     m->count = m->used = 0;
     m->cap = cap;
@@ -2835,7 +2848,7 @@ static tv_mapbuf *tv_map_rebuild(const tv_mapbuf *old, tv_mlayout L, int64_t cap
 static inline tv_mapbuf *tv_map_buf(tv_map m) { return m.p ? m.p->b : NULL; }
 
 tv_map tv_map_fresh(void) {
-    tv_maphdr *h = (tv_maphdr *)tv_alloc(sizeof(tv_maphdr));
+    tv_maphdr *h = (tv_maphdr *)tv_small_alloc(sizeof(tv_maphdr));
     h->rc = 1;
     h->b = NULL;
     h->object = 0;
@@ -2894,10 +2907,11 @@ static void tv_map_release_entries(tv_mapbuf *m, const tv_type *kt, const tv_typ
 void tv_map_release(tv_map m, const tv_type *kt, const tv_type *vt) {
     if (!m.p || m.p->rc <= 0 || --m.p->rc > 0) return;
     if (m.p->b) {
-        tv_map_release_entries(m.p->b, kt, vt, tv_mlay(kt, vt));
-        free(m.p->b);
+        tv_mlayout L = tv_mlay(kt, vt);
+        tv_map_release_entries(m.p->b, kt, vt, L);
+        tv_mapbuf_free(m.p->b, L);
     }
-    free(m.p);
+    tv_small_free(m.p, sizeof(tv_maphdr));
 }
 
 tv_int tv_map_size(tv_map m) { tv_mapbuf *b = tv_map_buf(m); return b ? b->count : 0; }
@@ -2922,7 +2936,7 @@ static unsigned char *tv_map_add(tv_map *mp, tv_mapbuf *m, tv_mlayout L, const t
         /* full: compact if at least half the entries are deleted, else double */
         int64_t ncap = m->count * 2 <= m->cap ? m->cap : m->cap * 2;
         tv_mapbuf *n = tv_map_rebuild(m, L, ncap, false, kt, vt);
-        free(m);
+        tv_mapbuf_free(m, L);
         mp->p->b = m = n;
         pos = h & m->mask;
         while (m->index[pos]) pos = (pos + 1) & m->mask;
@@ -3080,8 +3094,9 @@ void tv_map_clear(tv_map *m, const tv_type *kt, const tv_type *vt) {
     tv_mapbuf *b = tv_map_buf(*m);
     if (!b) return;
     m->p->b = NULL; /* (a release callback sees the map empty) */
-    tv_map_release_entries(b, kt, vt, tv_mlay(kt, vt));
-    free(b);
+    tv_mlayout L = tv_mlay(kt, vt);
+    tv_map_release_entries(b, kt, vt, L);
+    tv_mapbuf_free(b, L);
 }
 
 static tv_arr tv_map_column(tv_map mm, const tv_type *kt, const tv_type *vt, bool values) {

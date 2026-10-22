@@ -2071,6 +2071,8 @@ static inline void tvg_gc_obj(void *p) {
 /* A buffer reachable from a cyclic object: returns true when its elements should be visited now. */
 static bool tvg_gc_buf(void *buf, int64_t len, tvg_gv_fn fn) {
     if (!buf || *(int64_t *)buf < 0) return false;
+    /* (held only by what reached it, which is visited once a phase: no need to count it) */
+    if (*(int64_t *)buf == 1) return true;
     int fresh;
     tvg_gcb *b = tvg_gcb_find(buf, &fresh);
     if (fresh) { b->len = len; b->fn = fn; }
@@ -2081,7 +2083,7 @@ static bool tvg_gc_buf(void *buf, int64_t len, tvg_gv_fn fn) {
 }
 static void tvg_cyc_collect(void) {
     tvg_cyc_since = 0;
-    if (tvg_gcb_tab) memset(tvg_gcb_tab, 0, tvg_gcb_cap * sizeof(tvg_gcb));
+    if (tvg_gcb_n) memset(tvg_gcb_tab, 0, tvg_gcb_cap * sizeof(tvg_gcb));
     tvg_gcb_n = 0;
     for (tvg_cyc *c = tvg_cyc_head.next; c != &tvg_cyc_head; c = c->next) c->gc = TVG_OBJ(c)->rc;
     tvg_gc_phase = 1;
@@ -2090,7 +2092,7 @@ static void tvg_cyc_collect(void) {
     tvg_gc_sn = 0;
     for (tvg_cyc *c = tvg_cyc_head.next; c != &tvg_cyc_head; c = c->next)
         if (c->gc > 0) { TVG_OBJ(c)->flags |= TVG_REACHED; tvg_gc_push(TVG_OBJ(c)); }
-    for (size_t i = 0; i < tvg_gcb_cap; i++) {
+    for (size_t i = 0; tvg_gcb_n && i < tvg_gcb_cap; i++) {
         tvg_gcb *b = &tvg_gcb_tab[i];
         if (b->buf && !b->reached && *(int64_t *)b->buf > b->internal) { b->reached = 1; b->fn(b->buf, b->len); }
     }
