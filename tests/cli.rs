@@ -46,3 +46,13 @@ fn help_after_a_command_prints_help_instead_of_running_it() {
         assert!(!String::from_utf8_lossy(&out.stdout).contains("freed"), "{command} --help ran the command");
     }
 }
+
+#[test]
+fn test_directories_run_each_typescript_test_file() {
+    let out = cli("test").arg("tests/cli/jest_dir").output().expect("run compiler");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(!out.status.success(), "a file that doesn't build fails the run: {stdout}");
+    assert!(stdout.contains("ok   adds > one and two"), "{stdout}");
+    assert!(stdout.contains("unknown name `missing`"), "{stdout}");
+    assert!(stdout.contains("1 passed, 0 failed across 2 files (1 didn't build)"), "{stdout}");
+}

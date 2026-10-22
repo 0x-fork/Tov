@@ -109,6 +109,12 @@ pub struct Loaded {
 
 /// Finds, reads and parses the program (following imports).
 pub fn load(paths: &[PathBuf], base: &Path) -> Result<Loaded, String> {
+    load_with(paths, base, false)
+}
+
+/// `load`; `tests`: a directory's TypeScript test files (`*.test.ts`, `*.spec.ts`) are roots
+/// too, as `bun test` and Jest find them.
+pub fn load_with(paths: &[PathBuf], base: &Path, tests: bool) -> Result<Loaded, String> {
     let t0 = std::time::Instant::now();
     let base = normalize(base);
     let mut roots = Vec::new();
@@ -122,9 +128,10 @@ pub fn load(paths: &[PathBuf], base: &Path) -> Result<Loaded, String> {
             return Err(format!("no such file or directory: {}", p.display()));
         }
     }
-    roots.extend(walk_parallel(dirs));
+    roots.extend(walk_parallel(dirs, tests));
     if roots.is_empty() {
-        return Err("no `.tov` source files found in the input directories\n  hint: use the `.tov` extension, or pass a source file explicitly".into());
+        let nor = if tests { ", nor `.test.ts` files" } else { "" };
+        return Err(format!("no `.tov` source files found in the input directories{nor}\n  hint: use the `.tov` extension, or pass a source file explicitly"));
     }
     let mut roots: Vec<PathBuf> = roots.iter().map(|p| normalize(p)).collect();
     roots.sort();
@@ -290,15 +297,23 @@ fn parse_parallel(roots: &[PathBuf], base: &Path) -> Result<Vec<(Interner, Vec<P
     Ok(results)
 }
 
-/// Finds `.tov` files under `dirs`, listing one directory level at a time on all cores.
-fn walk_parallel(mut level: Vec<PathBuf>) -> Vec<PathBuf> {
+/// The TypeScript test files (`*.test.ts`, `*.spec.ts`) under `dirs`, sorted.
+pub fn ts_test_files(dirs: &[PathBuf]) -> Vec<PathBuf> {
+    let mut out: Vec<PathBuf> = walk_parallel(dirs.to_vec(), true).into_iter().filter(|p| !p.extension().is_some_and(|e| e == "tov")).collect();
+    out.sort();
+    out
+}
+
+/// Finds `.tov` files (and with `tests`, TypeScript test files) under `dirs`, listing one
+/// directory level at a time on all cores.
+fn walk_parallel(mut level: Vec<PathBuf>, tests: bool) -> Vec<PathBuf> {
     let threads: usize = std::env::var("TOV_WALKERS").ok().and_then(|v| v.parse().ok()).unwrap_or(3);
     let mut files = Vec::new();
     while !level.is_empty() {
         if level.len() < 4 {
             let mut next = Vec::new();
             for d in &level {
-                list_dir(d, &mut files, &mut next);
+                list_dir(d, &mut files, &mut next, tests);
             }
             level = next;
             continue;
@@ -311,7 +326,7 @@ fn walk_parallel(mut level: Vec<PathBuf>) -> Vec<PathBuf> {
                     scope.spawn(move || {
                         let (mut files, mut subdirs) = (Vec::new(), Vec::new());
                         for d in dirs {
-                            list_dir(d, &mut files, &mut subdirs);
+                            list_dir(d, &mut files, &mut subdirs, tests);
                         }
                         (files, subdirs)
                     })
@@ -328,7 +343,7 @@ fn walk_parallel(mut level: Vec<PathBuf>) -> Vec<PathBuf> {
     files
 }
 
-fn list_dir(dir: &Path, files: &mut Vec<PathBuf>, subdirs: &mut Vec<PathBuf>) {
+fn list_dir(dir: &Path, files: &mut Vec<PathBuf>, subdirs: &mut Vec<PathBuf>, tests: bool) {
     let Ok(entries) = std::fs::read_dir(dir) else { return };
     for entry in entries.flatten() {
         let name = entry.file_name();
@@ -340,7 +355,7 @@ fn list_dir(dir: &Path, files: &mut Vec<PathBuf>, subdirs: &mut Vec<PathBuf>) {
         let is_dir = entry.file_type().map(|t| t.is_dir() || (t.is_symlink() && path.is_dir())).unwrap_or(false);
         if is_dir {
             subdirs.push(path);
-        } else if name.ends_with(".tov") {
+        } else if name.ends_with(".tov") || (tests && [".test.ts", ".spec.ts", ".test.tsx", ".spec.tsx", ".test.mts", ".spec.mts"].iter().any(|x| name.ends_with(x))) {
             files.push(path);
         }
     }

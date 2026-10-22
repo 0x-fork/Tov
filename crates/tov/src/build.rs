@@ -244,7 +244,7 @@ fn use_lld(cc: &str) -> bool {
 pub fn build(paths: &[PathBuf], base: &Path, opts: &Options) -> Result<Built, BuildError> {
     prune_cache();
     let t0 = Instant::now();
-    let loaded = driver::load(paths, base).map_err(BuildError::Message)?;
+    let loaded = driver::load_with(paths, base, opts.mode == crate::codegen::Mode::Test).map_err(BuildError::Message)?;
     let driver::Loaded { sm, mut interner, mut modules, diags } = loaded;
     let sources = source_paths(&sm);
     if !diags.is_empty() {

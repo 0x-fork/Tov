@@ -262,6 +262,8 @@ test("adds", () => {
 ```
 `test` calls are top-level only, or in a suite. Jest's and Vitest's API works as it is: `describe("name", () => { ... })` suites (nested too) whose `it`/`test` calls are tests of their own (`suite > name`), `beforeEach`/`afterEach` (run around each test of the suite and the suites in it), `beforeAll`/`afterAll`, `.skip`/`.todo`/`.only`, and `it.each(table)(name, fn)` / `test.each` (a row is spread over the parameters when it's an array, else it's the one parameter; `%s`, `%i`, `%p`... in the name show its values, `$field` an object row's fields, `%#` its number). A table of array literals has rows of tuples, as `as const` makes them.
 
+`tov test dir` runs every `*.test.ts` / `*.spec.ts` file under `dir` as `bun test` does: each is built (on every core, the build cache keeping unchanged ones) and run on its own, so one that doesn't build doesn't stop the others; the totals come last. (A directory of `.tov` files is one program, as before.)
+
 Matchers: `toBe`, `toEqual`, `toStrictEqual`, `toBeCloseTo`, `toBeUndefined`, `toBeDefined`, `toBeNull`, `toBeTruthy`, `toBeFalsy`, `toBeNaN`, `toBeGreaterThan(OrEqual)`, `toBeLessThan(OrEqual)`, `toHaveLength`, `toContain`, and `toThrow`/`toThrowError` (of a function: `expect(() => parse("")).toThrow()`; a message, class or pattern it's given isn't checked yet); `.not` negates any of them.
 
 ## 9. Diagnostics

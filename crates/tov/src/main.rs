@@ -338,6 +338,17 @@ fn execute(f: Flags, cmd: BuildCmd) -> ExitCode {
         let wopts = watch::Options { clear_screen: f.clear_screen, kill_signal: f.kill_signal };
         return watch::run(&paths, &base, &opts, &f.program_args, then, &wopts);
     }
+    // `tov test dir` with TypeScript test files: each one a program of its own, as `bun test`
+    // runs them (one that doesn't build doesn't stop the others)
+    if cmd == BuildCmd::Test && opts.emit_c.is_none() {
+        let dirs: Vec<PathBuf> = paths.iter().filter(|p| p.is_dir()).cloned().collect();
+        let files = if dirs.is_empty() { Vec::new() } else { tov::driver::ts_test_files(&dirs) };
+        if !files.is_empty() {
+            let mut singles: Vec<PathBuf> = paths.iter().filter(|p| p.is_file()).cloned().collect();
+            singles.extend(files);
+            return test_files(&singles, &base, &opts);
+        }
+    }
     // `tov file.ts` again with nothing changed: the binary it built, run straight away
     let manifest = (cmd == BuildCmd::Run && opts.emit_c.is_none() && !f.time && paths.len() == 1 && paths[0].is_file()).then(|| run_manifest(&paths[0], &opts.opt, opts.unchecked, opts.symbols)).flatten();
     if let Some(m) = &manifest
@@ -375,6 +386,95 @@ fn execute(f: Flags, cmd: BuildCmd) -> ExitCode {
         }
         BuildCmd::Run | BuildCmd::Test => exec_program(&built.binary, &f.program_args),
     }
+}
+
+/// `tov test` on many TypeScript test files: each built (on every core; the build cache keeps
+/// unchanged ones) and run on its own, their reports in order, then the totals.
+fn test_files(files: &[PathBuf], base: &Path, opts: &tov::build::Options) -> ExitCode {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    // (the first builds the runtime others share)
+    let next = AtomicUsize::new(1);
+    let mut results: Vec<Option<Result<PathBuf, String>>> = (0..files.len()).map(|_| None).collect();
+    let build = |f: &PathBuf| match tov::build::build(std::slice::from_ref(f), base, opts) {
+        Ok(b) => Ok(b.binary),
+        Err(tov::build::BuildError::Diagnostics(sm, diags)) => {
+            let n = diags.len();
+            Err(format!("{}build: {n} error{}\n", tov::diag::render_text(&diags, &sm), if n == 1 { "" } else { "s" }))
+        }
+        Err(tov::build::BuildError::Message(m)) => Err(format!("error: {m}\n")),
+    };
+    results[0] = Some(build(&files[0]));
+    let threads = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4).min(files.len());
+    let done = std::sync::Mutex::new(Vec::new());
+    std::thread::scope(|scope| {
+        for _ in 0..threads {
+            scope.spawn(|| {
+                loop {
+                    let i = next.fetch_add(1, Ordering::Relaxed);
+                    if i >= files.len() {
+                        break;
+                    }
+                    let r = build(&files[i]);
+                    let out = match r {
+                        Ok(bin) => match std::process::Command::new(&bin).output() {
+                            Ok(o) => Ok((o.status.success(), format!("{}{}", String::from_utf8_lossy(&o.stdout), String::from_utf8_lossy(&o.stderr)))),
+                            Err(e) => Err(format!("error: can't run {}: {e}\n", bin.display())),
+                        },
+                        Err(e) => Err(e),
+                    };
+                    done.lock().unwrap().push((i, out));
+                }
+            });
+        }
+    });
+    let mut outs: Vec<Option<Result<(bool, String), String>>> = (0..files.len()).map(|_| None).collect();
+    for (i, o) in done.into_inner().unwrap() {
+        outs[i] = Some(o);
+    }
+    outs[0] = Some(match results[0].take().unwrap() {
+        Ok(bin) => match std::process::Command::new(&bin).output() {
+            Ok(o) => Ok((o.status.success(), format!("{}{}", String::from_utf8_lossy(&o.stdout), String::from_utf8_lossy(&o.stderr)))),
+            Err(e) => Err(format!("error: can't run {}: {e}\n", bin.display())),
+        },
+        Err(e) => Err(e),
+    });
+    let (mut passed, mut failed, mut broken) = (0u64, 0u64, 0usize);
+    for (f, o) in files.iter().zip(outs) {
+        let shown = f.strip_prefix(base).unwrap_or(f).display().to_string();
+        println!("{shown}:");
+        match o.unwrap() {
+            Ok((_, text)) => {
+                // ("<n> passed, <m> failed" ends a test program's report)
+                let mut lines: Vec<&str> = text.lines().collect();
+                let counts = lines.last().and_then(|l| {
+                    let (p, f) = l.split_once(" passed, ")?;
+                    Some((p.parse::<u64>().ok()?, f.strip_suffix(" failed")?.parse::<u64>().ok()?))
+                });
+                match counts {
+                    Some((p, f)) => {
+                        lines.pop();
+                        passed += p;
+                        failed += f;
+                    }
+                    None => failed += 1,
+                }
+                for l in lines {
+                    println!("{l}");
+                }
+            }
+            Err(e) => {
+                broken += 1;
+                print!("{e}");
+            }
+        }
+    }
+    let n = files.len();
+    let mut summary = format!("{passed} passed, {failed} failed across {n} file{}", if n == 1 { "" } else { "s" });
+    if broken > 0 {
+        summary.push_str(&format!(" ({broken} didn't build)"));
+    }
+    println!("{summary}");
+    if failed > 0 || broken > 0 { ExitCode::from(1) } else { ExitCode::SUCCESS }
 }
 
 /// Runs the program in tov's place: signals reach it, `timeout tov run x` stops it, and its
