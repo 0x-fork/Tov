@@ -158,6 +158,7 @@ static inline void tv_str_release(tv_str s) { if (s.p->rc > 0 && (--s.p->rc & TV
 tv_str tv_str_from(const char *bytes, size_t n);
 tv_str tv_str_from_sb(tv_sb *sb);               /* takes the builder's contents; sb is reset */
 tv_str tv_str_concat(tv_str a, tv_str b);
+tv_str tv_str_concatn(const tv_str *parts, int n);   /* a + b + c ...: one new string */
 bool tv_str_eq(tv_str a, tv_str b);
 int tv_str_cmp(tv_str a, tv_str b);             /* byte order == code point order */
 uint64_t tv_str_hash(tv_str s);

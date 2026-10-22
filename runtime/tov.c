@@ -751,6 +751,25 @@ tv_str tv_str_concat(tv_str a, tv_str b) {
     return (tv_str){r};
 }
 
+tv_str tv_str_concatn(const tv_str *parts, int n) {
+    size_t total = 0;
+    uint64_t ascii = TV_STR_ASCII, wide = 0;
+    for (int i = 0; i < n; i++) {
+        total = tv_size_mul_add((size_t)parts[i].p->len, 1, total);
+        ascii &= parts[i].p->rc;
+        wide |= parts[i].p->rc;
+    }
+    tv_strbuf *r = tv_strbuf_new(total);
+    size_t at = 0;
+    for (int i = 0; i < n; i++) {
+        size_t k = (size_t)parts[i].p->len;
+        memcpy(r->data + at, parts[i].p->data, k);
+        at += k;
+    }
+    r->rc |= (ascii & TV_STR_ASCII) | (wide & TV_STR_WIDE);
+    return (tv_str){r};
+}
+
 bool tv_str_eq(tv_str a, tv_str b) {
     return a.p == b.p || (a.p->len == b.p->len && memcmp(a.p->data, b.p->data, (size_t)a.p->len) == 0);
 }

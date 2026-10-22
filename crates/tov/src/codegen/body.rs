@@ -4462,6 +4462,33 @@ impl<'c, 'a> Gen<'c, 'a> {
                 Val::plain(format!("({} {o} {})", a, b), BOOL)
             }
             Add if ty == STR => {
+                // `a + b + c + d` of strings: one string, made once (not one per `+`)
+                let m = self.cur_m();
+                let mut parts = vec![r];
+                let mut cur = l;
+                loop {
+                    let ast = self.ast(m);
+                    match ast.expr(cur).kind {
+                        ExprKind::Binary(BinOp::Add, a, b) if self.facts(m).expr_ty.get(cur as usize) == Some(&STR) => {
+                            parts.push(b);
+                            cur = a;
+                        }
+                        _ => break,
+                    }
+                }
+                parts.push(cur);
+                parts.reverse();
+                let all_str = |g: &Self| parts.iter().all(|&x| g.c.types.is_string(g.facts(m).expr_ty.get(x as usize).copied().unwrap_or(ERROR)));
+                if parts.len() >= 3 && all_str(self) {
+                    let mut codes = Vec::new();
+                    for (k, &x) in parts.iter().enumerate() {
+                        let v = if k + 1 < parts.len() { self.expr_before(x, &parts[k + 1..]) } else { self.expr(x) };
+                        let v = self.coerce(v, STR);
+                        codes.push(v.code);
+                    }
+                    let n = codes.len();
+                    return self.tmp(STR, &format!("tv_str_concatn((tv_str[]){{{}}}, {n})", codes.join(", ")), true);
+                }
                 let lv = self.expr_before(l, &[r]);
                 let rv = self.expr(r);
                 if lv.ty == STR && rv.ty == STR {
