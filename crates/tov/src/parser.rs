@@ -20,9 +20,10 @@ pub fn parse(src: &str, file: FileId, interner: &mut Interner) -> (Ast, Vec<Diag
             lexed.tokens[i].kind = Tok::Ident;
         }
     }
-    let mut p = Parser { src, toks: lexed.tokens, strings: lexed.strings, pos: 0, file, interner, ast: Ast::default(), diags, script_stmts: Vec::new(), defaults: Vec::new(), more_stmts: Vec::new(), hidden: 0, prologue: Vec::new(), index_sig: None, local_fns: Vec::new(), prop_defaults: false, extra_members: Vec::new(), generic_arrows: Vec::new() };
+    let mut p = Parser { src, toks: lexed.tokens, strings: lexed.strings, pos: 0, file, interner, ast: Ast::default(), diags, script_stmts: Vec::new(), defaults: Vec::new(), more_stmts: Vec::new(), hidden: 0, prologue: Vec::new(), index_sig: None, local_fns: Vec::new(), prop_defaults: false, extra_members: Vec::new(), generic_arrows: Vec::new(), local_types: Vec::new(), local_type_items: Vec::new() };
     p.ast.iterator_sym = Some(p.interner.intern("__iterator"));
     p.module();
+    p.unhide_local_types();
     slot_records(&mut p.ast, p.interner);
     (p.ast, p.diags)
 }
@@ -318,6 +319,10 @@ struct Parser<'a> {
     /// Generic arrow functions (`<T>(x: T) => x`): the arrow, its type parameters, where it starts
     /// (a top-level `const` of one becomes a generic function; any other is an error).
     generic_arrows: Vec<(ExprId, Vec<TypeParam>, Span)>,
+    /// `type T = ...` / `interface T { }` in a body: module types under hidden names, which
+    /// `T` stands for in the rest of the block (innermost last).
+    local_types: Vec<(Sym, Sym)>,
+    local_type_items: Vec<(Sym, Sym)>,
 }
 
 /// A destructuring pattern (desugared into `let`s).
@@ -1528,6 +1533,36 @@ impl<'a> Parser<'a> {
         }
     }
 
+    /// A type declared in a body keeps its name when no other type in the module has it.
+    fn unhide_local_types(&mut self) {
+        let taken = |ast: &Ast, n: Sym| {
+            ast.items.iter().any(|it| match &it.kind {
+                ItemKind::TypeAlias { name, .. } | ItemKind::Interface { name, .. } => *name == n,
+                ItemKind::Class(c) => c.name == n,
+                _ => false,
+            })
+        };
+        for &(name, hidden) in &self.local_type_items {
+            if self.local_type_items.iter().filter(|t| t.0 == name).count() > 1 || taken(&self.ast, name) {
+                continue;
+            }
+            for it in &mut self.ast.items {
+                if let ItemKind::TypeAlias { name: n, .. } | ItemKind::Interface { name: n, .. } = &mut it.kind
+                    && *n == hidden
+                {
+                    *n = name;
+                }
+            }
+            for t in &mut self.ast.types {
+                if let TypeExprKind::Named { ns: None, name: n, .. } = &mut t.kind
+                    && *n == hidden
+                {
+                    *n = name;
+                }
+            }
+        }
+    }
+
     fn type_alias(&mut self, start: Span, exported: bool) {
         self.bump(); // type
         let Some((name, name_span)) = self.ident("a type name") else {
@@ -2387,6 +2422,10 @@ impl<'a> Parser<'a> {
                     self.expect(Tok::Gt, "to close the type argument list");
                 }
                 let span = start.to(self.prev_span());
+                let name = match ns {
+                    None => self.local_types.iter().rev().find(|t| t.0 == name).map_or(name, |t| t.1),
+                    Some(_) => name,
+                };
                 self.mk_ty(TypeExprKind::Named { ns, name, name_span, args }, span)
             }
             // `this` as a type, in a class: the class (see `check::class`)
@@ -2468,6 +2507,7 @@ impl<'a> Parser<'a> {
 
     fn block(&mut self) -> StmtId {
         let start = self.cur_span();
+        let types = self.local_types.len();
         self.expect(Tok::LBrace, "to start a block");
         let mut stmts = Vec::new();
         while !self.at(Tok::RBrace) && !self.at(Tok::Eof) {
@@ -2479,6 +2519,7 @@ impl<'a> Parser<'a> {
             }
         }
         self.expect(Tok::RBrace, "to close the block");
+        self.local_types.truncate(types);
         self.hoist_functions(&mut stmts);
         let span = start.to(self.prev_span());
         self.mk_stmt(StmtKind::Block(stmts), span)
@@ -2650,15 +2691,31 @@ impl<'a> Parser<'a> {
                 self.bump();
                 self.local_function(start, true)
             }
+            Tok::Type | Tok::Interface if self.nth(1) == Tok::Ident => {
+                let name = self.interner.intern(self.text(self.toks[self.pos + 1]));
+                let n = self.local_type_items.len();
+                let hidden = self.interner.intern(&format!("{}#{n}", self.interner.get(name)));
+                self.local_types.push((name, hidden));
+                self.local_type_items.push((name, hidden));
+                let items = self.ast.items.len();
+                if self.at(Tok::Type) {
+                    self.type_alias(start, false);
+                } else {
+                    self.interface(start, false);
+                }
+                if let Some(item) = self.ast.items.get_mut(items) {
+                    match &mut item.kind {
+                        ItemKind::TypeAlias { name, .. } | ItemKind::Interface { name, .. } => *name = hidden,
+                        _ => {}
+                    }
+                }
+                let span = start.to(self.prev_span());
+                self.mk_stmt(StmtKind::Empty, span)
+            }
             Tok::Class | Tok::Enum | Tok::Interface | Tok::Import | Tok::Export => {
                 let msg = format!("{} declarations are only allowed at the top level", self.found());
                 self.err("P0006", start, msg);
                 self.skip_decl();
-                self.mk_stmt(StmtKind::Error, start)
-            }
-            Tok::Type if self.nth(1) == Tok::Ident => {
-                self.err("P0006", start, "type declarations are only allowed at the top level");
-                self.recover_line();
                 self.mk_stmt(StmtKind::Error, start)
             }
             Tok::Ident if self.nth(1) == Tok::Colon => {
