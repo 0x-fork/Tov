@@ -348,8 +348,10 @@ impl<'a> Checker<'a> {
                     }
                 let tscope = self.tscope();
                 let target = self.resolve_type(*te, &tscope);
-                // The target guides literal typing (`[] as int[]`), like an annotation would.
-                let src = self.expr(*x, Some(target));
+                // The target guides literal typing (`[] as int[]`), like an annotation would
+                // (and is where the value goes: `JSON.parse(t) as number[]` may hold any number).
+                let sites = if self.spec.on { self.type_sites(self.cur, *te) } else { Vec::new() };
+                let src = self.flow(sites, |c| c.expr(*x, Some(target)));
                 if self.spec.on && (src == UNKNOWN || src == JS) {
                     // (a value from outside the program may be any number)
                     let sites = self.type_sites(self.cur, *te);
@@ -726,15 +728,18 @@ impl<'a> Checker<'a> {
                 if tl == BIGINT || tr == BIGINT {
                     return self.bigint_arith(op, l, r, tl, tr, span);
                 }
-                // (`2 ** 70`, `2 ** -1` in TypeScript: a number that's no safe integer, a float)
-                if op == Pow
-                    && tl == INT
-                    && tr == INT
-                    && self.ts_module()
-                    && let (Some(a), Some(b)) = (self.const_int(l), self.const_int(r))
-                    && !(0..=u32::MAX as i128).contains(&b).then(|| a.checked_pow(b as u32)).flatten().is_some_and(|v| v.abs() <= 1 << 53)
-                {
-                    return F64;
+                // (`2 ** 70`, `2 ** -1`, `10 ** e` in TypeScript: a number that may be no safe
+                // integer, a float; `x ** 2` stays an integer)
+                if op == Pow && tl == INT && tr == INT && self.ts_module() {
+                    let fits = match (self.const_int(l), self.const_int(r)) {
+                        (_, None) => false,
+                        (_, Some(b)) if b < 0 => false,
+                        (Some(a), Some(b)) => (0..=u32::MAX as i128).contains(&b).then(|| a.checked_pow(b as u32)).flatten().is_some_and(|v| v.abs() <= 1 << 53),
+                        (None, Some(_)) => true,
+                    };
+                    if !fits {
+                        return F64;
+                    }
                 }
                 self.arith(op, tl, tr, span)
             }
