@@ -683,6 +683,10 @@ impl<'a> Checker<'a> {
                 let entry = self.fcx().locals.len();
                 self.push_scope();
                 self.apply(&n);
+                // (`if (xs[i] || xs[j])`: either may be missing)
+                if want_bool && matches!(self.ast().expr(r).kind, ExprKind::Index { .. }) {
+                    self.want_optional = true;
+                }
                 let tr = self.expr(r, if tl == BOOL && hint.is_none() { Some(BOOL) } else { hint });
                 self.pop_scope();
                 self.apply_effects(&fx, entry, &[]);
