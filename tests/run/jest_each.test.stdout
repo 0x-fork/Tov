@@ -1,0 +1,10 @@
+ok   each > isPow2(0) is false
+ok   each > isPow2(1) is true
+ok   each > isPow2(4) is true
+ok   each > sum of 1,2 is 3
+ok   each > sum of  is 0
+ok   each > case 0
+ok   each > case 1
+ok   2 + 3 = 5
+ok   1 + 1 = 2
+9 passed, 0 failed

@@ -1,0 +1,9 @@
+ok   math > adds
+ok   math > sees the hook
+FAIL math > nested > fails
+  expected 4, received 3
+  at tests/run/jest_suites.test.ts:9:27
+FAIL math > nested > throws
+  trap: uncaught Error: boom
+ok   top level it
+3 passed, 2 failed

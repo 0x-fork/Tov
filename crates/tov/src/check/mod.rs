@@ -369,6 +369,8 @@ pub struct Checker<'a> {
     /// Arrows that narrow their first parameter, as a type guard (`(x): x is T => ...`, or one
     /// whose body does exactly that: `(x) => x !== undefined`): (module, arrow) → what passes.
     arrow_guards: crate::hash::FxMap<(u32, ExprId), TyId>,
+    /// The next arrow checked is a test's body (it may throw: the test fails).
+    test_callback: bool,
     /// Record types whose values JavaScript would show to be shared (changed in place, or
     /// compared by identity): objects on the heap, every reference seeing every change. Records
     /// never changed or compared stay values, which nothing can tell apart (see `find_objects`).
@@ -449,6 +451,7 @@ fn new_checker<'a>(modules: &'a [Module], interner: &'a Interner, sm: &'a Source
         float_args: false,
         cb_throws: Vec::new(),
         arrow_guards: Default::default(),
+        test_callback: false,
         objects: HashSet::default(),
         mutated: HashSet::default(),
         object_fields: HashSet::default(),
@@ -703,6 +706,7 @@ impl<'a> Checker<'a> {
             float_args: false,
             cb_throws: Vec::new(),
         arrow_guards: Default::default(),
+        test_callback: false,
         objects: HashSet::default(),
         mutated: HashSet::default(),
         object_fields: HashSet::default(),

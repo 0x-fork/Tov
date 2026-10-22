@@ -159,7 +159,7 @@ pub(super) fn is_builtin_ns(name: &str) -> bool {
 }
 
 pub(super) fn is_builtin_fn(name: &str) -> bool {
-    matches!(name, "expect" | "String" | "Number" | "Boolean" | "BigInt" | "decimal" | "parseInt" | "parseFloat" | "isNaN" | "isFinite" | "test")
+    matches!(name, "expect" | "String" | "Number" | "Boolean" | "BigInt" | "decimal" | "parseInt" | "parseFloat" | "isNaN" | "isFinite" | "test" | "__test")
         || CONVERSIONS.contains(&name)
         || TIMER_FNS.contains(&name)
 }
@@ -1411,6 +1411,32 @@ impl<'a> Checker<'a> {
                 }
                 BOOL
             }
+            // `it("does", () => ...)` in a `describe` suite (see `Parser::suite_body`)
+            "__test" => {
+                let (Some(n), Some(f)) = (args.first(), args.get(1)) else {
+                    self.check_args_loose(args);
+                    return Some(VOID);
+                };
+                let (n, f) = (n.expr, f.expr);
+                let t = self.expr(n, Some(STR));
+                let s = self.ast().expr(n).span;
+                self.expect_assignable(t, STR, s, None);
+                let expected = self.types.func(Vec::new(), VOID);
+                self.test_callback = true;
+                let t = self.expr(f, Some(expected));
+                self.test_callback = false;
+                if !self.assignable(t, expected) {
+                    let span = self.ast().expr(f).span;
+                    let msg = format!("a test body must be `() => {{ ... }}`, found `{}`", self.show(t));
+                    self.report(Diagnostic::new("T0001", span, msg));
+                }
+                if let Some(a) = args.get(2) {
+                    self.test_callback = true;
+                    self.expr(a.expr, Some(expected));
+                    self.test_callback = false;
+                }
+                VOID
+            }
             "test" => {
                 self.check_args_loose(args);
                 self.report(Diagnostic::new("P0202", callee_span, "`test(...)` is only allowed at the top level of a module"));
@@ -1460,7 +1486,7 @@ impl<'a> Checker<'a> {
 
     pub(super) fn expect_matcher(&mut self, subject: TyId, name: &str, name_span: Span, args: &[Arg], span: Span) -> TyId {
         match name {
-            "toBe" | "toEqual" => {
+            "toBe" | "toEqual" | "toStrictEqual" => {
                 if args.len() != 1 {
                     self.report(Diagnostic::new("T0201", span, format!("`{name}` takes 1 argument, found {}", args.len())));
                     self.check_args_loose(args);
@@ -1481,19 +1507,77 @@ impl<'a> Checker<'a> {
                     self.report(Diagnostic::new("T0001", name_span, msg));
                 }
             }
-            "toBeUndefined" | "toBeDefined" | "toBeTruthy" | "toBeFalsy" => {
+            "toBeUndefined" | "toBeDefined" => {
                 self.check_args_loose(args);
-                if matches!(name, "toBeTruthy" | "toBeFalsy") {
-                    let alt = if name == "toBeTruthy" { "toBe(true)" } else { "toBe(false)" };
-                    self.report(Diagnostic::new("X0039", name_span, format!("`{name}` relies on truthiness")).fix(Applicability::Maybe, format!("use `{alt}`"), name_span.to(span.empty_at_end()), alt));
-                } else if !self.types.has_undefined(subject) && subject != ERROR {
+                if !self.types.has_undefined(subject) && subject != ERROR {
                     let msg = format!("`{}` is never `undefined`", self.show(subject));
                     self.report(Diagnostic::new("T0503", name_span, msg));
                 }
             }
+            "toBeTruthy" | "toBeFalsy" | "toBeNull" | "toBeNaN" => {
+                if !args.is_empty() {
+                    self.report(Diagnostic::new("T0201", span, format!("`{name}` takes no arguments, found {}", args.len())));
+                }
+                self.check_args_loose(args);
+                if name == "toBeNull" && !self.flat_members(subject).contains(&NULL) && subject != ERROR {
+                    let msg = format!("`{}` is never `null`", self.show(subject));
+                    self.report(Diagnostic::new("T0503", name_span, msg));
+                }
+                if name == "toBeNaN" && subject != ERROR && !self.types.is_numeric(subject) {
+                    let msg = format!("`toBeNaN` needs a number, found `{}`", self.show(subject));
+                    self.report(Diagnostic::new("T0001", name_span, msg));
+                }
+            }
+            "toBeGreaterThan" | "toBeGreaterThanOrEqual" | "toBeLessThan" | "toBeLessThanOrEqual" => {
+                let want = if subject == BIGINT { BIGINT } else { F64 };
+                let cs = CallSig { tparams: Vec::new(), params: vec![p(want)], names: vec!["expected".into()], rest: None, ret: VOID, throws: NEVER };
+                self.call_sig(&cs, name, &[], args, None, span);
+                if subject != ERROR && !self.types.is_numeric(subject) && subject != BIGINT {
+                    let msg = format!("`{name}` needs a number, found `{}`", self.show(subject));
+                    self.report(Diagnostic::new("T0001", name_span, msg));
+                }
+            }
+            "toHaveLength" => {
+                let cs = CallSig { tparams: Vec::new(), params: vec![p(INT)], names: vec!["length".into()], rest: None, ret: VOID, throws: NEVER };
+                self.call_sig(&cs, name, &[], args, None, span);
+                if subject != ERROR && !self.types.is_string(subject) && !matches!(self.types.get(subject), Ty::Array(_)) {
+                    let msg = format!("`toHaveLength` needs an array or a string, found `{}`", self.show(subject));
+                    self.report(Diagnostic::new("T0001", name_span, msg));
+                }
+            }
+            "toContain" => {
+                let el = match *self.types.get(subject) {
+                    Ty::Array(e) => Some(e),
+                    _ if self.types.is_string(subject) => Some(STR),
+                    _ => None,
+                };
+                match (el, args) {
+                    (Some(e), [a]) => {
+                        let t = self.expr(a.expr, Some(e));
+                        let s = self.ast().expr(a.expr).span;
+                        self.expect_assignable(t, e, s, None);
+                    }
+                    _ => {
+                        self.check_args_loose(args);
+                        if subject != ERROR {
+                            let msg = format!("`toContain` needs an array or a string and 1 argument, found `{}`", self.show(subject));
+                            self.report(Diagnostic::new("T0001", name_span, msg));
+                        }
+                    }
+                }
+            }
+            "toThrow" | "toThrowError" => {
+                // (what it throws: any message, error class or pattern given is checked loosely)
+                self.check_args_loose(args);
+                let callable = matches!(self.types.get(subject), Ty::Func(ps, _, _) if self.types.params(*ps).is_empty());
+                if subject != ERROR && !callable {
+                    let msg = format!("`{name}` needs a function to call, found `{}`", self.show(subject));
+                    self.report(Diagnostic::new("T0001", name_span, msg).note("instead", "pass a function: `expect(() => f(x)).toThrow()`"));
+                }
+            }
             _ => {
                 self.check_args_loose(args);
-                let known = ["toBe", "toEqual", "toBeCloseTo", "toBeUndefined", "toBeDefined"];
+                let known = ["toBe", "toEqual", "toStrictEqual", "toBeCloseTo", "toBeUndefined", "toBeDefined", "toBeNull", "toBeTruthy", "toBeFalsy", "toBeNaN", "toBeGreaterThan", "toBeGreaterThanOrEqual", "toBeLessThan", "toBeLessThanOrEqual", "toHaveLength", "toContain", "toThrow", "toThrowError"];
                 let mut d = Diagnostic::new("T0107", name_span, format!("unknown matcher `{name}`")).note("available", known.join(", "));
                 let sug = similar(name, known.iter().copied());
                 if let Some(first) = sug.first() {

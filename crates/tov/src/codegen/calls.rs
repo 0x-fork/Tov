@@ -225,11 +225,16 @@ impl<'c, 'a> Gen<'c, 'a> {
                 let subject = self.inst(subject);
                 let ExprKind::Member { obj, name, .. } = &ast.expr(*callee).kind else { return Val::plain("0", VOID) };
                 let name = self.sym(*name).to_string();
+                // `expect(x).not.name(...)`: negated
+                let (obj, negate) = match &ast.expr(*obj).kind {
+                    ExprKind::Member { obj: inner, name: not, .. } if self.sym(*not) == "not" => (*inner, true),
+                    _ => (*obj, false),
+                };
                 // `expect(x)`: evaluate x directly.
-                let ExprKind::Call { args: eargs, .. } = &ast.expr(*obj).kind else { return Val::plain("0", VOID) };
+                let ExprKind::Call { args: eargs, .. } = &ast.expr(obj).kind else { return Val::plain("0", VOID) };
                 let s = self.expr(eargs[0].expr);
                 let s = self.coerce(s, subject);
-                self.matcher(s, &name, args, span);
+                self.matcher(s, &name, args, span, negate);
                 Val::plain("0", VOID)
             }
         }
@@ -2207,6 +2212,28 @@ impl<'c, 'a> Gen<'c, 'a> {
                 }
                 Val::plain("0", VOID)
             }
+            // a test in a suite: run as one of its own (see `tv_test_run_ctx`)
+            (None, "__test") => {
+                let n = self.expr(args[0].expr);
+                let n = self.coerce(n, STR);
+                let f = self.expr(args[1].expr);
+                let fv = self.fresh("tf");
+                self.line(format!("tv_fn {fv} = {};", f.code));
+                if !self.test_call_done {
+                    self.test_call_done = true;
+                    self.protos.push_str("static void tvg_uncaught(void);\nstatic void tvg_test_fn(void *p);\n");
+                    self.helpers_after.push("static void tvg_test_fn(void *p) { tv_fn *f = p; ((void (*)(tv_env *))f->fn)(f->env); if (tvg_err) tvg_uncaught(); }\n".to_string());
+                }
+                self.needs_uncaught = true;
+                self.line(format!("tv_test_run_ctx((const char *){0}.p->data, (size_t){0}.p->len, tvg_test_fn, &{fv}, false);", n.code));
+                if let Some(a) = args.get(2) {
+                    let after = self.expr(a.expr);
+                    let av = self.fresh("tf");
+                    self.line(format!("tv_fn {av} = {};", after.code));
+                    self.line(format!("tv_test_run_ctx((const char *){0}.p->data, (size_t){0}.p->len, tvg_test_fn, &{av}, true);", n.code));
+                }
+                Val::plain("0", VOID)
+            }
             (None, "queueMicrotask") => {
                 let cb = self.expr(args[0].expr);
                 self.line(format!("tv_queue_microtask({});", cb.code));
@@ -2738,11 +2765,22 @@ impl<'c, 'a> Gen<'c, 'a> {
         self.members(t).iter().any(|&m| matches!(self.tget(m), Ty::Array(_) | Ty::Map(..) | Ty::Set(_) | Ty::Record(_) | Ty::Rec(..)))
     }
 
-    fn matcher(&mut self, s: Val, name: &str, args: &[Arg], span: Span) {
+    fn matcher(&mut self, s: Val, name: &str, args: &[Arg], span: Span, negate: bool) {
         let loc = self.loc(span);
+        // (what's expected, when there's no value to show: "expected null, received 3")
+        let what = match name {
+            "toBeUndefined" => "undefined",
+            "toBeDefined" => "a defined value",
+            "toBeNull" => "null",
+            "toBeTruthy" => "a truthy value",
+            "toBeFalsy" => "a falsy value",
+            "toBeNaN" => "NaN",
+            _ => "",
+        }
+        .to_string();
         let (cond, expected) = match name {
             // (deep: arrays, records, maps alike when they print alike, as Jest compares them)
-            "toEqual" if self.has_objects(s.ty) => {
+            "toEqual" | "toStrictEqual" if self.has_objects(s.ty) => {
                 let x = self.expr(args[0].expr);
                 let x = self.coerce(x, s.ty);
                 let (a, b) = (self.fresh("sa"), self.fresh("sb"));
@@ -2754,11 +2792,91 @@ impl<'c, 'a> Gen<'c, 'a> {
                 self.line(format!("bool {r} = {a}.len == {b}.len && memcmp({a}.data, {b}.data, {a}.len) == 0; tv_sb_free(&{a}); tv_sb_free(&{b});"));
                 (r, Some(x))
             }
-            "toBe" | "toEqual" => {
+            "toBe" | "toEqual" | "toStrictEqual" => {
                 let x = self.expr(args[0].expr);
                 let x = self.coerce(x, s.ty);
                 let eq = self.equality(s.clone(), x.clone(), true);
                 (eq, Some(x))
+            }
+            "toBeNull" => {
+                let n = self.coerce(Val::plain("0", NULL), s.ty);
+                (self.equality(s.clone(), n, true), None)
+            }
+            "toBeTruthy" | "toBeFalsy" => {
+                let t = self.js_truthy(s.clone());
+                (if name == "toBeFalsy" { format!("!({t})") } else { t }, None)
+            }
+            "toBeNaN" => {
+                let v = self.coerce(s.clone(), F64);
+                (format!("isnan({})", v.code), None)
+            }
+            "toBeGreaterThan" | "toBeGreaterThanOrEqual" | "toBeLessThan" | "toBeLessThanOrEqual" => {
+                let op = match name {
+                    "toBeGreaterThan" => ">",
+                    "toBeGreaterThanOrEqual" => ">=",
+                    "toBeLessThan" => "<",
+                    _ => "<=",
+                };
+                let x = self.expr(args[0].expr);
+                if s.ty == BIGINT {
+                    let x = self.coerce(x, BIGINT);
+                    (format!("(tv_big_cmp({}, {}) {op} 0)", s.code, x.code), Some(x))
+                } else {
+                    let x = self.coerce(x, F64);
+                    let sv = self.coerce(s.clone(), F64);
+                    (format!("(({}) {op} ({}))", sv.code, x.code), Some(x))
+                }
+            }
+            "toHaveLength" => {
+                let x = self.expr(args[0].expr);
+                let x = self.coerce(x, INT);
+                let len = if matches!(self.tget(s.ty), Ty::Array(_)) {
+                    format!("tv_arr_len({})", s.code)
+                } else {
+                    let sv = self.coerce(s.clone(), STR);
+                    format!("tv_str_length({})", sv.code)
+                };
+                let n = self.tmp(INT, &len, false);
+                (format!("({} == {})", n.code, x.code), Some(x))
+            }
+            "toContain" => {
+                let x = self.expr(args[0].expr);
+                if let Ty::Array(et) = self.tget(s.ty) {
+                    let x = self.coerce(x, et);
+                    let d = self.desc(et);
+                    let xn = self.key_tmp(x.clone(), et);
+                    (format!("(tv_arr_index_of({}, {d}, &{xn}) >= 0)", s.code), Some(x))
+                } else {
+                    let x = self.coerce(x, STR);
+                    let sv = self.coerce(s.clone(), STR);
+                    (format!("tv_str_includes({}, {})", sv.code, x.code), Some(x))
+                }
+            }
+            "toThrow" | "toThrowError" => {
+                // (called, and what it throws dropped; a trap still fails the test)
+                let Ty::Func(ps, ret, _) = self.tget(s.ty) else { return };
+                let ps = self.c.types.params(ps).to_vec();
+                let cast = self.fn_ptr_type(&ps, ret);
+                let fv = self.fresh("fv");
+                self.line(format!("tv_fn {fv} = {};", s.code));
+                let call = format!("(({cast}){fv}.fn)({fv}.env)");
+                if ret == VOID {
+                    self.line(format!("{call};"));
+                } else {
+                    let rct = self.ctype(ret);
+                    let r = self.fresh("r");
+                    self.line(format!("{rct} {r} = {call};"));
+                    if self.is_rc(ret) {
+                        let rel = self.release_code(ret, &r);
+                        self.line(format!("if (!tvg_err) {rel};"));
+                    }
+                }
+                let thrown = self.fresh("threw");
+                self.line(format!("bool {thrown} = tvg_err != NULL; if ({thrown}) {{ tvg_obj_release(tvg_err); tvg_err = NULL; }}"));
+                let msg = if negate { "expected the function not to throw" } else { "expected the function to throw" };
+                let cond = if negate { format!("!{thrown}") } else { thrown };
+                self.line(format!("if (!({cond})) {{ tv_sb msg_ = {{0}}; tv_sb_push_cstr(&msg_, {}); tv_expect_fail(&msg_, {loc}); }}", c_string(msg.as_bytes())));
+                return;
             }
             "toBeCloseTo" => {
                 let x = self.expr(args[0].expr);
@@ -2779,19 +2897,31 @@ impl<'c, 'a> Gen<'c, 'a> {
             }
             _ => ("true".into(), None),
         };
+        let cond = if negate { format!("!({cond})") } else { cond };
+        let not = if negate { "not " } else { "" };
+        let relation = match name {
+            "toBeGreaterThan" => "a value > ",
+            "toBeGreaterThanOrEqual" => "a value >= ",
+            "toBeLessThan" => "a value < ",
+            "toBeLessThanOrEqual" => "a value <= ",
+            "toHaveLength" => "length ",
+            "toContain" => "to contain ",
+            _ => "",
+        };
         self.line(format!("if (!({cond})) {{"));
         self.bump(1);
         self.line("tv_sb msg_ = {0}; tv_sb *sb = &msg_;");
         match &expected {
             Some(x) => {
-                self.line("tv_sb_push_cstr(sb, \"expected \");");
+                let head = format!("expected {not}{relation}");
+                self.line(format!("tv_sb_push_cstr(sb, {});", c_string(head.as_bytes())));
                 let c = self.inspect_root(x.ty, &x.code, "1");
                 self.line(format!("{c};"));
                 self.line("tv_sb_push_cstr(sb, \", received \");");
             }
             None => {
-                let what = if name == "toBeUndefined" { "expected undefined, received " } else { "expected a defined value, received " };
-                self.line(format!("tv_sb_push_cstr(sb, {});", c_string(what.as_bytes())));
+                let head = format!("expected {not}{what}, received ");
+                self.line(format!("tv_sb_push_cstr(sb, {});", c_string(head.as_bytes())));
             }
         }
         let c = self.inspect_root(s.ty, &s.code, "1");

@@ -3950,22 +3950,28 @@ bool tv_test_active(void) { return tv_test_jmp != NULL; }
 
 static void tv_test_longjmp(void) { longjmp(*tv_test_jmp, 1); }
 
-void tv_test_run(const char *name, void (*fn)(void)) {
+void tv_test_call(void *fn) { ((void (*)(void))fn)(); }
+
+void tv_test_run(const char *name, void (*fn)(void)) { tv_test_run_ctx(name, strlen(name), tv_test_call, (void *)fn, false); }
+
+void tv_test_run_ctx(const char *name, size_t n, void (*fn)(void *), void *ctx, bool suite) {
     jmp_buf jb;
+    jmp_buf *outer = tv_test_jmp;
     tv_test_jmp = &jb;
     tv_test_unwind = tv_test_longjmp;
     tv_sb sb = {0};
     if (setjmp(jb) == 0) {
-        fn();
-        tv_test_jmp = NULL;
+        fn(ctx);
+        tv_test_jmp = outer;
+        if (suite) return;
         tv_tests_passed++;
         tv_sb_push_cstr(&sb, "ok   ");
-        tv_sb_push_cstr(&sb, name);
+        tv_sb_push(&sb, name, n);
     } else {
-        tv_test_jmp = NULL;
+        tv_test_jmp = outer;
         tv_tests_failed++;
         tv_sb_push_cstr(&sb, "FAIL ");
-        tv_sb_push_cstr(&sb, name);
+        tv_sb_push(&sb, name, n);
         tv_sb_push_cstr(&sb, "\n  ");
         tv_sb_push(&sb, tv_test_msg.data, tv_test_msg.len);
         if (tv_test_loc && *tv_test_loc) {

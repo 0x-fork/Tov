@@ -392,6 +392,11 @@ impl<'a> Parser<'a> {
         &self.src[t.start as usize..t.end as usize]
     }
 
+    /// The source text of a span (of this file).
+    fn src_text(&self, span: Span) -> String {
+        self.src.get(span.start as usize..span.end as usize).unwrap_or("").to_string()
+    }
+
     fn at_word(&self, w: &str) -> bool {
         self.at(Tok::Ident) && self.text(self.tok()) == w
     }
@@ -931,6 +936,7 @@ impl<'a> Parser<'a> {
                 }
             }
             Tok::Ident if self.text(self.tok()) == "test" && self.nth(1) == Tok::LParen => self.test_item(start),
+            Tok::Ident if self.at_jest() => self.jest_item(start),
             _ => {
                 // A script statement (only the entry module may have them; the checker says so).
                 let s = self.stmt();
@@ -1788,7 +1794,382 @@ impl<'a> Parser<'a> {
         self.expect(Tok::RParen, "to close `test(...)`");
         self.terminator();
         let span = start.to(self.prev_span());
-        self.ast.items.push(Item { kind: ItemKind::Test { name, name_span, body }, span, exported: false });
+        self.ast.items.push(Item { kind: ItemKind::Test { name, name_span, body, suite: false }, span, exported: false });
+    }
+
+    /// At the top level: `describe(...)`, `it(...)`, `test.skip(...)` and the like (Jest's and
+    /// Vitest's API)?
+    fn at_jest(&self) -> bool {
+        let w = self.text(self.tok());
+        match self.nth(1) {
+            Tok::LParen => matches!(w, "describe" | "it"),
+            Tok::Dot => {
+                matches!(w, "describe" | "it" | "test")
+                    && self.toks.get(self.pos + 2).is_some_and(|t| t.kind == Tok::Ident && matches!(self.text(*t), "skip" | "only" | "todo" | "each"))
+            }
+            _ => false,
+        }
+    }
+
+    /// `describe("A", () => { ... })`, `it("does", () => ...)`: a suite runs its body as a test
+    /// item, in which each `it`/`test` call is a test of its own (`A > does`, see `suite_body`).
+    fn jest_item(&mut self, start: Span) {
+        let e = self.expr();
+        self.terminator();
+        let span = start.to(self.prev_span());
+        // `test.each(table)(name, f)` on its own: a suite of its rows
+        if let Some((table, n, f)) = self.each_call(e) {
+            let name_span = self.expr_span(n);
+            let name = match &self.ast.exprs[n as usize].kind {
+                ExprKind::Str(s) => self.interner.get(*s).to_string(),
+                _ => self.src_text(name_span),
+            };
+            let Some(st) = self.each_stmt(table, n, f, "", &[], &[], span) else { return };
+            let b = self.mk_stmt(StmtKind::Block(vec![st]), span);
+            let body = self.mk_expr(ExprKind::Arrow(Box::new(ArrowFn { params: Vec::new(), ret: None, throws: None, body: ArrowBody::Block(b), is_async: false })), span);
+            self.ast.items.push(Item { kind: ItemKind::Test { name, name_span, body, suite: true }, span, exported: false });
+            return;
+        }
+        let Some((kind, modifier, args)) = self.jest_call(e) else { return };
+        if matches!(modifier.as_deref(), Some("skip" | "todo")) {
+            return;
+        }
+        let (Some(&n), Some(&f)) = (args.first(), args.get(1)) else {
+            self.err("P0001", span, format!("`{kind}` takes a name and a function"));
+            return;
+        };
+        let name_span = self.expr_span(n);
+        let name = match &self.ast.exprs[n as usize].kind {
+            ExprKind::Str(s) => self.interner.get(*s).to_string(),
+            _ => self.src_text(name_span),
+        };
+        let suite = kind == "describe";
+        if suite {
+            self.suite_body(f, &name, &[], &[]);
+        }
+        self.ast.items.push(Item { kind: ItemKind::Test { name, name_span, body: f, suite }, span, exported: false });
+    }
+
+    /// `name(args)` or `name.modifier(args)` for Jest's functions: (name, modifier, args).
+    fn jest_call(&self, e: ExprId) -> Option<(String, Option<String>, Vec<ExprId>)> {
+        let ExprKind::Call { callee, args, .. } = &self.ast.exprs[e as usize].kind else { return None };
+        let args = args.iter().map(|a| a.expr).collect();
+        match &self.ast.exprs[*callee as usize].kind {
+            ExprKind::Ident(s) => {
+                let n = self.interner.get(*s);
+                matches!(n, "describe" | "it" | "test" | "beforeEach" | "afterEach" | "beforeAll" | "afterAll").then(|| (n.to_string(), None, args))
+            }
+            ExprKind::Member { obj, name, .. } => {
+                let ExprKind::Ident(s) = self.ast.exprs[*obj as usize].kind else { return None };
+                let (n, m) = (self.interner.get(s), self.interner.get(*name));
+                (matches!(n, "describe" | "it" | "test") && matches!(m, "skip" | "only" | "todo")).then(|| (n.to_string(), Some(m.to_string()), args))
+            }
+            _ => None,
+        }
+    }
+
+    /// A suite's body, in place: `beforeEach(f)` becomes a hidden constant called first by each
+    /// later test of this suite and those in it (`afterEach(f)` last), `beforeAll(f)` a call
+    /// there, `afterAll(f)` a call at the end, a nested `describe` its own body there, and
+    /// `it("does", g)` a test `__test("Suite > does", g)`.
+    fn suite_body(&mut self, arrow: ExprId, prefix: &str, before: &[Sym], after: &[Sym]) {
+        let body = match &self.ast.exprs[arrow as usize].kind {
+            ExprKind::Arrow(f) => match f.body {
+                ArrowBody::Block(b) => b,
+                ArrowBody::Expr(_) => return,
+            },
+            _ => return,
+        };
+        let StmtKind::Block(ss) = &self.ast.stmts[body as usize].kind else { return };
+        let ss = ss.clone();
+        let (mut before, mut after) = (before.to_vec(), after.to_vec());
+        let mut out = Vec::new();
+        let mut tail = Vec::new();
+        for s in ss {
+            if let StmtKind::Expr(e) = self.ast.stmts[s as usize].kind
+                && let Some((table, n, f)) = self.each_call(e)
+            {
+                let span = self.ast.stmts[s as usize].span;
+                match self.each_stmt(table, n, f, prefix, &before, &after, span) {
+                    Some(st) => out.push(st),
+                    None => out.push(s),
+                }
+                continue;
+            }
+            let call = match self.ast.stmts[s as usize].kind {
+                StmtKind::Expr(e) => self.jest_call(e).map(|c| (e, c)),
+                _ => None,
+            };
+            let Some((e, (kind, modifier, args))) = call else {
+                out.push(s);
+                continue;
+            };
+            let span = self.ast.stmts[s as usize].span;
+            if matches!(modifier.as_deref(), Some("skip" | "todo")) {
+                continue;
+            }
+            match (kind.as_str(), &args[..]) {
+                ("beforeEach" | "afterEach", &[f]) => {
+                    let h = self.fresh_name();
+                    let fs = self.expr_span(f);
+                    out.push(self.mk_stmt(StmtKind::Let { mutable: false, name: h, name_span: fs, ty: None, init: Some(f) }, span));
+                    if kind == "beforeEach" { before.push(h) } else { after.push(h) }
+                }
+                ("beforeAll" | "afterAll", &[f]) => {
+                    let fs = self.expr_span(f);
+                    let c = self.mk_expr(ExprKind::Call { callee: f, type_args: Vec::new(), args: Vec::new(), optional: false }, fs);
+                    let st = self.mk_stmt(StmtKind::Expr(c), span);
+                    if kind == "beforeAll" { out.push(st) } else { tail.push(st) }
+                }
+                ("describe", &[n, f, ..]) => {
+                    let name = self.jest_name(prefix, n);
+                    self.suite_body(f, &name, &before, &after);
+                    match &self.ast.exprs[f as usize].kind {
+                        ExprKind::Arrow(a) => match a.body {
+                            ArrowBody::Block(b) => out.push(b),
+                            ArrowBody::Expr(x) => out.push(self.mk_stmt(StmtKind::Expr(x), span)),
+                        },
+                        _ => out.push(s),
+                    }
+                }
+                ("it" | "test", &[n, f, ..]) => {
+                    let ns = self.expr_span(n);
+                    let full = match &self.ast.exprs[n as usize].kind {
+                        ExprKind::Str(t) => {
+                            let t = format!("{prefix} > {}", self.interner.get(*t));
+                            let t = self.interner.intern(&t);
+                            self.mk_expr(ExprKind::Str(t), ns)
+                        }
+                        _ => {
+                            let p = self.interner.intern(&format!("{prefix} > "));
+                            let p = self.mk_expr(ExprKind::Str(p), ns);
+                            self.mk_expr(ExprKind::Binary(BinOp::Add, p, n), ns)
+                        }
+                    };
+                    self.with_hooks(f, &before);
+                    let test = self.interner.intern("__test");
+                    let cs = self.ast.exprs[e as usize].span;
+                    let callee = self.mk_expr(ExprKind::Ident(test), cs);
+                    let mut args = vec![Arg { expr: full, by_ref: None }, Arg { expr: f, by_ref: None }];
+                    // (the `afterEach` callbacks, run however the test ends)
+                    if !after.is_empty() {
+                        let ss: Vec<StmtId> = after.iter().map(|&h| self.hook_call(h, cs)).collect();
+                        let b = self.mk_stmt(StmtKind::Block(ss), cs);
+                        let a = self.mk_expr(ExprKind::Arrow(Box::new(ArrowFn { params: Vec::new(), ret: None, throws: None, body: ArrowBody::Block(b), is_async: false })), cs);
+                        args.push(Arg { expr: a, by_ref: None });
+                    }
+                    let c = self.mk_expr(ExprKind::Call { callee, type_args: Vec::new(), args, optional: false }, cs);
+                    out.push(self.mk_stmt(StmtKind::Expr(c), span));
+                }
+                _ => out.push(s),
+            }
+        }
+        out.extend(tail);
+        self.ast.stmts[body as usize].kind = StmtKind::Block(out);
+    }
+
+    /// `it.each(table)(name, f)` / `test.each(...)(...)`: (table, name, f).
+    fn each_call(&self, e: ExprId) -> Option<(ExprId, ExprId, ExprId)> {
+        let ExprKind::Call { callee, args, .. } = &self.ast.exprs[e as usize].kind else { return None };
+        let ExprKind::Call { callee: inner, args: targs, .. } = &self.ast.exprs[*callee as usize].kind else { return None };
+        let ExprKind::Member { obj, name, .. } = &self.ast.exprs[*inner as usize].kind else { return None };
+        let ExprKind::Ident(s) = self.ast.exprs[*obj as usize].kind else { return None };
+        if !matches!(self.interner.get(s), "it" | "test") || self.interner.get(*name) != "each" {
+            return None;
+        }
+        match (&targs[..], &args[..]) {
+            ([t], [n, f, ..]) => Some((t.expr, n.expr, f.expr)),
+            _ => None,
+        }
+    }
+
+    /// `it.each(table)(name, (a, b) => body)`: a test per row,
+    /// `for (const row of table) __test(name of row, () => { const a = row[0]; const b = row[1]; body })`.
+    /// A row is spread over the parameters when it's an array (two parameters or more, a rest
+    /// one, or a table of array literals), else it's the one parameter (`({ input }) => ...`).
+    /// A table of array literals is `as const` (its rows tuples, as Jest's types infer). The
+    /// name's `%s`/`%p`/`%d`... show the row's values, `$field` an object row's field, `%#` the
+    /// row number.
+    #[allow(clippy::too_many_arguments)]
+    fn each_stmt(&mut self, table: ExprId, n: ExprId, f: ExprId, prefix: &str, before: &[Sym], after: &[Sym], span: Span) -> Option<StmtId> {
+        let ExprKind::Arrow(a) = &self.ast.exprs[f as usize].kind else { return None };
+        if a.is_async {
+            return None;
+        }
+        let params: Vec<(Sym, Span, Option<TypeId>, bool)> = a.params.iter().map(|p| (p.name, p.span, p.ty, p.rest)).collect();
+        let fbody = match a.body {
+            ArrowBody::Block(b) => b,
+            ArrowBody::Expr(x) => {
+                let xs = self.expr_span(x);
+                self.mk_stmt(StmtKind::Expr(x), xs)
+            }
+        };
+        let literal_rows = matches!(&self.ast.exprs[table as usize].kind, ExprKind::Array(rows) if !rows.is_empty() && rows.iter().all(|&r| matches!(self.ast.exprs[r as usize].kind, ExprKind::Array(_))));
+        let spread = params.len() >= 2 || params.first().is_some_and(|p| p.3) || (params.len() == 1 && literal_rows);
+        let ts = self.expr_span(table);
+        let table = if literal_rows {
+            let c = self.interner.intern("const");
+            let te = self.mk_ty(TypeExprKind::Named { ns: None, name: c, name_span: ts, args: Vec::new() }, ts);
+            self.mk_expr(ExprKind::As(table, te), ts)
+        } else {
+            table
+        };
+        let (row, idx) = (self.fresh_name(), self.fresh_name());
+        let row_ref = |p: &mut Self| p.mk_expr(ExprKind::Ident(row), span);
+        // the parameters, from the row
+        let mut ss = Vec::new();
+        for (j, &(name, pspan, ty, rest)) in params.iter().enumerate() {
+            let r = row_ref(self);
+            let init = if !spread {
+                r
+            } else if rest {
+                if j == 0 {
+                    r
+                } else {
+                    let slice = self.interner.intern("slice");
+                    let callee = self.mk_expr(ExprKind::Member { obj: r, name: slice, name_span: pspan, optional: false }, pspan);
+                    let k = self.mk_expr(ExprKind::Int(j as u64), pspan);
+                    self.mk_expr(ExprKind::Call { callee, type_args: Vec::new(), args: vec![Arg { expr: k, by_ref: None }], optional: false }, pspan)
+                }
+            } else {
+                let k = self.mk_expr(ExprKind::Int(j as u64), pspan);
+                self.mk_expr(ExprKind::Index { obj: r, index: k, optional: false }, pspan)
+            };
+            ss.push(self.mk_stmt(StmtKind::Let { mutable: false, name, name_span: pspan, ty, init: Some(init) }, pspan));
+            if !spread {
+                break;
+            }
+        }
+        ss.push(fbody);
+        // (the function's own span: the row and its number are declared outside it)
+        let fspan = self.expr_span(f);
+        let b = self.mk_stmt(StmtKind::Block(ss), fspan);
+        let test_fn = self.mk_expr(ExprKind::Arrow(Box::new(ArrowFn { params: Vec::new(), ret: None, throws: None, body: ArrowBody::Block(b), is_async: false })), fspan);
+        self.with_hooks(test_fn, before);
+        // the name
+        let ns = self.expr_span(n);
+        let name = match &self.ast.exprs[n as usize].kind {
+            ExprKind::Str(t) => {
+                let text = self.interner.get(*t).to_string();
+                let (mut parts, mut vals) = (vec![String::new()], Vec::new());
+                let mut next = 0u64;
+                let mut cs = text.chars().peekable();
+                while let Some(c) = cs.next() {
+                    let v = match (c, cs.peek().copied()) {
+                        ('%', Some('%')) => {
+                            cs.next();
+                            parts.last_mut().unwrap().push('%');
+                            continue;
+                        }
+                        ('%', Some('#')) => {
+                            cs.next();
+                            self.mk_expr(ExprKind::Ident(idx), ns)
+                        }
+                        ('%', Some('p' | 's' | 'd' | 'i' | 'f' | 'j' | 'o')) => {
+                            cs.next();
+                            let r = row_ref(self);
+                            if spread {
+                                let k = self.mk_expr(ExprKind::Int(next), ns);
+                                next += 1;
+                                self.mk_expr(ExprKind::Index { obj: r, index: k, optional: false }, ns)
+                            } else {
+                                r
+                            }
+                        }
+                        ('$', Some(d)) if !spread && (d.is_alphabetic() || d == '_') => {
+                            let mut field = String::new();
+                            while let Some(&d) = cs.peek() {
+                                if !(d.is_alphanumeric() || d == '_') {
+                                    break;
+                                }
+                                field.push(d);
+                                cs.next();
+                            }
+                            let r = row_ref(self);
+                            let fname = self.interner.intern(&field);
+                            self.mk_expr(ExprKind::Member { obj: r, name: fname, name_span: ns, optional: false }, ns)
+                        }
+                        _ => {
+                            parts.last_mut().unwrap().push(c);
+                            continue;
+                        }
+                    };
+                    vals.push(v);
+                    parts.push(String::new());
+                }
+                if !prefix.is_empty() {
+                    parts[0].insert_str(0, &format!("{prefix} > "));
+                }
+                self.mk_expr(ExprKind::Template(parts, vals), ns)
+            }
+            _ if prefix.is_empty() => n,
+            _ => {
+                let p = self.interner.intern(&format!("{prefix} > "));
+                let p = self.mk_expr(ExprKind::Str(p), ns);
+                self.mk_expr(ExprKind::Binary(BinOp::Add, p, n), ns)
+            }
+        };
+        let callee = {
+            let t = self.interner.intern("__test");
+            self.mk_expr(ExprKind::Ident(t), span)
+        };
+        let mut args = vec![Arg { expr: name, by_ref: None }, Arg { expr: test_fn, by_ref: None }];
+        if !after.is_empty() {
+            let ss: Vec<StmtId> = after.iter().map(|&h| self.hook_call(h, span)).collect();
+            let b = self.mk_stmt(StmtKind::Block(ss), span);
+            let a = self.mk_expr(ExprKind::Arrow(Box::new(ArrowFn { params: Vec::new(), ret: None, throws: None, body: ArrowBody::Block(b), is_async: false })), span);
+            args.push(Arg { expr: a, by_ref: None });
+        }
+        let call = self.mk_expr(ExprKind::Call { callee, type_args: Vec::new(), args, optional: false }, span);
+        let call = self.mk_stmt(StmtKind::Expr(call), span);
+        let inc = {
+            let t = self.mk_expr(ExprKind::Ident(idx), span);
+            let u = self.mk_expr(ExprKind::Update { inc: true, prefix: false, target: t }, span);
+            self.mk_stmt(StmtKind::Expr(u), span)
+        };
+        let lb = self.mk_stmt(StmtKind::Block(vec![call, inc]), span);
+        let lp = self.mk_stmt(StmtKind::ForOf { mutable: false, name: row, name_span: ts, iter: table, body: lb }, span);
+        let zero = self.mk_expr(ExprKind::Int(0), span);
+        let init = self.mk_stmt(StmtKind::Let { mutable: true, name: idx, name_span: span, ty: None, init: Some(zero) }, span);
+        Some(self.mk_stmt(StmtKind::Block(vec![init, lp]), span))
+    }
+
+    /// A nested suite's name: `Outer > inner`.
+    fn jest_name(&self, prefix: &str, n: ExprId) -> String {
+        let inner = match &self.ast.exprs[n as usize].kind {
+            ExprKind::Str(s) => self.interner.get(*s).to_string(),
+            _ => self.src_text(self.expr_span(n)),
+        };
+        format!("{prefix} > {inner}")
+    }
+
+    /// `h();`
+    fn hook_call(&mut self, h: Sym, span: Span) -> StmtId {
+        let callee = self.mk_expr(ExprKind::Ident(h), span);
+        let c = self.mk_expr(ExprKind::Call { callee, type_args: Vec::new(), args: Vec::new(), optional: false }, span);
+        self.mk_stmt(StmtKind::Expr(c), span)
+    }
+
+    /// A test function `() => body` that calls `before` first.
+    fn with_hooks(&mut self, f: ExprId, before: &[Sym]) {
+        if before.is_empty() {
+            return;
+        }
+        let span = self.expr_span(f);
+        let ExprKind::Arrow(a) = &self.ast.exprs[f as usize].kind else { return };
+        if !a.params.is_empty() || a.is_async {
+            return;
+        }
+        let inner = match a.body {
+            ArrowBody::Block(b) => b,
+            ArrowBody::Expr(x) => self.mk_stmt(StmtKind::Expr(x), span),
+        };
+        let mut ss: Vec<StmtId> = before.iter().map(|&h| self.hook_call(h, span)).collect();
+        ss.push(inner);
+        let b = self.mk_stmt(StmtKind::Block(ss), span);
+        if let ExprKind::Arrow(a) = &mut self.ast.exprs[f as usize].kind {
+            a.body = ArrowBody::Block(b);
+        }
     }
 
     // ---------------------------------------------------------------- types

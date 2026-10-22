@@ -1047,6 +1047,21 @@ impl<'c, 'a> Gen<'c, 'a> {
                             mutated.insert(k);
                         }
                     }
+                    // (a suite's test runs its function, and the `afterEach` one, right there)
+                    if let Some(fact) = facts.calls.get(&e)
+                        && let Callee::Builtin { ns: None, name } = fact.callee
+                        && self.c.interner.get(name) == "__test"
+                    {
+                        for a in args.iter().skip(1) {
+                            let mut nested = Vec::new();
+                            collect_exprs_expr(ast, a.expr, &mut nested);
+                            if matches!(&ast.expr(a.expr).kind, ExprKind::Arrow(f) if !f.is_async)
+                                && !nested.iter().any(|&x| x != a.expr && matches!(ast.expr(x).kind, ExprKind::Arrow(_)))
+                            {
+                                stack_arrows.insert(a.expr);
+                            }
+                        }
+                    }
                     if let Some(fact) = facts.calls.get(&e)
                         && let ExprKind::Member { obj, name, .. } = &ast.expr(*callee).kind
                             && let Callee::Method(recv) = fact.callee

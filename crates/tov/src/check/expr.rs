@@ -2132,6 +2132,10 @@ impl<'a> Checker<'a> {
     /// Type of `base.name` for a non-optional base.
     pub(super) fn member_of(&mut self, base: TyId, name: Sym, name_span: Span, span: Span, obj: ExprId) -> Option<TyId> {
         let n = self.name(name).to_string();
+        // `expect(x).not.toBe(y)`: the matcher, negated
+        if n == "not" && matches!(self.types.get(base), Ty::Expect(_)) {
+            return Some(base);
+        }
         let members = self.flat_members(base);
         let mut found = Vec::new();
         let mut lacking = Vec::new();
@@ -2774,6 +2778,7 @@ impl<'a> Checker<'a> {
     /// of its type (`(x) => x !== undefined`, `(x) => typeof x === "string"`), as TypeScript
     /// infers.
     fn arrow_guarded(&mut self, f: &ArrowFn, exp: Option<TyId>, span: Span) -> (TyId, Option<TyId>) {
+        let test_cb = std::mem::take(&mut self.test_callback);
         let exp_fn = exp.and_then(|e| {
             self.flat_members(e).into_iter().find_map(|m| match *self.types.get(m) {
                 Ty::Func(ps, r, _) => Some((self.types.params(ps).to_vec(), r)),
@@ -2856,7 +2861,7 @@ impl<'a> Checker<'a> {
         let fcx = self.fcx.last_mut().unwrap();
         // A test's body can throw (an uncaught error fails the test); other closures only when
         // their function type says so.
-        let test_body = fcx.test_body && fcx.frames.is_empty();
+        let test_body = (fcx.test_body && fcx.frames.is_empty()) || test_cb;
         // (an arrow with no function type expected, `const f = () => ...` or a nested
         // function, throws what its body does, as a function declaration)
         let can_throw = test_body || exp_throws != NEVER || is_async || exp_fn.is_none();

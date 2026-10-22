@@ -1,0 +1,17 @@
+ok   matchers > passes
+FAIL matchers > fails not
+  expected not 3, received 3
+  at tests/run/jest_matchers.test.ts:25:27
+FAIL matchers > fails throw
+  expected the function to throw
+  at tests/run/jest_matchers.test.ts:26:29
+FAIL matchers > fails contain
+  expected to contain 5, received [ 1, 2 ]
+  at tests/run/jest_matchers.test.ts:27:31
+FAIL matchers > fails gt
+  expected a value > 2, received 1
+  at tests/run/jest_matchers.test.ts:28:26
+FAIL matchers > fails null
+  expected null, received 'x'
+  at tests/run/jest_matchers.test.ts:29:28
+1 passed, 5 failed

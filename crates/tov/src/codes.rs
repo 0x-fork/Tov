@@ -128,7 +128,6 @@ pub const CODES: &[(&str, &str)] = &[
     ("X0032", "This JavaScript global isn't available in Tov."),
     ("X0033", "`satisfies` is not supported; annotate the binding."),
     ("X0038", "Iterate a map with `keys()` or `values()`."),
-    ("X0039", "Truthiness matchers are not supported; compare explicitly."),
     ("X0040", "Definite-assignment assertions (`x!: T`) are not supported: initialize the field, assign it in the constructor, or make it optional."),
     ("C0001", "The native backend doesn't support this construct yet (`tov check` accepts it)."),
     ("C0002", "`tov run`/`tov build` need a `function main()`."),

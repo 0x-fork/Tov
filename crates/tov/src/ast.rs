@@ -395,7 +395,8 @@ pub enum ItemKind {
     Interface { name: Sym, name_span: Span, tparams: Vec<TypeParam>, members: Vec<FieldTy>, body: TypeId },
     /// A module-level `const` (or `let`, with `mutable`).
     Const { name: Sym, name_span: Span, ty: Option<TypeId>, init: ExprId, mutable: bool },
-    Test { name: String, name_span: Span, body: ExprId },
+    /// `test("name", () => ...)`; `suite`: a `describe` block, whose `it`s are tests of their own.
+    Test { name: String, name_span: Span, body: ExprId, suite: bool },
     Class(ClassDecl),
 }
 

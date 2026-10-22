@@ -263,6 +263,8 @@ pub(crate) struct Gen<'c, 'a> {
     pub(crate) fn_adapters: FxMap<(TyId, TyId), String>,
     /// Emit `tvg_uncaught` (main can throw, or tests).
     needs_uncaught: bool,
+    /// `tvg_test_fn` (running a test closure, see `__test`) is emitted.
+    pub(crate) test_call_done: bool,
     /// The async function whose body `function_body` emits next (see `asyncfn.rs`).
     pub(crate) pending_async: Option<(u32, u32)>,
     /// The next body is a generator's, yielding these.
@@ -361,6 +363,7 @@ impl<'c, 'a> Gen<'c, 'a> {
             itabs: FxMap::default(),
             fn_adapters: FxMap::default(),
             needs_uncaught: false,
+            test_call_done: false,
             pending_async: None,
             pending_gen: None,
             checked_project: None,
@@ -423,7 +426,7 @@ impl<'c, 'a> Gen<'c, 'a> {
             for (ii, item) in module.ast.items.iter().enumerate() {
                 match &item.kind {
                     ItemKind::Function(f) if self.sym(f.name) == "main" && main_fn.is_none() => main_fn = Some((mi as u32, ii as u32)),
-                    ItemKind::Test { name, body, .. } => tests.push((mi as u32, name.clone(), *body)),
+                    ItemKind::Test { name, body, suite, .. } => tests.push((mi as u32, name.clone(), *body, *suite)),
                     _ => {}
                 }
             }
@@ -478,9 +481,9 @@ impl<'c, 'a> Gen<'c, 'a> {
             }
             Mode::Test => {
                 self.needs_uncaught = true;
-                for (m, name, body) in tests {
+                for (m, name, body, suite) in tests {
                     let f = self.test_fn(m, body);
-                    let _ = writeln!(main_body, "    tv_test_run({}, {f});", c_string(name.as_bytes()));
+                    let _ = writeln!(main_body, "    tv_test_run_ctx({}, {}, tv_test_call, (void *){f}, {suite});", c_string(name.as_bytes()), name.len());
                 }
                 let _ = writeln!(main_body, "    tv_out_flush();\n    return tv_test_summary();");
             }

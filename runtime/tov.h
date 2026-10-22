@@ -872,6 +872,10 @@ void tv_async_run(void);
 /* Runs one test; a failing expect or a trap inside it marks it failed and returns.
  * Prints "ok   <name>" or "FAIL <name>\n  <message>\n  at <loc>". */
 void tv_test_run(const char *name, void (*fn)(void));
+/* A test named name[0, n) running fn(ctx) (it may run inside another: a `describe` suite's); a
+ * suite reports only a failure outside its tests. */
+void tv_test_run_ctx(const char *name, size_t n, void (*fn)(void *), void *ctx, bool suite);
+void tv_test_call(void *fn);  /* calls fn, a `void (*)(void)` */
 bool tv_test_active(void);   /* inside tv_test_run (a trap fails the test instead of exiting) */
 _Noreturn void tv_expect_fail(tv_sb *message, const char *loc);   /* message: e.g. "expected 3, received 4"; takes (frees) the builder */
 int tv_test_summary(void);   /* prints "<n> passed, <m> failed"; returns exit status (0 if all passed) */
