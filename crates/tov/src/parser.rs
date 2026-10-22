@@ -5,6 +5,8 @@ use crate::lexer::{self, Tok, Token};
 use crate::source::{FileId, Span};
 
 pub fn parse(src: &str, file: FileId, interner: &mut Interner) -> (Ast, Vec<Diagnostic>) {
+    // (the name of a spread's field, which checking may also make: see `check::rewrite`)
+    interner.intern("...");
     let mut diags = Vec::new();
     let mut lexed = lexer::lex(src, file, &mut diags);
     // `type` is a keyword only where a declaration starts (`type T = ...`, `import type { ... }`,
@@ -1265,6 +1267,21 @@ impl<'a> Parser<'a> {
 
     // ---------------------------------------------------------------- types
 
+    /// `A & B & ...` (binding tighter than `|`).
+    fn intersection_ty(&mut self) -> TypeId {
+        let start = self.cur_span();
+        let first = self.postfix_ty();
+        if !self.at(Tok::Amp) {
+            return first;
+        }
+        let mut members = vec![first];
+        while self.eat(Tok::Amp) {
+            members.push(self.postfix_ty());
+        }
+        let span = start.to(self.prev_span());
+        self.mk_ty(TypeExprKind::Intersection(members), span)
+    }
+
     fn ty(&mut self) -> TypeId {
         let start = self.cur_span();
         // `x is T` (a type predicate, as a function's result)
@@ -1276,25 +1293,13 @@ impl<'a> Parser<'a> {
             return self.mk_ty(TypeExprKind::Predicate(name, t), span);
         }
         self.eat(Tok::Pipe);
-        let first = self.postfix_ty();
-        if self.at(Tok::Amp) {
-            let span = self.cur_span();
-            self.push(
-                Diagnostic::new("X0014", span, "intersection types (`&`) are not supported")
-                    .note("instead", "declare a record type with all the fields"),
-            );
-            while self.eat(Tok::Amp) {
-                self.postfix_ty();
-            }
-            let span = start.to(self.prev_span());
-            return self.mk_ty(TypeExprKind::Error, span);
-        }
+        let first = self.intersection_ty();
         if !self.at(Tok::Pipe) {
             return first;
         }
         let mut members = vec![first];
         while self.eat(Tok::Pipe) {
-            members.push(self.postfix_ty());
+            members.push(self.intersection_ty());
         }
         let span = start.to(self.prev_span());
         self.mk_ty(TypeExprKind::Union(members), span)

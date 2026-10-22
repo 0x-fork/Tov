@@ -92,28 +92,32 @@ impl<'c, 'a> Gen<'c, 'a> {
                 }
                 let fv = self.expr(*callee);
                 let fty = self.c.types.without_undefined(fv.ty);
-                let fv = if *optional || fty != fv.ty {
-                    if *optional {
-                        self.unsupported(span, "optional calls `f?.()`");
+                // `f?.(x)`: undefined when f is (its arguments unevaluated)
+                if *optional && fty != fv.ty && self.c.types.has_undefined(ty) {
+                    let present = self.truthy_val(fv.clone());
+                    let res = self.fresh("t");
+                    let ct = self.ctype(ty);
+                    self.line(format!("{ct} {res};"));
+                    self.open_block(&format!("if ({present}) {{"));
+                    let f = self.project(fv, fty);
+                    let inner = self.c.types.without_undefined(ty);
+                    let r = self.call_fn_value(f, fty, args, inner, span);
+                    let r = self.coerce(r, ty);
+                    let code = self.consume(r);
+                    self.line(format!("{res} = {code};"));
+                    self.mid_block("} else {");
+                    let u = self.coerce(Val::plain("0", UNDEFINED), ty);
+                    self.line(format!("{res} = {};", u.code));
+                    self.close_block("}");
+                    let owned = self.is_rc(ty);
+                    if owned {
+                        self.b().temps.last_mut().unwrap().push((res.clone(), ty));
                     }
-                    self.project(fv, fty)
-                } else {
-                    fv
-                };
-                let Ty::Func(ps, ret, _) = self.tget(fty) else {
-                    self.unsupported(span, "calling this value");
-                    return Val::plain("0", ty);
-                };
-                let ps = self.c.types.params(ps).to_vec();
-                let argv = self.args(args, &ps, None);
-                let fvn = self.fresh("fn");
-                self.line(format!("tv_fn {fvn} = {};", fv.code));
-                let cast = self.fn_ptr_type(&ps, ret);
-                let mut all = vec![format!("{fvn}.env")];
-                all.extend(argv);
-                self.finish_call(&format!("(({cast}){fvn}.fn)({})", all.join(", ")), ret, ty)
-            }
-            Callee::Method(recv) => {
+                    return Val { code: res, ty, owned };
+                }
+                let fv = if fty != fv.ty { self.project(fv, fty) } else { fv };
+                self.call_fn_value(fv, fty, args, ty, span)
+            }            Callee::Method(recv) => {
                 let recv = self.inst(recv);
                 let ExprKind::Member { obj, name, optional: mopt, .. } = &ast.expr(*callee).kind else {
                     self.unsupported(span, "this method call");
@@ -361,6 +365,22 @@ impl<'c, 'a> Gen<'c, 'a> {
     }
 
     /// Calls a prepared callback with (borrowed) arguments; extra arguments are dropped.
+    /// A call of the function value `fv` (of function type `fty`).
+    fn call_fn_value(&mut self, fv: Val, fty: TyId, args: &[Arg], ty: TyId, span: Span) -> Val {
+        let Ty::Func(ps, ret, _) = self.tget(fty) else {
+            self.unsupported(span, "calling this value");
+            return Val::plain("0", ty);
+        };
+        let ps = self.c.types.params(ps).to_vec();
+        let argv = self.args(args, &ps, None);
+        let fvn = self.fresh("fn");
+        self.line(format!("tv_fn {fvn} = {};", fv.code));
+        let cast = self.fn_ptr_type(&ps, ret);
+        let mut all = vec![format!("{fvn}.env")];
+        all.extend(argv);
+        self.finish_call(&format!("(({cast}){fvn}.fn)({})", all.join(", ")), ret, ty)
+    }
+
     pub(crate) fn invoke(&mut self, cb: &Callback, args: Vec<Val>) -> Val {
         let mut codes = Vec::new();
         for (p, a) in cb.params.clone().iter().zip(args) {

@@ -49,11 +49,17 @@ pub struct Rewrites {
     pub(crate) setters: Vec<(u32, ExprId, crate::intern::Sym)>,
     /// `Promise.allSettled(ps)`: (module, the call, the prelude function), as `__allSettled(ps)`.
     pub(crate) static_calls: Vec<(u32, ExprId, crate::intern::Sym)>,
+    /// `a ||= b`, `a &&= b` on a variable or field path: (module, the assignment), as
+    /// `a = a || b`.
+    pub(crate) logical: Vec<(u32, ExprId)>,
+    /// `x as T`, T a record with x's fields and optional ones more: (module, the cast, the
+    /// spread field's name), as `{ ...x } as T`.
+    pub(crate) widen_casts: Vec<(u32, ExprId, crate::intern::Sym)>,
 }
 
 impl Rewrites {
     pub fn is_empty(&self) -> bool {
-        self.args.is_empty() && self.prims.is_empty() && self.records.is_empty() && self.fn_values.is_empty() && self.enum_names.is_empty() && self.rests.is_empty() && self.setters.is_empty() && self.static_calls.is_empty() && self.consts.is_empty() && self.items.is_empty() && self.awaits.is_empty() && self.calls.is_empty() && self.elems.is_empty() && self.keys.is_empty() && self.spreads.is_empty() && self.keyed.is_empty()
+        self.args.is_empty() && self.prims.is_empty() && self.records.is_empty() && self.fn_values.is_empty() && self.enum_names.is_empty() && self.rests.is_empty() && self.setters.is_empty() && self.static_calls.is_empty() && self.logical.is_empty() && self.widen_casts.is_empty() && self.consts.is_empty() && self.items.is_empty() && self.awaits.is_empty() && self.calls.is_empty() && self.elems.is_empty() && self.keys.is_empty() && self.spreads.is_empty() && self.keyed.is_empty()
     }
 
     pub(crate) fn extend(&mut self, o: Rewrites) {
@@ -73,6 +79,8 @@ impl Rewrites {
         self.rests.extend(o.rests);
         self.setters.extend(o.setters);
         self.static_calls.extend(o.static_calls);
+        self.logical.extend(o.logical);
+        self.widen_casts.extend(o.widen_casts);
     }
 }
 
@@ -115,6 +123,27 @@ pub fn apply(modules: &mut [Module], rw: &Rewrites) -> bool {
             *callee = fe;
             *args = all;
         }
+        changed = true;
+    }
+    for &(m, e, dots) in &rw.widen_casts {
+        let ast = &mut modules[m as usize].ast;
+        let ExprKind::As(x, t) = ast.exprs[e as usize].kind else { continue };
+        let span = ast.exprs[x as usize].span;
+        ast.exprs.push(crate::ast::Expr { kind: ExprKind::Spread(x), span });
+        let value = ast.exprs.len() as ExprId - 1;
+        ast.exprs.push(crate::ast::Expr { kind: ExprKind::Object(vec![crate::ast::ObjField { name: dots, name_span: span, value, quoted: false }]), span });
+        let obj = ast.exprs.len() as ExprId - 1;
+        ast.exprs[e as usize].kind = ExprKind::As(obj, t);
+        changed = true;
+    }
+    for &(m, e) in &rw.logical {
+        let ast = &mut modules[m as usize].ast;
+        let ExprKind::Assign(crate::ast::AssignOp::Op(op), target, value) = ast.exprs[e as usize].kind else { continue };
+        let Some(read) = copy_path(ast, target) else { continue };
+        let span = ast.exprs[e as usize].span;
+        ast.exprs.push(crate::ast::Expr { kind: ExprKind::Binary(op, read, value), span });
+        let v = ast.exprs.len() as ExprId - 1;
+        ast.exprs[e as usize].kind = ExprKind::Assign(crate::ast::AssignOp::Assign, target, v);
         changed = true;
     }
     for &(m, call, f) in &rw.static_calls {
@@ -352,4 +381,29 @@ fn clone_path(ast: &mut crate::ast::Ast, x: ExprId) -> ExprId {
     };
     ast.exprs.push(crate::ast::Expr { kind, span });
     ast.exprs.len() as ExprId - 1
+}
+
+/// `x`, `this`, `x.a.b`: an expression that reads the same place however often it's evaluated.
+pub(crate) fn simple_path(ast: &crate::ast::Ast, e: ExprId) -> bool {
+    match &ast.expr(e).kind {
+        ExprKind::Ident(_) | ExprKind::This => true,
+        ExprKind::Member { obj, optional: false, .. } => simple_path(ast, *obj),
+        _ => false,
+    }
+}
+
+/// A copy of the `simple_path` `e` (new nodes).
+fn copy_path(ast: &mut crate::ast::Ast, e: ExprId) -> Option<ExprId> {
+    let span = ast.exprs[e as usize].span;
+    let kind = match ast.exprs[e as usize].kind {
+        ExprKind::Ident(s) => ExprKind::Ident(s),
+        ExprKind::This => ExprKind::This,
+        ExprKind::Member { obj, name, name_span, optional: false } => {
+            let obj = copy_path(ast, obj)?;
+            ExprKind::Member { obj, name, name_span, optional: false }
+        }
+        _ => return None,
+    };
+    ast.exprs.push(crate::ast::Expr { kind, span });
+    Some(ast.exprs.len() as ExprId - 1)
 }

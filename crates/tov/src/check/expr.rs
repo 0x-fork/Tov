@@ -182,6 +182,14 @@ impl<'a> Checker<'a> {
             ExprKind::Unary(op, x) => self.unary(*op, *x, exp, span),
             ExprKind::Binary(op, l, r) => self.binary(*op, *l, *r, exp, span),
             ExprKind::Assign(op, t, v) => {
+                // `a ||= b`, `a.f &&= b`: as `a = a || b` (rewritten; the target is a variable or a
+                // field path, so reading it again changes nothing)
+                if matches!(op, AssignOp::Op(BinOp::And | BinOp::Or)) && super::rewrite::simple_path(self.ast(), *t) {
+                    self.expr(*t, None);
+                    let vt = self.expr(*v, None);
+                    self.rewrites.logical.push((self.cur, e));
+                    return vt;
+                }
                 if let Some(setter) = self.setter_of(*t) {
                     // (rewritten as `x.__set_name(v)`, checked then)
                     self.expr(*t, None);
@@ -278,6 +286,17 @@ impl<'a> Checker<'a> {
                     self.spec_poison(target);
                 }
                 if src == ERROR || target == ERROR || src == UNKNOWN || self.assignable(src, target) || self.assignable(target, src) {
+                    return target;
+                }
+                // `user as typeof user & { missing?: string }`: the record with the fields it
+                // lacks absent (rewritten as `{ ...user } as T`)
+                if self.adds_optional_fields(src, target)
+                    && let Some(dots) = self.interner.lookup("...")
+                {
+                    // (once an object literal, it's checked against T: see `object`)
+                    if !matches!(self.ast().expr(*x).kind, ExprKind::Object(_)) {
+                        self.rewrites.widen_casts.push((self.cur, e, dots));
+                    }
                     return target;
                 }
                 if src == JS {
@@ -3280,6 +3299,8 @@ impl<'a> Checker<'a> {
                     if let Some(f) = self.facts_mut() {
                         f.expr_ty[callee as usize] = ft;
                     }
+                    // (`o.cb?.(x)`: called when it's there)
+                    let ft = if optional { self.types.without_undefined(ft) } else { ft };
                     self.rec_call(e, Callee::Value);
                     self.pending_call = Some(e);
                     self.call_value(ft, &mtext, args, exp, span)
@@ -3343,6 +3364,15 @@ impl<'a> Checker<'a> {
         self.set_call_spec_from(callee);
         let r = self.call_value(t, &text, args, exp, span);
         if optional { self.types.optional(r) } else { r }
+    }
+
+    /// Records `from` and `to`, `to` with every field of `from` (of a type `from`'s fits) and
+    /// more, all of them optional.
+    fn adds_optional_fields(&mut self, from: TyId, to: TyId) -> bool {
+        let (Ty::Record(ff), Ty::Record(tf)) = (*self.types.get(from), *self.types.get(to)) else { return false };
+        let (ff, tf) = (self.types.fields(ff).to_vec(), self.types.fields(tf).to_vec());
+        ff.iter().all(|f| tf.iter().any(|t| t.name == f.name && self.assignable(f.ty, t.ty)))
+            && tf.iter().all(|t| t.optional || ff.iter().any(|f| f.name == t.name))
     }
 
     /// `x.name = v` where `x`'s class has a setter `name`: its method `__set_name`.

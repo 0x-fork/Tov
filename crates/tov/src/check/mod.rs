@@ -1721,6 +1721,52 @@ impl<'a> Checker<'a> {
         fields.into_iter().map(|f| Field { ty: self.types.subst(f.ty, &map), ..f }).collect()
     }
 
+    /// `A & B`: one record with the fields of each (a field in both has the narrower type, and is
+    /// optional only if it is in both).
+    fn intersection(&mut self, tys: &[TyId], span: Span) -> TyId {
+        let mut out: Vec<Field> = Vec::new();
+        let mut sites: Vec<(Sym, Vec<spec::Site>)> = Vec::new();
+        for &t in tys {
+            let fields = match *self.types.get(t) {
+                Ty::Error => return ERROR,
+                Ty::Record(_) => self.types.fields_in_order(t),
+                Ty::Interface(i, args) => {
+                    let args = self.types.tys(args).to_vec();
+                    self.iface_fields_inst(i, &args)
+                }
+                _ => {
+                    let shown = self.show(t);
+                    self.report(
+                        Diagnostic::new("X0014", span, format!("an intersection (`&`) combines record types, and `{shown}` isn't one"))
+                            .note("instead", "declare a record type with all the fields"),
+                    );
+                    return ERROR;
+                }
+            };
+            for f in fields {
+                sites.push((f.name, self.record_field_sites(t, f.name)));
+                match out.iter_mut().find(|x| x.name == f.name) {
+                    Some(x) => {
+                        if x.ty != f.ty && self.assignable(f.ty, x.ty) {
+                            x.ty = f.ty;
+                        }
+                        x.optional = x.optional && f.optional;
+                    }
+                    None => out.push(f),
+                }
+            }
+        }
+        let order: Vec<Sym> = out.iter().map(|f| f.name).collect();
+        let r = self.types.record(out);
+        self.types.note_field_order(r, order);
+        for (name, s) in sites {
+            if !s.is_empty() {
+                self.spec_fields.entry((r, name)).or_default().extend(s);
+            }
+        }
+        r
+    }
+
     /// One level of unfolding for recursive aliases.
     pub(crate) fn unfold(&mut self, ty: TyId) -> TyId {
         match *self.types.get(ty) {
@@ -1898,6 +1944,10 @@ impl<'a> Checker<'a> {
             TypeExprKind::Union(ms) => {
                 let ms: Vec<TyId> = ms.iter().map(|&m| self.resolve_type(m, tscope)).collect();
                 self.types.union(&ms)
+            }
+            TypeExprKind::Intersection(ms) => {
+                let ms: Vec<TyId> = ms.iter().map(|&m| self.resolve_type(m, tscope)).collect();
+                self.intersection(&ms, span)
             }
             TypeExprKind::Record(fields) => {
                 let mut out = Vec::new();
@@ -2694,7 +2744,28 @@ impl<'a> Checker<'a> {
         if changed && ty != declared {
             return;
         }
-        fcx.scopes.last_mut().unwrap().push((name, local, Some(ty)));
+        // (where another local of the same name hides it, as a closure's parameter hides a
+        // script variable: beneath that one, right after its own latest entry)
+        let mut hidden = None;
+        'find: for (si, scope) in fcx.scopes.iter().enumerate().rev() {
+            for (ei, &(s, id, _)) in scope.iter().enumerate().rev() {
+                if s == name {
+                    if id != local {
+                        hidden = Some(None);
+                        continue;
+                    }
+                    if hidden.is_some() {
+                        hidden = Some(Some((si, ei)));
+                    }
+                    break 'find;
+                }
+            }
+        }
+        match hidden {
+            None => fcx.scopes.last_mut().unwrap().push((name, local, Some(ty))),
+            Some(Some((si, ei))) => fcx.scopes[si].insert(ei + 1, (name, local, Some(ty))),
+            Some(None) => {}
+        }
     }
 
     /// Only references (class instances, promises, functions, `undefined`): changing what they
@@ -2798,7 +2869,7 @@ fn collect_type_refs(ast: &Ast, te: ast::TypeId, out: &mut Vec<(Option<Sym>, Sym
             }
         }
         TypeExprKind::Array(e) => collect_type_refs(ast, *e, out),
-        TypeExprKind::Union(ms) => ms.iter().for_each(|&m| collect_type_refs(ast, m, out)),
+        TypeExprKind::Union(ms) | TypeExprKind::Intersection(ms) => ms.iter().for_each(|&m| collect_type_refs(ast, m, out)),
         TypeExprKind::Record(fs) => fs.iter().for_each(|f| collect_type_refs(ast, f.ty, out)),
         TypeExprKind::Func(ps, r, th) => {
             ps.iter().filter_map(|p| p.ty).for_each(|t| collect_type_refs(ast, t, out));

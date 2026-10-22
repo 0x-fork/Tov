@@ -265,6 +265,8 @@ pub enum TypeExprKind {
     Array(TypeId),
     Record(Vec<FieldTy>),
     Union(Vec<TypeId>),
+    /// `A & B`: the record of both's fields.
+    Intersection(Vec<TypeId>),
     StrLit(Sym),
     /// `(params) => ret`, with an optional `throws E`.
     Func(Vec<Param>, TypeId, Option<TypeId>),

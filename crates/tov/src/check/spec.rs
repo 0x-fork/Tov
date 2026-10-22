@@ -109,7 +109,7 @@ impl<'a> Checker<'a> {
         }
         match &self.modules[m as usize].ast.ty(te).kind {
             TypeExprKind::Array(e) => self.type_sites_into(m, *e, out),
-            TypeExprKind::Union(ms) => ms.iter().for_each(|&t| self.type_sites_into(m, t, out)),
+            TypeExprKind::Union(ms) | TypeExprKind::Intersection(ms) => ms.iter().for_each(|&t| self.type_sites_into(m, t, out)),
             TypeExprKind::Record(fields) => fields.iter().for_each(|f| self.type_sites_into(m, f.ty, out)),
             TypeExprKind::Func(params, ret, _) => {
                 for p in params {
