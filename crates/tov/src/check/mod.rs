@@ -1945,6 +1945,7 @@ impl<'a> Checker<'a> {
             TypeExprKind::Void => VOID,
             TypeExprKind::Null => NULL,
             TypeExprKind::StrLit(s) => self.types.str_lit(*s),
+            TypeExprKind::BoolLit(b) => self.types.bool_lit(*b),
             TypeExprKind::Array(e) => {
                 let e = self.resolve_type(*e, tscope);
                 self.types.array(e)
@@ -2392,6 +2393,7 @@ impl<'a> Checker<'a> {
             (Ty::F64 | Ty::F32, Ty::Int) if top && self.float_args => return true,
             (Ty::Int | Ty::I8 | Ty::I16 | Ty::I32 | Ty::U8 | Ty::U16 | Ty::U32 | Ty::U64, Ty::Decimal) if top => return true,
             (Ty::StrLit(_), Ty::Str) => return true,
+            (Ty::BoolLit(_), Ty::Bool) => return true,
             (Ty::Undefined, Ty::Void) => return true,
             _ => {}
         }

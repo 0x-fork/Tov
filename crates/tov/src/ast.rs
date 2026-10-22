@@ -268,6 +268,8 @@ pub enum TypeExprKind {
     /// `A & B`: the record of both's fields.
     Intersection(Vec<TypeId>),
     StrLit(Sym),
+    /// `true` / `false` as a type.
+    BoolLit(bool),
     /// `(params) => ret`, with an optional `throws E`.
     Func(Vec<Param>, TypeId, Option<TypeId>),
     Undefined,

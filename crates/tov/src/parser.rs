@@ -1403,9 +1403,20 @@ impl<'a> Parser<'a> {
                 let s = self.interner.intern(&self.strings[t.val as usize]);
                 self.mk_ty(TypeExprKind::StrLit(s), start)
             }
-            Tok::Int | Tok::Float | Tok::BigInt | Tok::Decimal | Tok::True | Tok::False => {
+            Tok::True | Tok::False => {
+                let b = self.at(Tok::True);
                 self.bump();
-                self.err("U0007", start, "numeric and boolean literal types are not supported yet; use `int`, `f64` or `bool`");
+                self.mk_ty(TypeExprKind::BoolLit(b), start)
+            }
+            // (`1 | 2 | 3`: a number; Tov has no numeric literal types)
+            Tok::Int | Tok::Float => {
+                self.bump();
+                let number = self.interner.intern("number");
+                self.mk_ty(TypeExprKind::Named { ns: None, name: number, name_span: start, args: Vec::new() }, start)
+            }
+            Tok::BigInt | Tok::Decimal => {
+                self.bump();
+                self.err("U0007", start, "bigint and decimal literal types are not supported yet; use `bigint` or `decimal`");
                 self.mk_ty(TypeExprKind::Error, start)
             }
             Tok::Undefined => {

@@ -399,7 +399,11 @@ impl<'c, 'a> Gen<'c, 'a> {
     }
 
     pub(crate) fn tget(&self, t: TyId) -> Ty {
-        *self.c.types.get(t)
+        match *self.c.types.get(t) {
+            // (`true` as a type is a `bool` that's always true: the same C value)
+            Ty::BoolLit(_) => Ty::Bool,
+            t => t,
+        }
     }
 
     // ------------------------------------------------------------ program
@@ -778,7 +782,7 @@ impl<'c, 'a> Gen<'c, 'a> {
             Ty::U16 => "uint16_t".into(),
             Ty::U32 => "uint32_t".into(),
             Ty::U64 => "uint64_t".into(),
-            Ty::Bool => "bool".into(),
+            Ty::Bool | Ty::BoolLit(_) => "bool".into(),
             Ty::Str => "tv_str".into(),
             Ty::BigInt => "tv_big".into(),
             Ty::Decimal => "tv_dec".into(),

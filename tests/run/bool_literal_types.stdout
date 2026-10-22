@@ -1,0 +1,8 @@
+value 84
+error bad number: x
+value 7
+7 -1
+1 [ 'a', 'nope' ]
+{"ok":true,"value":"a"} { ok: false, error: 'nope' }
+5 true { done: true }
+12 9

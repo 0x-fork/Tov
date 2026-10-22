@@ -769,16 +769,18 @@ impl<'a> Checker<'a> {
                 group.iter().flatten().copied().collect()
             };
             match &mode {
+                // (a `default` after a case for every variant: `never`, as in TypeScript's
+                // `const _exhaustive: never = s`)
                 SwitchMode::Discriminated { local, variants } => {
                     let tys: Vec<TyId> = variants.iter().filter(|(l, _)| narrowed_lits.contains(l)).map(|(_, t)| *t).collect();
-                    if !tys.is_empty() {
+                    if !tys.is_empty() || group_default {
                         let t = self.types.union(&tys);
                         self.narrow(*local, t);
                     }
                 }
                 SwitchMode::Literal { local: Some(local), .. } => {
                     let tys: Vec<TyId> = narrowed_lits.iter().map(|&l| self.types.str_lit(l)).collect();
-                    if !tys.is_empty() {
+                    if !tys.is_empty() || group_default {
                         let t = self.types.union(&tys);
                         self.narrow(*local, t);
                     }

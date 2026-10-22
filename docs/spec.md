@@ -31,13 +31,14 @@ Status tags: **[M0]** checked today · **[Mn]** planned for milestone n.
 | `T[]` / `Array<T>` | growable array (value); `Uint8Array`, `Int32Array`, `Float64Array` and the other typed arrays are arrays of `u8`, `i32`, `f64`, ... |
 | `Map<K, V>`, `Set<T>` | hash map/set (value) |
 | `{ a: T, b?: U }` | exact record (value) |
-| `A \| B` | union; `"lit"` string-literal types |
+| `A \| B` | union; `"lit"` string-literal types and `true`/`false` (discriminants: `{ ok: true, value: T } \| { ok: false, error: E }`, narrowed by `if (r.ok)`); numeric literal types (`1 \| 2 \| 3`) are `number` |
+| `A & B` | intersection of record types: one record with the fields of each |
 | `(a: T) => U` | function type (`(a: T) => U throws E` if it can throw, §7) |
 | `Record<string, V>` | string-keyed map built with an object literal: `{ "Content-Type": "text/plain" }`; read with `.get(k)` (it is a `Map<string, V>`) |
 | `Promise<T>`, `Promise<T, E>` | a promise of a `T` that never rejects, or can reject with `E` (an `Error` class); see §7b |
 
 - Tuples `[A, B]` are records whose fields are `0`, `1`, ... (`t[0]`, printed and written to JSON as arrays). Destructuring works in `let`/`const` (`const [a, b] = t`, `const { x, y: py, z = 0 } = p`, holes and `...rest` in arrays), `for...of` (`for (const [k, v] of map)`), parameters and `[a, b] = [b, a]`; a missing array element traps, where JavaScript gives `undefined`. `map.entries()`, `xs.entries()`, `new Map(entries)` and `Object.keys/values/entries` give and take `[key, value]` tuples.
-- Removed: `any`, `object`, `symbol`, intersection `&`, conditional/mapped/indexed-access types, `keyof`, `typeof` in types, namespaces, decorators. `enum`s are a type (a number, or the union of their string values) and a constant holding the members (`Color.Red`); no reverse mapping (`Color[0]`).
+- Removed: `any`, `object`, `symbol`, conditional/mapped types, namespaces, decorators. `enum`s are a type (a number, or the union of their string values) and a constant holding the members (`Color.Red`); a numeric enum numbered from 0 maps back to names (`Color[0]`), and a `switch` with a case for every member is exhaustive.
 - `boolean` is exactly `bool`. `number` is TypeScript's number: each `number` written in an annotation is an `int` when only integers ever reach it (from the program's own code: data parsed from JSON or received from JavaScript keeps it a float), and an `f64` otherwise. The program means the same either way, except that an integer past 2^63 traps where a float would round (as an `int`'s does); `fib(n: number): number` runs as fast as with `int`.
 
 ### Numbers
@@ -124,7 +125,7 @@ class Circle extends Shape {
   get diameter(): f64 { return 2 * this.r }
 }
 ```
-- Single inheritance (`extends`, `super(...)`, `super.method(...)`), `abstract` classes and methods, `implements` (checked structurally), `static` methods and `static readonly` fields (no mutable statics), getters (setters later), `public`/`protected`/`private` and `#private` members, `readonly` fields (set only by their initializer or the constructor), parameter properties. No generic methods yet (make the class generic, or use a top-level generic function).
+- Single inheritance (`extends`, `super(...)`, `super.method(...)`), `abstract` classes and methods, `implements` (checked structurally), `static` methods and fields, getters and setters (`set name(v)`: `x.name = v`, `x.name += 1`), `x.constructor.name`, `public`/`protected`/`private` and `#private` members, `readonly` fields (set only by their initializer or the constructor), parameter properties. No generic methods yet (make the class generic, or use a top-level generic function).
 - Every field needs a value: an initializer, an assignment at the top level of the constructor, or `?` (optional). In a constructor, `this` is only used to set fields until all are set. A derived class's constructor starts with `super(...)`.
 - An override takes the same parameters (or wider types) and returns the same type (or a narrower one). Methods nobody overrides are called directly.
 - `x instanceof C` narrows unions and base-class types; `x as C` is a checked downcast (traps if wrong). `===` on instances is identity. `console.log` prints `ClassName { field: value }`, and `${x}` uses a `toString(): string` method if the class has one.
@@ -169,7 +170,7 @@ Node's names, so existing habits work:
 - `process.argv` (`[binary, binary, ...args]`, so `process.argv.slice(2)` are the arguments), `process.env.NAME` (`string | undefined`), `process.exit(code?)`, `process.cwd()`, `process.platform`, `process.arch`, `process.pid`, `process.stdout.write(s)`, `process.stderr.write(s)`; `console.error` / `console.warn` write to stderr.
 - `Date.now()` and `performance.now()` (milliseconds).
 - `JSON.stringify(value, undefined, indent?)` as in JavaScript (maps with string keys are written as objects, where JavaScript writes `{}`). `JSON.parse(text)` takes its type from context — `const c: Config = JSON.parse(text)` or `JSON.parse(text) as Config` — and **checks** the input against it (exact integers, string literals, discriminants, required fields; extra keys ignored, `null` and missing keys read as `undefined`), throwing `SyntaxError` otherwise.
-- Rest parameters: `function f(first: T, ...rest: U[])` (not in methods yet). Default values: `function f(x: T = d)` (an unannotated `n = 10` takes the literal's type); `d` is evaluated when the argument is missing or `undefined`, as in JavaScript (not yet for `inout`, rest and constructor parameter properties).
+- Rest parameters: `function f(first: T, ...rest: U[])`, in methods too. Default values: `function f(x: T = d)` (an unannotated `n = 10` takes the literal's type); `d` is evaluated when the argument is missing or `undefined`, as in JavaScript (not yet for `inout`, rest and constructor parameter properties).
 - Regular expressions: literals (`/(\d+)-(?<w>\w+)/g`) and `new RegExp(pattern, flags?)`, run by QuickJS's engine (vendored, linked only into programs that use them), with JavaScript's syntax, flags and UTF-16 positions. `test`, `exec`, `lastIndex`, `source`, `flags`; a match (`RegExpExecArray`) has `m[i]`, `index`, `input`, `groups`, `length`. Strings take them in `replace`/`replaceAll` (with `$1`, `$<name>`, `$&` or a function), `split`, `match`, `matchAll` and `search`. An invalid pattern throws `SyntaxError`.
 - Web servers: see §7c.
 

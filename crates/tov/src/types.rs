@@ -72,6 +72,8 @@ pub enum Ty {
     Decimal,
     Str,
     StrLit(Sym),
+    /// `true` or `false` as a type (`{ ok: true, value: T }`): a `bool` that is always this one.
+    BoolLit(bool),
     Array(TyId),
     Map(TyId, TyId),
     Set(TyId),
@@ -386,6 +388,15 @@ impl Types {
         self.intern(Ty::Class(class, l))
     }
 
+    pub fn bool_lit(&mut self, b: bool) -> TyId {
+        self.intern(Ty::BoolLit(b))
+    }
+
+    /// `bool`, or one of its literals.
+    pub fn is_bool(&self, ty: TyId) -> bool {
+        ty == BOOL || matches!(self.get(ty), Ty::BoolLit(_))
+    }
+
     pub fn str_lit(&mut self, s: Sym) -> TyId {
         self.intern(Ty::StrLit(s))
     }
@@ -429,6 +440,16 @@ impl Types {
         if out.contains(&STR) {
             let types = &*self;
             out.retain(|&m| !matches!(types.get(m), Ty::StrLit(_)));
+        }
+        // (`true | false` is `bool`; `bool | true` too)
+        let (t, f) = (out.iter().any(|&m| *self.get(m) == Ty::BoolLit(true)), out.iter().any(|&m| *self.get(m) == Ty::BoolLit(false)));
+        if out.contains(&BOOL) || (t && f) {
+            let types = &*self;
+            out.retain(|&m| !matches!(types.get(m), Ty::BoolLit(_)));
+            if !out.contains(&BOOL) {
+                out.push(BOOL);
+                out.sort();
+            }
         }
         match out.len() {
             0 => NEVER,
@@ -509,7 +530,7 @@ impl Types {
 
     /// Primitive = compared and tested by value, never "present/absent" by truthiness.
     pub fn is_primitive(&self, ty: TyId) -> bool {
-        self.is_numeric(ty) || self.is_string(ty) || ty == BOOL || ty == BIGINT || ty == DECIMAL
+        self.is_numeric(ty) || self.is_string(ty) || self.is_bool(ty) || ty == BIGINT || ty == DECIMAL
     }
 
     /// A number, or a decimal: a type a numeric literal can take.
@@ -621,8 +642,13 @@ impl Types {
     pub fn widen(&mut self, ty: TyId) -> TyId {
         match *self.get(ty) {
             Ty::StrLit(_) => STR,
-            Ty::Union(ms) if self.tys(ms).iter().all(|&m| matches!(self.get(m), Ty::StrLit(_)) || m == UNDEFINED) => {
-                let ms: Vec<TyId> = self.tys(ms).iter().map(|&m| if m == UNDEFINED { m } else { STR }).collect();
+            Ty::BoolLit(_) => BOOL,
+            Ty::Union(ms) if self.tys(ms).iter().all(|&m| matches!(self.get(m), Ty::StrLit(_) | Ty::BoolLit(_)) || m == UNDEFINED) => {
+                let ms: Vec<TyId> = self.tys(ms).iter().map(|&m| match self.get(m) {
+                    Ty::StrLit(_) => STR,
+                    Ty::BoolLit(_) => BOOL,
+                    _ => m,
+                }).collect();
                 self.union(&ms)
             }
             _ => ty,
@@ -676,6 +702,7 @@ impl Display<'_> {
             Ty::BigInt => out.push_str("bigint"),
             Ty::Decimal => out.push_str("decimal"),
             Ty::Str => out.push_str("string"),
+            Ty::BoolLit(b) => out.push_str(if b { "true" } else { "false" }),
             Ty::StrLit(s) => {
                 out.push('"');
                 out.push_str(self.interner.get(s));

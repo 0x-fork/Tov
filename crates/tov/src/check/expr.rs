@@ -152,7 +152,14 @@ impl<'a> Checker<'a> {
                 }
                 STR
             }
-            ExprKind::Bool(_) => BOOL,
+            // (`true` where a `true` is expected, as a discriminant: `{ ok: true, value }`)
+            ExprKind::Bool(b) => {
+                let lit = self.types.bool_lit(*b);
+                match exp {
+                    Some(x) if x != BOOL && self.flat_members(x).contains(&lit) => lit,
+                    _ => BOOL,
+                }
+            }
             ExprKind::Undefined => UNDEFINED,
             ExprKind::Null => NULL,
             // `xs.map(depth)`, `depth` a generic function of one parameter: as `(v) => depth(v)`,
@@ -2454,6 +2461,18 @@ impl<'a> Checker<'a> {
             let _ = span;
             return Some((ERROR, Vec::new()));
         }
+        // (`{ ok: true, value }`: a `true`/`false` field selecting the variant)
+        for f in fields {
+            let ExprKind::Bool(b) = self.ast().expr(f.value).kind else { continue };
+            let is_disc = records.iter().all(|(_, fs)| fs.iter().any(|x| x.name == f.name && matches!(self.types.get(x.ty), Ty::BoolLit(_))));
+            if !is_disc {
+                continue;
+            }
+            let lit = self.types.bool_lit(b);
+            if let Some((m, fs)) = records.iter().find(|(_, fs)| fs.iter().any(|x| x.name == f.name && x.ty == lit)) {
+                return Some((*m, fs.clone()));
+            }
+        }
         // No discriminant: the one variant whose fields the literal's fit.
         let names: Vec<Sym> = fields.iter().map(|f| f.name).collect();
         let fitting: Vec<&(TyId, Vec<Field>)> = records.iter().filter(|(_, fs)| names.iter().all(|n| fs.iter().any(|x| x.name == *n)) && fs.iter().all(|x| x.optional || names.contains(&x.name))).collect();
@@ -4101,6 +4120,8 @@ impl<'a> Checker<'a> {
         if actual == ERROR {
             return;
         }
+        // (`Result<number>` given where its body is the pattern: the body)
+        let actual = if matches!(self.types.get(actual), Ty::Rec(..)) && !matches!(self.types.get(pattern), Ty::Rec(..)) { self.unfold(actual) } else { actual };
         match *self.types.get(pattern) {
             Ty::Param(p) if free.contains(&p) => match map.get(&p).copied() {
                 None => {
@@ -4162,6 +4183,19 @@ impl<'a> Checker<'a> {
                 if pattern_rest.len() == 1 {
                     let actual_rest = self.types.without_undefined(actual);
                     self.unify(pattern_rest[0], actual_rest, free, map);
+                } else {
+                    // (variants of records: each with the actual one of the same fields)
+                    let names = |c: &Self, t: TyId| match *c.types.get(t) {
+                        Ty::Record(fs) => Some(c.types.fields(fs).iter().map(|f| f.name).collect::<Vec<Sym>>()),
+                        _ => None,
+                    };
+                    let actuals = self.flat_members(actual);
+                    for pm in pattern_rest {
+                        let Some(pn) = names(self, pm) else { continue };
+                        if let Some(&am) = actuals.iter().find(|&&a| names(self, a).as_ref() == Some(&pn)) {
+                            self.unify(pm, am, free, map);
+                        }
+                    }
                 }
             }
             Ty::Class(pd, pargs) => {
@@ -4277,7 +4311,7 @@ impl<'a> Checker<'a> {
             ExprKind::Binary(op @ (BinOp::Eq | BinOp::Ne | BinOp::LooseEq | BinOp::LooseNe), l, r) => {
                 let eq = matches!(op, BinOp::Eq | BinOp::LooseEq) == positive;
                 let (l, r) = (*l, *r);
-                let (subject, other) = if matches!(ast.expr(l).kind, ExprKind::Undefined | ExprKind::Null | ExprKind::Str(_)) { (r, l) } else { (l, r) };
+                let (subject, other) = if matches!(ast.expr(l).kind, ExprKind::Undefined | ExprKind::Null | ExprKind::Str(_) | ExprKind::Bool(_)) { (r, l) } else { (l, r) };
                 let loose = matches!(op, BinOp::LooseEq | BinOp::LooseNe);
                 match &ast.expr(other).kind {
                     // (`x == null` and `x == undefined` match both)
@@ -4306,6 +4340,14 @@ impl<'a> Checker<'a> {
                         let Some((target, ty)) = self.target_of(subject) else { return Vec::new() };
                         let t = if eq { if self.types.has_undefined(ty) { UNDEFINED } else { NEVER } } else { self.types.without_undefined(ty) };
                         vec![target.with(t)]
+                    }
+                    // `r.ok === false`: the variants whose `ok` is `false`
+                    ExprKind::Bool(b) => {
+                        let b = *b;
+                        match &ast.expr(subject).kind {
+                            ExprKind::Member { obj, name, optional: false, .. } => self.bool_field_narrowing(*obj, *name, b == eq),
+                            _ => Vec::new(),
+                        }
                     }
                     ExprKind::Str(lit) => {
                         let lit = *lit;
@@ -4401,6 +4443,8 @@ impl<'a> Checker<'a> {
                 let keep: Vec<TyId> = self.flat_members(ty).into_iter().filter(|&m| matches!(self.types.get(m), Ty::Array(_)) == positive).collect();
                 vec![target.with(self.types.union(&keep))]
             }
+            // `if (r.ok)`: the variants whose `ok` is `true` (`false` when it fails)
+            ExprKind::Member { obj, name, optional: false, .. } if self.bool_discriminant(*obj, *name) => self.bool_field_narrowing(*obj, *name, positive),
             ExprKind::Ident(_) | ExprKind::Member { optional: false, .. } => {
                 let Some((target, ty)) = self.target_of(e) else { return Vec::new() };
                 if !self.types.has_nullish(ty) {
@@ -4422,6 +4466,32 @@ impl<'a> Checker<'a> {
             }
             _ => Vec::new(),
         }
+    }
+
+    /// `x.name` where x is a union of records, some with `name` a `true` or `false`.
+    fn bool_discriminant(&mut self, obj: ExprId, name: Sym) -> bool {
+        let Some((_, ty)) = self.target_of(obj) else { return false };
+        let members = self.flat_members(ty);
+        members.len() > 1
+            && members.iter().any(|&m| match *self.types.get(m) {
+                Ty::Record(fs) => self.types.fields(fs).iter().any(|f| f.name == name && matches!(self.types.get(f.ty), Ty::BoolLit(_))),
+                _ => false,
+            })
+    }
+
+    /// x narrowed to the members whose field `name` can be `value`.
+    fn bool_field_narrowing(&mut self, obj: ExprId, name: Sym, value: bool) -> Vec<Narrowing> {
+        let Some((target, ty)) = self.target_of(obj) else { return Vec::new() };
+        let lit = self.types.bool_lit(!value);
+        let keep: Vec<TyId> = self
+            .flat_members(ty)
+            .into_iter()
+            .filter(|&m| match *self.types.get(m) {
+                Ty::Record(fs) => !self.types.fields(fs).iter().any(|f| f.name == name && f.ty == lit),
+                _ => true,
+            })
+            .collect();
+        vec![target.with(self.types.union(&keep))]
     }
 
     /// Is this callee the built-in `Array.isArray`?
