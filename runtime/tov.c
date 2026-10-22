@@ -3836,18 +3836,16 @@ tv_int tv_f64_to_int(double x, const char *what, const char *loc) {
 
 /* Stored xor the default seed, so the state is zero-initialized (no __data page in the binary). */
 #define TV_RNG_DEFAULT 0x9e3779b97f4a7c15ULL
-static uint64_t tv_rng_state;
+uint64_t tv_rng_state;
 
 static void tv_random_seed(uint64_t seed) {
     uint64_t x = tv_mix64(seed + TV_RNG_DEFAULT);
     tv_rng_state = (x ? x : TV_RNG_DEFAULT) ^ TV_RNG_DEFAULT;
 }
 
-/* Seeded on first use (TOV_SEED: a number, or any other value for a random seed), so programs
- * that never draw a random number don't link getenv, time and clock. */
-static bool tv_rng_ready;
-static __attribute__((noinline, cold)) void tv_random_init(void) {
-    tv_rng_ready = true;
+/* Seeded as a program that draws random numbers starts (TOV_SEED: a number, or any other value
+ * for a random seed), so programs that never draw one don't link getenv, time and clock. */
+__attribute__((noinline, cold)) void tv_random_init(void) {
     const char *seed = getenv("TOV_SEED");
     if (seed) {
         char *end;
@@ -3859,15 +3857,6 @@ static __attribute__((noinline, cold)) void tv_random_init(void) {
     }
 }
 
-double tv_random(void) { /* xorshift64* */
-    if (TV_UNLIKELY(!tv_rng_ready)) tv_random_init();
-    uint64_t x = tv_rng_state ^ TV_RNG_DEFAULT;
-    x ^= x >> 12;
-    x ^= x << 25;
-    x ^= x >> 27;
-    tv_rng_state = x ^ TV_RNG_DEFAULT;
-    return (double)((x * 0x2545f4914f6cdd1dULL) >> 11) * 0x1.0p-53;
-}
 
 /* ================================================================== closures */
 

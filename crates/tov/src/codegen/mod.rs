@@ -572,6 +572,11 @@ impl<'c, 'a> Gen<'c, 'a> {
             init.insert_str(0, "    tv_tls_install();\n");
             self.uses_tls = true;
         }
+        // (Math.random's seed, read from TOV_SEED once, before the first draw: tv_random has no
+        // check of its own)
+        if self.funcs.contains("tv_random()") || main_body.contains("tv_random()") {
+            init.insert_str(0, "    tv_random_init();\n");
+        }
         // A program importing npm packages: JavaScript exceptions become JsError objects.
         if self.js.used {
             // the roots of JavaScript values Tov holds: in this frame, which the collector scans

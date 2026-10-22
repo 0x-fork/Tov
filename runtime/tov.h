@@ -705,7 +705,20 @@ tv_int tv_dec_to_int(tv_dec a, const char *loc);
 
 double tv_math_round(double x);           /* JS Math.round: half toward +infinity */
 tv_int tv_f64_to_int(double x, const char *what, const char *loc);   /* traps on NaN/±inf/out of i64 range */
-double tv_random(void);                   /* xorshift, deterministic seed unless TOV_SEED is set */
+/* Math.random: xorshift64*, deterministic seed unless TOV_SEED is set. A program that draws
+ * numbers calls tv_random_init as it starts (so programs that don't never read TOV_SEED);
+ * tv_random is inline and checks nothing, so a loop drawing numbers keeps the state in a
+ * register. The state is stored xor 0x9e3779b97f4a7c15 (zero-initialized: no data page). */
+extern uint64_t tv_rng_state;
+void tv_random_init(void);
+static inline double tv_random(void) {
+    uint64_t x = tv_rng_state ^ 0x9e3779b97f4a7c15ULL;
+    x ^= x >> 12;
+    x ^= x << 25;
+    x ^= x >> 27;
+    tv_rng_state = x ^ 0x9e3779b97f4a7c15ULL;
+    return (double)((x * 0x2545f4914f6cdd1dULL) >> 11) * 0x1.0p-53;
+}
 
 /* ------------------------------------------------------------------ closures and boxes */
 
