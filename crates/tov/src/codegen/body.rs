@@ -5810,17 +5810,20 @@ impl<'c, 'a> Gen<'c, 'a> {
                         return cur;
                     }
                     BinOp::Add if p.ty == STR => {
+                        // (in place when the variable holds the only reference: a loop of `+=`
+                        // is linear)
+                        if rhs.ty == STR {
+                            self.line(format!("tv_str_append(&({lv}), {});", rhs.code));
+                            return cur;
+                        }
                         let sbv = self.fresh("sb");
                         self.line(format!("tv_sb {sbv} = {{0}};"));
                         self.open("{");
                         self.line(format!("tv_sb *sb = &{sbv};"));
-                        self.line(format!("tv_sb_push_str(sb, {lv});"));
                         let c = self.string_code(rhs.ty, &rhs.code);
                         self.line(format!("{c};"));
                         self.close("}");
-                        let s = self.fresh("s");
-                        self.line(format!("tv_str {s} = tv_str_from_sb(&{sbv});"));
-                        self.line(format!("tv_str_release({lv}); {lv} = {s};"));
+                        self.line(format!("tv_str_append_bytes(&({lv}), {sbv}.data, {sbv}.len, 0); tv_sb_free(&{sbv});"));
                         return cur;
                     }
                     BinOp::BitAnd | BinOp::BitOr | BinOp::BitXor | BinOp::Shl | BinOp::Shr | BinOp::UShr => {

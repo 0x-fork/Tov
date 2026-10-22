@@ -740,6 +740,69 @@ tv_str tv_str_from_sb(tv_sb *sb) {
     return (tv_str){b};
 }
 
+/* What a string's malloc'd block can hold, header and NUL included (0: unknown, or the block
+ * isn't malloc's: a mapped one). */
+static size_t tv_strbuf_block(const tv_strbuf *p) {
+#if defined(__APPLE__)
+    return malloc_size(p);
+#elif defined(__GLIBC__)
+    return malloc_usable_size((void *)p);
+#else
+    (void)p;
+    return 0;
+#endif
+}
+
+/* s += bytes[0, n) (`kind`: what's known of them, TV_STR_ASCII / TV_STR_WIDE). A string only `s`
+ * holds grows in place, its block doubling when full (so a loop of `+=` is linear); a shared
+ * one is copied into a block with room to grow. Small strings stay in their size class. */
+void tv_str_append_bytes(tv_str *s, const char *bytes, size_t n, int32_t kind) {
+    if (n == 0) return;
+    tv_strbuf *p = s->p;
+    size_t len = (size_t)p->len, nl = tv_size_mul_add(len, 1, n);
+    if (nl > INT32_MAX) tv_trap("string too long", NULL);
+    int32_t rc = p->rc;
+    int32_t flags = (rc & kind & TV_STR_ASCII) | ((rc | kind) & TV_STR_WIDE);
+    size_t size = tv_strbuf_size(len), nsize = tv_strbuf_size(nl);
+    tv_strbuf *q = NULL;
+    if (rc > 0 && (rc & TV_STR_COUNT) == 1 && (bytes < p->data || bytes > p->data + len)) {
+        if (rc & TV_STR_WIDE) tv_uview_drop(p); /* (its UTF-16 view describes the old text) */
+        if (size <= TV_SMALL_MAX) {
+            if (((size + 7) >> 3) == ((nsize + 7) >> 3)) q = p;
+            else {
+                q = (tv_strbuf *)(nsize <= TV_SMALL_MAX ? tv_small_alloc(nsize) : tv_alloc(nsize < 1024 ? 1024 : nsize));
+                memcpy(q->data, p->data, len);
+                tv_small_free(p, size);
+            }
+        } else {
+            size_t block = tv_strbuf_block(p);
+            if (block >= nsize) q = p;
+            else if (block) q = (tv_strbuf *)tv_realloc(p, nsize > 2 * block ? nsize : 2 * block);
+        }
+        if (q) {
+            memcpy(q->data + len, bytes, n);
+            q->data[nl] = 0;
+            q->len = (int32_t)nl;
+            q->rc = 1 | flags;
+            s->p = q;
+            return;
+        }
+    }
+    /* (shared, immortal or mapped: a copy, with room for more) */
+    q = (tv_strbuf *)(nsize <= TV_SMALL_MAX ? tv_small_alloc(nsize) : tv_alloc(nsize + nsize / 2));
+    memcpy(q->data, p->data, len);
+    memcpy(q->data + len, bytes, n);
+    q->data[nl] = 0;
+    q->len = (int32_t)nl;
+    q->rc = 1 | flags;
+    tv_str_release(*s);
+    s->p = q;
+}
+
+void tv_str_append(tv_str *s, tv_str t) {
+    tv_str_append_bytes(s, t.p->data, (size_t)t.p->len, t.p->rc & (TV_STR_ASCII | TV_STR_WIDE));
+}
+
 tv_str tv_str_concat(tv_str a, tv_str b) {
     size_t na = (size_t)a.p->len, nb = (size_t)b.p->len;
     if (nb == 0) { tv_str_retain(a); return a; }
