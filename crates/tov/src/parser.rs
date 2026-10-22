@@ -2301,8 +2301,34 @@ impl<'a> Parser<'a> {
                     && let ExprKind::Array(elems) = &self.ast.exprs[target as usize].kind
                 {
                     let elems = elems.clone();
-                    let tmp = self.fresh_name();
                     let tspan = self.expr_span(target);
+                    // `[a, b] = [b, a + b]`: each value in a hidden variable of its own (all of
+                    // them first, as JavaScript evaluates the array), with no array made
+                    let plain = |p: &Self, x: ExprId| matches!(p.ast.exprs[x as usize].kind, ExprKind::Ident(_) | ExprKind::Member { optional: false, .. } | ExprKind::Index { optional: false, .. });
+                    if let ExprKind::Array(vals) = &self.ast.exprs[value as usize].kind
+                        && vals.len() == elems.len()
+                        // (a value whose type comes from its target keeps the array: `[x, y] = [undefined, []]`)
+                        && vals.iter().all(|&v| !matches!(&self.ast.exprs[v as usize].kind, ExprKind::Spread(_) | ExprKind::Undefined | ExprKind::Null | ExprKind::Arrow(_) | ExprKind::Object(_) | ExprKind::Array(_)))
+                        && elems.iter().all(|&x| plain(self, x))
+                    {
+                        let vals = vals.clone();
+                        let mut out = Vec::new();
+                        let mut tmps = Vec::new();
+                        for &v in &vals {
+                            let tmp = self.fresh_name();
+                            let vs = self.expr_span(v);
+                            out.push(self.mk_stmt(StmtKind::Let { mutable: false, name: tmp, name_span: vs, ty: None, init: Some(v) }, vs));
+                            tmps.push(tmp);
+                        }
+                        for (&x, tmp) in elems.iter().zip(tmps) {
+                            let xs = self.expr_span(x);
+                            let v = self.mk_expr(ExprKind::Ident(tmp), xs);
+                            let a = self.mk_expr(ExprKind::Assign(AssignOp::Assign, x, v), xs);
+                            out.push(self.mk_stmt(StmtKind::Expr(a), xs));
+                        }
+                        return self.mk_stmt(StmtKind::Block(out), span);
+                    }
+                    let tmp = self.fresh_name();
                     let mut out = vec![self.mk_stmt(StmtKind::Let { mutable: false, name: tmp, name_span: tspan, ty: None, init: Some(value) }, span)];
                     for (i, &x) in elems.iter().enumerate() {
                         let xs = self.expr_span(x);
