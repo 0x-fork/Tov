@@ -661,6 +661,8 @@ impl<'c, 'a> Gen<'c, 'a> {
                 skip = false;
             } else if let Some(n) = self.map_count(ss, i) {
                 skip = n == 2;
+            } else if let Some(n) = self.permutation(ss, i) {
+                in_group = n - 1;
             } else {
                 self.stmt(x);
             }
@@ -670,6 +672,108 @@ impl<'c, 'a> Gen<'c, 'a> {
                 }
             }
         }
+    }
+
+    /// `const t = a; a = b; b = t`, `[a, b] = [b, a]` (desugared to hidden constants), and other
+    /// runs of constants and assignments that only move values between locals of one counted
+    /// type, leaving each value in exactly one of them: plain copies, with no counting. The
+    /// constants must be unused after the run. The statements it emitted, or None.
+    fn permutation(&mut self, ss: &[StmtId], i: usize) -> Option<usize> {
+        let m = self.cur_m();
+        let ast = self.ast(m);
+        // what each slot holds, as the slot it held at the start; temps are constants of the run
+        let mut holds: Vec<(u32, u32)> = Vec::new();
+        let mut temps: Vec<u32> = Vec::new();
+        let mut steps: Vec<(u32, u32, bool)> = Vec::new(); // (to, from, declares)
+        let mut ty = None;
+        let mut best = None;
+        let local = |e: ExprId| match (&ast.expr(e).kind, self.ident_fact(m, e)) {
+            (ExprKind::Ident(_), Some(IdentFact::Local(k))) => Some(k),
+            _ => None,
+        };
+        for (j, &x) in ss.iter().enumerate().skip(i) {
+            let (to, from, declares) = match &ast.stmt(x).kind {
+                StmtKind::Let { mutable: false, name_span, ty: None, init: Some(v), .. } => match local(*v) {
+                    Some(v) => (name_span.start, v, true),
+                    None => break,
+                },
+                StmtKind::Expr(e) => match &ast.expr(*e).kind {
+                    ExprKind::Assign(AssignOp::Assign, t, v) => match (local(*t), local(*v)) {
+                        (Some(t), Some(v)) if !temps.contains(&t) => (t, v, false),
+                        _ => break,
+                    },
+                    _ => break,
+                },
+                _ => break,
+            };
+            if !declares {
+                let Some(l) = self.bodies.last().unwrap().locals.get(&to) else { break };
+                if ty.is_some_and(|t| t != l.ty) {
+                    break;
+                }
+                ty = Some(l.ty);
+            }
+            if !temps.contains(&from) {
+                let Some(l) = self.bodies.last().unwrap().locals.get(&from) else { break };
+                if ty.is_some_and(|t| t != l.ty) {
+                    break;
+                }
+                ty = Some(l.ty);
+            }
+            let val = holds.iter().find(|h| h.0 == from).map(|h| h.1).unwrap_or(from);
+            match holds.iter_mut().find(|h| h.0 == to) {
+                Some(h) => h.1 = val,
+                None => holds.push((to, val)),
+            }
+            if declares {
+                temps.push(to);
+            }
+            steps.push((to, from, declares));
+            // (a permutation: each local's start value is in exactly one local)
+            let locals: Vec<&(u32, u32)> = holds.iter().filter(|h| !temps.contains(&h.0)).collect();
+            let starts: Vec<u32> = holds.iter().map(|h| h.0).filter(|k| !temps.contains(k)).collect();
+            let perm = !locals.is_empty()
+                && locals.iter().all(|h| starts.contains(&h.1))
+                && starts.iter().all(|s| locals.iter().filter(|h| h.1 == *s).count() == 1);
+            if perm {
+                best = Some(j + 1 - i);
+            }
+        }
+        let n = best?;
+        let ty = ty?;
+        if n < 2 {
+            return None;
+        }
+        let temps: Vec<u32> = steps[..n].iter().filter(|s| s.2).map(|s| s.0).collect();
+        // (a loop's cached view of an array local stays the codegen's own way of assigning)
+        let b = self.bodies.last().unwrap();
+        if steps[..n].iter().flat_map(|s| [s.0, s.1]).any(|k| b.unique.contains(&k) || b.arr_cache.contains_key(&k) || b.push_caps.contains_key(&k)) {
+            return None;
+        }
+        let mut later = Vec::new();
+        for &x in &ss[i + n..] {
+            collect_exprs_stmt(ast, x, &mut later);
+        }
+        if later.iter().any(|&e| local(e).is_some_and(|k| temps.contains(&k))) || !self.is_rc(ty) {
+            return None;
+        }
+        let ct = self.ctype(ty);
+        let mut names: FxMap<u32, String> = FxMap::default();
+        for &(to, from, declares) in &steps[..n] {
+            let src = match names.get(&from) {
+                Some(n) => n.clone(),
+                None => self.b().locals.get(&from)?.access.clone(),
+            };
+            if declares {
+                let t = self.fresh("mv");
+                self.line(format!("{ct} {t} = {src};"));
+                names.insert(to, t);
+            } else {
+                let dst = self.b().locals.get(&to)?.access.clone();
+                self.line(format!("{dst} = {src};"));
+            }
+        }
+        Some(n)
     }
 
     /// `m.set(k, (m.get(k) ?? d) op e)` (a counter or running total in a map, `k` a local, `d`
