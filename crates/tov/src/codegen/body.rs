@@ -3305,6 +3305,14 @@ impl<'c, 'a> Gen<'c, 'a> {
                     ExprKind::Ident(s) => self.sym(*s).to_string(),
                     _ => String::new(),
                 };
+                if name == "Array" && self.facts(self.cur_m()).filled_arrays.contains(&e) {
+                    // (filled in order by the loop after it: see `filled_arrays`)
+                    let Ty::Array(et) = self.tget(ty) else { unreachable!() };
+                    let n = self.expr(args[0].expr);
+                    let n = self.int_code(n);
+                    let d = self.desc(et);
+                    return self.tmp(ty, &format!("tv_arr_with_capacity({d}, {n})"), true);
+                }
                 if name == "Array" || crate::check::typed_array_elem(&name).is_some() {
                     return self.new_array(args, ty, span);
                 }

@@ -1,5 +1,5 @@
 use super::*;
-use crate::ast::{ArrowBody, AssignOp, Case, ExprKind, StmtKind};
+use crate::ast::{ArrowBody, AssignOp, BinOp, Case, ExprKind, StmtKind};
 
 enum SwitchMode {
     /// `switch (x.kind)` over a discriminated union: variants are (literal, member type).
@@ -1467,4 +1467,82 @@ fn results_tested(ast: &crate::ast::Ast, name: Sym, stmts: &[StmtId]) -> bool {
         }
         _ => false,
     })
+}
+
+/// Is `ne` (a `new Array(n)`) the start of an array the next statement fills, one element a
+/// round, in order: `const xs: T[] = new Array(n); for (let i = 0; i < n; i++) { ...; xs[i] = v; }`
+/// with `xs` used nowhere else before (the loop is the first statement after to mention it)? It's then made empty (with room for `n`), and each
+/// store appends: no element is ever missing (a read before its store is out of bounds).
+pub(super) fn filled_by_next_loop(ast: &Ast, ne: ExprId) -> bool {
+    let local = |e: ExprId, s: Sym| matches!(ast.expr(e).kind, ExprKind::Ident(n) if n == s);
+    let mentions = |s: StmtId, x: Sym| {
+        let mut es = Vec::new();
+        crate::codegen::body::collect_exprs_stmt_pub(ast, s, &mut es);
+        es.iter().filter(|&&e| local(e, x)).count()
+    };
+    fn jumps(ast: &Ast, s: StmtId) -> bool {
+        match &ast.stmt(s).kind {
+            StmtKind::Break(_) | StmtKind::Continue(_) => true,
+            StmtKind::Block(ss) => ss.iter().any(|&x| jumps(ast, x)),
+            StmtKind::If(_, t, e) => jumps(ast, *t) || e.is_some_and(|e| jumps(ast, e)),
+            StmtKind::While(_, b) | StmtKind::DoWhile(b, _) | StmtKind::For { body: b, .. } | StmtKind::ForOf { body: b, .. } => jumps(ast, *b),
+            StmtKind::Switch(_, cases) => cases.iter().flat_map(|c| c.body.iter()).any(|&x| jumps(ast, x)),
+            StmtKind::Try { body, catch, finally } => jumps(ast, *body) || catch.as_ref().is_some_and(|c| jumps(ast, c.body)) || finally.is_some_and(|f| jumps(ast, f)),
+            _ => false,
+        }
+    }
+    for st in &ast.stmts {
+        let StmtKind::Block(ss) = &st.kind else { continue };
+        // (a script's top-level `const`: initialized where it's declared)
+        let declared = |s: StmtId| match ast.stmt(s).kind {
+            StmtKind::Let { name, init: Some(i), .. } if i == ne => Some(name),
+            StmtKind::InitGlobal(item) => match ast.items[item as usize].kind {
+                crate::ast::ItemKind::Const { name, init, .. } if init == ne => Some(name),
+                _ => None,
+            },
+            _ => None,
+        };
+        let Some((k, x)) = ss.iter().enumerate().find_map(|(k, &s)| declared(s).map(|x| (k, x))) else { continue };
+        // (statements between that don't mention `xs` can't see it)
+        let Some(&next) = ss[k + 1..].iter().find(|&&s| mentions(s, x) > 0) else { return false };
+        let StmtKind::For { init: Some(init), cond: Some(cond), step: Some(step), body } = &ast.stmt(next).kind else { return false };
+        let StmtKind::Let { name: i, init: Some(zero), .. } = ast.stmt(*init).kind else { return false };
+        if !matches!(ast.expr(zero).kind, ExprKind::Int(0)) {
+            return false;
+        }
+        let ExprKind::Binary(BinOp::Lt, l, bound) = ast.expr(*cond).kind else { return false };
+        let one_up = match &ast.expr(*step).kind {
+            ExprKind::Update { inc: true, target, .. } => local(*target, i),
+            ExprKind::Assign(AssignOp::Op(BinOp::Add), t, one) => local(*t, i) && matches!(ast.expr(*one).kind, ExprKind::Int(1)),
+            _ => false,
+        };
+        let mut bound_exprs = Vec::new();
+        crate::codegen::body::collect_exprs_expr(ast, bound, &mut bound_exprs);
+        if !local(l, i) || !one_up || bound_exprs.iter().any(|&e| local(e, x)) {
+            return false;
+        }
+        // (`i` changes only in the step)
+        let mut es = Vec::new();
+        crate::codegen::body::collect_exprs_stmt_pub(ast, *body, &mut es);
+        if es.iter().any(|&e| matches!(&ast.expr(e).kind, ExprKind::Assign(_, t, _) | ExprKind::Update { target: t, .. } if local(*t, i))) {
+            return false;
+        }
+        let body_ss: Vec<StmtId> = match &ast.stmt(*body).kind {
+            StmtKind::Block(bs) => bs.clone(),
+            _ => vec![*body],
+        };
+        // the one mention of `xs` in the loop: a store at `i`, every round
+        let Some(j) = body_ss.iter().position(|&s| mentions(s, x) > 0) else { return false };
+        let StmtKind::Expr(store) = ast.stmt(body_ss[j]).kind else { return false };
+        let ExprKind::Assign(AssignOp::Assign, place, v) = ast.expr(store).kind else { return false };
+        let ExprKind::Index { obj, index, optional: false } = ast.expr(place).kind else { return false };
+        let mut ves = Vec::new();
+        crate::codegen::body::collect_exprs_expr(ast, v, &mut ves);
+        return local(obj, x)
+            && local(index, i)
+            && !ves.iter().any(|&e| local(e, x))
+            && body_ss[j + 1..].iter().all(|&s| mentions(s, x) == 0)
+            && !body_ss[..j].iter().any(|&s| jumps(ast, s));
+    }
+    false
 }

@@ -3148,7 +3148,13 @@ impl<'a> Checker<'a> {
                     }
                 }
                 match elem {
-                    Some(e) if typed.is_some() || self.has_default(e) => self.types.array(e),
+                    Some(el) if typed.is_some() || self.has_default(el) => self.types.array(el),
+                    Some(el) if n == "Array" && args.len() == 1 && super::stmt::filled_by_next_loop(self.ast(), e) => {
+                        if let Some(f) = self.facts_mut() {
+                            f.filled_arrays.insert(e);
+                        }
+                        self.types.array(el)
+                    }
                     Some(e) => {
                         let shown = self.show(e);
                         self.report(

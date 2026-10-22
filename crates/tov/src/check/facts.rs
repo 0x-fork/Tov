@@ -111,6 +111,9 @@ pub struct ModuleFacts {
     pub closure_groups: FxMap<StmtId, Vec<StmtId>>,
     /// Field reads narrowed before a call that may have changed them: checked when read.
     pub asserted_reads: crate::hash::FxSet<ExprId>,
+    /// `new Array(n)` of elements without an empty value, filled by the loop after it (see
+    /// `stmt::filled_by_next_loop`): made empty, with room for `n`.
+    pub filled_arrays: crate::hash::FxSet<ExprId>,
 }
 
 impl ModuleFacts {
