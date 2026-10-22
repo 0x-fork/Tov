@@ -1441,7 +1441,9 @@ impl<'c, 'a> Gen<'c, 'a> {
                 let absent = self.niche_absent(t);
                 format!("({{ if (({place}) != NULL) {inner}; else tv_sb_push_cstr(sb, \"{absent}\"); }})")
             }
-            Ty::Map(..) | Ty::Set(_) => format!("({})->to_str(sb, &({place}))", self.desc(t)),
+            // (as JavaScript's `String(m)`; a `Record` made as an object is one)
+            Ty::Map(..) => format!("tv_sb_push_cstr(sb, tv_map_is_object({place}) ? \"[object Object]\" : \"[object Map]\")"),
+            Ty::Set(_) => "tv_sb_push_cstr(sb, \"[object Set]\")".into(),
             Ty::Promise(..) => "tv_sb_push_cstr(sb, \"[object Promise]\")".into(),
             Ty::Gen(_) => "tv_sb_push_cstr(sb, \"[object Generator]\")".into(),
             Ty::Js => format!("tv_type_js.to_str(sb, &({place}))"),

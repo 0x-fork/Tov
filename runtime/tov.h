@@ -480,6 +480,7 @@ tv_arr tv_map_values(tv_map m, const tv_type *kt, const tv_type *vt);
 bool tv_map_next(tv_map m, const tv_type *kt, const tv_type *vt, tv_int *cursor, void **key, void **value);
 /* Descriptor helpers for maps used as values inside other containers. */
 bool tv_map_eq(tv_map a, tv_map b, const tv_type *kt, const tv_type *vt);   /* identity-free value equality */
+bool tv_map_is_object(tv_map m);   /* made as an object (`{ a: 1 }` for a Record<string, V>) */
 void tv_map_inspect(tv_sb *sb, tv_map m, const tv_type *kt, const tv_type *vt, int depth); /* Map(2) { 'a' => 1, 'b' => 2 } */
 /* Sets are maps whose value type has size 0: pass &tv_type_undefined as vt and NULL as value. */
 void tv_set_inspect(tv_sb *sb, tv_map m, const tv_type *kt, int depth);                    /* Set(2) { 1, 2 } */

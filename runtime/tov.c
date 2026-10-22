@@ -3055,6 +3055,8 @@ void tv_map_release(tv_map m, const tv_type *kt, const tv_type *vt) {
     tv_small_free(m.p, sizeof(tv_maphdr));
 }
 
+bool tv_map_is_object(tv_map m) { return m.p && m.p->object; }
+
 tv_int tv_map_size(tv_map m) { tv_mapbuf *b = tv_map_buf(m); return b ? b->count : 0; }
 
 void *tv_map_get(tv_map mm, const tv_type *kt, const tv_type *vt, const void *key) {
