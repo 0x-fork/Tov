@@ -5397,6 +5397,28 @@ impl<'c, 'a> Gen<'c, 'a> {
             let kc = self.consume(kv);
             let kn = self.fresh("k");
             self.line(format!("{kct} {kn} = {kc};"));
+            // `m[k] ??= v`: v when k is missing (or undefined); the value either way
+            if matches!(op, AssignOp::Op(BinOp::Nullish)) {
+                let (p, ins) = (self.fresh("p"), self.fresh("ins"));
+                self.line(format!("bool {ins}; {vct} *{p} = ({vct} *)tv_map_slot(&{}, {kd}, {vd}, &{kn}, &{ins});", mp.lv));
+                let absent = match self.tag_of(v, UNDEFINED) {
+                    Some(t) => format!("({ins} || {})", self.u_is(&format!("(*{p})"), v, t)),
+                    None => ins.clone(),
+                };
+                self.open_block(&format!("if ({absent}) {{"));
+                let vv = self.expr(value);
+                let vv = self.coerce(vv, v);
+                let vv = self.own(vv);
+                let vc = self.consume(vv);
+                let vn = self.fresh("v");
+                self.line(format!("{vct} {vn} = {vc};"));
+                // (the slot is re-read: evaluating v may have changed the map)
+                self.line(format!("{p} = ({vct} *)tv_map_slot(&{}, {kd}, {vd}, &{kn}, &{ins});", mp.lv));
+                let rel = self.release_code(v, &format!("(*{p})"));
+                self.line(format!("if (!{ins}) {{ {rel}; }} *{p} = {vn};"));
+                self.close_block("}");
+                return Val::plain(format!("(*{p})"), v);
+            }
             let nv = match op {
                 AssignOp::Assign => {
                     let vv = self.expr(value);

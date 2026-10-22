@@ -163,7 +163,7 @@ impl<'c, 'a> Gen<'c, 'a> {
                 self.class_method_call(e, recv, name, sup, args, &params, ty, span)
             }
             Callee::StaticMethod(c, mi) => {
-                let argv = self.args(args, &params, None);
+                let argv = self.args_rest(e, args, &params);
                 let mut subst = FxMap::default();
                 for (p, t) in &fact.targs {
                     let t = self.inst(*t);
@@ -299,6 +299,18 @@ impl<'c, 'a> Gen<'c, 'a> {
 
     pub(crate) fn args_pub(&mut self, args: &[Arg], params: &[FnParam]) -> Vec<String> {
         self.args(args, params, None)
+    }
+
+    /// The arguments of call `e`, the ones for a rest parameter packed into one array.
+    pub(crate) fn args_rest(&mut self, e: ExprId, args: &[Arg], params: &[FnParam]) -> Vec<String> {
+        let m = self.cur_m();
+        let rest = self.facts(m).calls.get(&e).and_then(|f| f.rest);
+        let Some(rest) = rest else { return self.args(args, params, None) };
+        let mut argv = self.args(&args[..args.len().min(params.len())], params, None);
+        let rest = self.inst(rest);
+        let arr = self.pack_rest(&args[params.len().min(args.len())..], rest);
+        argv.push(arr);
+        argv
     }
 
     pub(crate) fn finish_call_pub(&mut self, call: &str, ret: TyId, ty: TyId) -> Val {

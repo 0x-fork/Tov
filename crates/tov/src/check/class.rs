@@ -489,13 +489,25 @@ impl<'a> Checker<'a> {
         }
     }
 
+    /// A method's parameters as a call sees them: the fixed ones, and a rest parameter's element
+    /// type (`of(...xs: T[])`).
+    pub(super) fn method_call_params(&self, mm: &CMethod) -> (Vec<FnParam>, Option<TyId>) {
+        let rest = matches!(&self.class_decl(mm.owner).members[mm.member as usize].kind, ast::MemberKind::Method(f) if f.params.last().is_some_and(|p| p.rest));
+        let n = mm.params.len();
+        if !rest || n == 0 {
+            return (mm.params.clone(), None);
+        }
+        let elem = match self.types.get(mm.params[n - 1].ty) {
+            Ty::Array(e) => *e,
+            _ => ERROR,
+        };
+        (mm.params[..n - 1].to_vec(), Some(elem))
+    }
+
     fn member_params(&mut self, f: &FnDecl, scope: &[(Sym, TyId)]) -> (Vec<FnParam>, Vec<Sym>) {
         let mut ps = Vec::new();
         let mut names = Vec::new();
         for p in &f.params {
-            if p.rest {
-                self.report(Diagnostic::new("U0011", p.span, "rest parameters in methods are not supported yet; take an array parameter"));
-            }
             let ty = match p.ty {
                 Some(t) => self.resolve_type(t, scope),
                 None => {

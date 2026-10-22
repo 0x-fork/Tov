@@ -343,6 +343,8 @@ pub struct Checker<'a> {
     wrap_store: bool,
     /// Checking an object literal written `as const` (see `object`).
     as_const: bool,
+    /// The place just made is a map's key (`m[k]`, which may be missing: `m[k] ??= v`).
+    map_place: bool,
     /// What the driver rewrites before checking again (see `rewrite`).
     pub(crate) rewrites: rewrite::Rewrites,
     /// The next expression checked may be absent (see `expr_inner`).
@@ -425,6 +427,7 @@ fn new_checker<'a>(modules: &'a [Module], interner: &'a Interner, sm: &'a Source
         call_spec: None,
         wrap_store: false,
         as_const: false,
+        map_place: false,
         rewrites: rewrite::Rewrites::default(),
         want_optional: false,
         float_args: false,
@@ -676,6 +679,7 @@ impl<'a> Checker<'a> {
             call_spec: None,
             wrap_store: false,
             as_const: false,
+        map_place: false,
             rewrites: rewrite::Rewrites::default(),
             want_optional: false,
             float_args: false,
@@ -2312,8 +2316,9 @@ impl<'a> Checker<'a> {
                     self.types.note_field_order(r, lits);
                     return Some(r);
                 }
-                // (`Record<number, V>`: a number-keyed map)
-                if self.types.is_numeric(targs[0]) {
+                // (`Record<number, V>`: a number-keyed map; `Record<K, V>`, K a type parameter
+                // (`K extends string`), a map keyed by whatever K is)
+                if self.types.is_numeric(targs[0]) || matches!(self.types.get(targs[0]), Ty::Param(_)) {
                     return Some(self.types.intern(Ty::Map(targs[0], targs[1])));
                 }
                 if targs[0] != STR && targs[0] != ERROR {

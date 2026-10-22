@@ -681,7 +681,7 @@ impl<'c, 'a> Gen<'c, 'a> {
         let ret = self.c.types.subst(ret, &msubst);
         if sup {
             let bn = self.ctype(recv);
-            let argv = self.args_pub(args, params);
+            let argv = self.args_rest(e, args, params);
             let code = self.method_call_code_with(&format!("({bn})self_"), recv, name, true, argv, &msubst);
             return self.finish_call_pub(&code, ret, ty);
         }
@@ -694,7 +694,7 @@ impl<'c, 'a> Gen<'c, 'a> {
             self.line(format!("{ct} {res};"));
             self.open_block(&format!("if ({present}) {{"));
             let rv = self.project(v, recv);
-            let argv = self.args_pub(args, params);
+            let argv = self.args_rest(e, args, params);
             let code = self.method_call_code_with(&rv.code, recv, name, false, argv, &msubst);
             let inner = self.c.types.without_undefined(ty);
             let r = self.finish_call_pub(&code, ret, inner);
@@ -713,7 +713,7 @@ impl<'c, 'a> Gen<'c, 'a> {
         }
         let v = self.project(v, recv);
         let v = if self.heap_rooted(*obj) { self.own(v) } else { v };
-        let argv = self.args_pub(args, params);
+        let argv = self.args_rest(e, args, params);
         let code = self.method_call_code_with(&v.code, recv, name, false, argv, &msubst);
         self.finish_call_pub(&code, ret, ty)
     }

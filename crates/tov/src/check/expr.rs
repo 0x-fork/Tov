@@ -152,6 +152,20 @@ impl<'a> Checker<'a> {
             ExprKind::Bool(_) => BOOL,
             ExprKind::Undefined => UNDEFINED,
             ExprKind::Null => NULL,
+            // `xs.map(depth)`, `depth` a generic function of one parameter: as `(v) => depth(v)`,
+            // which instantiates it
+            ExprKind::Ident(sym)
+                if self.lookup(*sym).is_none()
+                    && let Some(Decl::Fn(fm, fi)) = self.scopes[self.cur as usize].values.get(sym).map(|d| d.0)
+                    && let ItemKind::Function(f) = &self.modules[fm as usize].ast.items[fi as usize].kind
+                    && !f.tparams.is_empty()
+                    && f.params.len() == 1
+                    && !f.params[0].rest
+                    && let Some(v) = self.interner.lookup("v") =>
+            {
+                self.rewrites.fn_values.push((self.cur, e, v));
+                return ERROR;
+            }
             // `xs.map(Number)`: a built-in function as a value (rewritten as `(v) => Number(v)`)
             ExprKind::Ident(sym)
                 if matches!(self.name(*sym), "Number" | "String" | "Boolean" | "parseFloat")
@@ -1083,7 +1097,10 @@ impl<'a> Checker<'a> {
             let _ = (op, span);
             return JS;
         }
-        let Some(place) = self.place(target, false) else {
+        self.map_place = false;
+        let place = self.place(target, false);
+        let map_key = std::mem::take(&mut self.map_place);
+        let Some(place) = place else {
             self.expr(value, None);
             return ERROR;
         };
@@ -1105,7 +1122,8 @@ impl<'a> Checker<'a> {
                     }
             }
             AssignOp::Op(BinOp::Nullish) => {
-                if !self.types.has_undefined(place.ty) && place.ty != ERROR {
+                // (`m[k] ??= []`: a map's key may be missing)
+                if !self.types.has_undefined(place.ty) && place.ty != ERROR && !map_key {
                     let msg = format!("`??=` needs an optional target, found `{}`", self.show(place.ty));
                     self.report(Diagnostic::new("T0503", span, msg));
                 }
@@ -1516,6 +1534,7 @@ impl<'a> Checker<'a> {
                     Ty::Error => return None,
                     Ty::Map(k, v) => {
                         // `counts[w] = n`: sets the key
+                        self.map_place = true;
                         let it = self.expr(*index, Some(k));
                         let s = self.ast().expr(*index).span;
                         self.expect_assignable(it, k, s, Some("the key".into()));
@@ -2104,7 +2123,7 @@ impl<'a> Checker<'a> {
         let mut map = None;
         for &mt in &members {
             match self.types.get(mt) {
-                Ty::Map(k, _) if *k == STR => map = Some(mt),
+                Ty::Map(k, _) if *k == STR || matches!(self.types.get(*k), Ty::Param(_)) => map = Some(mt),
                 Ty::Record(_) | Ty::Interface(..) => return None,
                 _ => {}
             }
@@ -3126,7 +3145,8 @@ impl<'a> Checker<'a> {
                                 let ret = self.method_ret(&mm);
                                 let names = mm.param_names.iter().map(|&p| self.name(p).to_string()).collect();
                                 let throws = self.method_throws(&mm);
-                                let cs = CallSig { tparams: mm.tparams.clone(), params: mm.params.clone(), names, rest: None, ret, throws };
+                                let (params, rest) = self.method_call_params(&mm);
+                                let cs = CallSig { tparams: mm.tparams.clone(), params, names, rest, ret, throws };
                                 self.rec_call(e, Callee::StaticMethod(c, mm.member));
                                 self.pending_call = Some(e);
                                 let sites = self.member_sites(mm.owner, mm.member);
@@ -3282,7 +3302,8 @@ impl<'a> Checker<'a> {
                     let ret = self.method_ret(&mm);
                     let names = mm.param_names.iter().map(|&p| self.name(p).to_string()).collect();
                     let throws = self.method_throws(&mm);
-                    let cs = CallSig { tparams: mm.tparams.clone(), params: mm.params.clone(), names, rest: None, ret, throws };
+                    let (params, rest) = self.method_call_params(&mm);
+                                let cs = CallSig { tparams: mm.tparams.clone(), params, names, rest, ret, throws };
                     self.rec_call(e, Callee::ClassMethod { recv: base, name, sup: false });
                     self.pending_call = Some(e);
                     let sites = self.member_sites(mm.owner, mm.member);
@@ -3539,7 +3560,8 @@ impl<'a> Checker<'a> {
                 let ret = self.method_ret(&mm);
                 let names = mm.param_names.iter().map(|&p| self.name(p).to_string()).collect();
                 let throws = self.method_throws(&mm);
-                let cs = CallSig { tparams: Vec::new(), params: mm.params.clone(), names, rest: None, ret, throws };
+                let (params, rest) = self.method_call_params(&mm);
+                let cs = CallSig { tparams: Vec::new(), params, names, rest, ret, throws };
                 self.rec_call(e, Callee::ClassMethod { recv: base, name, sup: true });
                 self.pending_call = Some(e);
                 let sites = self.member_sites(mm.owner, mm.member);
