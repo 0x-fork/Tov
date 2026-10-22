@@ -44,7 +44,7 @@ pub const CODES: &[(&str, &str)] = &[
     ("T0202", "The value being called is not a function."),
     ("T0203", "A method or built-in function is referenced without calling it."),
     ("T0301", "A type can't be inferred here; add an annotation."),
-    ("T0303", "A recursive function needs an explicit return type."),
+    ("T0303", "A recursive function whose result can't be told from its other returns needs an explicit return type."),
     ("T0304", "Generic functions can't be used as values yet; wrap the call in an arrow function."),
     ("T0305", "A type argument can't be inferred from the arguments; pass it explicitly (`f<T>(...)`)."),
     ("T0306", "`undefined` alone doesn't determine a type; annotate the binding."),

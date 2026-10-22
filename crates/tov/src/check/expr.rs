@@ -3002,6 +3002,9 @@ impl<'a> Checker<'a> {
                     }
                     None => {
                         let mut all = std::mem::take(&mut self.fcx().frames.last_mut().unwrap().returns);
+                        if self.arrow_probe == Some(span) {
+                            all.retain(|&t| !self.types.mentions_error(t));
+                        }
                         if all.is_empty() || all.iter().all(|&t| t == UNDEFINED || t == VOID) {
                             VOID
                         } else {

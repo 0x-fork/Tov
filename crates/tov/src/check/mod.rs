@@ -304,6 +304,15 @@ pub struct Checker<'a> {
     sig_in_progress: HashSet<(u32, u32)>,
     /// Signatures (assumed to throw) for recursive calls made while a body is inferred.
     sig_provisional: HashMap<(u32, u32), Sig>,
+    /// Functions whose result is being inferred, innermost last; a guessed result (`ret_probe`)
+    /// only answers a function's calls to itself.
+    sig_stack: Vec<(u32, u32)>,
+    sig_recursed: HashSet<(u32, u32)>,
+    /// The body inferred with a guessed result for its calls to itself: returns that fail
+    /// under the guess don't count toward the next guess.
+    ret_probe: Option<(u32, StmtId)>,
+    /// The same for a local arrow that calls itself (by its span).
+    arrow_probe: Option<Span>,
     /// Bodies checked in phase A (read-only in phase B) and by this checker.
     checked_bodies: Arc<HashSet<(u32, u32)>>,
     checked_local: HashSet<(u32, u32)>,
@@ -418,6 +427,10 @@ fn new_checker<'a>(modules: &'a [Module], interner: &'a Interner, sm: &'a Source
         sigs: Arc::default(),
         sig_in_progress: HashSet::default(),
         sig_provisional: HashMap::default(),
+        sig_stack: Vec::new(),
+        sig_recursed: HashSet::default(),
+        ret_probe: None,
+        arrow_probe: None,
         checked_bodies: Arc::default(),
         checked_local: HashSet::default(),
         route_key: None,
@@ -673,6 +686,10 @@ impl<'a> Checker<'a> {
             sigs: self.sigs.clone(),
             sig_in_progress: HashSet::default(),
             sig_provisional: HashMap::default(),
+            sig_stack: Vec::new(),
+            sig_recursed: HashSet::default(),
+            ret_probe: None,
+            arrow_probe: None,
             checked_bodies: self.checked_bodies.clone(),
             checked_local: HashSet::default(),
             route_key: None,
@@ -1547,7 +1564,12 @@ impl<'a> Checker<'a> {
         let ItemKind::Function(f) = &self.modules[m as usize].ast.items[ii as usize].kind else { return None };
         if self.sig_in_progress.contains(&(m, ii)) {
             // A recursive call while the body is checked for what it throws: the declared
-            // signature, assuming it may throw.
+            // signature, assuming it may throw. Without a declared result, only the function's
+            // own calls get the guessed one.
+            if f.ret.is_none() && self.sig_stack.last() != Some(&(m, ii)) {
+                return None;
+            }
+            self.sig_recursed.insert((m, ii));
             return self.sig_provisional.get(&(m, ii)).cloned();
         }
         self.sig_in_progress.insert((m, ii));
@@ -1636,6 +1658,7 @@ impl<'a> Checker<'a> {
             Some(r) if throws != UNKNOWN => r,
             // No `return <value>` anywhere: `void`, and the body can wait for phase B.
             None if !rv && throws != UNKNOWN => VOID,
+            None if !f.is_async && !f.is_gen => self.infer_recursive(m, ii, f, &tparams, &params, &param_names, &tscope, &mut throws),
             declared => {
                 // Infer from the body (the return type, the errors, or both).
                 let partial = Sig { tparams: tparams.clone(), params: params.clone(), param_names: param_names.clone(), ret: declared.unwrap_or(ERROR), throws, rest: false };
@@ -1658,6 +1681,46 @@ impl<'a> Checker<'a> {
         self.sig_in_progress.remove(&(m, ii));
         Arc::make_mut(&mut self.sigs).insert((m, ii), sig.clone());
         Some(sig)
+    }
+
+    /// Infers a function's result from its body. Calls to itself first take the result to be
+    /// `never`, then what the returns gave, until the two agree (as `fact(n - 1) * n` does once
+    /// `return 1` says the result is a number).
+    #[allow(clippy::too_many_arguments)]
+    fn infer_recursive(&mut self, m: u32, ii: u32, f: &ast::FnDecl, tparams: &[u32], params: &[FnParam], param_names: &[Sym], tscope: &[(Sym, TyId)], throws: &mut TyId) -> TyId {
+        let rest = f.params.last().map(|p| p.rest).unwrap_or(false);
+        let guessed = if *throws == UNKNOWN { self.error_class() } else { *throws };
+        let partial = Sig { tparams: tparams.to_vec(), params: params.to_vec(), param_names: param_names.to_vec(), ret: ERROR, throws: *throws, rest: false };
+        let mark = self.done.len();
+        let mut guess = NEVER;
+        let mut result = ERROR;
+        for round in 0..4 {
+            self.sig_provisional.insert((m, ii), Sig { tparams: tparams.to_vec(), params: params.to_vec(), param_names: param_names.to_vec(), ret: guess, throws: guessed, rest });
+            self.sig_recursed.remove(&(m, ii));
+            self.sig_stack.push((m, ii));
+            let saved = self.ret_probe.replace((m, f.body));
+            let (inferred, errs) = self.check_body_of(m, ii, &partial, tscope, None);
+            self.ret_probe = saved;
+            self.sig_stack.pop();
+            if *throws == UNKNOWN || round > 0 {
+                *throws = errs;
+            }
+            result = inferred;
+            if !self.sig_recursed.contains(&(m, ii)) || (round > 0 && inferred == guess && self.done.len() == mark) || round == 3 {
+                break;
+            }
+            if inferred == ERROR || inferred == NEVER || inferred == VOID {
+                self.done.truncate(mark);
+                let n = self.name(f.name).to_string();
+                self.report(Diagnostic::new("T0303", f.name_span, format!("`{n}` calls itself, and its result can't be told from the returns that don't, so it needs an explicit return type")));
+                result = ERROR;
+                break;
+            }
+            self.done.truncate(mark);
+            guess = inferred;
+        }
+        self.sig_provisional.remove(&(m, ii));
+        result
     }
 
     fn check_fn_body(&mut self, m: u32, ii: u32) {
@@ -1811,6 +1874,9 @@ impl<'a> Checker<'a> {
                     }
                     None => {
                         let mut all = returns;
+                        if c.ret_probe == Some((m, body)) && c.sig_stack.last().is_some_and(|k| c.sig_recursed.contains(k)) {
+                            all.retain(|&t| !c.types.mentions_error(t));
+                        }
                         if !c.always_returns(body) && !all.is_empty() {
                             all.push(UNDEFINED);
                         }

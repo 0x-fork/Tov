@@ -1636,11 +1636,16 @@ impl<'a> Parser<'a> {
             // when the name can be used
             // (with its result type written: an inferred one stays the closure's, which speculation
             // widens with what it's given to; an async one returning a promise has its value)
+            // (or calling itself, which a closure's constant can't)
             let generic = self.generic_arrows.iter().any(|g| g.0 == init);
+            let iv = self.ast.exprs[init as usize].span;
             if ty.is_none()
                 && !mutable
                 && let ExprKind::Arrow(f) = &self.ast.exprs[init as usize].kind
-                && (generic || (f.ret.is_some() && !f.is_async))
+                && (generic
+                    || (!f.is_async
+                        && (f.ret.is_some()
+                            || self.ast.exprs.iter().any(|e| matches!(e.kind, ExprKind::Ident(n) if n == name) && e.span.file == iv.file && e.span.start >= iv.start && e.span.end <= iv.end))))
             {
                 let tparams = match self.generic_arrows.iter().position(|g| g.0 == init) {
                     Some(gi) => self.generic_arrows.remove(gi).1,

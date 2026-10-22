@@ -108,6 +108,19 @@ impl<'a> Checker<'a> {
                     self.types.func_throws(params, ret, throws)
                 }
             }
+            // No result type: its calls to itself first give `never` (see `infer_recursive`).
+            (None, true) if !f.is_async => {
+                let params: Vec<FnParam> = f
+                    .params
+                    .iter()
+                    .map(|p| {
+                        let ty = self.resolve_type(p.ty.unwrap(), &tscope);
+                        let ty = if p.optional { self.types.optional(ty) } else { ty };
+                        FnParam { ty, inout: p.inout, optional: p.optional }
+                    })
+                    .collect();
+                self.types.func(params, NEVER)
+            }
             _ => {
                 let n = self.name(name).to_string();
                 self.report(Diagnostic::new("T0303", name_span, format!("`{n}` calls itself, so its parameters and result need types")));
@@ -117,7 +130,35 @@ impl<'a> Checker<'a> {
         let id = self.declare(name, pre, kind, name_span, None, false);
         let marks = self.diags.len();
         let saved = self.rewrites.clone();
-        let mut t = self.expr(init, None);
+        let probing = f.ret.is_none() && pre != ERROR;
+        let t = if probing {
+            let before = self.arrow_probe.replace(span);
+            let t = self.expr(init, None);
+            self.arrow_probe = before;
+            let ret = match *self.types.get(t) {
+                Ty::Func(_, r, _) => r,
+                _ => ERROR,
+            };
+            let rv = match &f.body {
+                crate::ast::ArrowBody::Block(b) => super::returns_value(self.ast(), *b),
+                crate::ast::ArrowBody::Expr(_) => true,
+            };
+            if ret == ERROR || ret == NEVER || (ret == VOID && rv) {
+                self.diags.truncate(marks);
+                self.rewrites = saved.clone();
+                let n = self.name(name).to_string();
+                self.report(Diagnostic::new("T0303", name_span, format!("`{n}` calls itself, and its result can't be told from the returns that don't, so it needs an explicit return type")));
+                self.fcx().locals[id].ty = ERROR;
+                return Some(ERROR);
+            }
+            self.diags.truncate(marks);
+            self.rewrites = saved.clone();
+            self.fcx().locals[id].ty = t;
+            self.expr(init, None)
+        } else {
+            self.expr(init, None)
+        };
+        let mut t = t;
         for _ in 0..3 {
             if t == ERROR || pre == ERROR || t == self.fcx().locals[id].ty {
                 break;

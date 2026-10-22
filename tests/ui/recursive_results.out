@@ -1,0 +1,7 @@
+error[T0303] recursive_results.tov:1:10: `sum` calls itself, and its result can't be told from the returns that don't, so it needs an explicit return type
+    1 | function sum(xs: int[]) {
+
+error[T0303] recursive_results.tov:6:9: `go` calls itself, and its result can't be told from the returns that don't, so it needs an explicit return type
+    6 |   const go = (k: int) => k == 0 ? 0 : 1 + go(k - 1)
+
+2 error(s)
