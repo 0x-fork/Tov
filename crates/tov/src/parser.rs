@@ -1780,13 +1780,21 @@ impl<'a> Parser<'a> {
             }
             _ => {
                 let e = self.expr();
+                // `a = 1, b = 2;`: each in turn (the comma operator, as a statement)
                 if self.at(Tok::Comma) {
-                    let span = self.cur_span();
-                    self.err("X0024", span, "the comma operator is not supported; write separate statements");
-                    self.recover_line();
-                } else {
+                    let mut es = vec![e];
+                    while self.eat(Tok::Comma) {
+                        es.push(self.expr());
+                    }
                     self.terminator();
+                    let span = start.to(self.prev_span());
+                    let stmts: Vec<StmtId> = es.into_iter().map(|x| {
+                        let xs = self.expr_span(x);
+                        self.mk_stmt(StmtKind::Expr(x), xs)
+                    }).collect();
+                    return self.mk_stmt(StmtKind::Block(stmts), span);
                 }
+                self.terminator();
                 let span = start.to(self.prev_span());
                 // `[a, b] = [b, a]`: the value in a hidden variable, then each assigned
                 if let ExprKind::Assign(AssignOp::Assign, target, value) = self.ast.exprs[e as usize].kind
@@ -2802,11 +2810,17 @@ impl<'a> Parser<'a> {
             Tok::LParen => {
                 self.bump();
                 let e = self.expr();
-                if self.at(Tok::Comma) {
-                    let span = self.cur_span();
-                    self.err("X0024", span, "the comma operator is not supported");
-                    self.skip_to_paren_end();
-                }
+                // `(a, b)`: the comma operator, b's value after a
+                let e = if self.at(Tok::Comma) {
+                    let mut es = vec![e];
+                    while self.eat(Tok::Comma) {
+                        es.push(self.expr());
+                    }
+                    let span = self.expr_span(es[0]).to(self.prev_span());
+                    self.mk_expr(ExprKind::Seq(es), span)
+                } else {
+                    e
+                };
                 self.expect(Tok::RParen, "to close the parenthesized expression");
                 let span = start.to(self.prev_span());
                 self.mk_expr(ExprKind::Paren(e), span)

@@ -663,6 +663,22 @@ impl<'c, 'a> Gen<'c, 'a> {
             return r;
         }
         let ty = facts.expr_ty.get(e as usize).copied().unwrap_or(ERROR);
+        // (a typed array's element, read as a number in TypeScript: still within its type)
+        let elem_of = |x: ExprId| match ast.expr(x).kind {
+            ExprKind::Index { obj, .. } => match *self.c.types.get(facts.expr_ty.get(obj as usize).copied().unwrap_or(ERROR)) {
+                Ty::Array(el) => Some(el),
+                _ => None,
+            },
+            _ => None,
+        };
+        let inner = match ast.expr(e).kind {
+            ExprKind::NonNull(x) => x,
+            _ => e,
+        };
+        let ty = match elem_of(inner) {
+            Some(el) if ty == INT && matches!(self.tget(el), Ty::U8 | Ty::I8 | Ty::U16 | Ty::I16 | Ty::U32 | Ty::I32) => el,
+            _ => ty,
+        };
         let sized = match self.tget(ty) {
             Ty::U8 => Some((0, u8::MAX as i128)),
             Ty::I8 => Some((i8::MIN as i128, i8::MAX as i128)),

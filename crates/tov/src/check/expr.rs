@@ -519,6 +519,9 @@ impl<'a> Checker<'a> {
                     self.report(Diagnostic::new("T0501", span, msg));
                     return ERROR;
                 }
+                if self.ts_module() && promoted(t) == INT && self.types.is_int(t) {
+                    return INT;
+                }
                 if matches!(self.types.get(t), Ty::U8 | Ty::U16 | Ty::U32 | Ty::U64) && !self.is_int_literal(x) {
                     let msg = format!("unary `-` on unsigned `{}`", self.show(t));
                     self.report(Diagnostic::new("T0501", span, msg));
@@ -643,7 +646,7 @@ impl<'a> Checker<'a> {
                         d = d.note("why", "one side may be `undefined`; narrow it first");
                     }
                     self.report(d);
-                } else if ok && self.types.is_int(tl) && self.types.is_int(tr) && tl != tr {
+                } else if ok && self.types.is_int(tl) && self.types.is_int(tr) && tl != tr && !(self.ts_module() && promoted(tl) == promoted(tr)) {
                     self.mixed_ints(tl, tr, span);
                 }
                 BOOL
@@ -717,7 +720,9 @@ impl<'a> Checker<'a> {
                     }
                     return self.bigint_arith(op, l, r, tl, tr, span);
                 }
-                // On numbers (`int` and floats) the operators are JavaScript's: 32-bit, giving an `int`.
+                // On numbers (`int` and floats) the operators are JavaScript's: 32-bit, giving an `int`
+                // (a typed array's elements too, in TypeScript)
+                let (tl, tr) = if self.ts_module() { (promoted(tl), promoted(tr)) } else { (tl, tr) };
                 let js = |t: TyId| t == INT || self.types.is_float(t);
                 if js(tl) && js(tr) {
                     return INT;
@@ -887,14 +892,17 @@ impl<'a> Checker<'a> {
     /// Returns false if an error was reported.
     /// Checks two operands so an integer literal on either side adopts the other side's numeric type.
     fn numeric_pair(&mut self, l: ExprId, r: ExprId, exp: Option<TyId>) -> (TyId, TyId) {
+        // (in TypeScript a typed array's element is a number: `bytes[i] * 300` doesn't hint 300 a `u8`)
+        let ts = self.ts_module();
+        let hint_of = |t: TyId| if ts { promoted(t) } else { t };
         if self.is_num_literal(l) && !self.is_num_literal(r) {
             let tr = self.expr(r, exp);
-            let hint = if self.types.is_num_like(tr) { Some(tr) } else { exp };
+            let hint = if self.types.is_num_like(tr) { Some(hint_of(tr)) } else { exp };
             let tl = self.expr(l, hint);
             (tl, tr)
         } else {
             let tl = self.expr(l, exp);
-            let hint = if self.types.is_num_like(tl) { Some(tl) } else { None };
+            let hint = if self.types.is_num_like(tl) { Some(hint_of(tl)) } else { None };
             let tr = self.expr(r, hint);
             (tl, tr)
         }
@@ -1683,6 +1691,8 @@ impl<'a> Checker<'a> {
             // (TypeScript's type for an element: present, as it assumes; out of bounds traps)
             Ty::Array(e) => {
                 self.index_type(index);
+                // (in TypeScript a typed array's element is a number: `bytes[i]` reads an `int`)
+                let e = if self.ts_module() { promoted(e) } else { e };
                 if absent { self.types.optional(e) } else { e }
             }
             Ty::Map(k, v) => {

@@ -1,6 +1,11 @@
 //! Name resolution and type checking.
 
 pub(crate) mod builtins;
+
+/// A sized integer (`u8`, `i32`, ...) as it computes: `int` (see `expr::promoted`).
+pub(crate) fn promoted_ty(t: TyId) -> TyId {
+    expr::promoted(t)
+}
 pub(crate) mod class;
 mod expr;
 pub mod facts;

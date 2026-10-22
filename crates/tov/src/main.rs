@@ -362,6 +362,16 @@ fn execute(f: Flags, cmd: BuildCmd) -> ExitCode {
             ExitCode::SUCCESS
         }
         BuildCmd::Run | BuildCmd::Test => {
+            // (the program takes tov's place: signals reach it, `timeout tov run x` stops it, and
+            // its exit status is the command's)
+            #[cfg(unix)]
+            {
+                use std::os::unix::process::CommandExt;
+                let e = std::process::Command::new(&built.binary).args(&f.program_args).exec();
+                eprintln!("error: can't run {}: {e}", built.binary.display());
+                return ExitCode::from(2);
+            }
+            #[allow(unreachable_code)]
             let status = std::process::Command::new(&built.binary).args(&f.program_args).status();
             match status {
                 Ok(s) => match s.code() {

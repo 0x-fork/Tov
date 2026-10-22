@@ -90,6 +90,9 @@ pub(crate) struct Body {
     /// Array locals pushed in a loop that nothing else in it can reallocate: the C variable
     /// holding their capacity (pushes compare against it instead of reloading it).
     pub push_caps: FxMap<u32, String>,
+    /// Arrays a loop uses only by index and length: their elements' and length's C locals, kept
+    /// for the loop (an append through an index refreshes them; nothing else can move them).
+    pub arr_cache: FxMap<u32, (String, String)>,
     /// Array locals whose capacity was reserved before a loop for every push it can make
     /// (see `reserve_for_pushes`): those pushes store without a capacity check.
     pub exact_pushes: FxSet<u32>,
@@ -279,6 +282,7 @@ impl<'c, 'a> Gen<'c, 'a> {
             tre: None,
             in_bounds: Vec::new(),
             push_caps: FxMap::default(),
+            arr_cache: FxMap::default(),
             exact_pushes: FxSet::default(),
             nowrap_step: None,
             divs: FxMap::default(),
@@ -477,6 +481,7 @@ impl<'c, 'a> Gen<'c, 'a> {
             tre: self.pending_tre.take(),
             in_bounds: Vec::new(),
             push_caps: FxMap::default(),
+            arr_cache: FxMap::default(),
             exact_pushes: FxSet::default(),
             nowrap_step: None,
             divs: FxMap::default(),
@@ -1115,6 +1120,49 @@ impl<'c, 'a> Gen<'c, 'a> {
                 self.b().push_caps.insert(k, cv);
             }
         }
+        // Arrays the loop only indexes (and reads the length of), of plain elements: their
+        // elements' address and length in locals, refreshed when an index write appends (no
+        // reload of the array after every write that might have)
+        let cands: Vec<u32> = added
+            .iter()
+            .copied()
+            .filter(|&k| {
+                let lt = self.bodies.last().and_then(|b| b.locals.get(&k)).map(|l| l.ty);
+                !pushed.contains(&k)
+                    && lt.is_some_and(|t| matches!(self.tget(t), Ty::Array(et) if !self.is_rc(et)))
+                    && self.only_push_index_length(&all, k)
+            })
+            .collect();
+        // (not one an inner loop indexes too: that loop keeps its own, and the outer copies only
+        // cost it registers)
+        let nested: Vec<ExprId> = {
+            let ast = self.ast(m);
+            let mut inner = Vec::new();
+            let span_of = |s: StmtId| ast.stmt(s).span;
+            let roots: Vec<Span> = stmts.iter().map(|&s| span_of(s)).collect();
+            for st in ast.stmts.iter() {
+                if matches!(st.kind, StmtKind::While(..) | StmtKind::DoWhile(..) | StmtKind::For { .. } | StmtKind::ForOf { .. })
+                    && roots.iter().any(|r| r.file == st.span.file && r.start <= st.span.start && st.span.end <= r.end && *r != st.span)
+                {
+                    inner.push(st.span);
+                }
+            }
+            all.iter().copied().filter(|&e| {
+                let sp = ast.expr(e).span;
+                inner.iter().any(|r| r.file == sp.file && r.start <= sp.start && sp.end <= r.end)
+            }).collect()
+        };
+        let cands: Vec<u32> = cands.into_iter().filter(|&k| !self.indexes(&nested, k)).collect();
+        if !cands.is_empty() && !self.may_resize(m, &all, &cands) {
+            for k in cands {
+                let local = self.b().locals[&k].clone();
+                let Ty::Array(et) = self.tget(local.ty) else { continue };
+                let ect = self.ctype(et);
+                let (d, n) = (self.fresh("cd"), self.fresh("cn"));
+                self.line(format!("{ect} *{d} = ({ect} *)tv_arr_data({0}); tv_int {n} = tv_arr_len({0});", local.access));
+                self.b().arr_cache.insert(k, (d, n));
+            }
+        }
         added
     }
 
@@ -1652,6 +1700,39 @@ impl<'c, 'a> Gen<'c, 'a> {
         parts.join(" && ")
     }
 
+    /// Some expression in `exprs` indexes local `k`.
+    fn indexes(&self, exprs: &[ExprId], k: u32) -> bool {
+        let m = self.cur_m();
+        let ast = self.ast(m);
+        exprs.iter().any(|&e| matches!(&ast.expr(e).kind, ExprKind::Index { obj, .. } if matches!(self.ident_fact(m, *obj), Some(IdentFact::Local(x)) if x == k)))
+    }
+
+    /// `xs[i] = v` on an array a loop keeps in locals (and no enclosing versioned loop holds:
+    /// its writes there are in bounds).
+    fn cached_array(&self, target: ExprId) -> bool {
+        let m = self.cur_m();
+        let Some(b) = self.bodies.last() else { return false };
+        match self.ast(m).expr(target).kind {
+            ExprKind::Index { obj, .. } => matches!(self.ident_fact(m, obj), Some(IdentFact::Local(k)) if b.arr_cache.contains_key(&k) && !b.versioned.iter().any(|v| v.1.iter().any(|a| a.0 == k))),
+            _ => false,
+        }
+    }
+
+    /// `xs[index]` on an array a loop keeps in locals (see `arr_cache`): the element's C lvalue,
+    /// checked against the kept length.
+    fn cached_index(&mut self, obj: ExprId, index: ExprId, span: Span) -> Option<String> {
+        let m = self.cur_m();
+        if !matches!(self.ast(m).expr(obj).kind, ExprKind::Ident(_)) {
+            return None;
+        }
+        let Some(IdentFact::Local(xk)) = self.ident_fact(m, obj) else { return None };
+        let (d, n) = self.b().arr_cache.get(&xk).cloned()?;
+        let i = self.expr(index);
+        let i = self.int_code(i);
+        let loc = self.loc(span);
+        Some(format!("({d}[TV_IDX({i}, {n}, {loc})])"))
+    }
+
     /// `xs[index]` in a versioned loop's unchecked copy: the element's C lvalue, through the
     /// local holding the array's elements (every access to it, so the C compiler sees one base),
     /// unchecked at `i + k` and checked against the length elsewhere.
@@ -2146,6 +2227,7 @@ impl<'c, 'a> Gen<'c, 'a> {
         for k in keys {
             self.b().unique.remove(&k);
             self.b().push_caps.remove(&k);
+            self.b().arr_cache.remove(&k);
             self.b().exact_pushes.remove(&k);
         }
     }
@@ -3074,14 +3156,17 @@ impl<'c, 'a> Gen<'c, 'a> {
                 self.unsupported(span, "`...` here");
                 Val::plain("0", ty)
             }
+            // `(a, b)`: a for its effects, then b's value
             ExprKind::Seq(xs) => {
-                for &x in xs {
+                let (last, init) = xs.split_last().expect("a sequence has expressions");
+                for &x in init {
                     let v = self.expr(x);
-                    if v.ty != VOID && !v.code.is_empty() {
+                    if v.ty != VOID && !v.code.is_empty() && !v.owned {
                         self.line(format!("(void)({});", v.code));
                     }
                 }
-                Val::plain("0", ty)
+                let v = self.expr(*last);
+                if ty == VOID { Val::plain("0", ty) } else { self.coerce(v, ty) }
             }
             ExprKind::Int(v) if ty == DECIMAL => Val::plain(self.dec_lit(&v.to_string()), DECIMAL),
             ExprKind::Float(_) if ty == DECIMAL => {
@@ -3561,6 +3646,15 @@ impl<'c, 'a> Gen<'c, 'a> {
         }
         if to == JS {
             return self.js_of(v);
+        }
+        // (a typed array's element into a union of numbers: `bytes[i]` read as `int | undefined`)
+        if matches!(self.tget(from), Ty::I8 | Ty::I16 | Ty::I32 | Ty::U8 | Ty::U16 | Ty::U32)
+            && matches!(self.tget(to), Ty::Union(_))
+            && self.tag_of(to, from).is_none()
+            && self.tag_of(to, INT).is_some()
+        {
+            let w = Val::plain(format!("((tv_int)({}))", v.code), INT);
+            return self.coerce_inner(w, to);
         }
         let (tf, tt) = (self.tget(from), self.tget(to));
         match (tf, tt) {
@@ -5045,6 +5139,9 @@ impl<'c, 'a> Gen<'c, 'a> {
         {
             return Some(self.coerce(Val::plain(lv, et), ty));
         }
+        if let Some(lv) = self.cached_index(obj, index, span) {
+            return Some(self.coerce(Val::plain(lv, et), ty));
+        }
         let in_bounds = match (self.ident_fact(m, obj), self.ident_fact(m, index)) {
             (Some(IdentFact::Local(xk)), Some(IdentFact::Local(ik))) => self.b().in_bounds.contains(&(ik, xk)),
             _ => false,
@@ -5178,6 +5275,9 @@ impl<'c, 'a> Gen<'c, 'a> {
                     && !self.b().versioned.is_empty()
                     && let Some(lv) = self.versioned_index(*obj, *index, span)
                 {
+                    return Place { lv, ty: et, weak: false };
+                }
+                if let Some(lv) = self.cached_index(*obj, *index, span) {
                     return Place { lv, ty: et, weak: false };
                 }
                 let ect = self.ctype(et);
@@ -5459,7 +5559,7 @@ impl<'c, 'a> Gen<'c, 'a> {
                 v
             }
             // `xs[xs.length] = v`: appends, as in JavaScript (an index past that traps)
-            AssignOp::Assign if self.b().versioned.is_empty() && matches!(self.ast(m).expr(target).kind, ExprKind::Index { obj, optional: false, .. } if self.is_array(obj)) => {
+            AssignOp::Assign if (self.b().versioned.is_empty() || self.cached_array(target)) && matches!(self.ast(m).expr(target).kind, ExprKind::Index { obj, optional: false, .. } if self.is_array(obj)) => {
                 let ExprKind::Index { obj, index, .. } = self.ast(m).expr(target).kind else { unreachable!() };
                 let v = self.expr(value);
                 let ap = self.place(obj);
@@ -5491,6 +5591,17 @@ impl<'c, 'a> Gen<'c, 'a> {
                         self.line(format!("tvg_make_unique(&{a}, {d});"));
                     }
                     let recap = cap.as_ref().map(|c| format!(" {c} = {a}.p->cap;")).unwrap_or_default();
+                    // (an array the loop keeps in locals: against its kept length, refreshed if it grows)
+                    let cached = match self.ident_fact(m, obj) {
+                        Some(IdentFact::Local(k)) => self.b().arr_cache.get(&k).cloned(),
+                        _ => None,
+                    };
+                    if let Some((cd, cn)) = cached {
+                        self.line(format!("if (__builtin_expect((uint64_t){i} >= (uint64_t){cn}, 0)) {{ {a} = tvg_put_grow({a}, {d}, sizeof({ect}), {i}, {loc});{recap} {cd} = ({ect} *)tv_arr_data({a}); {cn} = tv_arr_len({a}); }}"));
+                        let store = self.store(target, et, &format!("({cd}[{i}])"), &nv);
+                        self.line(store);
+                        return Val::plain(nv, et);
+                    }
                     self.line(format!("if (__builtin_expect((uint64_t){i} >= (uint64_t)tv_arr_len({a}), 0)) {{ {a} = tvg_put_grow({a}, {d}, sizeof({ect}), {i}, {loc});{recap} }}"));
                     let store = self.store(target, et, &format!("((({ect} *)tv_arr_data({a}))[{i}])"), &nv);
                     self.line(store);
@@ -5613,9 +5724,17 @@ impl<'c, 'a> Gen<'c, 'a> {
                         } else {
                             p.ty
                         };
-                        self.js_mul_operand = has_mul(self.ast(self.cur_m()), value);
-                        let r = self.arith(bop, cur.clone(), rhs, arith_ty, span);
-                        self.coerce(r, p.ty)
+                        // (`bytes[i] += 200` in TypeScript: a number, stored wrapped as a typed
+                        // array's element is)
+                        if arith_ty != INT && super::super::check::promoted_ty(arith_ty) == INT && self.js_ints(self.cur_m()) {
+                            let r = self.arith(bop, cur.clone(), rhs, INT, span);
+                            let ct = self.ctype(p.ty);
+                            Val::plain(format!("(({ct})({}))", r.code), p.ty)
+                        } else {
+                            self.js_mul_operand = has_mul(self.ast(self.cur_m()), value);
+                            let r = self.arith(bop, cur.clone(), rhs, arith_ty, span);
+                            self.coerce(r, p.ty)
+                        }
                     }
                 };
                 let store = self.store(target, p.ty, &lv, &result.code);
@@ -5874,6 +5993,7 @@ impl<'c, 'a> Gen<'c, 'a> {
             tre: None,
             in_bounds: Vec::new(),
             push_caps: FxMap::default(),
+            arr_cache: FxMap::default(),
             exact_pushes: FxSet::default(),
             nowrap_step: None,
             divs: FxMap::default(),
