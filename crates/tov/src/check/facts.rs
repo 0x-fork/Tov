@@ -109,6 +109,8 @@ pub struct ModuleFacts {
     /// Named local functions that call each other (see `stmt::closure_groups`), by the first's
     /// statement: made together, sharing one environment.
     pub closure_groups: FxMap<StmtId, Vec<StmtId>>,
+    /// Field reads narrowed before a call that may have changed them: checked when read.
+    pub asserted_reads: crate::hash::FxSet<ExprId>,
 }
 
 impl ModuleFacts {

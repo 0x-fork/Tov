@@ -267,6 +267,8 @@ pub(crate) struct Gen<'c, 'a> {
     pub(crate) pending_async: Option<(u32, u32)>,
     /// The next body is a generator's, yielding these.
     pub(crate) pending_gen: Option<TyId>,
+    /// The next union projection checks the value is one of its members (see `asserted_reads`).
+    pub(crate) checked_project: Option<String>,
     /// The local an arrow being emitted initializes (its key), when the arrow refers to it: the
     /// closure itself, not a capture.
     pub(crate) self_closure: Option<u32>,
@@ -361,6 +363,7 @@ impl<'c, 'a> Gen<'c, 'a> {
             needs_uncaught: false,
             pending_async: None,
             pending_gen: None,
+            checked_project: None,
             self_closure: None,
             ranges: None,
             js_mul_operand: false,

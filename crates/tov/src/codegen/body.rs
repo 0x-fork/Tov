@@ -3581,8 +3581,22 @@ impl<'c, 'a> Gen<'c, 'a> {
     pub(crate) fn project(&mut self, v: Val, to: TyId) -> Val {
         // (narrowed to `never`: code that can't run)
         if v.ty == to || to == ERROR || to == NEVER {
+            self.checked_project = None;
             return v;
         }
+        // (a narrowing a call came after: checked, see `asserted_reads`)
+        if let Some(loc) = self.checked_project.take()
+            && let Ty::Union(ms) = self.tget(v.ty)
+        {
+            let ms = self.c.types.tys(ms).to_vec();
+            let targets = self.members(to);
+            let tests: Vec<String> = ms.iter().enumerate().filter(|(_, m)| targets.contains(m)).map(|(i, _)| self.u_is(&v.code, v.ty, i)).collect();
+            if !tests.is_empty() {
+                let msg = super::c_string(format!("the value changed since it was checked (a call in between): it's no longer `{}`", self.c.show(to)).as_bytes());
+                self.line(format!("if (!({})) tv_trap({msg}, {loc});", tests.join(" || ")));
+            }
+        }
+        self.checked_project = None;
         // A string narrowed to a literal (`if (path === "/")`): the value is known.
         if matches!(self.tget(to), Ty::StrLit(_)) && matches!(self.tget(v.ty), Ty::Str) {
             let d = self.default_value(to);
@@ -3606,7 +3620,7 @@ impl<'c, 'a> Gen<'c, 'a> {
             let u = self.unfold_val(v);
             return self.project(u, to);
         }
-        if let Ty::Union(_) = self.tget(v.ty) {
+        if let Ty::Union(ms) = self.tget(v.ty) {
             if let Some(k) = self.tag_of(v.ty, to) {
                 if self.is_unit(to) {
                     return Val::plain("0", to);
@@ -4822,6 +4836,17 @@ impl<'c, 'a> Gen<'c, 'a> {
 
     fn member(&mut self, e: ExprId, obj: ExprId, name: crate::intern::Sym, optional: bool, ty: TyId, span: Span) -> Val {
         let m = self.cur_m();
+        if self.facts(m).asserted_reads.contains(&e) {
+            let base = self.expr(obj);
+            let loc = self.loc(span);
+            let ft = self.c.types.without_undefined(base.ty);
+            let field_ty = self.c.field_of_pub(ft, name).unwrap_or(ty);
+            let raw = self.field(base, name, field_ty, span);
+            self.checked_project = Some(loc);
+            let v = self.project(raw, ty);
+            self.checked_project = None;
+            return v;
+        }
         let ot = self.ty(obj);
         if self.c.types.without_undefined(ot) == JS {
             if let Some(v) = self.js_try_fuse(e, ty, span) {

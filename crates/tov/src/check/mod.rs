@@ -223,6 +223,8 @@ struct FnCtx {
     /// Active narrowings of paths that go through a class instance (`this.left`): any call may
     /// change them through another reference, so calls forget them.
     heap_paths: Vec<(LocalId, Vec<Sym>)>,
+    /// Path narrowings kept past a call (see `invalidate_heap`): `path_table` indexes.
+    asserted: HashSet<usize>,
     /// The class whose member is being checked (for visibility, `super` and constructors).
     class: Option<u32>,
     /// Declaration key of `this` (for code generation).
@@ -2859,6 +2861,11 @@ impl<'a> Checker<'a> {
 
     /// The narrowed type of `local.path`, if it is narrowed (and not invalidated since).
     fn lookup_path(&self, local: LocalId, path: &[Sym]) -> Option<TyId> {
+        self.lookup_path_ex(local, path).map(|(t, _)| t)
+    }
+
+    /// `lookup_path`, and whether a call came since (the narrowing to be checked when read).
+    fn lookup_path_ex(&self, local: LocalId, path: &[Sym]) -> Option<(TyId, bool)> {
         let fcx = self.fcx.last()?;
         let cur_frame = fcx.frames.len().saturating_sub(1);
         let l = &fcx.locals[local];
@@ -2874,7 +2881,7 @@ impl<'a> Checker<'a> {
                     }
                     match pt {
                         None if path.starts_with(pp) => return None,
-                        Some(t) if pp.as_slice() == path => return Some(*t),
+                        Some(t) if pp.as_slice() == path => return Some((*t, fcx.asserted.contains(&idx))),
                         _ => {}
                     }
                 }

@@ -2003,7 +2003,12 @@ impl<'a> Checker<'a> {
         {
             let mut path = target.path.clone();
             path.push(name);
-            if let Some(t) = self.lookup_path(target.local, &path) {
+            if let Some((t, asserted)) = self.lookup_path_ex(target.local, &path) {
+                if asserted && t != ft
+                    && let Some(f) = self.facts_mut()
+                {
+                    f.asserted_reads.insert(e);
+                }
                 return t;
             }
         }
@@ -2132,6 +2137,10 @@ impl<'a> Checker<'a> {
                     }
         }
         out
+    }
+
+    pub(crate) fn field_of_pub(&mut self, ty: TyId, name: Sym) -> Option<TyId> {
+        self.field_of(ty, name)
     }
 
     pub(super) fn field_of(&mut self, ty: TyId, name: Sym) -> Option<TyId> {

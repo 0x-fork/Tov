@@ -592,8 +592,20 @@ impl<'a> Checker<'a> {
     /// instance, and every narrowing of a mutable global (any callee can reassign one).
     pub(super) fn invalidate_heap(&mut self) {
         let paths = std::mem::take(&mut self.fcx().heap_paths);
+        // (TypeScript keeps them, `if (this.head) { log(); this.head.value }`: so does a
+        // TypeScript module, each later read checked at run time, trapping if the call did
+        // change it)
+        let ts = self.ts_module();
         for (l, p) in paths {
-            self.narrow_path(l, p, None);
+            let keep = if ts { self.lookup_path(l, &p) } else { None };
+            self.narrow_path(l, p.clone(), None);
+            if let Some(t) = keep {
+                self.narrow_path(l, p.clone(), Some(t));
+                let fcx = self.fcx();
+                let idx = fcx.path_table.len() - 1;
+                fcx.asserted.insert(idx);
+                fcx.heap_paths.push((l, p));
+            }
         }
         let globals: Vec<LocalId> = self.fcx().locals.iter().enumerate().filter(|(_, l)| l.global.is_some() && l.kind == LocalKind::Let).map(|(i, _)| i).collect();
         for id in globals {
