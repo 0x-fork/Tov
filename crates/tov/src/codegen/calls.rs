@@ -673,6 +673,13 @@ impl<'c, 'a> Gen<'c, 'a> {
                 return Val::plain(format!("tv_dec_div_round({}, {}, {k}, {mode}, {loc})", lv.code, rv.code), DECIMAL);
             }
         }
+        // `xs.map(f).filter(g).reduce(h, 0)`: one loop, without the arrays between
+        if given.is_none()
+            && matches!(self.tget(recv), Ty::Array(_))
+            && let Some(v) = self.fused_chain(obj, name, args, ty)
+        {
+            return v;
+        }
         let rv = match given {
             Some(v) => v,
             None => self.expr(obj),
@@ -1079,6 +1086,224 @@ impl<'c, 'a> Gen<'c, 'a> {
             let r = self.release_code(t, &n);
             self.line(format!("{r};"));
         }
+    }
+
+    /// An arrow whose calls, one element at a time, can't be told apart from calls one array
+    /// at a time: it changes nothing and can't trap (no indexing, `!`, casts or bigint
+    /// division), takes the element and maybe its index, and doesn't throw.
+    fn fusible_arrow(&self, e: ExprId) -> bool {
+        let m = self.cur_m();
+        let ast = self.ast(m);
+        let ExprKind::Arrow(f) = &ast.expr(e).kind else { return false };
+        if f.is_async || f.throws.is_some() || f.params.len() > 2 || f.params.iter().any(|p| p.inout || p.optional || p.rest) {
+            return false;
+        }
+        let body = match &f.body {
+            crate::ast::ArrowBody::Expr(x) => *x,
+            crate::ast::ArrowBody::Block(b) => match &ast.stmt(*b).kind {
+                crate::ast::StmtKind::Block(ss) if ss.len() == 1 => match &ast.stmt(ss[0]).kind {
+                    crate::ast::StmtKind::Return(Some(x)) => *x,
+                    _ => return false,
+                },
+                _ => return false,
+            },
+        };
+        let ty_of = |x: ExprId| self.facts(m).expr_ty.get(x as usize).copied().unwrap_or(ERROR);
+        if !matches!(self.tget(ty_of(e)), Ty::Func(_, _, th) if th == NEVER) || !self.harmless(body) {
+            return false;
+        }
+        let mut es = Vec::new();
+        super::body::collect_exprs_expr(ast, body, &mut es);
+        es.iter().all(|&x| match &ast.expr(x).kind {
+            ExprKind::Index { .. } | ExprKind::NonNull(_) | ExprKind::As(..) | ExprKind::Try(_) | ExprKind::Spread(_) => false,
+            ExprKind::Binary(BinOp::Div | BinOp::Rem | BinOp::Pow, ..) => matches!(self.tget(ty_of(x)), Ty::Int | Ty::F64),
+            _ => true,
+        })
+    }
+
+    /// `src.map(f).filter(g)…` (the receiver of the call `name(args)`) as one loop ending in that
+    /// call, when every callback is a fusible arrow: no array is made for a stage.
+    fn fused_chain(&mut self, obj: ExprId, name: &str, args: &[Arg], ty: TyId) -> Option<Val> {
+        if !matches!(name, "map" | "filter" | "some" | "every" | "find" | "findIndex" | "reduce") || args.is_empty() || args.len() > if name == "reduce" { 2 } else { 1 } {
+            return None;
+        }
+        if name == "reduce" && args.len() != 2 {
+            return None;
+        }
+        let m = self.cur_m();
+        // stages, last first: (filter?, callback, the stage's array type)
+        let mut stages: Vec<(bool, ExprId, TyId)> = Vec::new();
+        let mut cur = obj;
+        loop {
+            let ast = self.ast(m);
+            let mut e = cur;
+            while let ExprKind::Paren(x) = ast.expr(e).kind {
+                e = x;
+            }
+            let ExprKind::Call { callee, args: cargs, optional: false, .. } = &ast.expr(e).kind else { break };
+            let ExprKind::Member { obj: inner, name: sname, optional: false, .. } = &ast.expr(*callee).kind else { break };
+            let filter = match self.sym(*sname) {
+                "map" => false,
+                "filter" => true,
+                _ => break,
+            };
+            let Some(Callee::Method(rt)) = self.facts(m).calls.get(&e).map(|c| c.callee.clone()) else { break };
+            if cargs.len() != 1 || !matches!(self.tget(rt), Ty::Array(_)) || !self.fusible_arrow(cargs[0].expr) {
+                break;
+            }
+            // (a filter by a type guard narrows: its array isn't of its receiver's elements)
+            let et = self.ty(e);
+            if filter && self.c.types.without_undefined(et) != rt {
+                break;
+            }
+            stages.push((filter, cargs[0].expr, et));
+            cur = *inner;
+        }
+        if stages.is_empty() || !self.fusible_arrow(args[0].expr) {
+            return None;
+        }
+        stages.reverse();
+        let cur_ty = self.ty(cur);
+        let src_ty = self.c.types.without_undefined(cur_ty);
+        let Ty::Array(et0) = self.tget(src_ty) else { return None };
+        let filters = stages.iter().filter(|s| s.0).count();
+        // the result
+        let (res, stop) = match name {
+            "map" | "filter" => {
+                let Ty::Array(rt) = self.tget(ty) else { return None };
+                let rd = self.desc(rt);
+                (Some(self.tmp(ty, &format!("tv_arr_with_capacity({rd}, 0)"), true)), None)
+            }
+            "some" => (Some(self.tmp(BOOL, "false", false)), Some("")),
+            "every" => (Some(self.tmp(BOOL, "true", false)), Some("")),
+            "findIndex" => (Some(self.tmp(INT, "-1", false)), Some("")),
+            "find" => {
+                let u = self.coerce(Val::plain("0", UNDEFINED), ty);
+                let code = self.consume(u);
+                (Some(self.tmp(ty, &code, true)), Some(""))
+            }
+            _ => (None, None),
+        };
+        let acc = if name == "reduce" {
+            let init = self.expr(args[1].expr);
+            let init = self.coerce(init, ty);
+            let code = self.consume(init);
+            let act = self.ctype(ty);
+            let acc = self.fresh("acc");
+            self.line(format!("{act} {acc} = {code};"));
+            Some(acc)
+        } else {
+            None
+        };
+        let src = self.expr(cur);
+        // (the callbacks change nothing: the source stays as it is through the loop)
+        let src = self.coerce(src, src_ty);
+        let cbs: Vec<_> = stages.iter().map(|s| s.1).collect();
+        let cbs: Vec<_> = cbs.into_iter().map(|a| self.prepare_callback(a)).collect();
+        let sink = self.prepare_callback(args[0].expr);
+        let counters: Vec<String> = (0..filters).map(|_| self.fresh("n")).collect();
+        for c in &counters {
+            self.line(format!("tv_int {c} = 0;"));
+        }
+        let done = stop.map(|_| self.fresh("done"));
+        if let Some(d) = &done {
+            self.line(format!("bool {d} = false;"));
+        }
+        let ect0 = self.ctype(et0);
+        let i = self.fresh("i");
+        let cond = match &done {
+            Some(d) => format!("!{d} && {i} < tv_arr_len({})", src.code),
+            None => format!("{i} < tv_arr_len({})", src.code),
+        };
+        self.open_block(&format!("for (tv_int {i} = 0; {cond}; {i}++) {{"));
+        let mut v = Val::plain(format!("(({ect0} *)tv_arr_data({}))[{i}]", src.code), et0);
+        let mut idx = i.clone();
+        let mut opened = 0;
+        let mut counters = counters.into_iter();
+        for (k, (filter, _, sty)) in stages.iter().enumerate() {
+            let r = self.invoke(&cbs[k], vec![v.clone(), Val::plain(idx.clone(), INT)]);
+            if *filter {
+                let c = self.truthy_val(r);
+                self.open_block(&format!("if ({c}) {{"));
+                opened += 1;
+                let n = counters.next().unwrap();
+                let j = self.fresh("j");
+                self.line(format!("tv_int {j} = {n}++; (void){j};"));
+                idx = j;
+            } else {
+                let Ty::Array(rt) = self.tget(*sty) else { return None };
+                v = self.coerce(r, rt);
+            }
+        }
+        // (the element, borrowed: a stage's result is released with its block)
+        let elem = Val { owned: false, ..v };
+        let r = match &acc {
+            Some(acc) => self.invoke(&sink, vec![Val::plain(acc.clone(), ty), elem.clone(), Val::plain(idx.clone(), INT)]),
+            None => self.invoke(&sink, vec![elem.clone(), Val::plain(idx.clone(), INT)]),
+        };
+        match name {
+            "map" => {
+                let res = res.as_ref().unwrap();
+                let Ty::Array(rt) = self.tget(ty) else { unreachable!() };
+                let (rd, rct) = (self.desc(rt), self.ctype(rt));
+                let v = self.coerce(r, rt);
+                let code = self.consume(v);
+                self.line(format!("TVG_PUSH({rct}, &{}, {rd}, {code});", res.code));
+            }
+            "filter" => {
+                let res = res.as_ref().unwrap();
+                let Ty::Array(rt) = self.tget(ty) else { unreachable!() };
+                let (rd, rct) = (self.desc(rt), self.ctype(rt));
+                let c = self.truthy_val(r);
+                self.open_block(&format!("if ({c}) {{"));
+                let x = self.coerce(elem, rt);
+                let code = self.consume(x);
+                self.line(format!("TVG_PUSH({rct}, &{}, {rd}, {code});", res.code));
+                self.close_block("}");
+            }
+            "some" | "every" | "findIndex" => {
+                let res = res.as_ref().unwrap();
+                let d = done.as_ref().unwrap();
+                let c = self.truthy_val(r);
+                let (test, val) = match name {
+                    "some" => (c, "true".to_string()),
+                    "every" => (format!("!({c})"), "false".to_string()),
+                    _ => (c, idx.clone()),
+                };
+                self.line(format!("if ({test}) {{ {} = {val}; {d} = true; }}", res.code));
+            }
+            "find" => {
+                let res = res.as_ref().unwrap();
+                let d = done.as_ref().unwrap();
+                let c = self.truthy_val(r);
+                self.open_block(&format!("if ({c}) {{"));
+                let x = self.coerce(elem, ty);
+                let code = self.consume(x);
+                let rel = self.release_code(ty, &res.code);
+                self.line(format!("{rel}; {} = {code}; {d} = true;", res.code));
+                self.close_block("}");
+            }
+            _ => {
+                let acc = acc.as_ref().unwrap();
+                let r = self.coerce(r, ty);
+                let code = self.consume(r);
+                let (act, n) = (self.ctype(ty), self.fresh("n"));
+                let rel = self.release_code(ty, acc);
+                self.line(format!("{act} {n} = {code}; {rel}; {acc} = {n};"));
+            }
+        }
+        for _ in 0..opened {
+            self.close_block("}");
+        }
+        self.close_block("}");
+        if let Some(acc) = acc {
+            let owned = self.is_rc(ty);
+            if owned {
+                self.b().temps.last_mut().unwrap().push((acc.clone(), ty));
+            }
+            return Some(Val { code: acc, ty, owned });
+        }
+        res
     }
 
     #[allow(clippy::too_many_arguments)]

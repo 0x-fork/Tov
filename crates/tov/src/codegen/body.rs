@@ -5632,7 +5632,7 @@ impl<'c, 'a> Gen<'c, 'a> {
 
     /// Can evaluating `e` change no variable or field (no assignment, and no call but built-ins on
     /// numbers and strings)?
-    fn harmless(&self, e: ExprId) -> bool {
+    pub(crate) fn harmless(&self, e: ExprId) -> bool {
         let m = self.cur_m();
         let ast = self.ast(m);
         let facts = self.facts(m);
