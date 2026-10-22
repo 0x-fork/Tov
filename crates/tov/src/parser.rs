@@ -289,6 +289,28 @@ impl<'a> Parser<'a> {
         self.ast.exprs.len() as ExprId - 1
     }
 
+    /// `x = d` as a default: `x !== undefined ? x : d` (only `undefined` takes the default,
+    /// not `null`; `x` first, so its type guides `d`'s). `x` is a name or a read of one's
+    /// field or element, built again for the test.
+    fn defaulted(&mut self, x: ExprId, d: ExprId, span: Span) -> ExprId {
+        let again = self.copy_read(x);
+        let u = self.mk_expr(ExprKind::Undefined, span);
+        let test = self.mk_expr(ExprKind::Binary(BinOp::Ne, again, u), span);
+        self.mk_expr(ExprKind::Cond(test, x, d), span)
+    }
+
+    fn copy_read(&mut self, x: ExprId) -> ExprId {
+        let span = self.ast.exprs[x as usize].span;
+        let kind = match &self.ast.exprs[x as usize].kind {
+            &ExprKind::Ident(n) => ExprKind::Ident(n),
+            &ExprKind::Int(i) => ExprKind::Int(i),
+            &ExprKind::Member { obj, name, name_span, optional } => ExprKind::Member { obj: self.copy_read(obj), name, name_span, optional },
+            &ExprKind::Index { obj, index, optional } => ExprKind::Index { obj: self.copy_read(obj), index: self.copy_read(index), optional },
+            _ => unreachable!("a default's target is a name or a read of one"),
+        };
+        self.mk_expr(kind, span)
+    }
+
     fn mk_stmt(&mut self, kind: StmtKind, span: Span) -> StmtId {
         self.ast.stmts.push(Stmt { kind, span });
         self.ast.stmts.len() as StmtId - 1
@@ -860,7 +882,7 @@ impl<'a> Parser<'a> {
                 let mut optional = optional;
                 if self.eat(Tok::Eq) {
                     let d = self.assign();
-                    init = self.mk_expr(ExprKind::Binary(BinOp::Nullish, init, d), pspan);
+                    init = self.defaulted(init, d, pspan);
                     optional = true;
                 }
                 let mut stmts = Vec::new();
@@ -960,7 +982,7 @@ impl<'a> Parser<'a> {
         Some(self.mk_ty(TypeExprKind::Named { ns: None, name: sym, name_span: span, args: Vec::new() }, span))
     }
 
-    /// Starts `body` with `let x: T = x ?? default` for each parameter with a default (the
+    /// Starts `body` with `let x: T = x !== undefined ? x : default` for each parameter with a default (the
     /// `let` declared at the default, so it's a variable of its own), then the parameters'
     /// destructuring.
     fn with_defaults(&mut self, (defaults, prologue): (Vec<(Sym, Span, Option<TypeId>, ExprId)>, Vec<StmtId>), body: StmtId) -> StmtId {
@@ -971,7 +993,7 @@ impl<'a> Parser<'a> {
         for (name, name_span, ty, d) in defaults {
             let a = self.mk_expr(ExprKind::Ident(name), name_span);
             let ds = self.expr_span(d);
-            let init = self.mk_expr(ExprKind::Binary(BinOp::Nullish, a, d), name_span.to(ds));
+            let init = self.defaulted(a, d, name_span.to(ds));
             stmts.push(self.mk_stmt(StmtKind::Let { mutable: true, name, name_span: ds, ty, init: Some(init) }, name_span.to(ds)));
         }
         stmts.extend(prologue);
@@ -1984,7 +2006,7 @@ impl<'a> Parser<'a> {
                     let idx = self.mk_expr(ExprKind::Int(i as u64), span);
                     let at = self.mk_expr(ExprKind::Index { obj: t, index: idx, optional: false }, span);
                     let v = match d {
-                        Some(d) => self.mk_expr(ExprKind::Binary(BinOp::Nullish, at, *d), span),
+                        Some(d) => self.defaulted(at, *d, span),
                         None => self.mk_expr(ExprKind::NonNull(at), span),
                     };
                     self.bindings(sub, None, v, out);
@@ -2004,7 +2026,7 @@ impl<'a> Parser<'a> {
                     let t = read(self);
                     let at = self.mk_expr(ExprKind::Member { obj: t, name: *key, name_span: *kspan, optional: false }, *kspan);
                     let v = match d {
-                        Some(d) => self.mk_expr(ExprKind::Binary(BinOp::Nullish, at, *d), *kspan),
+                        Some(d) => self.defaulted(at, *d, *kspan),
                         None => at,
                     };
                     self.bindings(sub, None, v, out);
