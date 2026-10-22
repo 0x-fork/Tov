@@ -1631,13 +1631,21 @@ impl<'a> Parser<'a> {
                 self.terminator();
             }
             let span = start.to(self.prev_span());
-            // `const id = <T>(x: T): T => x`: the generic function `id`
+            // `const f = (n: number): number => ...`, `const id = <T>(x: T): T => x`: the function
+            // `f` (it may call itself; calls to it are direct), as JavaScript's differ only in
+            // when the name can be used
+            // (with its result type written: an inferred one stays the closure's, which speculation
+            // widens with what it's given to; an async one returning a promise has its value)
+            let generic = self.generic_arrows.iter().any(|g| g.0 == init);
             if ty.is_none()
                 && !mutable
-                && let Some(gi) = self.generic_arrows.iter().position(|g| g.0 == init)
-                && let ExprKind::Arrow(_) = &self.ast.exprs[init as usize].kind
+                && let ExprKind::Arrow(f) = &self.ast.exprs[init as usize].kind
+                && (generic || (f.ret.is_some() && !f.is_async))
             {
-                let (_, tparams, _) = self.generic_arrows.remove(gi);
+                let tparams = match self.generic_arrows.iter().position(|g| g.0 == init) {
+                    Some(gi) => self.generic_arrows.remove(gi).1,
+                    None => Vec::new(),
+                };
                 let ExprKind::Arrow(f) = std::mem::replace(&mut self.ast.exprs[init as usize].kind, ExprKind::Error) else { unreachable!() };
                 let f = *f;
                 let body = match f.body {
