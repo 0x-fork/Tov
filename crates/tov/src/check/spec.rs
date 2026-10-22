@@ -72,8 +72,12 @@ impl<'a> Checker<'a> {
             return (true, None);
         }
         let module = &self.modules[self.cur as usize];
-        if !self.spec.on || !self.ts_module() || module.std || module.npm.is_some() {
+        if !self.ts_module() || module.std || module.npm.is_some() {
             return (false, None);
+        }
+        // (checked without speculation: every number is JavaScript's, as written)
+        if !self.spec.on {
+            return (true, None);
         }
         self.spec_used = true;
         (false, Some(site))

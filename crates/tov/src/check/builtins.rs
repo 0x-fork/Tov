@@ -1494,6 +1494,10 @@ impl<'a> Checker<'a> {
                 }
                 let t = self.expr(args[0].expr, Some(subject));
                 if !self.comparable(t, subject) {
+                    // (while `number`s are speculated `int`: `Map<int, int>` and `Map<f64, f64>`
+                    // become `f64` both)
+                    let s = self.ast().expr(args[0].expr).span;
+                    self.spec_mismatch(t, subject, s);
                     let msg = format!("expected value of type `{}` can never equal a `{}`", self.show(t), self.show(subject));
                     let s = self.ast().expr(args[0].expr).span;
                     self.report(Diagnostic::new("T0502", s, msg));

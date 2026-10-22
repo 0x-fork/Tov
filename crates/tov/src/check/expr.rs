@@ -339,7 +339,8 @@ impl<'a> Checker<'a> {
                             let xs = xs.clone();
                             let rows: Option<Vec<TyId>> = xs.iter().map(|&el| self.const_row(el)).collect();
                             if let Some(rows) = rows {
-                                let row = self.types.union(&rows);
+                                // (one row type: `[1, 2]` and `[0.5, 2]` are both `[number, number]`)
+                                let row = rows[1..].iter().fold(rows[0], |a, &b| self.join_numbers(a, b));
                                 let t = self.types.array(row);
                                 return self.expr(*x, Some(t));
                             }
@@ -2649,6 +2650,30 @@ impl<'a> Checker<'a> {
             return Some(((*one).0, (*one).1.clone()));
         }
         None
+    }
+
+    /// `a` and `b` as one type, TypeScript's `number` being `int` or `f64` (`int[]` and `f64[]`
+    /// are `f64[]`; tuples join by element), else their union.
+    fn join_numbers(&mut self, a: TyId, b: TyId) -> TyId {
+        if a == b {
+            return a;
+        }
+        if self.types.is_numeric(a) && self.types.is_numeric(b) {
+            return if self.types.is_float(a) { a } else { b };
+        }
+        match (*self.types.get(a), *self.types.get(b)) {
+            (Ty::Array(x), Ty::Array(y)) => {
+                let e = self.join_numbers(x, y);
+                self.types.array(e)
+            }
+            _ => match (self.tuple_of(a), self.tuple_of(b)) {
+                (Some(x), Some(y)) if x.len() == y.len() => {
+                    let tys: Vec<TyId> = x.iter().zip(&y).map(|(p, q)| (p.ty, q.ty)).collect::<Vec<_>>().into_iter().map(|(p, q)| self.join_numbers(p, q)).collect();
+                    self.tuple_ty(&tys)
+                }
+                _ => self.types.union(&[a, b]),
+            },
+        }
     }
 
     /// A row of `[[0, false], ...] as const`: a tuple of its (widened) elements' types, when
