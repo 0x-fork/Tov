@@ -311,7 +311,15 @@ impl<'a> Checker<'a> {
                 self.expr(*x, None);
                 ERROR
             }
-            ExprKind::Arrow(f) => self.arrow(f, exp, span),
+            ExprKind::Arrow(f) => {
+                let (t, guard) = self.arrow_guarded(f, exp, span);
+                let m = self.cur;
+                match guard {
+                    Some(g) => self.arrow_guards.insert((m, e), g),
+                    None => self.arrow_guards.remove(&(m, e)),
+                };
+                t
+            }
             ExprKind::Cond(c, a, b) => {
                 let fx = super::stmt::effects_of_expr(self.ast(), *a).with(super::stmt::effects_of_expr(self.ast(), *b));
                 let entry = self.fcx().locals.len();
@@ -1319,6 +1327,21 @@ impl<'a> Checker<'a> {
                 },
             },
             _ => Root::Temp,
+        }
+    }
+
+    /// What passes the callback `a` given elements `el`, when it's a type guard.
+    fn guard_arg(&mut self, mut a: ExprId, el: TyId) -> Option<TyId> {
+        while let ExprKind::Paren(x) = self.ast().expr(a).kind {
+            a = x;
+        }
+        let m = self.cur;
+        if let Some(&g) = self.arrow_guards.get(&(m, a)) {
+            return Some(g);
+        }
+        match self.predicate_of(a) {
+            Some((0, g)) => Some(self.guarded(el, g)),
+            _ => None,
         }
     }
 
@@ -2707,7 +2730,11 @@ impl<'a> Checker<'a> {
         }
     }
 
-    pub(super) fn arrow(&mut self, f: &ArrowFn, exp: Option<TyId>, span: Span) -> TyId {
+    /// The arrow's type, and what passes it when it's a type guard of its first parameter:
+    /// declared (`(x): x is T => ...`), or a body true exactly when the parameter is of a part
+    /// of its type (`(x) => x !== undefined`, `(x) => typeof x === "string"`), as TypeScript
+    /// infers.
+    fn arrow_guarded(&mut self, f: &ArrowFn, exp: Option<TyId>, span: Span) -> (TyId, Option<TyId>) {
         let exp_fn = exp.and_then(|e| {
             self.flat_members(e).into_iter().find_map(|m| match *self.types.get(m) {
                 Ty::Func(ps, r, _) => Some((self.types.params(ps).to_vec(), r)),
@@ -2803,9 +2830,11 @@ impl<'a> Checker<'a> {
         // (an unannotated parameter or result takes the sites of the context's function type)
         let context_sites = self.spec_flow.last().cloned().unwrap_or_default();
         let m = self.cur;
+        let mut first = None;
         for (p, fp) in f.params.iter().zip(&params) {
             let kind = if p.inout { LocalKind::Inout } else { LocalKind::Param };
             let id = self.declare(p.name, fp.ty, kind, p.span, None, false);
+            first.get_or_insert(id);
             if self.spec.on {
                 self.fcx().locals[id].sites = match p.ty {
                     Some(t) => self.type_sites(m, t),
@@ -2879,6 +2908,10 @@ impl<'a> Checker<'a> {
                 }
             }
         };
+        let guard = match (first, f.params.first(), params.first()) {
+            (Some(id), Some(p0), Some(fp0)) if !p0.inout && !is_async => self.guard_of(f, id, p0.name, fp0.ty, body_ty, &tscope),
+            _ => None,
+        };
         let fcx = self.fcx.last_mut().unwrap();
         fcx.scopes.pop();
         let frame = fcx.frames.pop().unwrap();
@@ -2892,9 +2925,49 @@ impl<'a> Checker<'a> {
         }
         if is_async {
             let p = self.types.promise(body_ty, thrown);
-            return self.types.func(params, p);
+            return (self.types.func(params, p), None);
         }
-        self.types.func_throws(params, body_ty, thrown)
+        (self.types.func_throws(params, body_ty, thrown), guard)
+    }
+
+    /// (see `arrow_guarded`; the parameter `id` is still in scope)
+    fn guard_of(&mut self, f: &ArrowFn, id: LocalId, name: Sym, ty: TyId, body_ty: TyId, tscope: &[(Sym, TyId)]) -> Option<TyId> {
+        if let Some(rt) = f.ret {
+            let crate::ast::TypeExprKind::Predicate(pn, t) = self.ast().ty(rt).kind else { return None };
+            if pn != name {
+                return None;
+            }
+            let g = self.resolve_type(t, tscope);
+            return Some(self.guarded(ty, g));
+        }
+        if body_ty != BOOL {
+            return None;
+        }
+        let x = match &f.body {
+            ArrowBody::Expr(x) => *x,
+            ArrowBody::Block(b) => match &self.ast().stmt(*b).kind {
+                crate::ast::StmtKind::Block(ss) if ss.len() == 1 => match &self.ast().stmt(ss[0]).kind {
+                    crate::ast::StmtKind::Return(Some(x)) => *x,
+                    _ => return None,
+                },
+                _ => return None,
+            },
+        };
+        let of = |ns: &[Narrowing]| ns.iter().find_map(|n| match n {
+            Narrowing::Local(l, t) if *l == id => Some(*t),
+            _ => None,
+        });
+        let yes = self.narrowings(x, true);
+        let no = self.narrowings(x, false);
+        let (yes, no) = (of(&yes)?, of(&no)?);
+        let (ym, nm) = (self.flat_members(yes), self.flat_members(no));
+        (yes != ty && !ym.iter().any(|m| nm.contains(m))).then_some(yes)
+    }
+
+    /// The members of `ty` a guard for `g` lets through (`g` itself when none is one).
+    pub(super) fn guarded(&mut self, ty: TyId, g: TyId) -> TyId {
+        let fits: Vec<TyId> = self.flat_members(ty).into_iter().filter(|&m| self.assignable(m, g)).collect();
+        if fits.is_empty() { g } else { self.types.union(&fits) }
     }
 
     /// `await e`: the value of a promise (a rejection throws), or `e` itself if it isn't one.
@@ -3538,6 +3611,15 @@ impl<'a> Checker<'a> {
                     let sig = self.throwing_callbacks(&ms.sig);
                     let mark = self.cb_throws.len();
                     let r = self.call_sig(&sig, &desc, type_args, args, exp, span);
+                    // `xs.filter((x): x is T => ...)`, `xs.find(isT)`: of what passes
+                    let r = match (*self.types.get(base), mtext.as_str(), args) {
+                        (Ty::Array(el), "filter" | "find" | "findLast", [a]) => match self.guard_arg(a.expr, el) {
+                            Some(g) if mtext == "filter" => self.types.array(g),
+                            Some(g) => self.types.optional(g),
+                            None => r,
+                        },
+                        _ => r,
+                    };
                     let mut thrown: Vec<TyId> = self.cb_throws.drain(mark..).collect();
                     for a in args {
                         if !matches!(self.ast().expr(a.expr).kind, ExprKind::Arrow(_))

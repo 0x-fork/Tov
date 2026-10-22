@@ -1151,11 +1151,7 @@ impl<'c, 'a> Gen<'c, 'a> {
             if cargs.len() != 1 || !matches!(self.tget(rt), Ty::Array(_)) || !self.fusible_arrow(cargs[0].expr) {
                 break;
             }
-            // (a filter by a type guard narrows: its array isn't of its receiver's elements)
             let et = self.ty(e);
-            if filter && self.c.types.without_undefined(et) != rt {
-                break;
-            }
             stages.push((filter, cargs[0].expr, et));
             cur = *inner;
         }
@@ -1230,6 +1226,11 @@ impl<'c, 'a> Gen<'c, 'a> {
                 let j = self.fresh("j");
                 self.line(format!("tv_int {j} = {n}++; (void){j};"));
                 idx = j;
+                // (by a type guard: of the members that pass)
+                let Ty::Array(rt) = self.tget(*sty) else { return None };
+                if v.ty != rt {
+                    v = self.project(v, rt);
+                }
             } else {
                 let Ty::Array(rt) = self.tget(*sty) else { return None };
                 v = self.coerce(r, rt);
@@ -1256,7 +1257,7 @@ impl<'c, 'a> Gen<'c, 'a> {
                 let (rd, rct) = (self.desc(rt), self.ctype(rt));
                 let c = self.truthy_val(r);
                 self.open_block(&format!("if ({c}) {{"));
-                let x = self.coerce(elem, rt);
+                let x = if elem.ty == rt { elem } else { self.project(elem, rt) };
                 let code = self.consume(x);
                 self.line(format!("TVG_PUSH({rct}, &{}, {rd}, {code});", res.code));
                 self.close_block("}");
@@ -1277,7 +1278,9 @@ impl<'c, 'a> Gen<'c, 'a> {
                 let d = done.as_ref().unwrap();
                 let c = self.truthy_val(r);
                 self.open_block(&format!("if ({c}) {{"));
-                let x = self.coerce(elem, ty);
+                let passed = self.c.types.without_undefined(ty);
+                let x = if self.c.types.without_undefined(elem.ty) == passed { elem } else { self.project(elem, passed) };
+                let x = self.coerce(x, ty);
                 let code = self.consume(x);
                 let rel = self.release_code(ty, &res.code);
                 self.line(format!("{rel}; {} = {code}; {d} = true;", res.code));
@@ -1354,8 +1357,19 @@ impl<'c, 'a> Gen<'c, 'a> {
                     }
                     "filter" => {
                         let c = self.truthy_val(r);
-                        let copy = self.retain_code(et, "x_");
-                        self.line(format!("if ({c}) {{ {ect} x_ = {}; {copy}; TVG_PUSH({ect}, &{}, {d}, x_); }}", elem(&i).code, res.code));
+                        let Ty::Array(rt) = self.tget(res_ty) else { unreachable!() };
+                        if rt == et {
+                            let copy = self.retain_code(et, "x_");
+                            self.line(format!("if ({c}) {{ {ect} x_ = {}; {copy}; TVG_PUSH({ect}, &{}, {d}, x_); }}", elem(&i).code, res.code));
+                        } else {
+                            // (by a type guard: of the members that pass)
+                            let (rd, rct) = (self.desc(rt), self.ctype(rt));
+                            self.open_block(&format!("if ({c}) {{"));
+                            let x = self.project(elem(&i), rt);
+                            let code = self.consume(x);
+                            self.line(format!("TVG_PUSH({rct}, &{}, {rd}, {code});", res.code));
+                            self.close_block("}");
+                        }
                     }
                     "some" => {
                         let c = self.truthy_val(r);
@@ -1377,7 +1391,9 @@ impl<'c, 'a> Gen<'c, 'a> {
                         self.b().temps.push(Vec::new());
                         self.line(format!("if ({cond}) {{"));
                         self.bump(1);
-                        let found = self.coerce(elem(&i), ty);
+                        let passed = self.c.types.without_undefined(ty);
+                        let found = if self.c.types.without_undefined(et) == passed { elem(&i) } else { self.project(elem(&i), passed) };
+                        let found = self.coerce(found, ty);
                         let code = self.consume(found);
                         let rel = self.release_code(ty, &res.code);
                         self.line(format!("{rel}; {} = {code};", res.code));

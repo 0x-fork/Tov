@@ -366,6 +366,9 @@ pub struct Checker<'a> {
     /// What callbacks given to built-in methods throw (`xs.map((x) => parse(x))`), as their
     /// arrows are checked: the method call passes it on.
     cb_throws: Vec<TyId>,
+    /// Arrows that narrow their first parameter, as a type guard (`(x): x is T => ...`, or one
+    /// whose body does exactly that: `(x) => x !== undefined`): (module, arrow) → what passes.
+    arrow_guards: crate::hash::FxMap<(u32, ExprId), TyId>,
     /// Record types whose values JavaScript would show to be shared (changed in place, or
     /// compared by identity): objects on the heap, every reference seeing every change. Records
     /// never changed or compared stay values, which nothing can tell apart (see `find_objects`).
@@ -445,6 +448,7 @@ fn new_checker<'a>(modules: &'a [Module], interner: &'a Interner, sm: &'a Source
         want_optional: false,
         float_args: false,
         cb_throws: Vec::new(),
+        arrow_guards: Default::default(),
         objects: HashSet::default(),
         mutated: HashSet::default(),
         object_fields: HashSet::default(),
@@ -698,6 +702,7 @@ impl<'a> Checker<'a> {
             want_optional: false,
             float_args: false,
             cb_throws: Vec::new(),
+        arrow_guards: Default::default(),
         objects: HashSet::default(),
         mutated: HashSet::default(),
         object_fields: HashSet::default(),
