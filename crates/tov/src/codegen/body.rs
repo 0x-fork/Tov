@@ -2350,8 +2350,12 @@ impl<'c, 'a> Gen<'c, 'a> {
     // ------------------------------------------------------------ statements
 
     pub(crate) fn stmt(&mut self, s: StmtId) {
-        // (a loop: the lengths it can rely on, of arrays nothing in the function resizes)
+        // (a loop's body that's one statement: `for (...) m.set(k, (m.get(k) ?? 0) + 1)`)
         let m = self.cur_m();
+        if matches!(self.ast(m).stmt(s).kind, StmtKind::Expr(_)) && self.map_count(&[s], 0).is_some() {
+            return;
+        }
+        // (a loop: the lengths it can rely on, of arrays nothing in the function resizes)
         if matches!(self.ast(m).stmt(s).kind, StmtKind::For { .. } | StmtKind::ForOf { .. } | StmtKind::While(..) | StmtKind::DoWhile(..)) {
             let fixed = self.fixed_lens();
             // (from where each holds: an array a loop fills, after that loop)
