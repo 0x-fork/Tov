@@ -2544,6 +2544,9 @@ impl<'a> Parser<'a> {
 
     fn postfix(&mut self) -> ExprId {
         let mut e = self.primary();
+        // (after `a?.b`, the rest of the chain is skipped too when `a` is absent: `a?.b.c(x)`
+        // reads as `a?.b?.c(x)`, which is the same wherever TypeScript allows the first)
+        let mut chain = false;
         loop {
             let start = self.expr_span(e);
             match self.kind() {
@@ -2568,10 +2571,11 @@ impl<'a> Parser<'a> {
                         return e;
                     };
                     let span = start.to(name_span);
-                    e = self.mk_expr(ExprKind::Member { obj: e, name, name_span, optional: false }, span);
+                    e = self.mk_expr(ExprKind::Member { obj: e, name, name_span, optional: chain }, span);
                 }
                 Tok::QuestionDot => {
                     self.bump();
+                    chain = true;
                     if self.at(Tok::LParen) {
                         let args = self.args();
                         let span = start.to(self.prev_span());
@@ -2591,6 +2595,12 @@ impl<'a> Parser<'a> {
                         return e;
                     }
                 }
+                Tok::LParen if chain && !self.tok().nl_before && !matches!(self.ast.exprs[e as usize].kind, ExprKind::Member { .. }) => {
+                    // (`f?.()()`: the result is called only if there is one)
+                    let args = self.args();
+                    let span = start.to(self.prev_span());
+                    e = self.mk_expr(ExprKind::Call { callee: e, type_args: Vec::new(), args, optional: true }, span);
+                }
                 Tok::LParen if !self.tok().nl_before => {
                     let args = self.args();
                     let span = start.to(self.prev_span());
@@ -2601,7 +2611,7 @@ impl<'a> Parser<'a> {
                     let index = self.expr();
                     self.expect(Tok::RBracket, "to close the index");
                     let span = start.to(self.prev_span());
-                    e = self.mk_expr(ExprKind::Index { obj: e, index, optional: false }, span);
+                    e = self.mk_expr(ExprKind::Index { obj: e, index, optional: chain }, span);
                 }
                 Tok::Bang if !self.tok().nl_before => {
                     self.bump();

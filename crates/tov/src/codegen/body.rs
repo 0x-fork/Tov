@@ -3620,7 +3620,7 @@ impl<'c, 'a> Gen<'c, 'a> {
             let u = self.unfold_val(v);
             return self.project(u, to);
         }
-        if let Ty::Union(ms) = self.tget(v.ty) {
+        if let Ty::Union(_) = self.tget(v.ty) {
             if let Some(k) = self.tag_of(v.ty, to) {
                 if self.is_unit(to) {
                     return Val::plain("0", to);
@@ -5118,17 +5118,41 @@ impl<'c, 'a> Gen<'c, 'a> {
             let iv = self.expr(index);
             return self.js_index(e, base, iv, optional, ty, span);
         }
-        let _ = (optional, span);
         let a = self.expr(obj);
-        let a = if optional {
-            let inner = self.c.types.without_undefined(a.ty);
+        if optional {
+            let inner = self.c.types.without_nullish(a.ty);
             if inner != a.ty {
-                self.unsupported(span, "`?.[]` on an optional array");
+                // a?.[i]: undefined when a is (`i` unevaluated)
+                let res = self.fresh("t");
+                let ct = self.ctype(ty);
+                self.line(format!("{ct} {res};"));
+                let present = self.truthy(a.clone());
+                self.open(&format!("if ({present}) {{"));
+                self.push_temps();
+                let pa = self.project(a, inner);
+                let v = self.index_of(pa, index, ty, span);
+                let v = self.coerce(v, ty);
+                let code = self.consume(v);
+                self.line(format!("{res} = {code};"));
+                self.pop_temps();
+                self.close("} else {");
+                self.b().indent += 1;
+                let u = self.coerce(Val::plain("0", UNDEFINED), ty);
+                let code = self.consume(u);
+                self.line(format!("{res} = {code};"));
+                self.close("}");
+                let owned = self.is_rc(ty);
+                if owned {
+                    self.b().temps.last_mut().unwrap().push((res.clone(), ty));
+                }
+                return Val { code: res, ty, owned };
             }
-            self.project(a, inner)
-        } else {
-            a
-        };
+        }
+        self.index_of(a, index, ty, span)
+    }
+
+    /// `a[index]` read as `ty`, for a present `a`.
+    fn index_of(&mut self, a: Val, index: ExprId, ty: TyId, span: Span) -> Val {
         // a tuple's element: its field
         if let Some(fields) = self.tuple_of(a.ty)
             && let ExprKind::Int(i) = self.ast(self.cur_m()).expr(index).kind
