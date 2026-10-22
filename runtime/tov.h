@@ -173,7 +173,11 @@ static inline bool tv_gen_next(tv_gen *g) {   /* true once it's finished (nothin
 static inline void tv_gen_retain(tv_gen *g) { if (g) g->rc++; }
 void tv_gen_release(tv_gen *g);
 extern const tv_type tv_type_gen;
-bool tv_str_eq(tv_str a, tv_str b);
+/* (inline: against a literal, whose length and bytes are constants, it's a length test and a
+ * few word compares) */
+static inline bool tv_str_eq(tv_str a, tv_str b) {
+    return a.p == b.p || (a.p->len == b.p->len && memcmp(a.p->data, b.p->data, (size_t)b.p->len) == 0);
+}
 int tv_str_cmp(tv_str a, tv_str b);             /* byte order == code point order */
 uint64_t tv_str_hash(tv_str s);
 static inline tv_int tv_str_byte_len(tv_str s) { return s.p->len; }

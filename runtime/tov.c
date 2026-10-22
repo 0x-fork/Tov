@@ -901,10 +901,6 @@ static void tv_gen_str_v(tv_sb *sb, const void *p) { (void)p; tv_sb_push_cstr(sb
 static void tv_gen_inspect_v(tv_sb *sb, const void *p, int depth) { (void)p; (void)depth; tv_sb_push_cstr(sb, "Object [Generator] {}"); }
 const tv_type tv_type_gen = {sizeof(tv_gen *), tv_gen_retain_v, tv_gen_release_v, tv_gen_eq_v, tv_gen_hash_v, tv_gen_str_v, tv_gen_inspect_v};
 
-bool tv_str_eq(tv_str a, tv_str b) {
-    return a.p == b.p || (a.p->len == b.p->len && memcmp(a.p->data, b.p->data, (size_t)a.p->len) == 0);
-}
-
 int tv_str_cmp(tv_str a, tv_str b) {
     if (a.p == b.p) return 0;
     int64_t na = a.p->len, nb = b.p->len;
@@ -1530,14 +1526,23 @@ static void tv_trim_range(tv_str s, bool left, bool right, size_t *a_out, size_t
     const unsigned char *d = (const unsigned char *)s.p->data;
     size_t a = 0, b = (size_t)s.p->len;
     uint32_t cp;
+    /* (an ASCII byte is space only as ' ' or \t..\r: no decoding) */
     if (left)
         while (a < b) {
+            if (d[a] < 0x80) {
+                if (d[a] == ' ' || (d[a] >= 9 && d[a] <= 13)) { a++; continue; }
+                break;
+            }
             size_t l = tv_utf8_decode(d + a, b - a, &cp);
             if (!tv_is_js_space(cp)) break;
             a += l;
         }
     if (right)
         while (b > a) {
+            if (d[b - 1] < 0x80) {
+                if (d[b - 1] == ' ' || (d[b - 1] >= 9 && d[b - 1] <= 13)) { b--; continue; }
+                break;
+            }
             size_t st = b - 1;
             while (st > a && tv_is_cont(d[st]) && b - st < 4) st--;
             tv_utf8_decode(d + st, b - st, &cp);
@@ -1977,6 +1982,48 @@ tv_arr tv_str_chars(tv_str s) {
     return tv_arr_of(b, k);
 }
 
+/* The bytes of w equal to the byte repeated in pat: 0x80 in each (exact, no carries between
+ * bytes). */
+static inline uint64_t tv_bytes_eq(uint64_t w, uint64_t pat) {
+    uint64_t x = w ^ pat;
+    return ~(((x & 0x7F7F7F7F7F7F7F7FULL) + 0x7F7F7F7F7F7F7F7FULL) | x | 0x7F7F7F7F7F7F7F7FULL);
+}
+
+/* s.split(c) for one byte c: the pieces counted first (8 bytes at a time), so the array is
+ * made once at its size, then found the same way. */
+static tv_arr tv_str_split_byte(tv_str s, unsigned char c) {
+    const unsigned char *d = (const unsigned char *)s.p->data;
+    size_t n = (size_t)s.p->len, i = 0, count = 1;
+    uint64_t pat = 0x0101010101010101ULL * c;
+    for (; i + 8 <= n; i += 8) count += (size_t)__builtin_popcountll(tv_bytes_eq(tv_r64(d + i), pat));
+    for (; i < n; i++) count += d[i] == c;
+    if (count == 1) {
+        tv_arr r = tv_arr_fresh();
+        tv_str_retain(s);
+        tv_arr_push(&r, &tv_type_str, &s);
+        return r;
+    }
+    bool ascii = tv_str_is_ascii(s);
+    tv_arrbuf *b = tv_arrbuf_new(sizeof(tv_str), (int64_t)count);
+    tv_str *out = (tv_str *)(void *)tv_arrbuf_data(b);
+    size_t k = 0, from = 0;
+    i = 0;
+    while (k + 1 < count) {
+        uint64_t z;
+        while (i + 8 <= n && !(z = tv_bytes_eq(tv_r64(d + i), pat))) i += 8;
+        if (i + 8 <= n) i += (size_t)__builtin_ctzll(z) >> 3;
+        else while (d[i] != c) i++;
+        tv_str piece = tv_str_from((const char *)d + from, i - from);
+        if (ascii) tv_str_mark(piece, true);
+        out[k++] = piece;
+        from = ++i;
+    }
+    tv_str piece = tv_str_from((const char *)d + from, n - from);
+    if (ascii) tv_str_mark(piece, true);
+    out[k++] = piece;
+    return tv_arr_of(b, (int64_t)k);
+}
+
 tv_arr tv_str_split(tv_str s, tv_str sep) {
     if (sep.p->len == 0) {
         if (tv_str_is_ascii(s)) return tv_str_chars(s);
@@ -1998,6 +2045,7 @@ tv_arr tv_str_split(tv_str s, tv_str sep) {
         }
         return tv_arr_of(b, k);
     }
+    if (sep.p->len == 1 && __BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__) return tv_str_split_byte(s, (unsigned char)sep.p->data[0]);
     tv_arr r = tv_arr_fresh();
     const char *d = s.p->data;
     size_t n = (size_t)s.p->len, sn = (size_t)sep.p->len, from = 0;

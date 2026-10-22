@@ -534,6 +534,11 @@ pub(crate) fn copyable(ast: &crate::ast::Ast, e: ExprId) -> bool {
     }
 }
 
+/// (for the parser's desugarings)
+pub(crate) fn deep_copy_pub(ast: &mut crate::ast::Ast, e: ExprId) -> Option<ExprId> {
+    deep_copy(ast, e)
+}
+
 /// A copy of `e` (new nodes all the way down; `copyable` says which it can make).
 fn deep_copy(ast: &mut crate::ast::Ast, e: ExprId) -> Option<ExprId> {
     let span = ast.exprs[e as usize].span;

@@ -1,0 +1,6 @@
+north widget 4.5 2024-01-01
+south gadget 15.75 2024-02-02
+east gizmo 9.5 2024-03-03
+[ { a: 'x', b: 2 }, { a: 'none', b: 5 }, { a: 'y', b: -1 } ]
+9
+{ a: 2, b: 1 }

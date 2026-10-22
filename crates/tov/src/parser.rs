@@ -23,7 +23,264 @@ pub fn parse(src: &str, file: FileId, interner: &mut Interner) -> (Ast, Vec<Diag
     let mut p = Parser { src, toks: lexed.tokens, strings: lexed.strings, pos: 0, file, interner, ast: Ast::default(), diags, script_stmts: Vec::new(), defaults: Vec::new(), more_stmts: Vec::new(), hidden: 0, prologue: Vec::new(), index_sig: None, local_fns: Vec::new(), prop_defaults: false, extra_members: Vec::new(), generic_arrows: Vec::new() };
     p.ast.iterator_sym = Some(p.interner.intern("__iterator"));
     p.module();
+    slot_records(&mut p.ast, p.interner);
     (p.ast, p.diags)
+}
+
+/// A local `const row: Record<string, V> = {}` used only as a bag of named values — written
+/// with `row[k] = v`, read only with names (`row.region`, `row["units"]`) — is a record with an
+/// optional field per name read: `row[k] = v` becomes `k === "region" ? (row.region = v) : ...
+/// : v` (keys nothing reads are dropped: nothing can see them), and each read the field, `!`
+/// where a missing key would have trapped. No map is made, filled, searched or freed.
+fn slot_records(ast: &mut Ast, interner: &mut Interner) {
+    let (Some(record), Some(string)) = (interner.lookup("Record"), interner.lookup("string")) else { return };
+    let cands: Vec<(StmtId, Sym, Span, TypeId)> = ast
+        .stmts
+        .iter()
+        .enumerate()
+        .filter_map(|(i, st)| match &st.kind {
+            StmtKind::Let { name, name_span, ty: Some(t), init: Some(e), .. } => {
+                let TypeExprKind::Named { ns: None, name: r, args, .. } = &ast.types[*t as usize].kind else { return None };
+                let key_is_string = args.len() == 2 && matches!(ast.types[args[0] as usize].kind, TypeExprKind::Named { ns: None, name: k, ref args, .. } if k == string && args.is_empty());
+                (*r == record && key_is_string && matches!(&ast.exprs[*e as usize].kind, ExprKind::Object(fs) if fs.is_empty())).then(|| (i as StmtId, *name, *name_span, args[1]))
+            }
+            _ => None,
+        })
+        .collect();
+    if cands.is_empty() {
+        return;
+    }
+    // each expression's parent, and the conditions statements test
+    let mut parent = vec![u32::MAX; ast.exprs.len()];
+    for (i, e) in ast.exprs.iter().enumerate() {
+        let mut kid = |c: ExprId| parent[c as usize] = i as u32;
+        match &e.kind {
+            ExprKind::Unary(_, x) | ExprKind::Paren(x) | ExprKind::NonNull(x) | ExprKind::Typeof(x) | ExprKind::Spread(x) | ExprKind::As(x, _) | ExprKind::Try(x) | ExprKind::Await(x) | ExprKind::Yield(Some(x), _) => kid(*x),
+            ExprKind::Binary(_, a, b) | ExprKind::Assign(_, a, b) => {
+                kid(*a);
+                kid(*b);
+            }
+            ExprKind::Update { target, .. } => kid(*target),
+            ExprKind::Call { callee, args, .. } | ExprKind::New { callee, args, .. } => {
+                kid(*callee);
+                args.iter().for_each(|a| kid(a.expr));
+            }
+            ExprKind::Member { obj, .. } => kid(*obj),
+            ExprKind::Index { obj, index, .. } => {
+                kid(*obj);
+                kid(*index);
+            }
+            ExprKind::Cond(a, b, c) => {
+                kid(*a);
+                kid(*b);
+                kid(*c);
+            }
+            ExprKind::Array(xs) | ExprKind::Template(_, xs) | ExprKind::Seq(xs) => xs.iter().for_each(|&x| kid(x)),
+            ExprKind::Object(fs) => fs.iter().for_each(|f| kid(f.value)),
+            ExprKind::Arrow(f) => {
+                if let ArrowBody::Expr(x) = f.body {
+                    kid(x)
+                }
+            }
+            _ => {}
+        }
+    }
+    let mut tested: crate::hash::FxSet<ExprId> = Default::default();
+    for st in &ast.stmts {
+        match &st.kind {
+            StmtKind::If(c, ..) | StmtKind::While(c, _) | StmtKind::DoWhile(_, c) | StmtKind::For { cond: Some(c), .. } => {
+                tested.insert(*c);
+            }
+            _ => {}
+        }
+    }
+    let within = |a: Span, b: Span| a.file == b.file && a.start >= b.start && a.end <= b.end;
+    // (the parent, through parentheses)
+    fn up(ast: &Ast, parent: &[u32], mut e: ExprId) -> Option<ExprId> {
+        loop {
+            let p = parent[e as usize];
+            if p == u32::MAX {
+                return None;
+            }
+            if !matches!(ast.exprs[p as usize].kind, ExprKind::Paren(_)) {
+                return Some(p);
+            }
+            e = p;
+        }
+    }
+    // a read where a missing key is a value (`row.x ?? d`, `if (row.x)`, `row.x === undefined`)
+    let optional_ctx = |ast: &Ast, parent: &[u32], tested: &crate::hash::FxSet<ExprId>, e: ExprId| -> bool {
+        if tested.contains(&e) {
+            return true;
+        }
+        let Some(p) = up(ast, parent, e) else { return false };
+        match &ast.exprs[p as usize].kind {
+            ExprKind::Binary(BinOp::Nullish, l, _) => *l == e || matches!(ast.exprs[*l as usize].kind, ExprKind::Paren(x) if x == e),
+            ExprKind::Binary(BinOp::And | BinOp::Or, ..) | ExprKind::Unary(UnOp::Not, _) | ExprKind::Typeof(_) => true,
+            ExprKind::Binary(BinOp::Eq | BinOp::Ne | BinOp::LooseEq | BinOp::LooseNe, a, b) => {
+                let other = if *a == e { *b } else { *a };
+                matches!(ast.exprs[other as usize].kind, ExprKind::Undefined | ExprKind::Null)
+            }
+            ExprKind::Cond(c, ..) => *c == e,
+            ExprKind::Member { optional: true, .. } | ExprKind::Index { optional: true, .. } => true,
+            _ => false,
+        }
+    };
+    for (let_id, name, name_span, vty) in cands {
+        // the block the binding lives in
+        let Some(block) = ast.stmts.iter().find(|st| matches!(&st.kind, StmtKind::Block(ss) if ss.contains(&let_id))).map(|st| st.span) else { continue };
+        let after = Span::new(name_span.file, name_span.end, block.end);
+        // (another binding of the name inside: give up rather than tell them apart)
+        let shadowed = ast.stmts.iter().enumerate().any(|(i, st)| {
+            i as StmtId != let_id
+                && within(st.span, block)
+                && matches!(&st.kind, StmtKind::Let { name: n, .. } | StmtKind::ForOf { name: n, .. } if *n == name)
+        }) || ast.exprs.iter().any(|e| matches!(&e.kind, ExprKind::Arrow(f) if within(e.span, block) && f.params.iter().any(|p| p.name == name)));
+        if shadowed {
+            continue;
+        }
+        enum Use { Set(ExprId, ExprId, ExprId), Read(ExprId, Sym, bool), Write(ExprId) }
+        let mut uses = Vec::new();
+        let mut ok = true;
+        for (i, e) in ast.exprs.iter().enumerate() {
+            if !matches!(e.kind, ExprKind::Ident(n) if n == name) || !within(e.span, after) {
+                continue;
+            }
+            let i = i as ExprId;
+            let Some(p) = up(ast, &parent, i) else {
+                ok = false;
+                break;
+            };
+            let target_of = |x: ExprId| up(ast, &parent, x).filter(|&g| matches!(ast.exprs[g as usize].kind, ExprKind::Assign(_, t, _) if t == x));
+            // (`row.x++`, `row.get(k)`: not a plain read)
+            let plain_read = |x: ExprId| !matches!(up(ast, &parent, x).map(|g| &ast.exprs[g as usize].kind), Some(ExprKind::Update { .. })) && !matches!(up(ast, &parent, x).map(|g| &ast.exprs[g as usize].kind), Some(ExprKind::Call { callee, .. }) if *callee == x);
+            match ast.exprs[p as usize].kind {
+                ExprKind::Index { obj, index, optional: false } if obj == i => {
+                    let lit = match ast.exprs[index as usize].kind {
+                        ExprKind::Str(k) => Some(k),
+                        _ => None,
+                    };
+                    match (target_of(p).map(|g| (g, &ast.exprs[g as usize].kind)), lit) {
+                        (Some((g, ExprKind::Assign(AssignOp::Assign, _, v))), None) => {
+                            let simple = matches!(ast.exprs[index as usize].kind, ExprKind::Ident(_));
+                            if !simple || !crate::check::rewrite::copyable(ast, *v) {
+                                ok = false;
+                                break;
+                            }
+                            uses.push(Use::Set(g, index, *v));
+                        }
+                        (Some((_, ExprKind::Assign(AssignOp::Assign, ..))), Some(_)) => uses.push(Use::Write(p)),
+                        (None, Some(k)) if plain_read(p) => {
+                            uses.push(Use::Read(p, k, optional_ctx(ast, &parent, &tested, p)));
+                        }
+                        _ => {
+                            ok = false;
+                            break;
+                        }
+                    }
+                }
+                ExprKind::Member { obj, name: k, optional: false, .. } if obj == i => match target_of(p).map(|g| &ast.exprs[g as usize].kind) {
+                    Some(ExprKind::Assign(AssignOp::Assign, ..)) => uses.push(Use::Write(p)),
+                    Some(_) => {
+                        ok = false;
+                        break;
+                    }
+                    None if !plain_read(p) => {
+                        ok = false;
+                        break;
+                    }
+                    None => uses.push(Use::Read(p, k, optional_ctx(ast, &parent, &tested, p))),
+                },
+                _ => {
+                    ok = false;
+                    break;
+                }
+            }
+        }
+        if !ok {
+            continue;
+        }
+        let mut keys: Vec<Sym> = Vec::new();
+        for u in &uses {
+            let k = match u {
+                Use::Read(_, k, _) => *k,
+                Use::Write(p) => match ast.exprs[*p as usize].kind {
+                    ExprKind::Member { name: k, .. } => k,
+                    ExprKind::Index { index, .. } => match ast.exprs[index as usize].kind {
+                        ExprKind::Str(k) => k,
+                        _ => continue,
+                    },
+                    _ => continue,
+                },
+                Use::Set(..) => continue,
+            };
+            if !keys.contains(&k) {
+                keys.push(k);
+            }
+        }
+        if keys.len() > 16 {
+            continue;
+        }
+        // (the record type)
+        let fields: Vec<FieldTy> = keys.iter().map(|&k| FieldTy { name: k, name_span, optional: true, ty: vty }).collect();
+        let tspan = ast.types[vty as usize].span;
+        ast.types.push(TypeExpr { kind: TypeExprKind::Record(fields), span: tspan });
+        let rec_ty = ast.types.len() as TypeId - 1;
+        if let StmtKind::Let { ty, .. } = &mut ast.stmts[let_id as usize].kind {
+            *ty = Some(rec_ty);
+        }
+        let push = |ast: &mut Ast, kind: ExprKind, span: Span| -> ExprId {
+            ast.exprs.push(Expr { kind, span });
+            ast.exprs.len() as ExprId - 1
+        };
+        for u in uses {
+            match u {
+                Use::Read(p, k, opt) => {
+                    let span = ast.exprs[p as usize].span;
+                    let obj = match ast.exprs[p as usize].kind {
+                        ExprKind::Member { obj, .. } | ExprKind::Index { obj, .. } => obj,
+                        _ => continue,
+                    };
+                    let m = push(ast, ExprKind::Member { obj, name: k, name_span: span, optional: false }, span);
+                    ast.exprs[p as usize].kind = if opt { ExprKind::Paren(m) } else { ExprKind::NonNull(m) };
+                }
+                Use::Write(p) => {
+                    if let ExprKind::Index { obj, index, .. } = ast.exprs[p as usize].kind
+                        && let ExprKind::Str(k) = ast.exprs[index as usize].kind
+                    {
+                        let span = ast.exprs[p as usize].span;
+                        ast.exprs[p as usize].kind = ExprKind::Member { obj, name: k, name_span: span, optional: false };
+                    }
+                }
+                Use::Set(g, key, value) => {
+                    let span = ast.exprs[g as usize].span;
+                    let ExprKind::Assign(_, target, _) = ast.exprs[g as usize].kind else { continue };
+                    let ExprKind::Index { obj, .. } = ast.exprs[target as usize].kind else { continue };
+                    // (no key matched: the value, evaluated all the same)
+                    let mut chain = value;
+                    for &k in keys.iter().rev() {
+                        let Some(v) = crate::check::rewrite::deep_copy_pub(ast, value) else { continue };
+                        let o = push(ast, ExprKind::Ident(name), ast.exprs[obj as usize].span);
+                        let m = push(ast, ExprKind::Member { obj: o, name: k, name_span: span, optional: false }, span);
+                        let set = push(ast, ExprKind::Assign(AssignOp::Assign, m, v), span);
+                        let kc = push(ast, ast_copy_ident(&ast.exprs[key as usize].kind), ast.exprs[key as usize].span);
+                        let lit = push(ast, ExprKind::Str(k), span);
+                        let test = push(ast, ExprKind::Binary(BinOp::Eq, kc, lit), span);
+                        ast.quiet_tests.push(test);
+                        chain = push(ast, ExprKind::Cond(test, set, chain), span);
+                    }
+                    let kind = std::mem::replace(&mut ast.exprs[chain as usize].kind, ExprKind::Error);
+                    ast.exprs[g as usize].kind = kind;
+                }
+            }
+        }
+    }
+    fn ast_copy_ident(k: &ExprKind) -> ExprKind {
+        match k {
+            ExprKind::Ident(n) => ExprKind::Ident(*n),
+            _ => ExprKind::Error,
+        }
+    }
 }
 
 struct Parser<'a> {
