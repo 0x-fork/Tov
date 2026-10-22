@@ -912,28 +912,157 @@ tv_str tv_str_from_bool(bool v) { return v ? TV_LIT(tv_lit_true) : TV_LIT(tv_lit
 
 /* ------------------------------------------------------------------ JS number formatting */
 
+/* Ryu's multipliers: 5^i and 5^-i to 125 bits, from every 26th power and 2-bit corrections
+ * (generated and checked against exact values). */
+static const uint64_t tv_ryu_pow5[26] = { 1u, 5u, 25u, 125u, 625u, 3125u, 15625u, 78125u, 390625u, 1953125u, 9765625u, 48828125u, 244140625u, 1220703125u, 6103515625u, 30517578125u, 152587890625u, 762939453125u, 3814697265625u, 19073486328125u, 95367431640625u, 476837158203125u, 2384185791015625u, 11920928955078125u, 59604644775390625u, 298023223876953125u };
+static const uint64_t tv_ryu_split[13][2] = { { 0u, 1152921504606846976u }, { 0u, 1490116119384765625u }, { 1032610780636961552u, 1925929944387235853u }, { 7910200175544436838u, 1244603055572228341u }, { 16941905809032713930u, 1608611746708759036u }, { 13024893955298202172u, 2079081953128979843u }, { 6607496772837067824u, 1343575221513417750u }, { 17332926989895652603u, 1736530273035216783u }, { 13037379183483547984u, 2244412773384604712u }, { 1605989338741628675u, 1450417759929778918u }, { 9630225068416591280u, 1874621017369538693u }, { 665883850346957067u, 1211445438634777304u }, { 14931890668723713708u, 1565756531257009982u } };
+static const uint64_t tv_ryu_inv_split[15][2] = { { 1u, 2305843009213693952u }, { 5955668970331000884u, 1784059615882449851u }, { 8982663654677661702u, 1380349269358112757u }, { 7286864317269821294u, 2135987035920910082u }, { 7005857020398200553u, 1652639921975621497u }, { 17965325103354776697u, 1278668206209430417u }, { 8928596168509315048u, 1978643211784836272u }, { 10075671573058298858u, 1530901034580419511u }, { 597001226353042382u, 1184477304306571148u }, { 1527430471115325346u, 1832889850782397517u }, { 12533209867169019542u, 1418129833677084982u }, { 5577825024675947042u, 2194449627517475473u }, { 11006974540203867551u, 1697873161311732311u }, { 10313493231639821582u, 1313665730009899186u }, { 12701016819766672773u, 2032799256770390445u } };
+static const uint32_t tv_ryu_offsets[21] = { 0u, 0u, 0u, 0u, 1073741824u, 1500076437u, 1431590229u, 1448432917u, 1091896580u, 1079333904u, 1146442053u, 1146111296u, 1163220304u, 1073758208u, 2521039936u, 1431721317u, 1413824581u, 1075134801u, 1431671125u, 1363170645u, 261u };
+static const uint32_t tv_ryu_inv_offsets[22] = { 1414808916u, 67458373u, 268701696u, 4195348u, 1073807360u, 1091917141u, 1108u, 65604u, 1073741824u, 1140850753u, 1346716752u, 1431634004u, 1365595476u, 1073758208u, 16777217u, 66816u, 1364284433u, 89478484u, 1346442496u, 1074003968u, 84148496u, 0u };
+
+/* Shortest round-trip digits of a double (Ryu, Ulf Adams 2018), small-table form. */
+static const char tv_digit_pairs[] = "00010203040506070809101112131415161718192021222324252627282930313233343536373839404142434445464748495051525354555657585960616263646566676869707172737475767778798081828384858687888990919293949596979899";
+static inline uint32_t tv_ryu_pow5bits(int32_t e) { return (uint32_t)(((uint32_t)e * 1217359) >> 19) + 1; }
+static inline uint32_t tv_ryu_log10_pow2(int32_t e) { return ((uint32_t)e * 78913) >> 18; }
+static inline uint32_t tv_ryu_log10_pow5(int32_t e) { return ((uint32_t)e * 732923) >> 20; }
+static inline uint32_t tv_ryu_pow5_factor(uint64_t v) {
+    uint32_t n = 0;
+    for (;;) { uint64_t q = v / 5; if (v - 5 * q != 0) break; v = q; n++; }
+    return n;
+}
+static inline bool tv_ryu_mul_pow5(uint64_t v, uint32_t p) { return tv_ryu_pow5_factor(v) >= p; }
+static inline bool tv_ryu_mul_pow2(uint64_t v, uint32_t p) { return (v & ((1ull << p) - 1)) == 0; }
+static inline void tv_ryu_compute_pow5(uint32_t i, uint64_t r[2]) {
+    uint32_t base = i / 26, base2 = base * 26, off = i - base2;
+    const uint64_t *mul = tv_ryu_split[base];
+    if (off == 0) { r[0] = mul[0]; r[1] = mul[1]; return; }
+    uint64_t m = tv_ryu_pow5[off];
+    unsigned __int128 b0 = (unsigned __int128)m * mul[0], b2 = (unsigned __int128)m * mul[1];
+    uint32_t delta = tv_ryu_pow5bits((int32_t)i) - tv_ryu_pow5bits((int32_t)base2);
+    unsigned __int128 s = (b0 >> delta) + (b2 << (64 - delta)) + ((tv_ryu_offsets[i / 16] >> ((i % 16) << 1)) & 3);
+    r[0] = (uint64_t)s; r[1] = (uint64_t)(s >> 64);
+}
+static inline void tv_ryu_compute_inv_pow5(uint32_t i, uint64_t r[2]) {
+    uint32_t base = (i + 25) / 26, base2 = base * 26, off = base2 - i;
+    const uint64_t *mul = tv_ryu_inv_split[base];
+    if (off == 0) { r[0] = mul[0]; r[1] = mul[1]; return; }
+    uint64_t m = tv_ryu_pow5[off];
+    unsigned __int128 b0 = (unsigned __int128)m * (mul[0] - 1), b2 = (unsigned __int128)m * mul[1];
+    uint32_t delta = tv_ryu_pow5bits((int32_t)base2) - tv_ryu_pow5bits((int32_t)i);
+    unsigned __int128 s = (b0 >> delta) + (b2 << (64 - delta)) + 1 + ((tv_ryu_inv_offsets[i / 16] >> ((i % 16) << 1)) & 3);
+    r[0] = (uint64_t)s; r[1] = (uint64_t)(s >> 64);
+}
+static inline uint64_t tv_ryu_mul_shift(uint64_t m, const uint64_t mul[2], int32_t j) {
+    unsigned __int128 b0 = (unsigned __int128)m * mul[0], b2 = (unsigned __int128)m * mul[1];
+    return (uint64_t)(((b0 >> 64) + b2) >> (j - 64));
+}
+/* v > 0, finite: digits (no trailing zeros) and n with v == 0.d1..dk × 10^n. */
+static int tv_ryu_digits(double v, char *digits, int *n_out) {
+    uint64_t bits; memcpy(&bits, &v, 8);
+    uint64_t ieee_m = bits & ((1ull << 52) - 1);
+    uint32_t ieee_e = (uint32_t)((bits >> 52) & 0x7ff);
+    int32_t e2; uint64_t m2;
+    if (ieee_e == 0) { e2 = 1 - 1023 - 52 - 2; m2 = ieee_m; }
+    else { e2 = (int32_t)ieee_e - 1023 - 52 - 2; m2 = (1ull << 52) | ieee_m; }
+    bool even = (m2 & 1) == 0, accept = even;
+    uint64_t mv = 4 * m2;
+    uint32_t mm_shift = ieee_m != 0 || ieee_e <= 1;
+    uint64_t vr, vp, vm, mul[2];
+    int32_t e10;
+    bool vm_tz = false, vr_tz = false;
+    if (e2 >= 0) {
+        uint32_t q = tv_ryu_log10_pow2(e2) - (e2 > 3);
+        e10 = (int32_t)q;
+        int32_t k = 125 + (int32_t)tv_ryu_pow5bits((int32_t)q) - 1;
+        int32_t i = -e2 + (int32_t)q + k;
+        tv_ryu_compute_inv_pow5(q, mul);
+        vr = tv_ryu_mul_shift(4 * m2, mul, i);
+        vp = tv_ryu_mul_shift(4 * m2 + 2, mul, i);
+        vm = tv_ryu_mul_shift(4 * m2 - 1 - mm_shift, mul, i);
+        if (q <= 21) {
+            if (mv % 5 == 0) vr_tz = tv_ryu_mul_pow5(mv, q);
+            else if (accept) vm_tz = tv_ryu_mul_pow5(mv - 1 - mm_shift, q);
+            else vp -= tv_ryu_mul_pow5(mv + 2, q);
+        }
+    } else {
+        uint32_t q = tv_ryu_log10_pow5(-e2) - (-e2 > 1);
+        e10 = (int32_t)q + e2;
+        int32_t i = -e2 - (int32_t)q;
+        int32_t k = (int32_t)tv_ryu_pow5bits(i) - 125;
+        int32_t j = (int32_t)q - k;
+        tv_ryu_compute_pow5((uint32_t)i, mul);
+        vr = tv_ryu_mul_shift(4 * m2, mul, j);
+        vp = tv_ryu_mul_shift(4 * m2 + 2, mul, j);
+        vm = tv_ryu_mul_shift(4 * m2 - 1 - mm_shift, mul, j);
+        if (q <= 1) {
+            vr_tz = true;
+            if (accept) vm_tz = mm_shift == 1;
+            else --vp;
+        } else if (q < 63) {
+            vr_tz = tv_ryu_mul_pow2(mv, q);
+        }
+    }
+    int32_t removed = 0;
+    uint8_t last = 0;
+    uint64_t out;
+    if (vm_tz || vr_tz) {
+        while (vp / 10 > vm / 10) {
+            vm_tz &= vm % 10 == 0;
+            vr_tz &= last == 0;
+            last = (uint8_t)(vr % 10);
+            vr /= 10; vp /= 10; vm /= 10; removed++;
+        }
+        if (vm_tz) {
+            while (vm % 10 == 0) {
+                vr_tz &= last == 0;
+                last = (uint8_t)(vr % 10);
+                vr /= 10; vp /= 10; vm /= 10; removed++;
+            }
+        }
+        if (vr_tz && last == 5 && vr % 2 == 0) last = 4;
+        out = vr + ((vr == vm && (!accept || !vm_tz)) || last >= 5);
+    } else {
+        /* (only the most significant digit removed decides the rounding: remove them in
+         * chunks while the bounds still differ above the chunk) */
+        bool up = false;
+        if (vp / 100000000 > vm / 100000000) {
+            up = vr % 100000000 >= 50000000;
+            vr /= 100000000; vp /= 100000000; vm /= 100000000; removed += 8;
+        }
+        if (vp / 10000 > vm / 10000) {
+            up = vr % 10000 >= 5000;
+            vr /= 10000; vp /= 10000; vm /= 10000; removed += 4;
+        }
+        if (vp / 100 > vm / 100) {
+            up = vr % 100 >= 50;
+            vr /= 100; vp /= 100; vm /= 100; removed += 2;
+        }
+        if (vp / 10 > vm / 10) {
+            up = vr % 10 >= 5;
+            vr /= 10; vp /= 10; vm /= 10; removed++;
+        }
+        out = vr + (vr == vm || up);
+    }
+    while (out % 10 == 0 && out >= 10) { out /= 10; removed++; }
+    int len = 1;
+    for (uint64_t p = 10; len < 20 && out >= p; p *= 10) len++;
+    char *q = digits + len;
+    while (out >= 100) { uint32_t r = (uint32_t)(out % 100); out /= 100; q -= 2; memcpy(q, tv_digit_pairs + 2 * r, 2); }
+    if (out >= 10) { q -= 2; memcpy(q, tv_digit_pairs + 2 * out, 2); }
+    else *--q = (char)('0' + out);
+    *n_out = e10 + removed + len;
+    return len;
+}
+
 /* Shortest decimal digits d1..dk (no trailing zeros) and exponent n such that
- * v == 0.d1..dk × 10^n round-trips (v > 0, finite). For f32, round-trips as a float. */
+ * v == 0.d1..dk × 10^n round-trips (v > 0, finite), the nearest v of those (JavaScript's
+ * Number::toString). For f32, round-trips as a float. */
 static int tv_shortest_digits(double v, bool is_f32, char *digits, int *n_out) {
+    if (!is_f32) return tv_ryu_digits(v, digits, n_out);
     char tmp[48];
-    if (is_f32) {
-        for (int prec = 0; prec < 9; prec++) {
-            snprintf(tmp, sizeof tmp, "%.*e", prec, v);
-            if (strtof(tmp, NULL) == (float)v) break;
-        }
-    } else if (v >= DBL_MIN) {
-        /* For normal doubles, if any <=15-digit decimal round-trips then the correctly rounded
-         * 15-digit one does too, and stripping its trailing zeros gives the shortest. */
-        snprintf(tmp, sizeof tmp, "%.14e", v);
-        if (strtod(tmp, NULL) != v) {
-            snprintf(tmp, sizeof tmp, "%.15e", v);
-            if (strtod(tmp, NULL) != v) snprintf(tmp, sizeof tmp, "%.16e", v);
-        }
-    } else { /* subnormal: fewer significant bits, search all precisions */
-        for (int prec = 0; prec < 17; prec++) {
-            snprintf(tmp, sizeof tmp, "%.*e", prec, v);
-            if (strtod(tmp, NULL) == v) break;
-        }
+    for (int prec = 0; prec < 9; prec++) {
+        snprintf(tmp, sizeof tmp, "%.*e", prec, v);
+        if (strtof(tmp, NULL) == (float)v) break;
     }
     int k = 0;
     const char *s = tmp;
@@ -956,29 +1085,7 @@ static size_t tv_fmt_number(char *buf, double v, bool is_f32) {
         return (size_t)(p - buf) + tv_fmt_i64(p, (int64_t)v);
     char d[24] = {0};
     int n, k = 0;
-    /* Fast path: the fewest decimals f such that round(v * 10^f) / 10^f is exactly v (both
-     * exact in a double: the division is correctly rounded, like parsing the decimal). The
-     * smallest f gives the fewest significant digits. Typical JSON numbers (prices, coordinates)
-     * take this path; others use the general shortest search. */
-    static const double pow10_tab[] = { 1e0, 1e1, 1e2, 1e3, 1e4, 1e5, 1e6, 1e7, 1e8, 1e9, 1e10, 1e11, 1e12, 1e13, 1e14, 1e15, 1e16 };
-    if (!is_f32 && v >= 1e-7 && v < 1e15) {
-        for (int f = 1; f <= 16 && !k; f++) {
-            double s = v * pow10_tab[f];
-            if (s >= 9007199254740992.0) break;
-            double r = (double)(int64_t)(s + 0.5);
-            if (r / pow10_tab[f] != v) continue;
-            /* digits of r, with the decimal point f places from the right */
-            char tmp[24];
-            int m = (int)tv_fmt_i64(tmp, (int64_t)r);
-            int lead = 0;
-            while (lead < m - 1 && tmp[lead] == '0') lead++;
-            k = m - lead;
-            memcpy(d, tmp + lead, (size_t)k);
-            n = m - f;
-            while (k > 1 && d[k - 1] == '0') k--;
-        }
-    }
-    if (!k) k = tv_shortest_digits(v, is_f32, d, &n);
+    k = tv_shortest_digits(v, is_f32, d, &n);
     if (k <= n && n <= 21) {
         memcpy(p, d, (size_t)k); p += k;
         for (int i = k; i < n; i++) *p++ = '0';
@@ -1079,8 +1186,8 @@ tv_str tv_f64_to_radix(double v, tv_int radix, const char *loc) {
 }
 
 void tv_sb_push_f64(tv_sb *sb, double v) {
-    char buf[40];
-    tv_sb_push(sb, buf, tv_fmt_number(buf, v, false));
+    char *p = tv_sb_reserve(sb, 40);
+    sb->len += tv_fmt_number(p, v, false);
 }
 
 static void tv_toFixed_check(tv_int digits, const char *loc) {
@@ -1993,6 +2100,94 @@ tv_str tv_str_pad_end(tv_str s, tv_int len, tv_str fill) { return tv_str_pad(s, 
 
 static inline bool tv_is_digit(char c) { return c >= '0' && c <= '9'; }
 
+/* Eisel-Lemire's multipliers: 5^q to 128 bits, from every 28th power and 2-bit corrections
+ * (generated and checked against exact values). */
+static const uint64_t tv_el_pow5[24][2] = { { 17218479456385750618ull, 1242899115359157055ull }, { 17386221171832138870ull, 13836871056604407053ull }, { 17555597020139803786ull, 7729112049988473103ull }, { 17726622920963562283ull, 9091170749936331336ull }, { 17899314949046850752ull, 14051622066030463842ull }, { 18073689335732591980ull, 8749227812785250177ull }, { 18249762470488780874ull, 10416625923311642211ull }, { 18427550902448932383ull, 18298537904747540562ull }, { 9303535670983768199ull, 578208414664970847ull }, { 9394170331095332911ull, 10291851488884697288ull }, { 9485687950320942729ull, 1825030320404309164ull }, { 9578097130411805364ull, 13644483260788183358ull }, { 9671406556917033397ull, 11979463175419572496ull }, { 9765625000000000000ull, 0ull }, { 9860761315262647567ull, 11927795063396681728ull }, { 9956824444577826731ull, 7941369183226839863ull }, { 10053823416929743980ull, 13653190937906703988ull }, { 10151767349262596893ull, 1772699331562333708ull }, { 10250665447337476733ull, 1466078993672598279ull }, { 10350527006597618960ull, 17973304801030866876ull }, { 10451361413042082976ull, 2133748077373825698ull }, { 10553178144107943212ull, 3674159897003727796ull }, { 10655986769561074501ull, 14608429132904838403ull }, { 10759796952395615435ull, 1096485900831157192ull } };
+static const uint32_t tv_el_offsets[41] = { 353719360u, 4526096u, 327680u, 0u, 4097u, 1074790400u, 72368385u, 0u, 1073807440u, 272634112u, 17055749u, 1048640u, 1343488000u, 88425536u, 1430607188u, 2421249385u, 1704286565u, 89167189u, 335877396u, 2861917249u, 2811931370u, 64u, 0u, 0u, 0u, 0u, 1314816u, 20975696u, 71566592u, 1346377045u, 341071121u, 1070421u, 1114368u, 2505466896u, 2505397669u, 1142228228u, 1343575316u, 1415926101u, 4216149u, 1073741829u, 1118273u };
+
+/* Decimal to double (Eisel-Lemire, as in Lemire's fast_float), small-table form. */
+static const uint64_t tv_el_pow5_small[28] = { 1ull, 5ull, 25ull, 125ull, 625ull, 3125ull, 15625ull, 78125ull, 390625ull, 1953125ull, 9765625ull, 48828125ull, 244140625ull, 1220703125ull, 6103515625ull, 30517578125ull, 152587890625ull, 762939453125ull, 3814697265625ull, 19073486328125ull, 95367431640625ull, 476837158203125ull, 2384185791015625ull, 11920928955078125ull, 59604644775390625ull, 298023223876953125ull, 1490116119384765625ull, 7450580596923828125ull };
+/* 5^q to 128 bits (top bit set), for q in [-342, 308] */
+static inline void tv_el_pow5_128(int q, uint64_t *hi, uint64_t *lo) {
+    int i = q + 342, b = i / 28, off = i - b * 28;
+    uint64_t h = tv_el_pow5[b][0], l = tv_el_pow5[b][1];
+    if (off) {
+        uint64_t m = tv_el_pow5_small[off];
+        unsigned __int128 pl = (unsigned __int128)l * m, ph = (unsigned __int128)h * m;
+        uint64_t w0 = (uint64_t)pl;
+        unsigned __int128 mid = (pl >> 64) + (uint64_t)ph;
+        uint64_t w1 = (uint64_t)mid, w2 = (uint64_t)(ph >> 64) + (uint64_t)(mid >> 64);
+        int s = __builtin_clzll(w2);
+        if (s) { h = (w2 << s) | (w1 >> (64 - s)); l = (w1 << s) | (w0 >> (64 - s)); }
+        else { h = w2; l = w1; }
+        uint64_t c = (tv_el_offsets[i / 16] >> ((i % 16) * 2)) & 3, nl = l + c;
+        h += nl < l; l = nl;
+    }
+    *hi = h; *lo = l;
+}
+/* w × 10^q correctly rounded (w != 0, exact); false when it can't be sure, or the result
+ * isn't a normal double (then strtod decides). */
+static bool tv_el_parse(uint64_t w, int q, double *out) {
+    if (q < -342 || q > 308) return false;
+    int lz = __builtin_clzll(w);
+    w <<= lz;
+    uint64_t ph, pl;
+    tv_el_pow5_128(q, &ph, &pl);
+    unsigned __int128 first = (unsigned __int128)w * ph;
+    uint64_t hi = (uint64_t)(first >> 64), lo = (uint64_t)first;
+    const uint64_t mask = 0xFFFFFFFFFFFFFFFFull >> 55;
+    if ((hi & mask) == mask) {
+        uint64_t sh = (uint64_t)(((unsigned __int128)w * pl) >> 64), nlo = lo + sh;
+        hi += nlo < lo;
+        lo = nlo;
+        if (lo == 0xFFFFFFFFFFFFFFFFull && (q < -27 || q > 55)) return false;
+    }
+    int upper = (int)(hi >> 63);
+    uint64_t mant = hi >> (upper + 64 - 52 - 3);
+    int32_t p2 = (int32_t)(((152170 + 65536) * q) >> 16) + 63 + upper - lz + 1023;
+    if (p2 <= 0) return false;
+    if (lo <= 1 && q >= -4 && q <= 23 && (mant & 3) == 1 && (mant << (upper + 64 - 52 - 3)) == hi) mant &= ~1ull;
+    mant += mant & 1;
+    mant >>= 1;
+    if (mant >= (2ull << 52)) { mant = 1ull << 52; p2++; }
+    mant &= ~(1ull << 52);
+    if (p2 >= 0x7FF) return false;
+    uint64_t bits = mant | ((uint64_t)p2 << 52);
+    memcpy(out, &bits, 8);
+    return true;
+}
+/* A JSON-shaped number's text [s, e) (validated): its value, by Eisel-Lemire when it has at
+ * most 19 significant digits. */
+static bool tv_el_decimal(const unsigned char *s, const unsigned char *e, double *out) {
+    bool neg = false;
+    if (s < e && *s == '-') { neg = true; s++; }
+    uint64_t w = 0;
+    int digits = 0, q = 0;
+    for (; s < e && *s >= '0' && *s <= '9'; s++) {
+        if (w || *s != '0') { if (++digits > 19) return false; w = w * 10 + (uint64_t)(*s - '0'); }
+    }
+    if (s < e && *s == '.') {
+        for (s++; s < e && *s >= '0' && *s <= '9'; s++) {
+            if (w || *s != '0') { if (++digits > 19) return false; w = w * 10 + (uint64_t)(*s - '0'); }
+            q--;
+        }
+    }
+    if (s < e && (*s == 'e' || *s == 'E')) {
+        s++;
+        bool eneg = false;
+        if (s < e && (*s == '+' || *s == '-')) eneg = *s++ == '-';
+        int x = 0;
+        for (; s < e && *s >= '0' && *s <= '9'; s++) if (x < 100000) x = x * 10 + (*s - '0');
+        q += eneg ? -x : x;
+    }
+    if (s != e) return false;
+    double d;
+    if (w == 0) d = 0;
+    else if (!tv_el_parse(w, q, &d)) return false;
+    *out = neg ? -d : d;
+    return true;
+}
+
 bool tv_parse_float(tv_str s, double *out) {
     size_t a, b;
     tv_trim_range(s, true, true, &a, &b);
@@ -2019,6 +2214,7 @@ bool tv_parse_float(tv_str s, double *out) {
         if (ne == 0) return false;
     }
     if (q != e) return false;
+    if (tv_el_decimal((const unsigned char *)p, (const unsigned char *)e, out)) return true;
     /* The span is validated; strtod stops at e (whitespace, NUL or a non-ASCII byte). */
     char *end;
     double d = strtod(p, &end);
@@ -2072,6 +2268,8 @@ double tv_js_parse_float(tv_str s) {
         while (r < e && tv_is_digit(*r)) r++, ne++;
         if (ne) q = r;
     }
+    double d;
+    if (tv_el_decimal((const unsigned char *)p, (const unsigned char *)q, &d)) return d;
     char buf[400];
     size_t n = (size_t)(q - p);
     if (n >= sizeof buf) {
@@ -4121,50 +4319,44 @@ bool tv_jp_string(tv_jp *p, tv_str *out) {
 
 bool tv_jp_number(tv_jp *p, double *out) {
     tv_jp_ws(p);
-    size_t start = p->i, i = p->i;
-    if (i < p->n && p->s[i] == '-') i++;
-    if (i < p->n && p->s[i] == '0') i++;
-    else if (i < p->n && p->s[i] >= '1' && p->s[i] <= '9') { while (i < p->n && p->s[i] >= '0' && p->s[i] <= '9') i++; }
-    else return tv_jp_fail(p, "a number");
-    if (i < p->n && p->s[i] == '.') {
+    const unsigned char *s = p->s;
+    size_t start = p->i, i = p->i, n = p->n;
+    /* (validated as it's read: its significant digits w, up to 19, and exponent q) */
+    bool neg = false;
+    uint64_t w = 0;
+    int digits = 0, q = 0;
+    if (i < n && s[i] == '-') { neg = true; i++; }
+    if (i < n && s[i] == '0') i++;
+    else if (i < n && s[i] >= '1' && s[i] <= '9') {
+        for (; i < n && s[i] >= '0' && s[i] <= '9'; i++) { w = w * 10 + (uint64_t)(s[i] - '0'); digits++; }
+    } else return tv_jp_fail(p, "a number");
+    if (i < n && s[i] == '.') {
         i++;
-        if (!(i < p->n && p->s[i] >= '0' && p->s[i] <= '9')) { p->i = i; return tv_jp_fail(p, "a digit"); }
-        while (i < p->n && p->s[i] >= '0' && p->s[i] <= '9') i++;
+        if (!(i < n && s[i] >= '0' && s[i] <= '9')) { p->i = i; return tv_jp_fail(p, "a digit"); }
+        for (; i < n && s[i] >= '0' && s[i] <= '9'; i++) {
+            if (w || s[i] != '0') { w = w * 10 + (uint64_t)(s[i] - '0'); digits++; }
+            q--;
+        }
     }
-    if (i < p->n && (p->s[i] == 'e' || p->s[i] == 'E')) {
+    if (i < n && (s[i] == 'e' || s[i] == 'E')) {
         i++;
-        if (i < p->n && (p->s[i] == '+' || p->s[i] == '-')) i++;
-        if (!(i < p->n && p->s[i] >= '0' && p->s[i] <= '9')) { p->i = i; return tv_jp_fail(p, "a digit"); }
-        while (i < p->n && p->s[i] >= '0' && p->s[i] <= '9') i++;
+        bool eneg = false;
+        if (i < n && (s[i] == '+' || s[i] == '-')) eneg = s[i++] == '-';
+        if (!(i < n && s[i] >= '0' && s[i] <= '9')) { p->i = i; return tv_jp_fail(p, "a digit"); }
+        int x = 0;
+        for (; i < n && s[i] >= '0' && s[i] <= '9'; i++) if (x < 100000) x = x * 10 + (s[i] - '0');
+        q += eneg ? -x : x;
     }
-    /* Fast path (exact): up to 15 significant digits, no exponent part, few decimals:
-     * mantissa / 10^decimals is correctly rounded because both are exact doubles. */
-    {
-        uint64_t mant = 0;
-        int digits = 0, decimals = 0;
-        bool neg = false, simple = true, frac = false;
-        for (size_t j = start; j < i; j++) {
-            unsigned char c = p->s[j];
-            if (c == '-') neg = true;
-            else if (c == '.') frac = true;
-            else if (c >= '0' && c <= '9') {
-                if (mant || c != '0') digits++;
-                mant = mant * 10 + (uint64_t)(c - '0');
-                if (frac) decimals++;
-            } else { simple = false; break; }
-        }
-        static const double p10[] = { 1e0, 1e1, 1e2, 1e3, 1e4, 1e5, 1e6, 1e7, 1e8, 1e9, 1e10, 1e11, 1e12, 1e13, 1e14, 1e15, 1e16, 1e17, 1e18, 1e19, 1e20, 1e21, 1e22 };
-        if (simple && digits <= 15 && decimals <= 22) {
-            double x = (double)mant / p10[decimals];
-            *out = neg ? -x : x;
-            p->i = i;
-            return true;
-        }
+    double d;
+    if (digits <= 19 && (w == 0 ? (d = 0, true) : tv_el_parse(w, q, &d))) {
+        *out = neg ? -d : d;
+        p->i = i;
+        return true;
     }
     char buf[64];
     size_t len = i - start;
     char *tmp = len < sizeof buf ? buf : tv_alloc(len + 1);
-    memcpy(tmp, p->s + start, len);
+    memcpy(tmp, s + start, len);
     tmp[len] = 0;
     *out = strtod(tmp, NULL);
     if (tmp != buf) tv_free(tmp);
