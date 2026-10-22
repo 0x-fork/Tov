@@ -770,6 +770,74 @@ tv_str tv_str_concatn(const tv_str *parts, int n) {
     return (tv_str){r};
 }
 
+tv_gen *tv_gen_new(void *F, bool (*resume)(void *F), void (*drop)(void *F), void *yv) {
+    tv_gen *g = (tv_gen *)tv_alloc(sizeof(tv_gen));
+    g->rc = 1; g->F = F; g->resume = resume; g->drop = drop; g->yv = yv; g->done = false;
+    return g;
+}
+
+void tv_gen_release(tv_gen *g) {
+    if (!g || --g->rc > 0) return;
+    g->drop(g->F);
+    free(g);
+}
+
+tv_arr tv_gen_collect(tv_gen *g, const tv_type *t) {
+    tv_arr out = tv_arr_fresh();
+    unsigned char tmp[64];
+    while (!tv_gen_next(g)) {
+        void *v = g->yv;
+        if (t->size <= sizeof tmp) {
+            memcpy(tmp, v, t->size);
+            if (t->retain) t->retain(tmp);
+            tv_arr_push(&out, t, tmp);
+        } else {
+            void *c = malloc(t->size);
+            if (!c) tv_trap("out of memory", NULL);
+            memcpy(c, v, t->size);
+            if (t->retain) t->retain(c);
+            tv_arr_push(&out, t, c);
+            free(c);
+        }
+    }
+    return out;
+}
+
+/* A generator over an array: its frame is the array, the type and the next index. */
+typedef struct { tv_arr a; const tv_type *t; int64_t i; void *yv; } tv_arr_gen;
+static tv_gen *tv_arr_gen_self(void *F);
+static bool tv_arr_gen_resume(void *F) {
+    tv_arr_gen *g = F;
+    if (g->i >= tv_arr_len(g->a)) return true;
+    tv_arr_gen_self(F)->yv = tv_arr_data(g->a) + (size_t)g->i * g->t->size;
+    g->i++;
+    return false;
+}
+static void tv_arr_gen_drop(void *F) {
+    tv_arr_gen *g = F;
+    tv_arr_release(g->a, g->t);
+    free(g);
+}
+/* (the generator's own `yv` points into the array: kept in the frame's last field) */
+static tv_gen *tv_arr_gen_self(void *F) { return (tv_gen *)((tv_arr_gen *)F)->yv; }
+
+tv_gen *tv_gen_of_arr(tv_arr a, const tv_type *t) {
+    tv_arr_gen *F = malloc(sizeof *F);
+    if (!F) tv_trap("out of memory", NULL);
+    F->a = a; F->t = t; F->i = 0;
+    tv_gen *g = tv_gen_new(F, tv_arr_gen_resume, tv_arr_gen_drop, NULL);
+    F->yv = g;
+    return g;
+}
+
+static void tv_gen_retain_v(void *p) { tv_gen_retain(*(tv_gen **)p); }
+static void tv_gen_release_v(void *p) { tv_gen_release(*(tv_gen **)p); }
+static bool tv_gen_eq_v(const void *a, const void *b) { return *(tv_gen *const *)a == *(tv_gen *const *)b; }
+static uint64_t tv_gen_hash_v(const void *p) { return (uint64_t)(uintptr_t)*(tv_gen *const *)p * 0x9E3779B97F4A7C15ull; }
+static void tv_gen_str_v(tv_sb *sb, const void *p) { (void)p; tv_sb_push_cstr(sb, "[object Generator]"); }
+static void tv_gen_inspect_v(tv_sb *sb, const void *p, int depth) { (void)p; (void)depth; tv_sb_push_cstr(sb, "Object [Generator] {}"); }
+const tv_type tv_type_gen = {sizeof(tv_gen *), tv_gen_retain_v, tv_gen_release_v, tv_gen_eq_v, tv_gen_hash_v, tv_gen_str_v, tv_gen_inspect_v};
+
 bool tv_str_eq(tv_str a, tv_str b) {
     return a.p == b.p || (a.p->len == b.p->len && memcmp(a.p->data, b.p->data, (size_t)a.p->len) == 0);
 }

@@ -534,7 +534,8 @@ impl<'c, 'a> Gen<'c, 'a> {
 pub(crate) fn has_call(ast: &ast::Ast, e: ExprId) -> bool {
     let any = |xs: &[ExprId]| xs.iter().any(|&x| has_call(ast, x));
     match &ast.expr(e).kind {
-        ExprKind::Call { .. } | ExprKind::New { .. } | ExprKind::Await(_) => true,
+        // (a `yield` runs the generator's consumer meanwhile, as a call would)
+        ExprKind::Call { .. } | ExprKind::New { .. } | ExprKind::Await(_) | ExprKind::Yield(..) => true,
         ExprKind::Arrow(_) => false,
         ExprKind::Unary(_, x) | ExprKind::Paren(x) | ExprKind::NonNull(x) | ExprKind::Typeof(x) | ExprKind::Spread(x) | ExprKind::As(x, _) | ExprKind::Try(x) => has_call(ast, *x),
         ExprKind::Binary(_, a, b) | ExprKind::Index { obj: a, index: b, .. } | ExprKind::Assign(_, a, b) => has_call(ast, *a) || has_call(ast, *b),
@@ -553,7 +554,7 @@ pub(crate) fn has_assign(ast: &ast::Ast, e: ExprId) -> bool {
     match &ast.expr(e).kind {
         ExprKind::Assign(..) | ExprKind::Update { .. } => true,
         ExprKind::Arrow(_) => false,
-        ExprKind::Unary(_, x) | ExprKind::Paren(x) | ExprKind::NonNull(x) | ExprKind::Typeof(x) | ExprKind::Spread(x) | ExprKind::As(x, _) | ExprKind::Try(x) | ExprKind::Await(x) => has_assign(ast, *x),
+        ExprKind::Unary(_, x) | ExprKind::Paren(x) | ExprKind::NonNull(x) | ExprKind::Typeof(x) | ExprKind::Spread(x) | ExprKind::As(x, _) | ExprKind::Try(x) | ExprKind::Await(x) | ExprKind::Yield(Some(x), _) => has_assign(ast, *x),
         ExprKind::Binary(_, a, b) | ExprKind::Index { obj: a, index: b, .. } => has_assign(ast, *a) || has_assign(ast, *b),
         ExprKind::Cond(a, b, c) => has_assign(ast, *a) || has_assign(ast, *b) || has_assign(ast, *c),
         ExprKind::Call { callee, args, .. } | ExprKind::New { callee, args, .. } => has_assign(ast, *callee) || args.iter().any(|a| has_assign(ast, a.expr)),
@@ -570,6 +571,7 @@ pub(crate) fn has_await(ast: &ast::Ast, e: ExprId) -> bool {
     match &ast.expr(e).kind {
         ExprKind::Await(_) => true,
         ExprKind::Arrow(_) => false,
+        ExprKind::Yield(x, _) => x.is_some_and(|x| has_await(ast, x)),
         ExprKind::Unary(_, x) | ExprKind::Paren(x) | ExprKind::NonNull(x) | ExprKind::Typeof(x) | ExprKind::Spread(x) | ExprKind::As(x, _) | ExprKind::Try(x) => has_await(ast, *x),
         ExprKind::Update { target, .. } => has_await(ast, *target),
         ExprKind::Binary(_, a, b) | ExprKind::Assign(_, a, b) | ExprKind::Index { obj: a, index: b, .. } => has_await(ast, *a) || has_await(ast, *b),

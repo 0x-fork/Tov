@@ -664,6 +664,7 @@ impl<'c, 'a> Gen<'c, 'a> {
             Ty::Array(et) => self.array_method(rv, et, name, args, params, ty, span),
             Ty::Map(k, v) => self.map_method(rv, k, v, name, args, ty),
             Ty::Set(k) => self.set_method(rv, k, name, args, ty),
+            Ty::Gen(e) if name == "next" => self.gen_next(rv, e, ty),
             Ty::Str | Ty::StrLit(_) => {
                 let s = self.coerce(rv, STR);
                 self.string_method(s, name, args, ty, span)
@@ -2448,6 +2449,12 @@ impl<'c, 'a> Gen<'c, 'a> {
             Ty::Set(e) => {
                 let arr = self.c.types.array(e);
                 let code = format!("tv_map_keys({}, {}, &tv_type_undefined)", v.code, self.desc(e));
+                self.tmp(arr, &code, true)
+            }
+            // (a generator: what it yields, to its end)
+            Ty::Gen(e) => {
+                let arr = self.c.types.array(e);
+                let code = format!("tv_gen_collect({}, {})", v.code, self.desc(e));
                 self.tmp(arr, &code, true)
             }
             Ty::Str | Ty::StrLit(_) => {

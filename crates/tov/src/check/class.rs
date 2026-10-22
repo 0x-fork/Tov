@@ -901,6 +901,8 @@ impl<'a> Checker<'a> {
             }));
             let span = self.modules[m as usize].ast.ty(te).span;
             match *self.types.get(it) {
+                // (`implements Iterable<T>`: its `[Symbol.iterator]()` is what for...of uses)
+                Ty::Gen(_) => {}
                 Ty::Interface(i, args) => {
                     let args = self.types.tys(args).to_vec();
                     let fields = self.iface_fields_inst(i, &args);

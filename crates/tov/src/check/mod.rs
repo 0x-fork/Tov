@@ -183,11 +183,14 @@ struct Frame {
     is_async: bool,
     /// A closure's expected function type (for `spec::blame_fn_type` when it throws).
     exp_fn: Option<TyId>,
+    /// A generator: what it yields, as declared (`Generator<T>`; `None` to infer from `yields`).
+    generator: Option<Option<TyId>>,
+    yields: Vec<TyId>,
 }
 
 impl Frame {
     fn new(ret: Option<TyId>, name: Option<Sym>, can_throw: bool, throws_decl: Option<TyId>) -> Frame {
-        Frame { ret, ret_sites: Vec::new(), returns: Vec::new(), loops: 0, switches: 0, labels: Vec::new(), name, can_throw, throws_decl, thrown: Vec::new(), try_frames: Vec::new(), try_expr: 0, module_init: false, is_async: false, exp_fn: None }
+        Frame { ret, ret_sites: Vec::new(), returns: Vec::new(), loops: 0, switches: 0, labels: Vec::new(), name, can_throw, throws_decl, thrown: Vec::new(), try_frames: Vec::new(), try_expr: 0, module_init: false, is_async: false, exp_fn: None, generator: None, yields: Vec::new() }
     }
 }
 
@@ -1431,21 +1434,23 @@ impl<'a> Checker<'a> {
             let (r, t) = if f.is_async { (self.types.promise(r, err), NEVER) } else { (r, err) };
             self.sig_provisional.insert((m, ii), Sig { tparams: tparams.clone(), params: params.clone(), param_names: param_names.clone(), ret: r, throws: t, rest });
         }
+        // (a generator's result comes from its `yield`s)
+        let rv = f.is_gen || returns_value(&self.modules[m as usize].ast, f.body);
         let ret = match ret {
             Some(r) if throws != UNKNOWN => r,
             // No `return <value>` anywhere: `void`, and the body can wait for phase B.
-            None if !returns_value(&self.modules[m as usize].ast, f.body) && throws != UNKNOWN => VOID,
+            None if !rv && throws != UNKNOWN => VOID,
             declared => {
                 // Infer from the body (the return type, the errors, or both).
                 let partial = Sig { tparams: tparams.clone(), params: params.clone(), param_names: param_names.clone(), ret: declared.unwrap_or(ERROR), throws, rest: false };
-                let (inferred, errs) = self.check_body_of(m, ii, &partial, &tscope, declared.or(if returns_value(&self.modules[m as usize].ast, f.body) { None } else { Some(VOID) }));
+                let (inferred, errs) = self.check_body_of(m, ii, &partial, &tscope, declared.or(if rv { None } else { Some(VOID) }));
                 if throws == UNKNOWN {
                     throws = errs;
                 }
                 if let Some(r) = declared {
                     r
                 } else {
-                    let inferred = if returns_value(&self.modules[m as usize].ast, f.body) { inferred } else { VOID };
+                    let inferred = if rv { inferred } else { VOID };
                 inferred
                 }
             }
@@ -1543,8 +1548,21 @@ impl<'a> Checker<'a> {
             fcx.scopes.push(Vec::new());
             // Without a `throws` clause the body's own `throw`s and the calls it makes decide.
             let decl = if sig.throws == UNKNOWN || (f.throws.is_none() && sig.throws == NEVER) { None } else { Some(sig.throws) };
-            let mut frame = Frame::new(ret, Some(f.name), true, decl);
+            // A generator yields what its `Generator<T>` says (or what its `yield`s give); its
+            // `return` only ends it.
+            let generator = f.is_gen.then(|| match ret.map(|r| *self.types.get(r)) {
+                Some(Ty::Gen(t)) => Some(t),
+                Some(Ty::Error) => Some(ERROR),
+                Some(_) => {
+                    let shown = self.show(ret.unwrap());
+                    self.report(Diagnostic::new("T0001", f.name_span, format!("a generator's result is a `Generator<T>`, not `{shown}`")));
+                    Some(ERROR)
+                }
+                None => None,
+            });
+            let mut frame = Frame::new(if f.is_gen { None } else { ret }, Some(f.name), true, decl);
             frame.is_async = f.is_async;
+            frame.generator = generator;
             let (param_sites, ret_sites) = self.decl_sites(m, f);
             frame.ret_sites = ret_sites;
             fcx.frames.push(frame);
@@ -1568,7 +1586,18 @@ impl<'a> Checker<'a> {
                 let fcx = c.fcx.last_mut().unwrap();
                 let returns = std::mem::take(&mut fcx.frames[0].returns);
                 let errs = std::mem::take(&mut fcx.frames[0].thrown);
+                let yields = std::mem::take(&mut fcx.frames[0].yields);
                 thrown = c.types.union(&errs);
+                if f.is_gen {
+                    return match ret {
+                        Some(r) => r,
+                        None => {
+                            let t = if yields.is_empty() { UNDEFINED } else { c.types.union(&yields) };
+                            let t = c.types.widen(t);
+                            c.types.intern(Ty::Gen(t))
+                        }
+                    };
+                }
                 match ret {
                     Some(r) => {
                         if r != VOID && r != ERROR && !c.always_returns(body) && !c.types.has_undefined(r) && !c.fcx.last().unwrap().reported_nonexhaustive {
@@ -2206,6 +2235,8 @@ impl<'a> Checker<'a> {
             "Array" | "ReadonlyArray" => Some(if arity(self, 1) { self.types.array(targs[0]) } else { ERROR }),
             "Map" | "ReadonlyMap" => Some(if arity(self, 2) { self.types.intern(Ty::Map(targs[0], targs[1])) } else { ERROR }),
             "Set" | "ReadonlySet" => Some(if arity(self, 1) { self.types.intern(Ty::Set(targs[0])) } else { ERROR }),
+            // (a generator's result, its return and `next` types being `void`/`undefined`)
+            "Generator" | "IterableIterator" | "Iterator" | "Iterable" if !targs.is_empty() => Some(self.types.intern(Ty::Gen(targs[0]))),
             "any" => {
                 self.report(
                     Diagnostic::new("X0001", name_span, "`any` is not supported")
@@ -2420,6 +2451,10 @@ impl<'a> Checker<'a> {
         match (s, d) {
             (Ty::Array(a), Ty::Array(b)) => self.assignable_in(a, b, false, assuming),
             (Ty::Set(a), Ty::Set(b)) => a == b,
+            // (read only: what it yields fits; an array is iterable too, through a generator
+            // over it)
+            (Ty::Gen(a), Ty::Gen(b)) => self.assignable_in(a, b, false, assuming),
+            (Ty::Array(a), Ty::Gen(b)) if top => a == b || self.assignable_in(a, b, false, assuming) && self.types.is_string(a) == self.types.is_string(b),
             // Promises are read-only: covariant in the value; the errors must fit.
             (Ty::Promise(v1, e1), Ty::Promise(v2, e2)) => self.assignable_in(v1, v2, false, assuming) && (e1 == NEVER || self.assignable_in(e1, e2, false, assuming)),
             (Ty::Map(k1, v1), Ty::Map(k2, v2)) => k1 == k2 && self.assignable_in(v1, v2, false, assuming),

@@ -1065,6 +1065,10 @@ impl<'c, 'a> Gen<'c, 'a> {
                     self.emit_async_method(&cname, &proto, m, subst, &ps, ret, fd.body, Some((fd.name_span.start, ty, ci.name.clone())));
                     return;
                 }
+                if fd.is_gen {
+                    self.emit_gen_method(&cname, &proto, m, subst, &ps, ret, fd.body, (fd.name_span.start, ty, ci.name.clone()));
+                    return;
+                }
                 let code = self.function_body(m, subst, &ps, ret, FnBodyKind::Block(fd.body), None, Some((fd.name_span.start, ty)), None);
                 let _ = writeln!(self.funcs, "static {proto} {{\n{code}}}\n");
             }

@@ -13,6 +13,7 @@
 //! borrowed; return values are owned; storing a borrowed value retains it.
 
 mod asyncfn;
+mod genfn;
 pub(crate) mod body;
 mod calls;
 mod frame;
@@ -264,6 +265,8 @@ pub(crate) struct Gen<'c, 'a> {
     needs_uncaught: bool,
     /// The async function whose body `function_body` emits next (see `asyncfn.rs`).
     pub(crate) pending_async: Option<(u32, u32)>,
+    /// The next body is a generator's, yielding these.
+    pub(crate) pending_gen: Option<TyId>,
     /// The local an arrow being emitted initializes (its key), when the arrow refers to it: the
     /// closure itself, not a capture.
     pub(crate) self_closure: Option<u32>,
@@ -357,6 +360,7 @@ impl<'c, 'a> Gen<'c, 'a> {
             fn_adapters: FxMap::default(),
             needs_uncaught: false,
             pending_async: None,
+            pending_gen: None,
             self_closure: None,
             ranges: None,
             js_mul_operand: false,
@@ -703,7 +707,7 @@ impl<'c, 'a> Gen<'c, 'a> {
     /// Does this type own heap memory (needs retain/release)?
     pub(crate) fn is_rc(&mut self, t: TyId) -> bool {
         match self.tget(t) {
-            Ty::Str | Ty::Array(_) | Ty::Map(..) | Ty::Set(_) | Ty::Func(..) | Ty::Rec(..) | Ty::Class(..) | Ty::Interface(..) | Ty::Promise(..) | Ty::Js | Ty::BigInt => true,
+            Ty::Str | Ty::Array(_) | Ty::Map(..) | Ty::Set(_) | Ty::Func(..) | Ty::Rec(..) | Ty::Class(..) | Ty::Interface(..) | Ty::Promise(..) | Ty::Gen(_) | Ty::Js | Ty::BigInt => true,
             Ty::Record(_) if self.is_obj(t) => true,
             Ty::Record(fs) => {
                 let fs = self.c.types.fields(fs).to_vec();
@@ -789,6 +793,7 @@ impl<'c, 'a> Gen<'c, 'a> {
             Ty::StrLit(_) | Ty::Undefined | Ty::Null | Ty::Void | Ty::Never | Ty::Error | Ty::Unknown => "tv_unit".into(),
             Ty::Array(_) => "tv_arr".into(),
             Ty::Promise(..) => "tv_promise *".into(),
+            Ty::Gen(_) => "tv_gen *".into(),
             Ty::Js => "JSValueRef".into(),
             Ty::Map(..) | Ty::Set(_) => "tv_map".into(),
             Ty::Func(..) => "tv_fn".into(),
@@ -1016,7 +1021,7 @@ impl<'c, 'a> Gen<'c, 'a> {
             Ty::Array(_) => "TV_EMPTY_ARR".into(),
             Ty::Map(..) | Ty::Set(_) => "TV_EMPTY_MAP".into(),
             Ty::Func(..) => "((tv_fn){NULL, NULL})".into(),
-            Ty::Promise(..) => "NULL".into(),
+            Ty::Promise(..) | Ty::Gen(_) => "NULL".into(),
             Ty::Bool => "false".into(),
             Ty::Class(..) => "NULL".into(),
             Ty::Interface(..) => "((tv_iface){NULL, NULL})".into(),
@@ -1303,6 +1308,7 @@ impl<'c, 'a> Gen<'c, 'a> {
             Ty::Map(..) | Ty::Set(_) => format!("tv_map_retain({place})"),
             Ty::Func(..) => format!("tv_env_retain(({place}).env)"),
             Ty::Promise(..) => format!("tv_promise_retain({place})"),
+            Ty::Gen(_) => format!("tv_gen_retain({place})"),
             Ty::Js => format!("tv_js_retain({place})"),
             Ty::Class(..) => format!("tvg_obj_retain({place})"),
             Ty::Interface(..) => format!("tv_iface_retain({place})"),
@@ -1338,6 +1344,7 @@ impl<'c, 'a> Gen<'c, 'a> {
             }
             Ty::Func(..) => format!("tv_env_release(({place}).env)"),
             Ty::Promise(..) => format!("tv_promise_release({place})"),
+            Ty::Gen(_) => format!("tv_gen_release({place})"),
             Ty::Js => format!("tv_js_release({place})"),
             Ty::Class(..) => self.class_release_code(t, place),
             Ty::Interface(..) => format!("tv_iface_release({place})"),
@@ -1367,7 +1374,7 @@ impl<'c, 'a> Gen<'c, 'a> {
             Ty::StrLit(_) | Ty::Undefined | Ty::Null | Ty::Void | Ty::Never => "true".into(),
             Ty::Array(_) | Ty::Map(..) | Ty::Set(_) => format!("(({a}).p == ({b}).p)"),
             Ty::Func(..) => format!("(({a}).fn == ({b}).fn && ({a}).env == ({b}).env)"),
-            Ty::Class(..) | Ty::Promise(..) => format!("((void *)({a}) == (void *)({b}))"),
+            Ty::Class(..) | Ty::Promise(..) | Ty::Gen(_) => format!("((void *)({a}) == (void *)({b}))"),
             Ty::Interface(..) => format!("(({a}).p == ({b}).p)"),
             Ty::Js => format!("tv_type_js.eq(&({a}), &({b}))"),
             Ty::Union(_) if self.niche_rec(t).is_some() => {
@@ -1425,6 +1432,7 @@ impl<'c, 'a> Gen<'c, 'a> {
             }
             Ty::Map(..) | Ty::Set(_) => format!("({})->to_str(sb, &({place}))", self.desc(t)),
             Ty::Promise(..) => "tv_sb_push_cstr(sb, \"[object Promise]\")".into(),
+            Ty::Gen(_) => "tv_sb_push_cstr(sb, \"[object Generator]\")".into(),
             Ty::Js => format!("tv_type_js.to_str(sb, &({place}))"),
             _ => {
                 self.ensure_helper(t, H_STR);
@@ -1460,6 +1468,7 @@ impl<'c, 'a> Gen<'c, 'a> {
             Ty::BigInt => format!("({{ tv_sb_push_big(sb, {place}); tv_sb_push_char(sb, 'n'); }})"),
             Ty::Decimal => format!("tv_sb_push_dec(sb, {place})"),
             Ty::Promise(..) => format!("tv_inspect_value(sb, &tv_type_promise, &({place}), {depth})"),
+            Ty::Gen(_) => format!("tv_inspect_value(sb, &tv_type_gen, &({place}), {depth})"),
             Ty::Array(e) => {
                 let d = self.desc(e);
                 format!("tv_inspect_arr(sb, {place}, {d}, {depth})")
@@ -1514,6 +1523,7 @@ impl<'c, 'a> Gen<'c, 'a> {
             Ty::Undefined | Ty::Void | Ty::Never | Ty::Error | Ty::Unknown => return "&tv_type_undefined".into(),
             Ty::Null => return "&tv_type_null".into(),
             Ty::Promise(..) => return "&tv_type_promise".into(),
+            Ty::Gen(_) => return "&tv_type_gen".into(),
             Ty::Js => return "&tv_type_js".into(),
             _ => {}
         }
@@ -1641,6 +1651,10 @@ impl<'c, 'a> Gen<'c, 'a> {
     }
 
     fn emit_function(&mut self, inst: Instance) {
+        if self.is_gen_fn(inst.m, inst.item) {
+            self.emit_gen_function(inst);
+            return;
+        }
         if self.is_async_fn(inst.m, inst.item) {
             self.emit_async_function(inst);
             return;

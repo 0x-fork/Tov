@@ -235,6 +235,7 @@ fn methods_of(types: &Types, ty: TyId) -> &'static [&'static str] {
         Ty::Str | Ty::StrLit(_) => STRING_METHODS,
         Ty::Map(..) => MAP_METHODS,
         Ty::Set(_) => SET_METHODS,
+        Ty::Gen(_) => &["next"],
         _ if types.is_numeric(ty) => NUMBER_METHODS,
         Ty::Bool | Ty::BigInt => &["toString"],
         Ty::Decimal => &["toString", "toFixed", "round", "floor", "ceil", "trunc", "abs"],
@@ -475,6 +476,14 @@ pub(super) fn method(c: &mut Checker, base: TyId, name: &str) -> Option<MethodSi
             }
             _ => None,
         },
+        // `g.next()`: `{ value, done }` (value `undefined` once it's done)
+        Ty::Gen(e) if name == "next" => {
+            let (value, done) = (c.interner.lookup("value")?, c.interner.lookup("done")?);
+            let v = c.types.optional(e);
+            let r = c.types.record(vec![Field { name: value, ty: v, optional: false }, Field { name: done, ty: BOOL, optional: false }]);
+            c.types.note_field_order(r, vec![value, done]);
+            mk(sig(vec![], r), false)
+        }
         Ty::Bool if name == "toString" => mk(sig(vec![], STR), false),
         Ty::Decimal => match name {
             "toString" | "toJSON" => mk(sig(vec![], STR), false),
@@ -1527,10 +1536,15 @@ impl<'a> Checker<'a> {
             let hint = exp_elem.map(|e| self.types.array(e));
             let t = self.expr(src, hint);
             let base = self.types.without_undefined(t);
-            match *self.types.get(base) {
-                Ty::Array(e) | Ty::Set(e) => e,
+            let bt = *self.types.get(base);
+            match bt {
+                Ty::Array(e) | Ty::Set(e) | Ty::Gen(e) => e,
                 Ty::Str | Ty::StrLit(_) => STR,
                 Ty::Error => return ERROR,
+                _ if let Some(e) = self.iterator_of(base) => {
+                    self.rewrites.iterators.push((self.cur, src));
+                    e
+                }
                 _ => {
                     let shown = self.show(t);
                     let s = self.ast().expr(src).span;

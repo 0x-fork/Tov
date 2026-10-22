@@ -63,11 +63,14 @@ pub struct Rewrites {
     /// `counts[k]++` / `counts[k] op= v`, `k` one of the record's field names: (module, the
     /// assignment, the names), as `k === "a" ? counts.a++ : counts.b++`.
     pub(crate) keyed_places: Vec<(u32, ExprId, Vec<crate::intern::Sym>)>,
+    /// `for (const x of bag)`, `[...bag]`, bag's class having `[Symbol.iterator]()`: (module, the
+    /// expression), as `bag.__iterator()`.
+    pub(crate) iterators: Vec<(u32, ExprId)>,
 }
 
 impl Rewrites {
     pub fn is_empty(&self) -> bool {
-        self.args.is_empty() && self.prims.is_empty() && self.records.is_empty() && self.fn_values.is_empty() && self.enum_names.is_empty() && self.rests.is_empty() && self.setters.is_empty() && self.static_calls.is_empty() && self.logical.is_empty() && self.widen_casts.is_empty() && self.assigns.is_empty() && self.identities.is_empty() && self.keyed_places.is_empty() && self.consts.is_empty() && self.items.is_empty() && self.awaits.is_empty() && self.calls.is_empty() && self.elems.is_empty() && self.keys.is_empty() && self.spreads.is_empty() && self.keyed.is_empty()
+        self.args.is_empty() && self.prims.is_empty() && self.records.is_empty() && self.fn_values.is_empty() && self.enum_names.is_empty() && self.rests.is_empty() && self.setters.is_empty() && self.static_calls.is_empty() && self.logical.is_empty() && self.widen_casts.is_empty() && self.assigns.is_empty() && self.identities.is_empty() && self.keyed_places.is_empty() && self.iterators.is_empty() && self.consts.is_empty() && self.items.is_empty() && self.awaits.is_empty() && self.calls.is_empty() && self.elems.is_empty() && self.keys.is_empty() && self.spreads.is_empty() && self.keyed.is_empty()
     }
 
     pub(crate) fn extend(&mut self, o: Rewrites) {
@@ -92,6 +95,7 @@ impl Rewrites {
         self.assigns.extend(o.assigns);
         self.identities.extend(o.identities);
         self.keyed_places.extend(o.keyed_places);
+        self.iterators.extend(o.iterators);
     }
 }
 
@@ -134,6 +138,18 @@ pub fn apply(modules: &mut [Module], rw: &Rewrites) -> bool {
             *callee = fe;
             *args = all;
         }
+        changed = true;
+    }
+    for &(m, e) in &rw.iterators {
+        let ast = &mut modules[m as usize].ast;
+        let span = ast.exprs[e as usize].span;
+        let inner = crate::ast::Expr { kind: std::mem::replace(&mut ast.exprs[e as usize].kind, ExprKind::Error), span };
+        ast.exprs.push(inner);
+        let obj = ast.exprs.len() as ExprId - 1;
+        let Some(name) = ast.iterator_sym else { continue };
+        ast.exprs.push(crate::ast::Expr { kind: ExprKind::Member { obj, name, name_span: span, optional: false }, span });
+        let callee = ast.exprs.len() as ExprId - 1;
+        ast.exprs[e as usize].kind = ExprKind::Call { callee, type_args: Vec::new(), args: Vec::new(), optional: false };
         changed = true;
     }
     for (m, e, keys) in &rw.keyed_places {

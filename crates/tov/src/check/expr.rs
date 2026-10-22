@@ -258,6 +258,47 @@ impl<'a> Checker<'a> {
             ExprKind::Object(fields) if fields.iter().any(|f| matches!(self.ast().expr(f.value).kind, ExprKind::Spread(_))) => self.object_spread(e, fields, span),
             ExprKind::Object(fields) => self.object(fields, exp, span),
             ExprKind::Array(elems) => self.array_lit(elems, exp, span),
+            ExprKind::Yield(v, delegate) => {
+                let generator = self.fcx.last().and_then(|f| f.frames.last()).and_then(|fr| fr.generator);
+                let Some(elem) = generator else {
+                    self.report(Diagnostic::new("T0306", span, "`yield` is only allowed in a generator (`function*`)"));
+                    if let Some(x) = v {
+                        self.expr(*x, None);
+                    }
+                    return ERROR;
+                };
+                let (v, delegate) = (*v, *delegate);
+                let t = match v {
+                    // `yield* xs`: each of xs's elements
+                    Some(x) if delegate => {
+                        let t = self.expr(x, None);
+                        match self.iterated(t) {
+                            Some(el) => el,
+                            None => {
+                                if t != ERROR {
+                                    let shown = self.show(t);
+                                    self.report(Diagnostic::new("T0001", self.ast().expr(x).span, format!("`yield*` takes a generator or an array, found `{shown}`")));
+                                }
+                                ERROR
+                            }
+                        }
+                    }
+                    Some(x) => self.expr(x, elem),
+                    None => UNDEFINED,
+                };
+                match elem {
+                    Some(el) => {
+                        let s = v.map(|x| self.ast().expr(x).span).unwrap_or(span);
+                        self.expect_assignable(t, el, s, Some("the yielded value".into()));
+                    }
+                    None => {
+                        if let Some(fr) = self.fcx.last_mut().and_then(|f| f.frames.last_mut()) {
+                            fr.yields.push(t);
+                        }
+                    }
+                }
+                UNDEFINED
+            }
             ExprKind::Seq(xs) => {
                 let mut t = VOID;
                 for &x in xs {
@@ -2618,13 +2659,18 @@ impl<'a> Checker<'a> {
         let hint = elem.map(|e| self.types.array(e));
         let t = self.expr(x, hint);
         let base = self.types.without_undefined(t);
-        match *self.types.get(base) {
-            Ty::Array(e) | Ty::Set(e) => e,
+        let bt = *self.types.get(base);
+        match bt {
+            Ty::Array(e) | Ty::Set(e) | Ty::Gen(e) => e,
             Ty::Str | Ty::StrLit(_) => STR,
             // (a map's entries: `[key, value]`)
             Ty::Map(k, v) => self.tuple_ty(&[k, v]),
             Ty::Js => JS,
             Ty::Error => ERROR,
+            _ if let Some(e) = self.iterator_of(base) => {
+                self.rewrites.iterators.push((self.cur, x));
+                e
+            }
             _ => {
                 let shown = self.show(t);
                 let s = self.ast().expr(x).span;
@@ -3534,6 +3580,29 @@ impl<'a> Checker<'a> {
         r
     }
 
+    /// What iterating a `t` gives: an array's, a set's or a generator's elements (`None` if it
+    /// isn't one of those).
+    pub(super) fn iterated(&mut self, t: TyId) -> Option<TyId> {
+        match *self.types.get(t) {
+            Ty::Array(e) | Ty::Set(e) | Ty::Gen(e) => Some(e),
+            Ty::Str | Ty::StrLit(_) => Some(STR),
+            Ty::Error => Some(ERROR),
+            _ => self.iterator_of(t),
+        }
+    }
+
+    /// A class instance with a `[Symbol.iterator]()` method returning a generator: what it yields.
+    pub(super) fn iterator_of(&mut self, t: TyId) -> Option<TyId> {
+        let sym = self.interner.lookup("__iterator")?;
+        self.class_of(t)?;
+        let Some(super::class::ClassMemberRef::Method(mm)) = self.class_member(t, sym) else { return None };
+        let r = self.method_ret(&mm);
+        match *self.types.get(r) {
+            Ty::Gen(e) => Some(e),
+            _ => None,
+        }
+    }
+
     /// `xs.reduce(f)`: `reduce/1f` where `xs` holds integers and `f` (a named function) takes
     /// floats, as TypeScript's one `number` allows; else `reduce/1`.
     fn reduce_from_first(&mut self, base: TyId, f: ExprId) -> &'static str {
@@ -4202,6 +4271,11 @@ impl<'a> Checker<'a> {
             }
             Ty::Set(pe) => {
                 if let Ty::Set(ae) = *self.types.get(actual) {
+                    self.unify(pe, ae, free, map);
+                }
+            }
+            Ty::Gen(pe) => {
+                if let Ty::Gen(ae) | Ty::Array(ae) = *self.types.get(actual) {
                     self.unify(pe, ae, free, map);
                 }
             }

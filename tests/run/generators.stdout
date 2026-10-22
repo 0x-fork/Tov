@@ -1,0 +1,16 @@
+45 [ 0, 1, 2, 3, 4 ] [ 0, 1, 2, 3 ]
+{ value: 1, done: false } { value: 2, done: false } { value: undefined, done: true } { value: undefined, done: true }
+w0,w1,w2
+start A B x y end
+[
+   0,  1,  1,  2,  3,
+   5,  8, 13, 21, 34,
+  55, 89
+]
+[ [ 1, 2 ], [ 3, 4 ], [ 5 ] ]
+6000
+item p
+item q
+[ 'p', 'q' ] [ [ 0, 'p' ], [ 1, 'q' ] ]
+[ 1, 2, 3, 4 ]
+3.5 6

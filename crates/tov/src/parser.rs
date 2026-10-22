@@ -5,8 +5,11 @@ use crate::lexer::{self, Tok, Token};
 use crate::source::{FileId, Span};
 
 pub fn parse(src: &str, file: FileId, interner: &mut Interner) -> (Ast, Vec<Diagnostic>) {
-    // (the name of a spread's field, which checking may also make: see `check::rewrite`)
+    // (the name of a spread's field, which checking may also make: see `check::rewrite`; and
+    // the fields of a generator's `next()` result)
     interner.intern("...");
+    interner.intern("value");
+    interner.intern("done");
     let mut diags = Vec::new();
     let mut lexed = lexer::lex(src, file, &mut diags);
     // `type` is a keyword only where a declaration starts (`type T = ...`, `import type { ... }`,
@@ -18,6 +21,7 @@ pub fn parse(src: &str, file: FileId, interner: &mut Interner) -> (Ast, Vec<Diag
         }
     }
     let mut p = Parser { src, toks: lexed.tokens, strings: lexed.strings, pos: 0, file, interner, ast: Ast::default(), diags, script_stmts: Vec::new(), defaults: Vec::new(), more_stmts: Vec::new(), hidden: 0, prologue: Vec::new(), index_sig: None, local_fns: Vec::new(), prop_defaults: false, extra_members: Vec::new(), generic_arrows: Vec::new() };
+    p.ast.iterator_sym = Some(p.interner.intern("__iterator"));
     p.module();
     (p.ast, p.diags)
 }
@@ -366,7 +370,7 @@ impl<'a> Parser<'a> {
         let block = self.mk_stmt(StmtKind::Block(body), span);
         let name = self.interner.intern("<script>");
         let is_async = top_level_await(&self.ast, block);
-        let f = FnDecl { name, name_span: span, tparams: Vec::new(), params: Vec::new(), ret: None, throws: None, body: block, is_async };
+        let f = FnDecl { name, name_span: span, tparams: Vec::new(), params: Vec::new(), ret: None, throws: None, body: block, is_async, is_gen: false };
         self.ast.script = Some(self.ast.items.len() as u32);
         self.ast.items.push(Item { kind: ItemKind::Function(f), span, exported: false });
     }
@@ -571,12 +575,33 @@ impl<'a> Parser<'a> {
             accessor = Some(self.text(self.tok()) == "get");
             self.bump();
         }
-        if self.at(Tok::LBracket) || self.at(Tok::Str) {
+        // `*items() { yield ... }`: a generator method
+        let is_gen = self.eat(Tok::Star);
+        // `[Symbol.iterator]() { ... }`: what `for...of` over an instance iterates, the method
+        // `__iterator`
+        let iterator_name = if self.at(Tok::LBracket)
+            && self.toks.get(self.pos + 1).is_some_and(|t| t.kind == Tok::Ident && self.text(*t) == "Symbol")
+            && self.toks.get(self.pos + 3).is_some_and(|t| t.kind == Tok::Ident && self.text(*t) == "iterator")
+            && self.toks.get(self.pos + 4).is_some_and(|t| t.kind == Tok::RBracket)
+        {
+            let span = self.cur_span();
+            for _ in 0..5 {
+                self.bump();
+            }
+            let sym = self.interner.intern("__iterator");
+            self.ast.iterator_sym = Some(sym);
+            Some((sym, span.to(self.prev_span())))
+        } else {
+            None
+        };
+        if iterator_name.is_none() && (self.at(Tok::LBracket) || self.at(Tok::Str)) {
             self.push(Diagnostic::new("X0017", start, "computed and string member names are not supported").note("instead", "use an identifier name"));
             self.recover_line();
             return None;
         }
-        let (name, name_span) = if self.at(Tok::Hash) {
+        let (name, name_span) = if let Some(n) = iterator_name {
+            n
+        } else if self.at(Tok::Hash) {
             let h = self.bump();
             let Some((n, s)) = self.ident("a private member name") else {
                 self.recover_line();
@@ -666,7 +691,7 @@ impl<'a> Parser<'a> {
                     }
                 }
             }
-            let fd = FnDecl { name, name_span, tparams, params, ret, throws, body, is_async };
+            let fd = FnDecl { name, name_span, tparams, params, ret, throws, body, is_async, is_gen };
             let kind = if text == "constructor" && accessor.is_none() {
                 MemberKind::Constructor(fd)
             } else if accessor == Some(true) {
@@ -976,13 +1001,11 @@ impl<'a> Parser<'a> {
 
     fn function(&mut self) -> Option<FnDecl> {
         self.bump(); // function
-        if self.at(Tok::Star) {
-            let span = self.cur_span();
-            self.err("U0013", span, "generator functions are not supported yet");
-            self.bump();
-        }
+        let is_gen = self.eat(Tok::Star);
         let (name, name_span) = self.ident("a function name")?;
-        self.function_rest(name, name_span)
+        let mut f = self.function_rest(name, name_span)?;
+        f.is_gen = is_gen;
+        Some(f)
     }
 
     /// A function after its name: type parameters, parameters, result, body.
@@ -1001,7 +1024,7 @@ impl<'a> Parser<'a> {
         }
         let body = self.block();
         let body = self.with_defaults(defaults, body);
-        Some(FnDecl { name, name_span, tparams, params, ret, throws, body, is_async: false })
+        Some(FnDecl { name, name_span, tparams, params, ret, throws, body, is_async: false, is_gen: false })
     }
 
     /// `throws E` (returned) / `uses fs | net` (not supported yet).
@@ -1145,7 +1168,7 @@ impl<'a> Parser<'a> {
                         self.mk_stmt(StmtKind::Block(vec![r]), sp)
                     }
                 };
-                let decl = FnDecl { name, name_span, tparams, params: f.params, ret: f.ret, throws: f.throws, body, is_async: f.is_async };
+                let decl = FnDecl { name, name_span, tparams, params: f.params, ret: f.ret, throws: f.throws, body, is_async: f.is_async, is_gen: false };
                 self.ast.items.push(Item { kind: ItemKind::Function(decl), span, exported });
             } else {
                 self.ast.items.push(Item { kind: ItemKind::Const { name, name_span, ty, init, mutable }, span, exported });
@@ -1619,6 +1642,9 @@ impl<'a> Parser<'a> {
     }
 
     fn arrow_of(&mut self, f: FnDecl, is_async: bool, span: Span) -> ExprId {
+        if f.is_gen {
+            self.err("U0013", f.name_span, "generator functions are supported at the top level and as methods only yet");
+        }
         let arrow = ArrowFn { params: f.params, ret: f.ret, throws: f.throws, body: ArrowBody::Block(f.body), is_async };
         self.mk_expr(ExprKind::Arrow(Box::new(arrow)), span)
     }
@@ -2276,6 +2302,17 @@ impl<'a> Parser<'a> {
     }
 
     fn assign(&mut self) -> ExprId {
+        // `yield x`, `yield* xs`, `yield` (where nothing that could start a value follows)
+        if self.at(Tok::Yield) {
+            let start = self.cur_span();
+            let t = self.bump();
+            let delegate = self.eat(Tok::Star);
+            let ends = matches!(self.kind(), Tok::RParen | Tok::RBracket | Tok::RBrace | Tok::Semi | Tok::Comma | Tok::Colon | Tok::Eof) || (self.tok().nl_before && !delegate);
+            let _ = t;
+            let value = if ends { None } else { Some(self.assign()) };
+            let span = start.to(self.prev_span());
+            return self.mk_expr(ExprKind::Yield(value, delegate), span);
+        }
         if let Some(e) = self.try_arrow() {
             return e;
         }
@@ -3096,6 +3133,7 @@ fn top_level_await(ast: &Ast, s: StmtId) -> bool {
         match &ast.expr(e).kind {
             ExprKind::Await(_) => true,
             ExprKind::Arrow(_) => false,
+            ExprKind::Yield(x, _) => x.is_some_and(|x| expr(ast, x)),
             ExprKind::Unary(_, x) | ExprKind::Paren(x) | ExprKind::NonNull(x) | ExprKind::Typeof(x) | ExprKind::Spread(x) | ExprKind::As(x, _) | ExprKind::Try(x) => expr(ast, *x),
             ExprKind::Update { target, .. } => expr(ast, *target),
             ExprKind::Binary(_, a, b) | ExprKind::Assign(_, a, b) | ExprKind::Index { obj: a, index: b, .. } => expr(ast, *a) || expr(ast, *b),

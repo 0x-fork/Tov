@@ -74,6 +74,8 @@ pub enum Ty {
     StrLit(Sym),
     /// `true` or `false` as a type (`{ ok: true, value: T }`): a `bool` that is always this one.
     BoolLit(bool),
+    /// A generator of `T`s (`function*`'s result; `Generator<T>`, `IterableIterator<T>`).
+    Gen(TyId),
     Array(TyId),
     Map(TyId, TyId),
     Set(TyId),
@@ -566,6 +568,10 @@ impl Types {
                 let e = self.subst(e, map);
                 self.intern(Ty::Set(e))
             }
+            Ty::Gen(e) => {
+                let e = self.subst(e, map);
+                self.intern(Ty::Gen(e))
+            }
             Ty::Promise(v, e) => {
                 let v = self.subst(v, map);
                 let e = self.subst(e, map);
@@ -574,7 +580,11 @@ impl Types {
             Ty::Record(fs) => {
                 let fields: Vec<Field> = self.fields(fs).to_vec();
                 let fields = fields.into_iter().map(|f| Field { ty: self.subst(f.ty, map), ..f }).collect();
-                self.record(fields)
+                let r = self.record(fields);
+                // (in the order its fields were written, as the original's)
+                let order: Vec<Sym> = self.fields_in_order(ty).iter().map(|f| f.name).collect();
+                self.note_field_order(r, order);
+                r
             }
             Ty::Union(ms) => {
                 let ms: Vec<TyId> = self.tys(ms).to_vec();
@@ -611,7 +621,7 @@ impl Types {
     pub fn has_param(&self, ty: TyId) -> bool {
         match *self.get(ty) {
             Ty::Param(_) => true,
-            Ty::Array(e) | Ty::Set(e) | Ty::Expect(e) => self.has_param(e),
+            Ty::Array(e) | Ty::Set(e) | Ty::Gen(e) | Ty::Expect(e) => self.has_param(e),
             Ty::Map(k, v) | Ty::Promise(k, v) => self.has_param(k) || self.has_param(v),
             Ty::Record(fs) => self.fields(fs).iter().any(|f| self.has_param(f.ty)),
             Ty::Union(ms) => self.tys(ms).iter().any(|&m| self.has_param(m)),
@@ -628,7 +638,7 @@ impl Types {
         }
         match *self.get(ty) {
             Ty::Param(p) => params.contains(&p),
-            Ty::Array(e) | Ty::Set(e) | Ty::Expect(e) => self.mentions(e, params),
+            Ty::Array(e) | Ty::Set(e) | Ty::Gen(e) | Ty::Expect(e) => self.mentions(e, params),
             Ty::Map(k, v) | Ty::Promise(k, v) => self.mentions(k, params) || self.mentions(v, params),
             Ty::Record(fs) => self.fields(fs).iter().any(|f| self.mentions(f.ty, params)),
             Ty::Union(ms) => self.tys(ms).iter().any(|&m| self.mentions(m, params)),
@@ -703,6 +713,11 @@ impl Display<'_> {
             Ty::Decimal => out.push_str("decimal"),
             Ty::Str => out.push_str("string"),
             Ty::BoolLit(b) => out.push_str(if b { "true" } else { "false" }),
+            Ty::Gen(t) => {
+                out.push_str("Generator<");
+                self.write(t, out, false);
+                out.push('>');
+            }
             Ty::StrLit(s) => {
                 out.push('"');
                 out.push_str(self.interner.get(s));

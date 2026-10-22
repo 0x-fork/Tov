@@ -427,7 +427,7 @@ impl Walk<'_, '_> {
     fn fresh(&self, e: ExprId) -> bool {
         match &self.ast.expr(e).kind {
             ExprKind::Object(_) | ExprKind::Array(_) => true,
-            ExprKind::Paren(x) | ExprKind::NonNull(x) | ExprKind::As(x, _) | ExprKind::Try(x) | ExprKind::Await(x) => self.fresh(*x),
+            ExprKind::Paren(x) | ExprKind::NonNull(x) | ExprKind::As(x, _) | ExprKind::Try(x) | ExprKind::Await(x) | ExprKind::Yield(Some(x), _) => self.fresh(*x),
             ExprKind::Cond(_, a, b) | ExprKind::Binary(crate::ast::BinOp::And | crate::ast::BinOp::Or | crate::ast::BinOp::Nullish, a, b) => self.fresh(*a) && self.fresh(*b),
             ExprKind::Undefined | ExprKind::Null => true,
             ExprKind::Call { .. } | ExprKind::New { .. } => match self.facts.calls.get(&e).map(|c| &c.callee) {
@@ -462,7 +462,7 @@ impl Walk<'_, '_> {
                 self.expr(*index, Ctx::Free);
             }
             ExprKind::Paren(x) | ExprKind::NonNull(x) | ExprKind::As(x, _) | ExprKind::Try(x) => self.expr(*x, ctx),
-            ExprKind::Unary(_, x) | ExprKind::Typeof(x) | ExprKind::Await(x) => self.expr(*x, Ctx::Free),
+            ExprKind::Unary(_, x) | ExprKind::Typeof(x) | ExprKind::Await(x) | ExprKind::Yield(Some(x), _) => self.expr(*x, Ctx::Free),
             ExprKind::Spread(x) => {
                 let t = self.ty(*x);
                 self.copied(t, true);

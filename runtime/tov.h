@@ -159,6 +159,18 @@ tv_str tv_str_from(const char *bytes, size_t n);
 tv_str tv_str_from_sb(tv_sb *sb);               /* takes the builder's contents; sb is reset */
 tv_str tv_str_concat(tv_str a, tv_str b);
 tv_str tv_str_concatn(const tv_str *parts, int n);   /* a + b + c ...: one new string */
+/* A generator: its frame, resumed by `next` until it finishes (resume returns true). `yv` points
+ * at the frame's last yielded value; drop releases what the frame holds and frees it. */
+typedef struct tv_gen { int64_t rc; void *F; bool (*resume)(void *F); void (*drop)(void *F); void *yv; bool done; } tv_gen;
+tv_gen *tv_gen_new(void *F, bool (*resume)(void *F), void (*drop)(void *F), void *yv);
+static inline bool tv_gen_next(tv_gen *g) {   /* true once it's finished (nothing yielded) */
+    if (g->done) return true;
+    if (g->resume(g->F)) { g->done = true; return true; }
+    return false;
+}
+static inline void tv_gen_retain(tv_gen *g) { if (g) g->rc++; }
+void tv_gen_release(tv_gen *g);
+extern const tv_type tv_type_gen;
 bool tv_str_eq(tv_str a, tv_str b);
 int tv_str_cmp(tv_str a, tv_str b);             /* byte order == code point order */
 uint64_t tv_str_hash(tv_str s);
@@ -378,6 +390,8 @@ typedef int8_t TV_I8S;
 void *tv_arr_at_mut(tv_arr *a, const tv_type *t, tv_int i, const char *loc);
 
 void tv_arr_push(tv_arr *a, const tv_type *t, void *elem);         /* moves elem */
+tv_arr tv_gen_collect(tv_gen *g, const tv_type *t);   /* every value it yields (retained), in an array */
+tv_gen *tv_gen_of_arr(tv_arr a, const tv_type *t);    /* a generator over an array's elements (takes a)  */
 static inline void tv_arr_push_fast(tv_arr *a, const tv_type *t, void *elem) {
     if (a->p && a->p->rc > 0 && a->p->len < a->p->cap) {
         memcpy(tv_arrbuf_data(a->p) + (size_t)a->p->len * t->size, elem, t->size);

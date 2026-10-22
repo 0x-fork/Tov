@@ -76,6 +76,8 @@ pub(crate) struct Body {
     pub handlers: Vec<(String, usize)>,
     /// An async function's body (module, item): its locals live in a frame (see asyncfn.rs).
     pub async_fn: Option<(u32, u32)>,
+    /// A generator's body: what it yields.
+    pub gen_elem: Option<TyId>,
     /// Awaited calls embedded in the frame: (union member, frame type).
     pub children: Vec<(String, String)>,
     /// Enclosing `try` blocks that have a `finally`, innermost last: (the `finally` block, scope
@@ -277,6 +279,7 @@ impl<'c, 'a> Gen<'c, 'a> {
             owned_once: FxSet::default(),
             handlers: Vec::new(),
             async_fn: None,
+            gen_elem: None,
             children: Vec::new(),
             finallies: Vec::new(),
             tre: None,
@@ -476,6 +479,7 @@ impl<'c, 'a> Gen<'c, 'a> {
             owned_once: FxSet::default(),
             handlers: Vec::new(),
             async_fn: self.pending_async.take(),
+            gen_elem: self.pending_gen.take(),
             children: Vec::new(),
             finallies: Vec::new(),
             tre: self.pending_tre.take(),
@@ -2661,6 +2665,12 @@ impl<'c, 'a> Gen<'c, 'a> {
                         self.open(&format!("while (tv_map_next({sn}, {kd}, &tv_type_undefined, &{cur}, &{cur}k, &{cur}v)) {{"));
                         self.line(format!("{ect} {var} = *({ect} *){cur}k;"));
                     }
+                    // a generator: each value it yields (borrowed from it until the next one)
+                    Ty::Gen(_) => {
+                        self.open("for (;;) {");
+                        self.line(format!("if (tv_gen_next({sn})) break;"));
+                        self.line(format!("{ect} {var} = *({ect} *){sn}->yv;"));
+                    }
                     _ => {
                         let idx = self.fresh("i");
                         self.open(&format!("for (tv_int {idx} = 0; {idx} < tv_arr_len({sn}); {idx}++) {{"));
@@ -3157,6 +3167,7 @@ impl<'c, 'a> Gen<'c, 'a> {
                 Val::plain("0", ty)
             }
             // `(a, b)`: a for its effects, then b's value
+            ExprKind::Yield(v, delegate) => self.yield_expr(*v, *delegate, span),
             ExprKind::Seq(xs) => {
                 let (last, init) = xs.split_last().expect("a sequence has expressions");
                 for &x in init {
@@ -3646,6 +3657,13 @@ impl<'c, 'a> Gen<'c, 'a> {
         }
         if to == JS {
             return self.js_of(v);
+        }
+        // (an array where something iterable is wanted: a generator over it)
+        if let (Ty::Array(e), Ty::Gen(_)) = (self.tget(from), self.tget(to)) {
+            let v = self.own(v);
+            let code = self.consume(v);
+            let d = self.desc(e);
+            return self.tmp(to, &format!("tv_gen_of_arr({code}, {d})"), true);
         }
         // (a typed array's element into a union of numbers: `bytes[i]` read as `int | undefined`)
         if matches!(self.tget(from), Ty::I8 | Ty::I16 | Ty::I32 | Ty::U8 | Ty::U16 | Ty::U32)
@@ -6015,6 +6033,7 @@ impl<'c, 'a> Gen<'c, 'a> {
             owned_once: FxSet::default(),
             handlers: Vec::new(),
             async_fn: self.pending_async.take(),
+            gen_elem: self.pending_gen.take(),
             children: Vec::new(),
             finallies: Vec::new(),
             tre: None,
@@ -6220,7 +6239,7 @@ pub(crate) fn collect_exprs_stmt(ast: &ast::Ast, s: StmtId, out: &mut Vec<ExprId
 pub(crate) fn collect_exprs_expr(ast: &ast::Ast, e: ExprId, out: &mut Vec<ExprId>) {
     out.push(e);
     match &ast.expr(e).kind {
-        ExprKind::Unary(_, x) | ExprKind::Paren(x) | ExprKind::NonNull(x) | ExprKind::Typeof(x) | ExprKind::Spread(x) | ExprKind::As(x, _) | ExprKind::Try(x) | ExprKind::Await(x) => collect_exprs_expr(ast, *x, out),
+        ExprKind::Unary(_, x) | ExprKind::Paren(x) | ExprKind::NonNull(x) | ExprKind::Typeof(x) | ExprKind::Spread(x) | ExprKind::As(x, _) | ExprKind::Try(x) | ExprKind::Await(x) | ExprKind::Yield(Some(x), _) => collect_exprs_expr(ast, *x, out),
         ExprKind::Binary(_, l, r) | ExprKind::Assign(_, l, r) => {
             collect_exprs_expr(ast, *l, out);
             collect_exprs_expr(ast, *r, out);

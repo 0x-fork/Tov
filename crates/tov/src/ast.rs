@@ -26,6 +26,8 @@ pub struct Ast {
     /// Comparisons a rewrite made (`k === "a"` choosing a field): never reported as always
     /// false, as where `k` is known.
     pub quiet_tests: Vec<ExprId>,
+    /// The name `__iterator` (`[Symbol.iterator]` methods), for rewrites that call it.
+    pub iterator_sym: Option<Sym>,
 }
 
 impl Ast {
@@ -191,6 +193,8 @@ pub enum ExprKind {
     Array(Vec<ExprId>),
     Arrow(Box<ArrowFn>),
     Cond(ExprId, ExprId, ExprId),
+    /// `yield x` (`None`: `yield` alone); `yield* xs` when true.
+    Yield(Option<ExprId>, bool),
     As(ExprId, TypeId),
     NonNull(ExprId),
     Typeof(ExprId),
@@ -308,6 +312,8 @@ pub struct FnDecl {
     pub body: StmtId,
     /// `async function` / `async method()`; a script whose top level uses `await`.
     pub is_async: bool,
+    /// `function*` / `*method()`: a generator.
+    pub is_gen: bool,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]

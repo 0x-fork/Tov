@@ -376,9 +376,16 @@ impl<'a> Checker<'a> {
             StmtKind::ForOf { mutable, name, name_span, iter, body } => {
                 let t = self.expr(*iter, None);
                 let ispan = self.ast().expr(*iter).span;
-                let elem = match *self.types.get(t) {
-                    Ty::Array(e) | Ty::Set(e) => e,
+                let tt = *self.types.get(t);
+                let elem = match tt {
+                    Ty::Array(e) | Ty::Set(e) | Ty::Gen(e) => e,
                     Ty::Error => ERROR,
+                    // an instance of a class with `[Symbol.iterator]()`: what that gives (rewritten
+                    // as `x.__iterator()`)
+                    _ if let Some(e) = self.iterator_of(t) => {
+                        self.rewrites.iterators.push((self.cur, *iter));
+                        e
+                    }
                     // a string's characters (code points), as in JavaScript
                     Ty::Str | Ty::StrLit(_) => STR,
                     // a map's entries, `[key, value]`, as in JavaScript
@@ -1029,7 +1036,7 @@ fn collect_assigned_expr(ast: &Ast, e: ExprId, out: &mut Vec<Sym>) {
                 out.push(s);
             }
         }
-        ExprKind::Unary(_, x) | ExprKind::Paren(x) | ExprKind::NonNull(x) | ExprKind::Typeof(x) | ExprKind::Spread(x) | ExprKind::As(x, _) | ExprKind::Try(x) | ExprKind::Await(x) => collect_assigned_expr(ast, *x, out),
+        ExprKind::Unary(_, x) | ExprKind::Paren(x) | ExprKind::NonNull(x) | ExprKind::Typeof(x) | ExprKind::Spread(x) | ExprKind::As(x, _) | ExprKind::Try(x) | ExprKind::Await(x) | ExprKind::Yield(Some(x), _) => collect_assigned_expr(ast, *x, out),
         ExprKind::Binary(_, l, r) => {
             collect_assigned_expr(ast, *l, out);
             collect_assigned_expr(ast, *r, out);
@@ -1165,7 +1172,7 @@ fn effects_into(ast: &Ast, e: ExprId, fx: &mut Effects) {
             fx.call = true;
             effects_into(ast, *obj, fx);
         }
-        ExprKind::Unary(_, x) | ExprKind::Paren(x) | ExprKind::NonNull(x) | ExprKind::Typeof(x) | ExprKind::Spread(x) | ExprKind::As(x, _) | ExprKind::Try(x) | ExprKind::Await(x) => effects_into(ast, *x, fx),
+        ExprKind::Unary(_, x) | ExprKind::Paren(x) | ExprKind::NonNull(x) | ExprKind::Typeof(x) | ExprKind::Spread(x) | ExprKind::As(x, _) | ExprKind::Try(x) | ExprKind::Await(x) | ExprKind::Yield(Some(x), _) => effects_into(ast, *x, fx),
         ExprKind::Binary(_, l, r) => {
             effects_into(ast, *l, fx);
             effects_into(ast, *r, fx);
@@ -1338,7 +1345,7 @@ fn closure_mutated_into(ast: &Ast, e: ExprId, inside: bool, out: &mut (HashSet<S
 
 fn collect_children(ast: &Ast, e: ExprId, out: &mut Vec<ExprId>) {
     match &ast.expr(e).kind {
-        ExprKind::Unary(_, x) | ExprKind::Paren(x) | ExprKind::NonNull(x) | ExprKind::Typeof(x) | ExprKind::Spread(x) | ExprKind::As(x, _) | ExprKind::Try(x) | ExprKind::Await(x) => out.push(*x),
+        ExprKind::Unary(_, x) | ExprKind::Paren(x) | ExprKind::NonNull(x) | ExprKind::Typeof(x) | ExprKind::Spread(x) | ExprKind::As(x, _) | ExprKind::Try(x) | ExprKind::Await(x) | ExprKind::Yield(Some(x), _) => out.push(*x),
         ExprKind::Binary(_, l, r) | ExprKind::Assign(_, l, r) => out.extend([*l, *r]),
         ExprKind::Update { target, .. } => out.push(*target),
         ExprKind::Call { callee, args, .. } | ExprKind::New { callee, args, .. } => {
