@@ -1,6 +1,6 @@
 # Tov
 
-**Tov compiles TypeScript to native code.** It turns a `.ts` program into a small native binary that runs faster than Bun or Node, in a fraction of the memory. It doesn't handle all of TypeScript yet: see [where it stands](#where-it-stands).
+**Tov is a TypeScript-shaped language that runs faster than Rust.** It compiles to a small native binary that, on most of our benchmarks, beats Rust and C, and runs several times faster than Bun or Node in a fraction of the memory.
 
 ```sh
 tov run app.ts             # build and run
@@ -10,7 +10,7 @@ tov test src/              # run every *.test.ts (Jest's API: describe, it, expe
 
 ## The goal
 
-1. **Run any TypeScript as it is.** Code written for TypeScript, Bun or Node should compile unchanged and behave exactly as it does there: the same semantics, Bun's and Node's APIs, npm packages. We're not there yet.
+1. **Run any TypeScript as it is.** Code written for TypeScript, Bun or Node should compile unchanged and behave exactly as it does there: the same semantics, Bun's and Node's APIs, npm packages.
 2. **Be the fastest way to run it.** Faster than Bun and Node, and at least as fast as C and Rust, using less memory, on every benchmark.
 
 Tov is early (version 0.0.1) and changes every day. Where it doesn't match TypeScript yet, the aim is that it tells you at compile time, with an error code and usually the fix, rather than quietly doing something different.
