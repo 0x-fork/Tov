@@ -203,6 +203,11 @@ struct FnCtx {
     tscope: Vec<(Sym, TyId)>,
     promoted: HashSet<u32>,
     pending: HashSet<u32>,
+    /// `const xs = []` (no type written) whose elements an earlier check of the body found in
+    /// what it's given (`xs.push(x)`, `xs[i] = x`): the element type, by declaration.
+    evolved: HashMap<u32, TyId>,
+    /// Such arrays this check: what they're given so far (see `evolve`), and where they are.
+    evolving: Vec<(u32, Span, Vec<TyId>)>,
     /// A non-exhaustive `switch` was reported; "missing return" would only repeat it.
     reported_nonexhaustive: bool,
     /// Narrowings of field paths (`t.left`): (local, path, narrowed type or `None` = invalidated).
@@ -1316,17 +1321,49 @@ impl<'a> Checker<'a> {
     fn check_test(&mut self, body: ExprId) {
         let expected = self.types.func(Vec::new(), VOID);
         let (closure_mutated, closure_assigned) = stmt::closure_mutated_expr(self.ast(), body);
-        self.fcx.push(FnCtx { closure_mutated, closure_assigned, test_body: true, ..Default::default() });
-        self.fcx.last_mut().unwrap().scopes.push(Vec::new());
-        let t = self.expr(body, Some(expected));
-        if !self.assignable(t, expected) {
-            let span = self.ast().expr(body).span;
-            let msg = format!("a test body must be `() => {{ ... }}`, found `{}`", self.show(t));
-            self.report(Diagnostic::new("T0001", span, msg));
+        let mut evolved = HashMap::default();
+        let saved = std::mem::take(&mut self.diags);
+        for _round in 0..4 {
+            self.diags.clear();
+            self.fcx.push(FnCtx { closure_mutated: closure_mutated.clone(), closure_assigned: closure_assigned.clone(), test_body: true, evolved: std::mem::take(&mut evolved), ..Default::default() });
+            self.fcx.last_mut().unwrap().scopes.push(Vec::new());
+            let t = self.expr(body, Some(expected));
+            if !self.assignable(t, expected) {
+                let span = self.ast().expr(body).span;
+                let msg = format!("a test body must be `() => {{ ... }}`, found `{}`", self.show(t));
+                self.report(Diagnostic::new("T0001", span, msg));
+            }
+            let fcx = self.fcx.pop().unwrap();
+            evolved = fcx.evolved;
+            if !self.settle_evolving(&mut evolved, fcx.evolving) {
+                break;
+            }
         }
-        self.fcx.pop();
+        let produced = std::mem::replace(&mut self.diags, saved);
+        self.diags.extend(produced);
         let produced = std::mem::take(&mut self.diags);
         self.done.extend(produced);
+    }
+
+    /// After a check of a body: the element types its untyped empty arrays were given join
+    /// `evolved` (true when any did: the body is checked again with them); one given nothing
+    /// is reported, as TypeScript can't type it either.
+    fn settle_evolving(&mut self, evolved: &mut HashMap<u32, TyId>, evolving: Vec<(u32, Span, Vec<TyId>)>) -> bool {
+        let mut grew = false;
+        for (key, span, given) in evolving {
+            if given.is_empty() {
+                self.report(
+                    Diagnostic::new("T0301", span, "can't infer the element type of an empty array")
+                        .note("instead", "annotate the binding: `const xs: T[] = []`"),
+                );
+                continue;
+            }
+            let t = self.types.union(&given);
+            if evolved.insert(key, t) != Some(t) {
+                grew = true;
+            }
+        }
+        grew
     }
 
     fn const_type(&mut self, m: u32, ii: u32) -> TyId {
@@ -1697,12 +1734,13 @@ impl<'a> Checker<'a> {
     /// Returns the (declared or inferred) return type and the errors the body lets out.
     pub(crate) fn check_decl_body(&mut self, m: u32, f: &'a ast::FnDecl, sig: &Sig, tscope: &[(Sym, TyId)], ret: Option<TyId>, this: Option<class::ThisInfo>, class: Option<u32>) -> (TyId, TyId) {
         let mut promoted = HashSet::default();
+        let mut evolved = HashMap::default();
         let mut result = ERROR;
         let mut thrown = NEVER;
         let saved = std::mem::take(&mut self.diags);
         for _round in 0..4 {
             self.diags.clear();
-            let mut fcx = FnCtx { tscope: tscope.to_vec(), promoted: promoted.clone(), ..Default::default() };
+            let mut fcx = FnCtx { tscope: tscope.to_vec(), promoted: promoted.clone(), evolved: std::mem::take(&mut evolved), ..Default::default() };
             (fcx.closure_mutated, fcx.closure_assigned) = stmt::closure_mutated_stmt(&self.modules[m as usize].ast, f.body);
             fcx.scopes.push(Vec::new());
             // Without a `throws` clause the body's own `throw`s and the calls it makes decide.
@@ -1788,7 +1826,9 @@ impl<'a> Checker<'a> {
                 self.throw_hits.push((m, f.body));
             }
             let new: Vec<u32> = fcx.pending.difference(&promoted).copied().collect();
-            if new.is_empty() {
+            evolved = fcx.evolved;
+            let grew = self.settle_evolving(&mut evolved, fcx.evolving);
+            if new.is_empty() && !grew {
                 break;
             }
             promoted.extend(new);

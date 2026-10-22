@@ -632,6 +632,18 @@ impl Types {
     }
 
     /// True if `ty` mentions any generic parameter in `params`.
+    /// `ty` is, or holds, the error type (an element still unknown: `[]` given nothing yet).
+    pub fn mentions_error(&self, ty: TyId) -> bool {
+        match *self.get(ty) {
+            Ty::Error => true,
+            Ty::Array(e) | Ty::Set(e) => self.mentions_error(e),
+            Ty::Map(k, v) => self.mentions_error(k) || self.mentions_error(v),
+            Ty::Record(fs) => self.fields(fs).iter().any(|f| self.mentions_error(f.ty)),
+            Ty::Union(ms) => self.tys(ms).iter().any(|&m| self.mentions_error(m)),
+            _ => false,
+        }
+    }
+
     pub fn mentions(&self, ty: TyId, params: &[u32]) -> bool {
         if params.is_empty() {
             return false;

@@ -189,6 +189,23 @@ impl<'a> Checker<'a> {
                         }
                         (declared, false)
                     }
+                    // `const xs = []`: its elements are what it's given later (`xs.push(x)`), as
+                    // TypeScript's evolving arrays (found by a first check of the body, see
+                    // `settle_evolving`)
+                    (None, Some(i)) if matches!(&self.ast().expr(*i).kind, ExprKind::Array(xs) if xs.is_empty()) && !self.fcx.is_empty() => {
+                        let key = name_span.start;
+                        let elem = match self.fcx.last().unwrap().evolved.get(&key) {
+                            Some(&e) => e,
+                            None => {
+                                let span = self.ast().expr(*i).span;
+                                self.fcx().evolving.push((key, span, Vec::new()));
+                                ERROR
+                            }
+                        };
+                        let t = self.types.array(elem);
+                        self.expr(*i, Some(t));
+                        (t, false)
+                    }
                     (None, Some(i)) => {
                         let found = match self.recursive_arrow(*name, *name_span, *i, kind) {
                             Some(t) => t,

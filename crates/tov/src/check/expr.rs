@@ -217,6 +217,13 @@ impl<'a> Checker<'a> {
                 if let Some(ty) = self.keyed_place(e, *t, Some(*v)) {
                     return ty;
                 }
+                // `xs[i] = x` on an untyped `const xs = []`: its elements are what it's given
+                if *op == AssignOp::Assign
+                    && let ExprKind::Index { obj, .. } = self.ast().expr(*t).kind
+                    && let Some(slot) = self.evolving_slot(obj)
+                {
+                    self.evolve(slot, &[Arg { expr: *v, by_ref: None }]);
+                }
                 if let Some(setter) = self.setter_of(*t) {
                     // (rewritten as `x.__set_name(v)`, checked then)
                     self.expr(*t, None);
@@ -1342,6 +1349,32 @@ impl<'a> Checker<'a> {
                 },
             },
             _ => Root::Temp,
+        }
+    }
+
+    /// `xs` (an expression), when it's an untyped empty array still finding its elements (see
+    /// `settle_evolving`): its entry in this check's `evolving`.
+    pub(super) fn evolving_slot(&self, xs: ExprId) -> Option<usize> {
+        let ExprKind::Ident(s) = self.ast().expr(xs).kind else { return None };
+        let (id, _) = self.lookup(s)?;
+        let fcx = self.fcx.last()?;
+        let key = fcx.locals[id].span.start;
+        fcx.evolving.iter().position(|e| e.0 == key)
+    }
+
+    /// The array at `slot` is given the values `args`: their types join its elements'.
+    pub(super) fn evolve(&mut self, slot: usize, args: &[Arg]) {
+        for a in args {
+            if matches!(self.ast().expr(a.expr).kind, ExprKind::Spread(_)) {
+                continue;
+            }
+            let mark = self.diags.len();
+            let t = self.expr(a.expr, None);
+            self.diags.truncate(mark);
+            let t = self.types.widen(t);
+            if t != ERROR && !self.types.mentions_error(t) {
+                self.fcx().evolving[slot].2.push(t);
+            }
         }
     }
 
@@ -2655,8 +2688,11 @@ impl<'a> Checker<'a> {
     /// `a` and `b` as one type, TypeScript's `number` being `int` or `f64` (`int[]` and `f64[]`
     /// are `f64[]`; tuples join by element), else their union.
     fn join_numbers(&mut self, a: TyId, b: TyId) -> TyId {
-        if a == b {
+        if a == b || b == NEVER {
             return a;
+        }
+        if a == NEVER {
+            return b;
         }
         if self.types.is_numeric(a) && self.types.is_numeric(b) {
             return if self.types.is_float(a) { a } else { b };
@@ -2685,7 +2721,8 @@ impl<'a> Checker<'a> {
         }
         let xs = xs.clone();
         let mark = self.diags.len();
-        let tys: Vec<TyId> = xs.iter().map(|&el| self.expr(el, None)).collect();
+        // (an empty array's elements come from the other rows': `[[1, 2], 3]`, `[[], 0]`)
+        let tys: Vec<TyId> = xs.iter().map(|&el| if matches!(&self.ast().expr(el).kind, ExprKind::Array(e) if e.is_empty()) { self.types.array(NEVER) } else { self.expr(el, None) }).collect();
         self.diags.truncate(mark);
         let wide: Vec<TyId> = tys.iter().map(|&t| self.types.widen(t)).collect();
         let one_type = wide.iter().all(|&t| t == wide[0]) || wide.iter().all(|&t| self.types.is_numeric(t));
@@ -3679,6 +3716,12 @@ impl<'a> Checker<'a> {
                     // (its callbacks may throw: the call then throws what they do)
                     let sig = self.throwing_callbacks(&ms.sig);
                     let mark = self.cb_throws.len();
+                    // `xs.push(x)` on an untyped `const xs = []`: its elements are what it's given
+                    if matches!(mtext.as_str(), "push" | "unshift")
+                        && let Some(slot) = self.evolving_slot(obj)
+                    {
+                        self.evolve(slot, args);
+                    }
                     let r = self.call_sig(&sig, &desc, type_args, args, exp, span);
                     // `xs.filter((x): x is T => ...)`, `xs.find(isT)`: of what passes
                     let r = match (*self.types.get(base), mtext.as_str(), args) {
