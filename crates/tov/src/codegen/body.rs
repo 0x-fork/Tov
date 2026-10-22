@@ -691,6 +691,21 @@ impl<'c, 'a> Gen<'c, 'a> {
                 }
                 e
             };
+            // (the same variable, or field of one, read twice: no getter runs)
+            let facts = self.facts(m);
+            fn same(ast: &ast::Ast, facts: &crate::check::facts::ModuleFacts, a: ExprId, b: ExprId) -> bool {
+                match (&ast.expr(a).kind, &ast.expr(b).kind) {
+                    (ExprKind::Paren(x), _) => same(ast, facts, *x, b),
+                    (_, ExprKind::Paren(y)) => same(ast, facts, a, *y),
+                    (ExprKind::Ident(x), ExprKind::Ident(y)) => x == y && facts.idents.get(&a).is_some_and(|f| matches!(f, IdentFact::Local(_) | IdentFact::Const(..))) && facts.idents.get(&a) == facts.idents.get(&b),
+                    (ExprKind::This, ExprKind::This) => true,
+                    (ExprKind::Member { obj: o1, name: n1, optional: false, .. }, ExprKind::Member { obj: o2, name: n2, optional: false, .. }) => {
+                        n1 == n2 && !facts.calls.contains_key(&a) && !facts.calls.contains_key(&b) && !facts.members.contains_key(&a) && same(ast, facts, *o1, *o2)
+                    }
+                    _ => false,
+                }
+            }
+            let same_path = |a: ExprId, b: ExprId| same(ast, facts, a, b);
             let method = |e: ExprId, name: &str| -> Option<(ExprId, Vec<ExprId>)> {
                 let ExprKind::Call { callee, args, optional: false, .. } = &ast.expr(e).kind else { return None };
                 let ExprKind::Member { obj, name: n, optional: false, .. } = &ast.expr(*callee).kind else { return None };
@@ -708,7 +723,7 @@ impl<'c, 'a> Gen<'c, 'a> {
                 let ExprKind::Binary(BinOp::Nullish, g, d) = &ast.expr(strip(*l)).kind else { return None };
                 let (gobj, gargs) = method(strip(*g), "get")?;
                 let [k2] = gargs[..] else { return None };
-                let same = local(gobj).is_some() && local(gobj) == local(mobj) && local(k2).is_some() && local(k2) == local(k);
+                let same = same_path(gobj, mobj) && same_path(k2, k);
                 same.then_some((mobj, k, *op, *e, *d, v))
             };
             // this statement, or `const k = s.slice(a, b)` and it next (`k` used nowhere after them)
@@ -735,14 +750,17 @@ impl<'c, 'a> Gen<'c, 'a> {
                 }
             };
             let (mobj, k, _, e, d, _) = found;
-            let (mk, kk) = (local(mobj)?, local(k)?);
+            let (mk, kk) = (local(mobj), local(k));
+            if slice.is_some() && kk.is_none() {
+                return None;
+            }
             let simple = |x: ExprId| matches!(ast.expr(x).kind, ExprKind::Int(_) | ExprKind::Float(_));
             // (`e` runs after the lookup instead of before it: nothing in it may call or read the map)
             let mut es = Vec::new();
             collect_exprs_expr(ast, e, &mut es);
             let e_ok = es.iter().all(|&x| match &ast.expr(x).kind {
                 ExprKind::Int(_) | ExprKind::Float(_) | ExprKind::Paren(_) | ExprKind::Binary(..) | ExprKind::Unary(..) | ExprKind::Cond(..) => true,
-                ExprKind::Ident(_) => local(x).is_some_and(|x| x != mk),
+                ExprKind::Ident(_) => local(x).is_some_and(|x| Some(x) != mk),
                 // (a record's field, or a length: no getter runs)
                 ExprKind::Member { obj, name, optional: false, .. } => {
                     let ot = self.facts(m).expr_ty.get(*obj as usize).copied().unwrap_or(ERROR);
@@ -750,7 +768,7 @@ impl<'c, 'a> Gen<'c, 'a> {
                 }
                 _ => false,
             });
-            if mk == kk || !simple(d) || !e_ok {
+            if (mk.is_some() && mk == kk) || !simple(d) || !e_ok {
                 return None;
             }
             (found, slice, kk)
@@ -763,7 +781,7 @@ impl<'c, 'a> Gen<'c, 'a> {
         }
         if let Some((_, sobj, _)) = &slice {
             let st = self.ty(*sobj);
-            if !matches!(self.tget(st), Ty::Str) || !boxed_ok(self, kk) {
+            if !matches!(self.tget(st), Ty::Str) || !kk.is_some_and(|kk| boxed_ok(self, kk)) {
                 return None;
             }
         }
