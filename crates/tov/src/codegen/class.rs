@@ -1227,6 +1227,19 @@ impl<'c, 'a> Gen<'c, 'a> {
             gv_out.push_str(code);
         }
         out = gv_out + &out;
+        if self.class_names_used {
+            let mut cases = String::new();
+            for t in &insts {
+                let ci = self.class_insts[t].clone();
+                let name = &self.c.class_names[ci.decl as usize];
+                let _ = writeln!(cases, "    case {}: return tv_str_from({}, {});", ci.cid, c_string(name.as_bytes()), name.len());
+            }
+            let _ = writeln!(out, "static tv_str tvg_cname(uint32_t cid) {{
+    switch (cid) {{
+{cases}    default: return TV_EMPTY_STR;
+    }}
+}}");
+        }
         let decls: Vec<u32> = self.isa_decls.iter().copied().collect();
         for d in decls {
             let mut cases = String::new();

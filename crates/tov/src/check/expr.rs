@@ -1767,6 +1767,22 @@ impl<'a> Checker<'a> {
             self.report(Diagnostic::new("T0801", span, format!("`super.{n}` must be called; base fields are read through `this.{n}`")));
             return ERROR;
         }
+        // `x.constructor.name`: the name of x's class (a subclass's, for one)
+        if self.name(name) == "name"
+            && let ExprKind::Member { obj: inst, name: cn, optional: false, .. } = self.ast().expr(obj).kind
+            && self.name(cn) == "constructor"
+        {
+            let t = self.expr(inst, None);
+            if t != ERROR && !matches!(self.types.get(t), Ty::Class(..)) {
+                let msg = format!("`.constructor.name` needs a class instance, found `{}`", self.show(t));
+                self.report(Diagnostic::new("T0107", span, msg));
+                return ERROR;
+            }
+            if let Some(f) = self.facts_mut() {
+                f.members.insert(e, MemberFact::ClassName(inst));
+            }
+            return STR;
+        }
         // `m.keys().next().value`: the first key (an LRU cache's oldest), or `undefined`
         if self.name(name) == "value"
             && let ExprKind::Call { callee: next, args: a1, optional: false, .. } = &self.ast().expr(obj).kind

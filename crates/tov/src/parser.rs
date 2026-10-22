@@ -17,7 +17,7 @@ pub fn parse(src: &str, file: FileId, interner: &mut Interner) -> (Ast, Vec<Diag
             lexed.tokens[i].kind = Tok::Ident;
         }
     }
-    let mut p = Parser { src, toks: lexed.tokens, strings: lexed.strings, pos: 0, file, interner, ast: Ast::default(), diags, script_stmts: Vec::new(), defaults: Vec::new(), more_stmts: Vec::new(), hidden: 0, prologue: Vec::new(), index_sig: None, local_fns: Vec::new(), prop_defaults: false, extra_members: Vec::new() };
+    let mut p = Parser { src, toks: lexed.tokens, strings: lexed.strings, pos: 0, file, interner, ast: Ast::default(), diags, script_stmts: Vec::new(), defaults: Vec::new(), more_stmts: Vec::new(), hidden: 0, prologue: Vec::new(), index_sig: None, local_fns: Vec::new(), prop_defaults: false, extra_members: Vec::new(), generic_arrows: Vec::new() };
     p.module();
     (p.ast, p.diags)
 }
@@ -51,6 +51,9 @@ struct Parser<'a> {
     prop_defaults: bool,
     /// Fields made from a constructor's parameter properties, for the class being parsed.
     extra_members: Vec<ClassMember>,
+    /// Generic arrow functions (`<T>(x: T) => x`): the arrow, its type parameters, where it starts
+    /// (a top-level `const` of one becomes a generic function; any other is an error).
+    generic_arrows: Vec<(ExprId, Vec<TypeParam>, Span)>,
 }
 
 /// A destructuring pattern (desugared into `let`s).
@@ -240,11 +243,13 @@ impl<'a> Parser<'a> {
     /// Runs `f`; if it fails or reports errors, rewinds as if it never ran.
     fn speculate<T>(&mut self, f: impl FnOnce(&mut Self) -> Option<T>) -> Option<T> {
         let (pos, nd, ne, ns, nt, ndf, npr) = (self.pos, self.diags.len(), self.ast.exprs.len(), self.ast.stmts.len(), self.ast.types.len(), self.defaults.len(), self.prologue.len());
+        let ng = self.generic_arrows.len();
         let r = f(self);
         if r.is_some() && self.diags.len() == nd {
             return r;
         }
         self.pos = pos;
+        self.generic_arrows.truncate(ng);
         self.defaults.truncate(ndf);
         self.prologue.truncate(npr);
         self.diags.truncate(nd);
@@ -336,6 +341,9 @@ impl<'a> Parser<'a> {
     /// A module with top-level statements is a script: its statements, and the initializers of
     /// its module variables, run in source order in a synthesized function `<script>`.
     fn finish_script(&mut self) {
+        for (_, _, at) in std::mem::take(&mut self.generic_arrows) {
+            self.err("U0015", at, "generic arrow functions are supported as a top-level `const` only; declare a generic `function`");
+        }
         let Some(first) = self.ast.script_span else { return };
         let mut body = Vec::new();
         let mut stmt_iter = std::mem::take(&mut self.script_stmts).into_iter().peekable();
@@ -1120,7 +1128,28 @@ impl<'a> Parser<'a> {
                 self.terminator();
             }
             let span = start.to(self.prev_span());
-            self.ast.items.push(Item { kind: ItemKind::Const { name, name_span, ty, init, mutable }, span, exported });
+            // `const id = <T>(x: T): T => x`: the generic function `id`
+            if ty.is_none()
+                && !mutable
+                && let Some(gi) = self.generic_arrows.iter().position(|g| g.0 == init)
+                && let ExprKind::Arrow(_) = &self.ast.exprs[init as usize].kind
+            {
+                let (_, tparams, _) = self.generic_arrows.remove(gi);
+                let ExprKind::Arrow(f) = std::mem::replace(&mut self.ast.exprs[init as usize].kind, ExprKind::Error) else { unreachable!() };
+                let f = *f;
+                let body = match f.body {
+                    ArrowBody::Block(b) => b,
+                    ArrowBody::Expr(x) => {
+                        let sp = self.expr_span(x);
+                        let r = self.mk_stmt(StmtKind::Return(Some(x)), sp);
+                        self.mk_stmt(StmtKind::Block(vec![r]), sp)
+                    }
+                };
+                let decl = FnDecl { name, name_span, tparams, params: f.params, ret: f.ret, throws: f.throws, body, is_async: f.is_async };
+                self.ast.items.push(Item { kind: ItemKind::Function(decl), span, exported });
+            } else {
+                self.ast.items.push(Item { kind: ItemKind::Const { name, name_span, ty, init, mutable }, span, exported });
+            }
             if !more {
                 return;
             }
@@ -2590,19 +2619,31 @@ impl<'a> Parser<'a> {
             self.bump(); // =>
             return Some(self.arrow_body(start, params, None, None));
         }
+        // (`<T>(`: the type parameters, read once the `(` shows it's an arrow)
+        let mut tps = Vec::new();
         if self.at(Tok::Lt)
-            && self.speculate(|p| {
-                p.tparams();
-                if p.at(Tok::LParen) { Some(()) } else { None }
+            && let Some(t) = self.speculate(|p| {
+                let t = p.tparams();
+                if p.at(Tok::LParen) { Some(t) } else { None }
             })
-            .is_some()
-            {
-                self.err("U0015", start, "generic arrow functions are not supported yet; declare a top-level generic `function`");
-                self.tparams();
-            }
+        {
+            tps = t;
+        }
         if !self.at(Tok::LParen) {
             return None;
         }
+        if !tps.is_empty() {
+            let r = self.arrow_after_parens(start);
+            if let Some(e) = r {
+                self.generic_arrows.push((e, tps, start));
+            }
+            return r;
+        }
+        self.arrow_after_parens(start)
+    }
+
+    /// An arrow function from its `(`: `(params) => body`, `(params): T => body`.
+    fn arrow_after_parens(&mut self, start: Span) -> Option<ExprId> {
         let close = self.matching_paren()?;
         let after = self.toks.get(close + 1).map(|t| t.kind);
         match after {

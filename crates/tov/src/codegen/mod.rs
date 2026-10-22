@@ -235,6 +235,8 @@ pub(crate) struct Gen<'c, 'a> {
     pub(crate) dispatch_bodies: String,
     pub(crate) overridden: FxMap<(u32, Sym), bool>,
     pub(crate) isa_decls: FxSet<u32>,
+    /// `x.constructor.name` read a class id: `tvg_cname` is emitted.
+    pub(crate) class_names_used: bool,
     pub(crate) class_work: Vec<class::ClassWork>,
     pub(crate) statics_done: FxSet<(u32, u32)>,
     pub(crate) ctor_move_memo: FxMap<u32, Vec<bool>>,
@@ -337,6 +339,7 @@ impl<'c, 'a> Gen<'c, 'a> {
             dispatch_bodies: String::new(),
             overridden: FxMap::default(),
             isa_decls: FxSet::default(),
+            class_names_used: false,
             class_work: Vec::new(),
             statics_done: FxSet::default(),
             ctor_move_memo: FxMap::default(),

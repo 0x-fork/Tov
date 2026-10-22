@@ -4697,6 +4697,28 @@ impl<'c, 'a> Gen<'c, 'a> {
             }
             Some(MemberFact::NsConst(cm, ci)) => return self.const_ref(cm, ci),
             Some(MemberFact::StaticField(c, mi)) => return self.static_field_ref(c, mi),
+            Some(MemberFact::ClassName(inst)) => {
+                let v = self.expr(inst);
+                let Some((decl, _)) = self.c.class_of(v.ty) else { return Val::plain("TV_EMPTY_STR", STR) };
+                let has_subclass = (0..self.c.classes.len() as u32).any(|d| d != decl && self.c.class_descends(d, decl));
+                if !has_subclass {
+                    let name = self.c.class_names[decl as usize].clone();
+                    let code = self.lit(name.as_bytes());
+                    return Val::plain(code, STR);
+                }
+                // (the object's class, read from its header)
+                self.cid_decls.insert(decl);
+                for d in 0..self.c.classes.len() as u32 {
+                    if self.c.class_descends(d, decl) {
+                        self.cid_decls.insert(d);
+                    }
+                }
+                if !self.class_names_used {
+                    self.class_names_used = true;
+                    let _ = writeln!(self.protos, "static tv_str tvg_cname(uint32_t cid);");
+                }
+                return self.tmp(STR, &format!("tvg_cname(((tvg_obj *)({}))->cid)", v.code), true);
+            }
             Some(MemberFact::First(coll, values)) => {
                 let cv = self.expr(coll);
                 let ct = self.c.types.without_undefined(cv.ty);

@@ -84,6 +84,8 @@ pub enum MemberFact {
     /// `m.keys().next().value` (`.values()` when true) on a map or set: its first key (value),
     /// `undefined` if it's empty, read without making the array (the expression `m`).
     First(ExprId, bool),
+    /// `x.constructor.name` on a class instance: its class's name (the expression `x`).
+    ClassName(ExprId),
     /// `process.env.NAME` (the variable's name).
     Env(Sym),
     /// `req.params` in a `routes` handler: the route's `:name` segments as this record type,
