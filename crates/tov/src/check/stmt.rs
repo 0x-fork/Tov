@@ -255,6 +255,18 @@ impl<'a> Checker<'a> {
                     {
                         self.want_optional = true;
                     }
+                    // `const peek = () => toks[pos]` whose results are tested (`const t = peek();
+                    // if (t ...)`): the read may find nothing too
+                    if let StmtKind::Let { ty: None, init: Some(x), name, .. } = &ast.stmt(st).kind
+                        && let ExprKind::Arrow(f) = &ast.expr(*x).kind
+                        && f.ret.is_none()
+                        && let ArrowBody::Expr(body) = f.body
+                        && matches!(ast.expr(body).kind, ExprKind::Index { .. })
+                        && results_tested(ast, *name, &stmts[i + 1..])
+                    {
+                        let m = self.cur;
+                        self.absent_reads.insert((m, body));
+                    }
                     self.stmt(st);
                 }
                 let ends = self.end_types(&fx.assigned, entry);
@@ -1370,11 +1382,18 @@ pub(crate) fn closure_groups(ast: &Ast, stmts: &[StmtId]) -> Vec<Vec<StmtId>> {
         }
         if j - i >= 2 {
             let run: Vec<(Sym, Span)> = stmts[i..j].iter().map(|&s| named(s).unwrap()).collect();
-            let forward = run.iter().enumerate().any(|(a, &(_, sp))| {
-                run[a + 1..].iter().any(|&(n, _)| ast.exprs.iter().any(|e| matches!(e.kind, ExprKind::Ident(x) if x == n) && e.span.file == sp.file && e.span.start >= sp.start && e.span.end <= sp.end))
-            });
-            if forward {
-                out.push(stmts[i..j].to_vec());
+            let refers = |a: usize, b: usize| {
+                let (sp, n) = (run[a].1, run[b].0);
+                ast.exprs.iter().any(|e| matches!(e.kind, ExprKind::Ident(x) if x == n) && e.span.file == sp.file && e.span.start >= sp.start && e.span.end <= sp.end)
+            };
+            // (from the first that calls one declared after it to the last such one: those
+            // before and after are checked in order, as usual)
+            let first = (0..run.len()).find(|&a| (a + 1..run.len()).any(|b| refers(a, b)));
+            let last = (0..run.len()).rev().find(|&b| (0..b).any(|a| refers(a, b)));
+            if let (Some(a), Some(b)) = (first, last)
+                && b > a
+            {
+                out.push(stmts[i + a..=i + b].to_vec());
             }
         }
         i = j.max(i + 1);
@@ -1408,6 +1427,23 @@ pub(super) fn tested(ast: &crate::ast::Ast, name: Sym, stmts: &[StmtId]) -> bool
         ExprKind::Binary(BinOp::And | BinOp::Or | BinOp::Nullish, a, _) => is(*a),
         ExprKind::Binary(BinOp::Eq | BinOp::Ne | BinOp::LooseEq | BinOp::LooseNe, a, b) => (is(*a) && absent(*b)) || (is(*b) && absent(*a)),
         ExprKind::Member { obj, optional: true, .. } => is(*obj),
+        _ => false,
+    })
+}
+
+/// Whether a call of `name` in `stmts` gives a variable tested for being there (`const t =
+/// peek(); if (t ...)`).
+fn results_tested(ast: &crate::ast::Ast, name: Sym, stmts: &[StmtId]) -> bool {
+    let Some(last) = stmts.last() else { return false };
+    let span = ast.stmt(stmts[0]).span.to(ast.stmt(*last).span);
+    let inside = |sp: Span| sp.file == span.file && sp.start >= span.start && sp.end <= span.end;
+    let calls = |e: ExprId| matches!(&ast.expr(e).kind, ExprKind::Call { callee, .. } if matches!(ast.expr(*callee).kind, ExprKind::Ident(n) if n == name));
+    ast.stmts.iter().filter(|st| inside(st.span)).any(|st| match &st.kind {
+        StmtKind::Let { name: t, init: Some(x), .. } if calls(*x) => {
+            // (tested anywhere in what follows it, inside the same statements)
+            let after: Vec<StmtId> = stmts.to_vec();
+            tested(ast, *t, &after)
+        }
         _ => false,
     })
 }

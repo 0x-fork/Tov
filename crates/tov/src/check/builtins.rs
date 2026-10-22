@@ -584,6 +584,10 @@ const MATH_F64_FNS: &[(&str, usize)] = &[
     ("pow", 2),
     ("hypot", 2),
     ("sign", 1),
+    ("asinh", 1),
+    ("acosh", 1),
+    ("atanh", 1),
+    ("fround", 1),
     ("random", 0),
 ];
 const MATH_INT_FNS: &[&str] = &["floor", "ceil", "round", "trunc"];
@@ -614,7 +618,7 @@ impl<'a> Checker<'a> {
             }
         }
         let known: Vec<&str> = match ns {
-            "Math" => MATH_CONSTS.iter().copied().chain(MATH_F64_FNS.iter().map(|f| f.0)).chain(MATH_INT_FNS.iter().copied()).chain(["abs", "min", "max"]).collect(),
+            "Math" => MATH_CONSTS.iter().copied().chain(MATH_F64_FNS.iter().map(|f| f.0)).chain(MATH_INT_FNS.iter().copied()).chain(["abs", "min", "max", "imul", "clz32"]).collect(),
             "process" => vec!["argv", "env", "exit", "cwd", "platform", "arch", "pid", "stdout", "stderr"],
             "Date" | "performance" => vec!["now"],
             "JSON" => vec!["stringify", "parse"],
@@ -1092,6 +1096,22 @@ impl<'a> Checker<'a> {
             return self.call_sig(&cs, &desc, &[], args, exp, span);
         }
         match name {
+            // 32-bit integer arithmetic on numbers (ToInt32 / ToUint32): integers
+            "imul" | "clz32" => {
+                let n = if name == "imul" { 2 } else { 1 };
+                if args.len() != n {
+                    self.report(Diagnostic::new("T0201", span, format!("`{desc}` takes {n} argument{}, found {}", if n == 1 { "" } else { "s" }, args.len())));
+                }
+                for a in args {
+                    let t = self.expr(a.expr, Some(INT));
+                    if t != ERROR && !self.types.is_numeric(t) {
+                        let msg = format!("`{desc}` needs numbers, found `{}`", self.show(t));
+                        let s = self.ast().expr(a.expr).span;
+                        self.report(Diagnostic::new("T0001", s, msg));
+                    }
+                }
+                INT
+            }
             "abs" => {
                 if args.len() != 1 {
                     self.report(Diagnostic::new("T0201", span, format!("`{desc}` takes 1 argument, found {}", args.len())));
@@ -1145,7 +1165,7 @@ impl<'a> Checker<'a> {
             }
             _ => {
                 self.check_args_loose(args);
-                let known: Vec<&str> = MATH_CONSTS.iter().copied().chain(MATH_F64_FNS.iter().map(|f| f.0)).chain(MATH_INT_FNS.iter().copied()).chain(["abs", "min", "max"]).collect();
+                let known: Vec<&str> = MATH_CONSTS.iter().copied().chain(MATH_F64_FNS.iter().map(|f| f.0)).chain(MATH_INT_FNS.iter().copied()).chain(["abs", "min", "max", "imul", "clz32"]).collect();
                 self.unknown_ns_member("Math", name, &known, name_span);
                 ERROR
             }

@@ -345,6 +345,8 @@ pub struct Checker<'a> {
     as_const: bool,
     /// The place just made is a map's key (`m[k]`, which may be missing: `m[k] ??= v`).
     map_place: bool,
+    /// Index reads whose value may be missing, `undefined` (see `stmt::tested`): (module, read).
+    absent_reads: HashSet<(u32, ExprId)>,
     /// What the driver rewrites before checking again (see `rewrite`).
     pub(crate) rewrites: rewrite::Rewrites,
     /// The next expression checked may be absent (see `expr_inner`).
@@ -428,6 +430,7 @@ fn new_checker<'a>(modules: &'a [Module], interner: &'a Interner, sm: &'a Source
         wrap_store: false,
         as_const: false,
         map_place: false,
+        absent_reads: HashSet::default(),
         rewrites: rewrite::Rewrites::default(),
         want_optional: false,
         float_args: false,
@@ -680,6 +683,7 @@ impl<'a> Checker<'a> {
             wrap_store: false,
             as_const: false,
         map_place: false,
+        absent_reads: HashSet::default(),
             rewrites: rewrite::Rewrites::default(),
             want_optional: false,
             float_args: false,

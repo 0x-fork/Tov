@@ -2180,6 +2180,16 @@ impl<'c, 'a> Gen<'c, 'a> {
         let f64s: Vec<String> = vals.iter().map(|v| self.coerce(v.clone(), F64).code).collect();
         let loc = self.loc(span);
         let code = match name {
+            "imul" | "clz32" => {
+                let a = self.int32_code(&vals[0]);
+                if name == "imul" {
+                    let b = vals.get(1).map(|v| self.int32_code(v)).unwrap_or_else(|| "0".into());
+                    format!("((tv_int)(int32_t)((uint32_t)({a}) * (uint32_t)({b})))")
+                } else {
+                    format!("({{ uint32_t c_ = (uint32_t)({a}); (tv_int)(c_ ? __builtin_clz(c_) : 32); }})")
+                }
+            }
+            "fround" => format!("((double)(float)({}))", f64s[0]),
             "floor" | "ceil" | "trunc" if ty == F64 => format!("{name}({})", f64s[0]),
             "round" if ty == F64 => format!("tv_math_round({})", f64s[0]),
             "floor" | "ceil" | "trunc" => format!("tv_f64_to_int({name}({}), \"Math.{name}\", {loc})", f64s[0]),

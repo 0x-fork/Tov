@@ -62,6 +62,16 @@ const COPYING: &[&str] = &["slice", "concat", "filter", "flat", "flatMap", "toSo
 
 impl Checker<'_> {
     /// The mutated record types (see `mutated`) that must be objects: shared somewhere.
+    /// The generic module function (module, item) whose body has call `e` in it.
+    fn enclosing_generic_fn(&self, m: u32, e: ExprId) -> Option<(u32, u32)> {
+        let ast = &self.modules[m as usize].ast;
+        let sp = ast.expr(e).span;
+        ast.items.iter().enumerate().find_map(|(i, it)| match &it.kind {
+            ast::ItemKind::Function(f) if !f.tparams.is_empty() && it.span.file == sp.file && it.span.start <= sp.start && sp.end <= it.span.end => Some((m, i as u32)),
+            _ => None,
+        })
+    }
+
     pub(super) fn shared_records(&self, cands: &HashSet<TyId>) -> HashSet<TyId> {
         let mut out = HashSet::default();
         let Some(facts) = &self.facts else { return out };
@@ -109,11 +119,42 @@ impl Checker<'_> {
             out.extend(ts);
         };
         if !generic_fns.is_empty() {
-            for f in facts.iter() {
-                for call in f.calls.values() {
+            // (a generic function passing its own `T` to one that copies a `T` copies it too:
+            // its callers' types, not every candidate, carry the copies)
+            let generic_targ = |c: &Self, call: &crate::check::facts::CallFact| {
+                call.targs.iter().any(|&(_, t)| {
+                    let (mut ts, mut g) = (Vec::new(), false);
+                    carried(c, cands, t, &mut ts, &mut g, true, 0);
+                    g
+                })
+            };
+            loop {
+                let mut more = Vec::new();
+                for (m, f) in facts.iter().enumerate() {
+                    for (&e, call) in &f.calls {
+                        if let Callee::Fn(fm, fi) = call.callee
+                            && generic_fns.contains(&(fm, fi))
+                            && generic_targ(self, call)
+                            && let Some(g) = self.enclosing_generic_fn(m as u32, e)
+                            && !generic_fns.contains(&g)
+                        {
+                            more.push(g);
+                        }
+                    }
+                }
+                if more.is_empty() {
+                    break;
+                }
+                generic_fns.extend(more);
+            }
+            for (m, f) in facts.iter().enumerate() {
+                for (&e, call) in &f.calls {
                     if let Callee::Fn(fm, fi) = call.callee
                         && generic_fns.contains(&(fm, fi))
                     {
+                        if generic_targ(self, call) && self.enclosing_generic_fn(m as u32, e).is_some() {
+                            continue;
+                        }
                         for &(_, t) in &call.targs {
                             all(self, t, &mut out);
                         }

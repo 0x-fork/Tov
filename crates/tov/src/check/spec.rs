@@ -416,6 +416,25 @@ impl<'a> Checker<'a> {
         match &node.kind {
             ExprKind::Paren(x) | ExprKind::NonNull(x) | ExprKind::Try(x) | ExprKind::Await(x) | ExprKind::Unary(crate::ast::UnOp::Neg, x) => from(self, *x, &mut out),
             ExprKind::Index { obj, .. } => from(self, *obj, &mut out),
+            // (`(j % 3) + 1` given a float: its literals are floats too, but not what its
+            // variables were declared as: `(i + j) / 2` is a float whatever `i` is)
+            ExprKind::Binary(BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Rem, a, b) => {
+                // (literals written in it, not through variables: `let i = 0` stays an `int`
+                // counter when `i * 0.5` is a float)
+                let ast = self.ast();
+                let written = |x: ExprId| {
+                    let mut x = x;
+                    while let ExprKind::Paren(y) | ExprKind::Unary(crate::ast::UnOp::Neg, y) = ast.expr(x).kind {
+                        x = y;
+                    }
+                    matches!(ast.expr(x).kind, ExprKind::Int(_) | ExprKind::Binary(BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Rem, ..))
+                };
+                for x in [*a, *b] {
+                    if written(x) {
+                        out.extend(self.sources(self.ast().expr(x).span).into_iter().filter(|s| s.1 & LIT_SITE != 0));
+                    }
+                }
+            }
             ExprKind::Cond(_, a, b) | ExprKind::Binary(BinOp::Nullish, a, b) => {
                 from(self, *a, &mut out);
                 from(self, *b, &mut out);

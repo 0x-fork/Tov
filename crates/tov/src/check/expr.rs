@@ -78,7 +78,7 @@ impl<'a> Checker<'a> {
     }
 
     pub(super) fn expr(&mut self, e: ExprId, exp: Option<TyId>) -> TyId {
-        let want = std::mem::take(&mut self.want_optional) || exp.is_some_and(|x| self.types.has_undefined(x));
+        let want = std::mem::take(&mut self.want_optional) || exp.is_some_and(|x| self.types.has_undefined(x)) || self.absent_reads.contains(&(self.cur, e));
         let t = self.expr_inner(e, exp, want);
         if self.spec.on {
             self.derive_sites(e);
@@ -105,7 +105,10 @@ impl<'a> Checker<'a> {
             ExprKind::Int(v) => {
                 // (a float flows where this literal's record field goes: `f64`, see `lit_key`)
                 let mut lit = if self.spec.float_globals.contains(&super::spec::lit_key(self.cur, e)) { F64 } else { INT };
-                if lit == INT && self.numeric_hint(exp).is_none() {
+                // (an `int` hint, as `(j % 3) + 1` gives, is no type of its own: a float may yet
+                // flow where the sum goes)
+                let hint = self.numeric_hint(exp);
+                if lit == INT && hint.is_none_or(|h| h == INT) {
                     match self.lit_site(e) {
                         (true, _) => lit = F64,
                         (false, Some(site)) => self.note_sites(span, vec![site]),
@@ -113,8 +116,8 @@ impl<'a> Checker<'a> {
                     }
                 }
                 // (one past what an `int` holds is a number, as in TypeScript: `12345678901234567890`)
-                let lit = if *v > i64::MAX as u64 && self.numeric_hint(exp).is_none() { F64 } else { lit };
-                let t = self.numeric_hint(exp).unwrap_or(lit);
+                let lit = if *v > i64::MAX as u64 && hint.is_none() { F64 } else { lit };
+                let t = if lit == F64 && hint == Some(INT) { F64 } else { hint.unwrap_or(lit) };
                 if let Some((lo, hi)) = int_range(t)
                     && (*v as i128) > hi {
                         let msg = format!("{v} doesn't fit in `{}` (range {lo}..={hi})", self.show(t));
@@ -568,6 +571,10 @@ impl<'a> Checker<'a> {
                 // it's a condition (`if (a || b)`)
                 let want_bool = exp == Some(BOOL);
                 let hint = if want_bool { Some(BOOL) } else { exp };
+                // (`counts[k] || 0`: a missing key is `undefined`, so the default)
+                if (op == Or || want_bool) && matches!(self.ast().expr(l).kind, ExprKind::Index { .. }) {
+                    self.want_optional = true;
+                }
                 let tl = self.expr(l, hint);
                 let n = self.narrowings(l, op == And);
                 let fx = super::stmt::effects_of_expr(self.ast(), r);
@@ -4200,6 +4207,10 @@ impl<'a> Checker<'a> {
     }
 
     pub(super) fn cond(&mut self, e: ExprId) {
+        // (`if (seen[k])`: a missing element or key is `undefined`, so false, as in JavaScript)
+        if matches!(self.ast().expr(e).kind, ExprKind::Index { .. }) {
+            self.want_optional = true;
+        }
         let t = self.expr(e, Some(BOOL));
         if self.condition_ok(t) {
             return;
