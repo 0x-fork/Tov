@@ -717,7 +717,11 @@ impl<'a> Checker<'a> {
                     self.decimal_arith(op, l, r, tl, tr, span);
                     return BOOL;
                 }
-                let ok = (self.types.is_numeric(tl) && self.types.is_numeric(tr)) || (self.types.is_string(tl) && self.types.is_string(tr));
+                // (a type parameter with itself, as TypeScript allows: each use compares what it
+                // stands for, as JavaScript does)
+                let ok = (self.types.is_numeric(tl) && self.types.is_numeric(tr))
+                    || (self.types.is_string(tl) && self.types.is_string(tr))
+                    || (tl == tr && matches!(self.types.get(tl), Ty::Param(_)));
                 if !ok && tl != ERROR && tr != ERROR {
                     let msg = format!("can't compare `{}` with `{}` using `{}`", self.show(tl), self.show(tr), op.as_str());
                     let mut d = Diagnostic::new("T0501", span, msg);

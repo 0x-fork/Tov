@@ -4642,6 +4642,15 @@ impl<'c, 'a> Gen<'c, 'a> {
                         }
                     }, BOOL);
                 }
+                // (what a type parameter stands for: a `boolean` compares as a number, anything
+                // else by its `String(x)`, as JavaScript's)
+                if lv.ty == BOOL && rv.ty == BOOL {
+                    return Val::plain(format!("((int)({}) {o} (int)({}))", lv.code, rv.code), BOOL);
+                }
+                if !self.c.types.is_numeric(lv.ty) || !self.c.types.is_numeric(rv.ty) {
+                    let (a, b) = (self.js_string(lv), self.js_string(rv));
+                    return Val::plain(format!("(tv_str_cmp({}, {}) {o} 0)", a.code, b.code), BOOL);
+                }
                 let (a, b) = self.numeric_operands(lv, rv);
                 Val::plain(format!("({} {o} {})", a, b), BOOL)
             }
@@ -5382,6 +5391,24 @@ impl<'c, 'a> Gen<'c, 'a> {
             self.b().temps.last_mut().unwrap().push((res.clone(), ty));
         }
         Val { code: res, ty, owned }
+    }
+
+    /// `String(v)`, as a string temporary.
+    fn js_string(&mut self, v: Val) -> Val {
+        if self.c.types.is_string(v.ty) {
+            return self.coerce(v, STR);
+        }
+        let v = self.own(v);
+        let sbv = self.fresh("sb");
+        self.line(format!("tv_sb {sbv} = {{0}};"));
+        self.line("{");
+        self.bump(1);
+        self.line(format!("tv_sb *sb = &{sbv};"));
+        let c = self.string_code(v.ty, &v.code);
+        self.line(format!("{c};"));
+        self.bump(-1);
+        self.line("}");
+        self.tmp(STR, &format!("tv_str_from_sb(&{sbv})"), true)
     }
 
     /// `xs[i] < x` (either side) on an array of numbers, with `i` maybe past either end: false
