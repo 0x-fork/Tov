@@ -791,11 +791,51 @@ impl<'a> Checker<'a> {
                 }
                 BOOL
             }
+            // `Object.freeze(x)`: x (Tov's values are only changed through what holds them)
+            "Object" if name == "freeze" && args.len() == 1 => {
+                if let Some(call) = self.pending_call.take() {
+                    self.rewrites.identities.push((self.cur, call));
+                }
+                self.expr(args[0].expr, exp)
+            }
+            // `Object.assign(t, p)` on records: each of p's fields set on t (rewritten as
+            // `(t.a = p.a, t.b = p.b ?? t.b, t)`, an optional field kept when p hasn't one)
+            "Object" if name == "assign" && args.len() >= 2 => {
+                let t = self.expr(args[0].expr, None);
+                let mut fields = Vec::new();
+                let mut ok = super::rewrite::simple_path(self.ast(), args[0].expr);
+                for a in &args[1..] {
+                    let st = self.expr(a.expr, None);
+                    let st = self.types.without_undefined(st);
+                    ok &= super::rewrite::simple_path(self.ast(), a.expr);
+                    let fs = match *self.types.get(st) {
+                        Ty::Record(_) => self.types.fields_in_order(st),
+                        Ty::Interface(i, iargs) => {
+                            let iargs = self.types.tys(iargs).to_vec();
+                            self.iface_fields_inst(i, &iargs)
+                        }
+                        Ty::Error => return ERROR,
+                        _ => {
+                            ok = false;
+                            Vec::new()
+                        }
+                    };
+                    fields.push((a.expr, fs.iter().map(|f| (f.name, f.optional)).collect::<Vec<_>>()));
+                }
+                if !ok {
+                    self.report(Diagnostic::new("U0017", span, "`Object.assign` takes a variable (or field path) and records to copy from it").note("instead", "assign the fields: `t.a = p.a`"));
+                    return ERROR;
+                }
+                if let Some(call) = self.pending_call.take() {
+                    self.rewrites.assigns.push((self.cur, call, fields));
+                }
+                t
+            }
             "Object" => {
                 // `Object.keys/values/entries(m)` of a `Record<string, V>` (a map), or of a record
                 if !matches!(name, "keys" | "values" | "entries") || args.len() != 1 {
                     self.check_args_loose(args);
-                    self.unknown_ns_member("Object", name, &["keys", "values", "entries", "is"], name_span);
+                    self.unknown_ns_member("Object", name, &["keys", "values", "entries", "is", "assign", "freeze"], name_span);
                     return ERROR;
                 }
                 let t = self.expr(args[0].expr, None);

@@ -23,6 +23,9 @@ pub struct Ast {
     /// Object literals with computed or number keys, written as `new Map([[k, v], ...])` (see
     /// `parser::keyed_object`; given a record type, they're record literals again).
     pub keyed_objects: Vec<ExprId>,
+    /// Comparisons a rewrite made (`k === "a"` choosing a field): never reported as always
+    /// false, as where `k` is known.
+    pub quiet_tests: Vec<ExprId>,
 }
 
 impl Ast {

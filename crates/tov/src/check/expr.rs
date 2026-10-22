@@ -204,7 +204,7 @@ impl<'a> Checker<'a> {
             }
             ExprKind::Await(x) => self.await_expr(e, *x, exp, span),
             ExprKind::Unary(op, x) => self.unary(*op, *x, exp, span),
-            ExprKind::Binary(op, l, r) => self.binary(*op, *l, *r, exp, span),
+            ExprKind::Binary(op, l, r) => self.binary(e, *op, *l, *r, exp, span),
             ExprKind::Assign(op, t, v) => {
                 // `a ||= b`, `a.f &&= b`: as `a = a || b` (rewritten; the target is a variable or a
                 // field path, so reading it again changes nothing)
@@ -213,6 +213,9 @@ impl<'a> Checker<'a> {
                     let vt = self.expr(*v, None);
                     self.rewrites.logical.push((self.cur, e));
                     return vt;
+                }
+                if let Some(ty) = self.keyed_place(e, *t, Some(*v)) {
+                    return ty;
                 }
                 if let Some(setter) = self.setter_of(*t) {
                     // (rewritten as `x.__set_name(v)`, checked then)
@@ -224,6 +227,9 @@ impl<'a> Checker<'a> {
                 self.assign(*op, *t, *v, span)
             }
             ExprKind::Update { target, .. } => {
+                if let Some(t) = self.keyed_place(e, *target, None) {
+                    return t;
+                }
                 let Some(place) = self.place(*target, false) else { return ERROR };
                 if !self.types.is_num_like(place.ty) && place.ty != ERROR && place.ty != BIGINT {
                     let msg = format!("`++`/`--` need a number, found `{}`", self.show(place.ty));
@@ -573,7 +579,7 @@ impl<'a> Checker<'a> {
     }
 
 
-    fn binary(&mut self, op: BinOp, l: ExprId, r: ExprId, exp: Option<TyId>, span: Span) -> TyId {
+    fn binary(&mut self, e: ExprId, op: BinOp, l: ExprId, r: ExprId, exp: Option<TyId>, span: Span) -> TyId {
         use BinOp::*;
         match op {
             And | Or => {
@@ -623,7 +629,7 @@ impl<'a> Checker<'a> {
             }
             // (`==` as `===`: TypeScript already rejects comparing values of different types, and
             // `x == null` tests for `undefined`)
-            Eq | Ne | LooseEq | LooseNe => self.equality(l, r, span),
+            Eq | Ne | LooseEq | LooseNe => self.equality(e, l, r, span),
             Lt | Gt | Le | Ge => {
                 let (tl, tr) = self.numeric_pair(l, r, None);
                 if tl == BIGINT || tr == BIGINT {
@@ -1032,7 +1038,7 @@ impl<'a> Checker<'a> {
         }
     }
 
-    fn equality(&mut self, l: ExprId, r: ExprId, span: Span) -> TyId {
+    fn equality(&mut self, e: ExprId, l: ExprId, r: ExprId, span: Span) -> TyId {
         let (lu, ru) = (matches!(self.ast().expr(l).kind, ExprKind::Undefined | ExprKind::Null), matches!(self.ast().expr(r).kind, ExprKind::Undefined | ExprKind::Null));
         let (tl, tr) = if matches!(self.ast().expr(l).kind, ExprKind::Str(_) | ExprKind::Undefined | ExprKind::Null) {
             self.want_optional = lu;
@@ -1051,7 +1057,7 @@ impl<'a> Checker<'a> {
             self.note_object(tl);
             self.note_object(tr);
         }
-        if !undefined_literal && !self.comparable(tl, tr) {
+        if !undefined_literal && !self.comparable(tl, tr) && !self.ast().quiet_tests.contains(&e) {
             let (ls, rs) = (self.show(tl), self.show(tr));
             let mut d = Diagnostic::new("T0502", span, format!("this comparison is always false: `{ls}` and `{rs}` have no values in common"));
             // `x === 0` on a bigint: the literal wants its `n`
@@ -2282,6 +2288,50 @@ impl<'a> Checker<'a> {
             self.report(d);
         }
         target_ty
+    }
+
+    /// `counts[k]++`, `counts[k] = v` where `k` is a union of the record's field names: as
+    /// `k === "a" ? counts.a++ : counts.b++` (rewritten, see `rewrite`). The type it gives, or
+    /// `None` when the target isn't one.
+    fn keyed_place(&mut self, e: ExprId, target: ExprId, value: Option<ExprId>) -> Option<TyId> {
+        let ExprKind::Index { obj, index, optional: false } = self.ast().expr(target).kind else { return None };
+        let base = self.expr_type_peek(obj)?;
+        let base = self.unfold(base);
+        let Ty::Record(_) = *self.types.get(base) else { return None };
+        if !super::rewrite::simple_path(self.ast(), obj) || !super::rewrite::simple_path(self.ast(), index) {
+            return None;
+        }
+        // (each branch gets its own copy of the value)
+        if value.is_some_and(|v| !super::rewrite::copyable(self.ast(), v)) {
+            return None;
+        }
+        // (a variable or field path: checking it again when it isn't one is harmless)
+        let it = self.expr(index, None);
+        let mut keys = Vec::new();
+        let mut tys = Vec::new();
+        for m in self.flat_members(it) {
+            let Ty::StrLit(n) = *self.types.get(m) else { return None };
+            let ft = self.field_of(base, n)?;
+            keys.push(n);
+            tys.push(ft);
+        }
+        if keys.len() < 2 {
+            return None;
+        }
+        self.expr(obj, None);
+        let ft = self.types.union(&tys);
+        if let Some(v) = value {
+            let vt = self.expr(v, Some(ft));
+            let vspan = self.ast().expr(v).span;
+            for &t in &tys {
+                if !self.assignable(vt, t) && !self.types.is_numeric(vt) {
+                    self.expect_assignable(vt, t, vspan, None);
+                    break;
+                }
+            }
+        }
+        self.rewrites.keyed_places.push((self.cur, e, keys));
+        Some(ft)
     }
 
     /// `p[k]` where `k` is a union of p's field names: `k === "a" ? p.a : p.b` (see `rewrite`),
