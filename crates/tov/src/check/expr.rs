@@ -330,6 +330,20 @@ impl<'a> Checker<'a> {
             ExprKind::As(x, te) => {
                 if let TypeExprKind::Named { name, ns: None, args, .. } = &self.ast().ty(*te).kind
                     && self.name(*name) == "const" && args.is_empty() {
+                        // `[[0, false], [1, true]] as const`: rows of tuples
+                        if exp.is_none()
+                            && let ExprKind::Array(xs) = &self.ast().expr(*x).kind
+                            && !xs.is_empty()
+                            && xs.iter().all(|&el| matches!(&self.ast().expr(el).kind, ExprKind::Array(r) if (2..=4).contains(&r.len())))
+                        {
+                            let xs = xs.clone();
+                            let rows: Option<Vec<TyId>> = xs.iter().map(|&el| self.const_row(el)).collect();
+                            if let Some(rows) = rows {
+                                let row = self.types.union(&rows);
+                                let t = self.types.array(row);
+                                return self.expr(*x, Some(t));
+                            }
+                        }
                         // `[k, v] as const`: a tuple, as TypeScript's (readonly) one
                         if let ExprKind::Array(xs) = &self.ast().expr(*x).kind
                             && (2..=4).contains(&xs.len())
@@ -2633,6 +2647,22 @@ impl<'a> Checker<'a> {
         None
     }
 
+    /// A row of `[[0, false], ...] as const`: a tuple of its (widened) elements' types, when
+    /// they're of more than one.
+    fn const_row(&mut self, row: ExprId) -> Option<TyId> {
+        let ExprKind::Array(xs) = &self.ast().expr(row).kind else { return None };
+        if xs.iter().any(|&el| matches!(self.ast().expr(el).kind, ExprKind::Spread(_))) {
+            return None;
+        }
+        let xs = xs.clone();
+        let mark = self.diags.len();
+        let tys: Vec<TyId> = xs.iter().map(|&el| self.expr(el, None)).collect();
+        self.diags.truncate(mark);
+        let wide: Vec<TyId> = tys.iter().map(|&t| self.types.widen(t)).collect();
+        let one_type = wide.iter().all(|&t| t == wide[0]) || wide.iter().all(|&t| self.types.is_numeric(t));
+        (!wide.contains(&ERROR) && !one_type).then(|| self.tuple_ty(&wide))
+    }
+
     pub(super) fn array_lit(&mut self, elems: &[ExprId], exp: Option<TyId>, span: Span) -> TyId {
         // `[lo, hi]` where a tuple `[number, number]` is expected
         if let Some(t) = exp.and_then(|e| self.flat_members(e).into_iter().find(|&m| self.tuple_of(m).is_some_and(|f| f.len() == elems.len())))
@@ -2675,8 +2705,17 @@ impl<'a> Checker<'a> {
             return ERROR;
         }
         let mut tys = Vec::new();
-        // (`[[1, 2], []]`: an empty array takes its type from the others)
-        let empty = |c: &Self, x: ExprId| matches!(&c.ast().expr(x).kind, ExprKind::Array(xs) if xs.is_empty());
+        // (`[[1, 2], []]`, `[{ xs: [1] }, { xs: [] }]`: an element holding an empty array takes
+        // its type from the others)
+        fn holds_empty(ast: &crate::ast::Ast, x: ExprId) -> bool {
+            match &ast.expr(x).kind {
+                ExprKind::Array(xs) => xs.is_empty() || xs.iter().any(|&y| holds_empty(ast, y)),
+                ExprKind::Object(fs) => fs.iter().any(|f| holds_empty(ast, f.value)),
+                &ExprKind::Paren(y) => holds_empty(ast, y),
+                _ => false,
+            }
+        }
+        let empty = |c: &Self, x: ExprId| holds_empty(c.ast(), x);
         for &x in elems {
             if empty(self, x) {
                 continue;
