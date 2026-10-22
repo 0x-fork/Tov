@@ -50,7 +50,7 @@ function h(x0: int | undefined): int {
 }
 
 // Top-level bindings narrow like locals: a `const` guard holds for the rest of
-// the script; a `let` guard is forgotten across calls (a callee may reassign it),
+// the script; a `let` a function assigns is forgotten across calls (a callee may reassign it),
 // and is replaced by what later assignments give it.
 type M = { v: int }
 function makeM(): M | undefined { return { v: 1 } }
@@ -63,8 +63,9 @@ if (mg !== undefined) {
 }
 
 let ml = makeM()
+function reset() { ml = undefined }
 if (ml !== undefined) {
-  noop()
+  reset()
   console.log(ml.v)
 }
 

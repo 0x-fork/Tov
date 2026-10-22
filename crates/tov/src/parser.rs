@@ -129,6 +129,9 @@ fn slot_records(ast: &mut Ast, interner: &mut Interner) {
     for (let_id, name, name_span, vty) in cands {
         // the block the binding lives in
         let Some(block) = ast.stmts.iter().find(|st| matches!(&st.kind, StmtKind::Block(ss) if ss.contains(&let_id))).map(|st| st.span) else { continue };
+        if !within(ast.stmts[let_id as usize].span, block) {
+            continue;
+        }
         let after = Span::new(name_span.file, name_span.end, block.end);
         // (another binding of the name inside: give up rather than tell them apart)
         let shadowed = ast.stmts.iter().enumerate().any(|(i, st)| {
@@ -628,8 +631,18 @@ impl<'a> Parser<'a> {
             self.err("U0015", at, "generic arrow functions are supported as a top-level `const` only; declare a generic `function`");
         }
         let Some(first) = self.ast.script_span else { return };
+        let local = self.script_locals();
         let mut body = Vec::new();
         let mut stmt_iter = std::mem::take(&mut self.script_stmts).into_iter().peekable();
+        // (the items that stay, renumbered)
+        let mut new_index = vec![u32::MAX; self.ast.items.len()];
+        let mut kept = 0;
+        for (ii, ni) in new_index.iter_mut().enumerate() {
+            if !local[ii] {
+                *ni = kept;
+                kept += 1;
+            }
+        }
         for ii in 0..self.ast.items.len() {
             // statements that came before this item
             while let Some(&(at, s)) = stmt_iter.peek() {
@@ -639,19 +652,93 @@ impl<'a> Parser<'a> {
                 body.push(s);
                 stmt_iter.next();
             }
-            if let ItemKind::Const { .. } = self.ast.items[ii].kind {
+            if let ItemKind::Const { name, name_span, ty, init, mutable } = self.ast.items[ii].kind {
                 let span = self.ast.items[ii].span;
-                body.push(self.mk_stmt(StmtKind::InitGlobal(ii as u32), span));
+                let st = if local[ii] {
+                    StmtKind::Let { mutable, name, name_span, ty, init: Some(init) }
+                } else {
+                    StmtKind::InitGlobal(new_index[ii])
+                };
+                body.push(self.mk_stmt(st, span));
             }
         }
         body.extend(stmt_iter.map(|(_, s)| s));
-        let span = first;
+        if local.iter().any(|&l| l) {
+            let items = std::mem::take(&mut self.ast.items);
+            self.ast.items = items.into_iter().zip(&local).filter(|(_, l)| !**l).map(|(it, _)| it).collect();
+        }
+        // (the whole script: from its first statement to its last)
+        let end = body.iter().map(|&b| self.ast.stmts[b as usize].span).filter(|sp| sp.file == first.file).map(|sp| sp.end).max().unwrap_or(first.end);
+        let span = Span::new(first.file, first.start, end.max(first.end));
         let block = self.mk_stmt(StmtKind::Block(body), span);
         let name = self.interner.intern("<script>");
         let is_async = top_level_await(&self.ast, block);
         let f = FnDecl { name, name_span: span, tparams: Vec::new(), params: Vec::new(), ret: None, throws: None, body: block, is_async, is_gen: false };
         self.ast.script = Some(self.ast.items.len() as u32);
         self.ast.items.push(Item { kind: ItemKind::Function(f), span, exported: false });
+    }
+
+    /// A script's module variables that are only its own: variables of the script function
+    /// (`<script>`) rather than of the module, so they live in registers and nothing retains
+    /// them around calls. A variable stays the module's when it's exported, or anything but the
+    /// script's statements after it mentions it: a function, a class, a type (`typeof x`), the
+    /// statements before it, or the initializer of another module variable that stays the
+    /// module's (those are evaluated on their own).
+    fn script_locals(&self) -> Vec<bool> {
+        let items = &self.ast.items;
+        // (not one whose value is an object of computed keys: those are checked against the
+        // declared type as module constants)
+        let mut local: Vec<bool> = items.iter().map(|it| matches!(it.kind, ItemKind::Const { init, .. } if !self.ast.keyed_objects.contains(&init)) && !it.exported).collect();
+        if !local.iter().any(|&l| l) {
+            return local;
+        }
+        let names: crate::hash::FxMap<Sym, Vec<usize>> = items.iter().enumerate().filter(|(i, _)| local[*i]).fold(Default::default(), |mut m, (i, it)| {
+            if let ItemKind::Const { name, .. } = it.kind {
+                m.entry(name).or_default().push(i);
+            }
+            m
+        });
+        let within = |a: Span, b: Span| a.file == b.file && a.start >= b.start && a.end <= b.end;
+        // where each mention is: an item (its index), or a script statement (the item it precedes)
+        enum Owner { Item(usize), Stmt(usize), Unknown }
+        let mut uses: Vec<(usize, Owner)> = Vec::new();
+        for e in &self.ast.exprs {
+            let ExprKind::Ident(sym) = e.kind else { continue };
+            let Some(xs) = names.get(&sym) else { continue };
+            let owner = if let Some(i) = items.iter().position(|it| within(e.span, it.span)) {
+                Owner::Item(i)
+            } else if let Some(&(at, _)) = self.script_stmts.iter().find(|(_, st)| within(e.span, self.ast.stmts[*st as usize].span)) {
+                Owner::Stmt(at)
+            } else {
+                Owner::Unknown
+            };
+            for &x in xs {
+                uses.push((x, match owner { Owner::Item(i) => Owner::Item(i), Owner::Stmt(a) => Owner::Stmt(a), Owner::Unknown => Owner::Unknown }));
+            }
+        }
+        loop {
+            let mut changed = false;
+            for (x, owner) in &uses {
+                if !local[*x] {
+                    continue;
+                }
+                // (its own initializer may mention it only as a recursive arrow: a closure
+                // that reads it later needs the module's variable)
+                let own_arrow = matches!(items[*x].kind, ItemKind::Const { init, .. } if matches!(self.ast.exprs[init as usize].kind, ExprKind::Arrow(_)));
+                let ok = match owner {
+                    Owner::Item(i) => (*i == *x && own_arrow) || (*i > *x && local[*i]),
+                    Owner::Stmt(at) => *at > *x,
+                    Owner::Unknown => false,
+                };
+                if !ok {
+                    local[*x] = false;
+                    changed = true;
+                }
+            }
+            if !changed {
+                return local;
+            }
+        }
     }
 
     fn item(&mut self) {

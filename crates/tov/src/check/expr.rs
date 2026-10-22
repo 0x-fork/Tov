@@ -1948,6 +1948,10 @@ impl<'a> Checker<'a> {
             if self.types.has_nullish(t) {
                 let d = self.possibly_undefined(obj, span);
                 self.report(d);
+                // (nothing but `undefined`: that's the error)
+                if self.types.without_nullish(t) == NEVER {
+                    return ERROR;
+                }
             }
             self.types.without_undefined(t)
         };
