@@ -48,6 +48,8 @@ pub struct Built {
     pub cached: bool,
     /// The program's source files on disk (the entry and everything it imports).
     pub sources: Vec<PathBuf>,
+    /// It bundles npm packages (whose files `sources` doesn't list).
+    pub npm: bool,
     /// (check, generate C, C compile)
     pub timings: (Duration, Duration, Duration),
 }
@@ -409,7 +411,7 @@ pub fn build(paths: &[PathBuf], base: &Path, opts: &Options) -> Result<Built, Bu
             Some(blob) => with_blob(&binary, blob)?,
             None => binary,
         };
-        return Ok(Built { binary, addons, tls: uses_tls, jsc_own, cached: true, sources, timings: (t1 - t0, t2 - t1, Duration::ZERO) });
+        return Ok(Built { binary, addons, tls: uses_tls, jsc_own, cached: true, sources, npm: !npm.is_empty(), timings: (t1 - t0, t2 - t1, Duration::ZERO) });
     }
     let c_dir = dir.join("c");
     for d in [&bin_dir, &c_dir] {
@@ -561,7 +563,7 @@ pub fn build(paths: &[PathBuf], base: &Path, opts: &Options) -> Result<Built, Bu
         None => binary,
     };
     let t3 = Instant::now();
-    Ok(Built { binary, addons, tls: uses_tls, jsc_own, cached: false, sources, timings: (t1 - t0, t2 - t1, t3 - t2) })
+    Ok(Built { binary, addons, tls: uses_tls, jsc_own, cached: false, sources, npm: !npm.is_empty(), timings: (t1 - t0, t2 - t1, t3 - t2) })
 }
 
 /// The compiler flags without the precompiled header's `-include` (for other C files).
@@ -962,6 +964,6 @@ pub(crate) fn tmp_tag() -> String {
     format!("{}-{}", std::process::id(), NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed))
 }
 
-fn hash_hex(parts: &[&[u8]]) -> String {
+pub fn hash_hex(parts: &[&[u8]]) -> String {
     tls_flags::hash_hex(parts)
 }

@@ -2887,10 +2887,27 @@ static inline double tv_canon_f64(double x) {
     return x;
 }
 
-static inline uint64_t tv_key_hash(const tv_type *kt, const void *key) { return kt->hash(key) | TV_LIVE_BIT; }
+static inline uint64_t tv_key_hash(const tv_type *kt, const void *key) {
+    if (kt == &tv_type_str) { /* (the common key: hashed here, not through the table) */
+        const tv_strbuf *b = ((const tv_str *)key)->p;
+        return tv_hash_bytes(b->data, (size_t)b->len) | TV_LIVE_BIT;
+    }
+    return kt->hash(key) | TV_LIVE_BIT;
+}
 
 /* Map keys use SameValueZero: like === except NaN equals NaN. */
 static inline bool tv_key_eq(const tv_type *kt, const void *a, const void *b) {
+    if (kt == &tv_type_str) {
+        /* (keys are mostly short: compared here rather than by a call to memcmp) */
+        const tv_strbuf *x = ((const tv_str *)a)->p, *y = ((const tv_str *)b)->p;
+        if (x == y) return true;
+        if (x->len != y->len) return false;
+        size_t n = (size_t)x->len;
+        if (n > 16) return memcmp(x->data, y->data, n) == 0;
+        for (size_t i = 0; i < n; i++)
+            if (x->data[i] != y->data[i]) return false;
+        return true;
+    }
     if (kt == &tv_type_f64) {
         double x = *(const double *)a, y = *(const double *)b;
         return x == y || (x != x && y != y);

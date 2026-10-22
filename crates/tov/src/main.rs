@@ -338,10 +338,22 @@ fn execute(f: Flags, cmd: BuildCmd) -> ExitCode {
         let wopts = watch::Options { clear_screen: f.clear_screen, kill_signal: f.kill_signal };
         return watch::run(&paths, &base, &opts, &f.program_args, then, &wopts);
     }
+    // `tov file.ts` again with nothing changed: the binary it built, run straight away
+    let manifest = (cmd == BuildCmd::Run && opts.emit_c.is_none() && !f.time && paths.len() == 1 && paths[0].is_file()).then(|| run_manifest(&paths[0], &opts.opt, opts.unchecked, opts.symbols)).flatten();
+    if let Some(m) = &manifest
+        && let Some(bin) = fresh_binary(m)
+    {
+        return exec_program(&bin, &f.program_args);
+    }
     let built = match tov::build::build(&paths, &base, &opts) {
         Ok(b) => b,
         Err(e) => return report(e),
     };
+    if let Some(m) = &manifest
+        && !built.npm
+    {
+        write_manifest(m, &built.binary, &built.sources);
+    }
     if f.time {
         let (c, g, cc) = built.timings;
         eprintln!(
@@ -361,29 +373,79 @@ fn execute(f: Flags, cmd: BuildCmd) -> ExitCode {
             println!("build: {}", dest.display());
             ExitCode::SUCCESS
         }
-        BuildCmd::Run | BuildCmd::Test => {
-            // (the program takes tov's place: signals reach it, `timeout tov run x` stops it, and
-            // its exit status is the command's)
-            #[cfg(unix)]
-            {
-                use std::os::unix::process::CommandExt;
-                let e = std::process::Command::new(&built.binary).args(&f.program_args).exec();
-                eprintln!("error: can't run {}: {e}", built.binary.display());
-                return ExitCode::from(2);
-            }
-            #[allow(unreachable_code)]
-            let status = std::process::Command::new(&built.binary).args(&f.program_args).status();
-            match status {
-                Ok(s) => match s.code() {
-                    Some(c) => ExitCode::from(c.clamp(0, 255) as u8),
-                    None => ExitCode::from(134),
-                },
-                Err(e) => {
-                    eprintln!("error: can't run {}: {e}", built.binary.display());
-                    ExitCode::from(2)
-                }
-            }
+        BuildCmd::Run | BuildCmd::Test => exec_program(&built.binary, &f.program_args),
+    }
+}
+
+/// Runs the program in tov's place: signals reach it, `timeout tov run x` stops it, and its
+/// exit status is the command's.
+fn exec_program(binary: &Path, args: &[String]) -> ExitCode {
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        let e = std::process::Command::new(binary).args(args).exec();
+        eprintln!("error: can't run {}: {e}", binary.display());
+        return ExitCode::from(2);
+    }
+    #[allow(unreachable_code)]
+    let status = std::process::Command::new(binary).args(args).status();
+    match status {
+        Ok(s) => match s.code() {
+            Some(c) => ExitCode::from(c.clamp(0, 255) as u8),
+            None => ExitCode::from(134),
+        },
+        Err(e) => {
+            eprintln!("error: can't run {}: {e}", binary.display());
+            ExitCode::from(2)
         }
+    }
+}
+
+/// Where `tov run` notes what it last built from `entry` with these options (and this tov, and
+/// these TOV_* and CC settings): the binary and every source file's size and modification time.
+fn run_manifest(entry: &Path, opt: &str, unchecked: bool, symbols: bool) -> Option<PathBuf> {
+    let abs = std::path::absolute(entry).ok()?;
+    let exe = std::env::current_exe().ok()?;
+    let em = std::fs::metadata(&exe).ok()?;
+    let stamp = |m: &std::fs::Metadata| m.modified().ok().and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok()).map(|d| d.as_nanos()).unwrap_or(0);
+    let mut env: Vec<(String, String)> = std::env::vars().filter(|(k, _)| k.starts_with("TOV_") || k == "CC").collect();
+    env.sort();
+    let desc = format!("{}\n{opt} {unchecked} {symbols}\n{} {} {}\n{env:?}", abs.display(), exe.display(), em.len(), stamp(&em));
+    Some(tov::build::cache_dir().join("run").join(tov::build::hash_hex(&[desc.as_bytes()])))
+}
+
+/// The binary a manifest names, if it's there and no source changed since.
+fn fresh_binary(manifest: &Path) -> Option<PathBuf> {
+    let text = std::fs::read_to_string(manifest).ok()?;
+    let mut lines = text.lines();
+    let bin = PathBuf::from(lines.next()?);
+    for line in lines {
+        let mut parts = line.splitn(3, ' ');
+        let (size, time, path) = (parts.next()?, parts.next()?, parts.next()?);
+        let m = std::fs::metadata(path).ok()?;
+        let t = m.modified().ok()?.duration_since(std::time::UNIX_EPOCH).ok()?.as_nanos();
+        if m.len().to_string() != size || t.to_string() != time {
+            return None;
+        }
+    }
+    bin.is_file().then_some(bin)
+}
+
+fn write_manifest(manifest: &Path, binary: &Path, sources: &[PathBuf]) {
+    let mut text = format!("{}\n", binary.display());
+    for p in sources {
+        let Ok(m) = std::fs::metadata(p) else { return };
+        let Some(t) = m.modified().ok().and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok()) else { return };
+        let Ok(abs) = std::path::absolute(p) else { return };
+        text.push_str(&format!("{} {} {}\n", m.len(), t.as_nanos(), abs.display()));
+    }
+    if let Some(dir) = manifest.parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
+    // (written whole, then renamed: a run reading it never sees half)
+    let tmp = manifest.with_extension(format!("tmp{}", std::process::id()));
+    if std::fs::write(&tmp, text).is_ok() {
+        let _ = std::fs::rename(&tmp, manifest);
     }
 }
 
