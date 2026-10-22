@@ -2779,6 +2779,20 @@ impl<'c, 'a> Gen<'c, 'a> {
         }
         .to_string();
         let (cond, expected) = match name {
+            // (a set or map of plain values: the same entries in any order, as Jest compares them)
+            "toEqual" | "toStrictEqual"
+                if matches!(self.tget(s.ty), Ty::Set(k) if !self.has_objects(k))
+                    || matches!(self.tget(s.ty), Ty::Map(k, v) if !self.has_objects(k) && !self.has_objects(v)) =>
+            {
+                let x = self.expr(args[0].expr);
+                let x = self.coerce(x, s.ty);
+                let (kd, vd) = match self.tget(s.ty) {
+                    Ty::Set(k) => (self.desc(k), "&tv_type_undefined".to_string()),
+                    Ty::Map(k, v) => (self.desc(k), self.desc(v)),
+                    _ => unreachable!(),
+                };
+                (format!("tv_map_eq({}, {}, {kd}, {vd})", s.code, x.code), Some(x))
+            }
             // (deep: arrays, records, maps alike when they print alike, as Jest compares them)
             "toEqual" | "toStrictEqual" if self.has_objects(s.ty) => {
                 let x = self.expr(args[0].expr);
@@ -2791,6 +2805,14 @@ impl<'c, 'a> Gen<'c, 'a> {
                 let r = self.fresh("eq");
                 self.line(format!("bool {r} = {a}.len == {b}.len && memcmp({a}.data, {b}.data, {a}.len) == 0; tv_sb_free(&{a}); tv_sb_free(&{b});"));
                 (r, Some(x))
+            }
+            // (numbers as `Object.is` compares them: NaN is NaN, 0 isn't -0)
+            "toBe" | "toEqual" | "toStrictEqual" if s.ty == F64 => {
+                let x = self.expr(args[0].expr);
+                let x = self.coerce(x, F64);
+                let (a, b) = (self.fresh("a"), self.fresh("b"));
+                self.line(format!("double {a} = {}, {b} = {};", s.code, x.code));
+                (format!("(({a} == {b} && ({a} != 0 || __builtin_signbit({a}) == __builtin_signbit({b}))) || ({a} != {a} && {b} != {b}))"), Some(x))
             }
             "toBe" | "toEqual" | "toStrictEqual" => {
                 let x = self.expr(args[0].expr);

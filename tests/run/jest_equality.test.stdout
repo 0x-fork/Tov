@@ -1,0 +1,5 @@
+ok   objects
+FAIL not equal sets
+  expected Set(2) { 1, 3 }, received Set(2) { 1, 2 }
+  at tests/run/jest_equality.test.ts:11:32
+1 passed, 1 failed
