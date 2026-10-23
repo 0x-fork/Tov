@@ -1520,6 +1520,12 @@ impl<'a> Parser<'a> {
         let defaults = (std::mem::take(&mut self.defaults), std::mem::take(&mut self.prologue));
         let ret = if self.eat(Tok::Colon) { Some(self.ty()) } else { None };
         let throws = self.effects_clause();
+        // An overload's signature (`function f(a: number[][], b: number): number[][]` before
+        // `function f(...) { ... }`): calls are checked against the implementation's
+        if !self.at(Tok::LBrace) && self.overload_follows(name) {
+            self.eat(Tok::Semi);
+            return None;
+        }
         if !self.at(Tok::LBrace) {
             let span = self.cur_span();
             let msg = format!("expected `{{` to start the function body, found {}", self.found());
@@ -1530,6 +1536,20 @@ impl<'a> Parser<'a> {
         let body = self.block();
         let body = self.with_defaults(defaults, body);
         Some(FnDecl { name, name_span, tparams, params, ret, throws, body, is_async: false, is_gen: false })
+    }
+
+    /// After a signature without a body: another declaration of `name` comes next (perhaps
+    /// after a `;`, `export`, `async`).
+    fn overload_follows(&self, name: Sym) -> bool {
+        let mut i = self.pos + usize::from(self.at(Tok::Semi));
+        let at = |i: usize| self.toks.get(i).map(|t| t.kind).unwrap_or(Tok::Eof);
+        if !(self.at(Tok::Semi) || self.tok().nl_before) {
+            return false;
+        }
+        while matches!(at(i), Tok::Export | Tok::Async) {
+            i += 1;
+        }
+        at(i) == Tok::Function && self.toks.get(i + 1).is_some_and(|t| t.kind == Tok::Ident && self.text(*t) == self.interner.get(name))
     }
 
     /// `throws E` (returned) / `uses fs | net` (not supported yet).
