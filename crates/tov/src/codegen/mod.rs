@@ -805,7 +805,8 @@ impl<'c, 'a> Gen<'c, 'a> {
             Ty::Str => "tv_str".into(),
             Ty::BigInt => "tv_big".into(),
             Ty::Decimal => "tv_dec".into(),
-            Ty::StrLit(_) | Ty::Undefined | Ty::Null | Ty::Void | Ty::Never | Ty::Error | Ty::Unknown => "tv_unit".into(),
+            // (a class given as a value: nothing at run time, each call's code is its own)
+            Ty::StrLit(_) | Ty::Undefined | Ty::Null | Ty::Void | Ty::Never | Ty::Error | Ty::Unknown | Ty::ClassObj(_) => "tv_unit".into(),
             Ty::Array(_) => "tv_arr".into(),
             Ty::Promise(..) => "tv_promise *".into(),
             Ty::Gen(_) => "tv_gen *".into(),

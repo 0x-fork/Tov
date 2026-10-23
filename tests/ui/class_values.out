@@ -1,0 +1,5 @@
+error[T0803] class_values.tov:26:32: class `Named` doesn't fit `new (f64) => Shape`
+   26 | console.log(make(Circle), make(Named))
+  problems: its instances are `Named`, not `Shape`; argument 1 is `f64`, its constructor takes `string`
+
+1 error(s)

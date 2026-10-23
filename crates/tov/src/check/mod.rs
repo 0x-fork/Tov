@@ -94,10 +94,21 @@ struct IfaceInfo {
     resolving: bool,
 }
 
+/// What a constructor type (`new <T>(x: number) => Queue<T>`, `typeof C`) says of the class
+/// given for it: its own type parameters, its constructor's parameters, its instances' type.
+#[derive(Clone)]
+pub(crate) struct CtorSig {
+    pub(crate) tparams: Vec<u32>,
+    pub(crate) params: Vec<FnParam>,
+    pub(crate) ret: TyId,
+}
+
 #[derive(Clone)]
 pub(crate) struct GParam {
     pub(crate) name: Sym,
     pub(crate) bound: Option<TyId>,
+    /// A parameter whose type is a constructor type stands for the class each call gives it.
+    pub(crate) ctor: Option<CtorSig>,
     /// `<T = undefined>`: used when inference leaves it open.
     pub(crate) default: Option<TyId>,
 }
@@ -824,8 +835,16 @@ impl<'a> Checker<'a> {
         r
     }
 
+    /// A type parameter standing for the class a constructor type is given.
+    fn ctor_param(&mut self, name: Sym, sig: CtorSig) -> TyId {
+        let id = self.new_gparam(name, None);
+        let base = self.gparams_base.len();
+        self.gparams[id as usize - base].ctor = Some(sig);
+        self.types.intern(Ty::Param(id))
+    }
+
     fn new_gparam(&mut self, name: Sym, bound: Option<TyId>) -> u32 {
-        self.gparams.push(GParam { name, bound, default: None });
+        self.gparams.push(GParam { name, bound, default: None, ctor: None });
         self.param_names.push(name);
         (self.gparams_base.len() + self.gparams.len() - 1) as u32
     }
@@ -1699,6 +1718,17 @@ impl<'a> Checker<'a> {
                 if let Some(t) = throws {
                     c.check_throws_type(t, f.throws.map(|te| c.ast().ty(te).span).unwrap());
                 }
+                // (a class passed as a value, `Q: new <T>() => Queue<T>`: a type parameter too,
+                // which each call binds to the class it gives)
+                for p in &params {
+                    let t = c.types.without_undefined(p.ty);
+                    if let Ty::Param(id) = *c.types.get(t)
+                        && c.gparam(id).ctor.is_some()
+                        && !tparams.contains(&id)
+                    {
+                        tparams.push(id);
+                    }
+                }
                 (tparams, params, param_names, ret, throws, tscope)
             })
         });
@@ -2179,6 +2209,15 @@ impl<'a> Checker<'a> {
                 Some((_, t)) => Some(t),
                 None => match self.scopes[self.cur as usize].values.get(&s).map(|d| d.0) {
                     Some(Decl::Const(m, i)) => Some(self.const_type(m, i)),
+                    // `typeof Shape` of a class: the class (or one extending it) as a value
+                    Some(Decl::Class(c)) => {
+                        self.resolve_class(c);
+                        let info = &self.classes[c as usize];
+                        let (tparams, params) = (info.params.clone(), info.ctor.params.clone());
+                        let args: Vec<TyId> = tparams.iter().map(|&p| self.types.intern(Ty::Param(p))).collect();
+                        let ret = self.types.class(c, &args);
+                        return self.ctor_param(s, CtorSig { tparams, params, ret });
+                    }
                     Some(Decl::Fn(m, i)) => self.fn_sig(m, i).map(|sig| {
                         let (params, _) = sig.call_params(&self.types);
                         self.types.func_throws(params, sig.ret, if sig.throws == UNKNOWN { NEVER } else { sig.throws })
@@ -2298,6 +2337,28 @@ impl<'a> Checker<'a> {
         match &node.kind {
             TypeExprKind::Error => ERROR,
             TypeExprKind::Typeof(x) => self.typeof_type(*x, span),
+            // `new <T>(n: number) => Queue<T>`: a class given as a value (see `CtorSig`)
+            TypeExprKind::Ctor(tps, ps, ret) => {
+                let mut scope = tscope.to_vec();
+                let mut tparams = Vec::new();
+                for tp in tps {
+                    let id = self.new_gparam(tp.name, None);
+                    tparams.push(id);
+                    scope.push((tp.name, self.types.intern(Ty::Param(id))));
+                }
+                let mut params = Vec::new();
+                for p in ps {
+                    let ty = match p.ty {
+                        Some(t) => self.resolve_type(t, &scope),
+                        None => ERROR,
+                    };
+                    let ty = if p.optional { self.types.optional(ty) } else { ty };
+                    params.push(FnParam { ty, inout: false, optional: p.optional });
+                }
+                let ret = self.resolve_type(*ret, &scope);
+                let name = self.interner.lookup("new").expect("interned by the parser");
+                self.ctor_param(name, CtorSig { tparams, params, ret })
+            }
             TypeExprKind::Predicate(_, t) => {
                 self.resolve_type(*t, tscope);
                 BOOL
@@ -2611,6 +2672,34 @@ impl<'a> Checker<'a> {
                     ERROR
                 }
             }),
+            // `Uppercase<"a" | "b">`: each string literal changed so (`string` when it can't be told)
+            "Capitalize" | "Uncapitalize" | "Uppercase" | "Lowercase" => {
+                if !arity(self, 1) {
+                    return Some(ERROR);
+                }
+                let mut out = Vec::new();
+                for m in self.flat_members(targs[0]) {
+                    let Ty::StrLit(lit) = *self.types.get(m) else { return Some(if targs[0] == ERROR { ERROR } else { STR }) };
+                    let s = self.name(lit).to_string();
+                    let changed = match text {
+                        "Uppercase" => s.to_uppercase(),
+                        "Lowercase" => s.to_lowercase(),
+                        _ => {
+                            let mut cs = s.chars();
+                            match cs.next() {
+                                Some(c) if text == "Capitalize" => c.to_uppercase().chain(cs).collect(),
+                                Some(c) => c.to_lowercase().chain(cs).collect(),
+                                None => s.clone(),
+                            }
+                        }
+                    };
+                    match self.interner.lookup(&changed) {
+                        Some(sym) => out.push(self.types.intern(Ty::StrLit(sym))),
+                        None => return Some(STR),
+                    }
+                }
+                Some(self.types.union(&out))
+            }
             "ReturnType" | "Awaited" | "NonNullable" | "Readonly" | "Partial" | "Required" => {
                 if !arity(self, 1) {
                     return Some(ERROR);

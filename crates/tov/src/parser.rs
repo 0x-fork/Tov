@@ -2553,6 +2553,45 @@ impl<'a> Parser<'a> {
                 }
                 self.mk_ty(TypeExprKind::Record(fields), span)
             }
+            // `` `px` `` is that string; `` `${number}px` `` a template literal type: a string
+            Tok::TemplateFull => {
+                let t = self.bump();
+                let s = self.interner.intern(&self.strings[t.val as usize]);
+                self.mk_ty(TypeExprKind::StrLit(s), start)
+            }
+            Tok::TemplateHead => {
+                self.bump();
+                loop {
+                    self.ty();
+                    if self.eat(Tok::TemplateMiddle) {
+                        continue;
+                    }
+                    if !self.eat(Tok::TemplateTail) {
+                        self.expect(Tok::TemplateTail, "to close the template literal type");
+                    }
+                    break;
+                }
+                let span = start.to(self.prev_span());
+                let string = self.interner.intern("string");
+                self.mk_ty(TypeExprKind::Named { ns: None, name: string, name_span: span, args: Vec::new() }, span)
+            }
+            // `new () => Queue<number>`, `new <T>() => Queue<T>`: a class passed as a value
+            Tok::New => {
+                self.bump();
+                self.interner.intern("new");
+                let tparams = self.tparams();
+                if !self.at(Tok::LParen) {
+                    self.expect(Tok::LParen, "for the constructor type's parameters");
+                    return self.mk_ty(TypeExprKind::Error, start);
+                }
+                let params = self.params();
+                self.defaults.clear();
+                self.prologue.clear();
+                self.expect(Tok::Arrow, "in the constructor type");
+                let ret = self.ty();
+                let span = start.to(self.prev_span());
+                self.mk_ty(TypeExprKind::Ctor(tparams, params, ret), span)
+            }
             Tok::Str => {
                 let t = self.bump();
                 let s = self.interner.intern(&self.strings[t.val as usize]);
@@ -3607,7 +3646,7 @@ impl<'a> Parser<'a> {
             if prec < min_prec {
                 break;
             }
-            let op_span = self.cur_span();
+            let _op_span = self.cur_span();
             let is_satisfies = op.is_none() && self.text(self.tok()) == "satisfies";
             for _ in 0..n {
                 self.bump();
@@ -3631,8 +3670,11 @@ impl<'a> Parser<'a> {
                 }
                 let ty = self.ty();
                 let span = self.expr_span(lhs).to(self.prev_span());
+                // (`x satisfies T`: `x`, checked to be a `T` and typed with it in mind, its own
+                // type kept)
                 if is_satisfies {
-                    self.err("X0033", op_span.to(self.prev_span()), "`satisfies` is not supported; annotate the binding's type instead");
+                    lhs = self.mk_expr(ExprKind::Paren(lhs), span);
+                    self.ast.satisfies.insert(lhs, ty);
                     continue;
                 }
                 lhs = self.mk_expr(ExprKind::As(lhs, ty), span);

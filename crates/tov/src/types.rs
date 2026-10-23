@@ -93,6 +93,9 @@ pub enum Ty {
     Interface(u32, Tys),
     /// A class instance (a reference): (class index, type arguments).
     Class(u32, Tys),
+    /// A class itself, as a value (`ArrayQueue` passed where a constructor is wanted, `new
+    /// <T>() => Queue<T>`): what a constructor-typed parameter stands for in each call (class index).
+    ClassObj(u32),
     /// The value of `import * as ns` (module index).
     Namespace(u32),
     /// Built-in namespaces such as `Math` and `console`.
@@ -878,6 +881,10 @@ impl Display<'_> {
                     }
                     out.push('>');
                 }
+            }
+            Ty::ClassObj(c) => {
+                out.push_str("typeof ");
+                out.push_str(&self.class_names[c as usize]);
             }
             Ty::Namespace(m) => {
                 out.push_str("module ");

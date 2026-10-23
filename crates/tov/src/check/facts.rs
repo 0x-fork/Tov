@@ -49,6 +49,9 @@ pub enum Callee {
     StaticMethod(u32, u32),
     /// `new C(...)`: the class; the instance type is the call's return type.
     New(u32),
+    /// `new Q(...)` of a parameter given a class (`Q: new <T>() => Queue<T>`): the type parameter
+    /// standing for it (each call's class), and the constructor type's own type parameters.
+    NewOf(u32, Vec<u32>),
     /// `super(...)` in a constructor: the base class type.
     SuperCtor(TyId),
     /// `new Promise(executor)`; the promise type is the call's return type.

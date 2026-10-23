@@ -195,6 +195,10 @@ impl<'c, 'a> Gen<'c, 'a> {
                 let _ = c;
                 self.new_object(e, ty, args, &params, span)
             }
+            Callee::NewOf(..) => {
+                self.unsupported(span, "this call");
+                Val::plain("0", ty)
+            }
             Callee::NewPromise => self.new_promise(args, ty),
             Callee::Js { method } => {
                 if let Some(v) = self.js_try_fuse(e, ty, span) {

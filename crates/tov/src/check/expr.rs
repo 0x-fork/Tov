@@ -213,9 +213,26 @@ impl<'a> Checker<'a> {
                 let ps = ps.unwrap_or_else(|| vec![FnParam { ty: UNKNOWN, inout: false, optional: false }]);
                 self.types.func(ps, ret)
             }
-            ExprKind::Ident(sym) => self.ident(e, *sym, span),
+            ExprKind::Ident(sym) => {
+                // (a class where a constructor type is wanted: the class itself, as a value)
+                if let Some(x) = exp
+                    && let Some(t) = self.class_value(e, *sym, x, span)
+                {
+                    return t;
+                }
+                self.ident(e, *sym, span)
+            }
             ExprKind::Paren(x) => {
                 self.want_optional = want;
+                // `x satisfies T`
+                if let Some(&te) = self.ast().satisfies.get(&e) {
+                    let tscope = self.tscope();
+                    let want_ty = self.resolve_type(te, &tscope);
+                    let t = self.expr(*x, Some(want_ty));
+                    let s = self.ast().expr(*x).span;
+                    self.expect_assignable(t, want_ty, s, Some("`satisfies`".into()));
+                    return t;
+                }
                 self.expr(*x, exp)
             }
             ExprKind::Await(x) => self.await_expr(e, *x, exp, span),
@@ -3349,6 +3366,21 @@ impl<'a> Checker<'a> {
     }
 
     fn new_expr(&mut self, e: ExprId, callee: ExprId, type_args: &[crate::ast::TypeId], args: &[Arg], exp: Option<TyId>, span: Span) -> TyId {
+        // `new Q<number>()` of a parameter given a class: what its constructor type says
+        if let ExprKind::Ident(s) = self.ast().expr(callee).kind
+            && let Some((_, qt)) = self.lookup(s)
+            && let Ty::Param(p) = *self.types.get(qt)
+            && let Some(sig) = self.gparam(p).ctor.clone()
+        {
+            self.ident(callee, s, self.ast().expr(callee).span);
+            let names = (0..sig.params.len()).map(|i| format!("arg{i}")).collect();
+            let throws = self.error_class();
+            let cs = CallSig { tparams: sig.tparams.clone(), params: sig.params.clone(), names, rest: None, ret: sig.ret, throws };
+            self.rec_call(e, Callee::NewOf(p, sig.tparams.clone()));
+            self.pending_call = Some(e);
+            let desc = format!("new {}", self.name(s));
+            return self.call_sig(&cs, &desc, type_args, args, exp, span);
+        }
         // `{ [Color.Red]: v }` where a record type is expected: a record literal, its keys string
         // literals (rewritten as `{ red: v }`)
         if self.ast().keyed_objects.contains(&e)
@@ -4502,7 +4534,9 @@ impl<'a> Checker<'a> {
                 };
                 let still_free: Vec<u32> = self.infer_free.iter().copied().filter(|x| !map.contains_key(x)).collect();
                 let unhinted: Vec<u32> = still_free.iter().copied().filter(|x| !(pass == 0 && soft.contains_key(x))).collect();
-                let hint = if is_arrow || !self.types.mentions(pty, &unhinted) { Some(pty) } else { None };
+                // (a constructor type's parameter: a class given for it is checked against it)
+                let ctor = matches!(*self.types.get(pty), Ty::Param(q) if self.gparam(q).ctor.is_some());
+                let hint = if is_arrow || ctor || !self.types.mentions(pty, &unhinted) { Some(pty) } else { None };
                 self.infer_free = still_free;
                 let marks = self.diags.len();
                 if self.spec.on {

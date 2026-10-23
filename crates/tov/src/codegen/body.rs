@@ -3421,6 +3421,28 @@ impl<'c, 'a> Gen<'c, 'a> {
                     }
                     return self.coerce(v, ty);
                 }
+                // `new Q<number>()` of a parameter given a class: that class (each call's own)
+                if let Some(fact) = self.facts(m).calls.get(&e).cloned()
+                    && let Callee::NewOf(p, sig_params) = &fact.callee
+                {
+                    let q = self.c.types.intern(Ty::Param(*p));
+                    let qi = self.inst(q);
+                    let Ty::ClassObj(c) = self.tget(qi) else {
+                        self.unsupported(span, "`new` of this constructor");
+                        return Val::plain("0", ty);
+                    };
+                    // (its type arguments: the constructor type's, as this call binds them)
+                    let targs: Vec<TyId> = sig_params.iter().map(|sp| fact.targs.iter().find(|(x, _)| x == sp).map(|&(_, t)| self.inst(t)).unwrap_or(ERROR)).collect();
+                    let info = self.c.classes[c as usize].clone();
+                    let map: FxMap<u32, TyId> = info.params.iter().copied().zip(targs.iter().copied()).collect();
+                    let cls = self.c.types.class(c, &targs);
+                    let params: Vec<FnParam> = info.ctor.params.iter().map(|p| FnParam { ty: self.c.types.subst(p.ty, &map), ..*p }).collect();
+                    let v = self.new_object(e, cls, args, &params, span);
+                    if self.facts(m).throwing.contains(&e) {
+                        self.error_check();
+                    }
+                    return self.coerce(v, ty);
+                }
                 if let Some(fact) = self.facts(m).calls.get(&e)
                     && let Callee::NewPromise = fact.callee
                 {
@@ -3703,6 +3725,8 @@ impl<'c, 'a> Gen<'c, 'a> {
                 }
                 self.project(Val::plain(local.access, local.ty), ty)
             }
+            // (a class given where a constructor is wanted: nothing at run time)
+            Some(IdentFact::Class(_)) if matches!(self.tget(ty), Ty::ClassObj(_) | Ty::Param(_)) => Val::plain("0", ty),
             Some(IdentFact::Fn(fm, fi)) => {
                 let code = self.fn_value(fm, fi);
                 Val::plain(code, ty)

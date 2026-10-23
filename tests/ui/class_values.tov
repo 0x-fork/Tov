@@ -1,0 +1,26 @@
+interface Shape {
+  area(): f64
+}
+
+class Circle implements Shape {
+  r: f64
+  constructor(r: f64) {
+    this.r = r
+  }
+  area(): f64 {
+    return 3.14 * this.r * this.r
+  }
+}
+
+class Named {
+  name: string
+  constructor(name: string) {
+    this.name = name
+  }
+}
+
+function make(C: new (x: f64) => Shape): f64 {
+  return new C(2.0).area()
+}
+
+console.log(make(Circle), make(Named))

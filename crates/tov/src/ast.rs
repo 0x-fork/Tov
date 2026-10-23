@@ -23,6 +23,14 @@ pub struct Ast {
     /// Object literals with computed or number keys, written as `new Map([[k, v], ...])` (see
     /// `parser::keyed_object`; given a record type, they're record literals again).
     pub keyed_objects: Vec<ExprId>,
+    /// Overload signatures (`function f(a: string): number;` before `function f(...) { ... }`):
+    /// the function's name, its type parameters, parameters and result, in order.
+    pub overloads: Vec<(Sym, Vec<TypeParam>, Vec<Param>, Option<TypeId>)>,
+    /// Where lines start that a `// @ts-expect-error` or `// @ts-ignore` comment covers (the
+    /// line after it): in a test, a statement there that doesn't check throws a `TypeError`.
+    pub ts_expect: Vec<u32>,
+    /// `x satisfies T`: the parenthesized `x` and `T`.
+    pub satisfies: std::collections::HashMap<ExprId, TypeId>,
     /// Fields declared `x!: T`: assigned somewhere the constructor reaches, as TypeScript
     /// takes on trust (by the field name's position).
     pub definite_fields: Vec<u32>,
@@ -302,6 +310,9 @@ pub enum TypeExprKind {
     Undefined,
     Null,
     Void,
+    /// `new (params) => T`, `new <T>(params) => C<T>`: a class (its constructor), as a parameter's
+    /// type.
+    Ctor(Vec<TypeParam>, Vec<Param>, TypeId),
     /// `typeof x` (a value's type: a variable, a function, a field path).
     Typeof(ExprId),
     /// `keyof T`: the union of T's field names.

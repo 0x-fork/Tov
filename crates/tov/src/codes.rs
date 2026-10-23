@@ -127,7 +127,6 @@ pub const CODES: &[(&str, &str)] = &[
     ("X0030", "This TypeScript/JavaScript type isn't supported."),
     ("X0031", "Side-effect imports are not supported; modules have no initialization side effects."),
     ("X0032", "This JavaScript global isn't available in Tov."),
-    ("X0033", "`satisfies` is not supported; annotate the binding."),
     ("X0038", "Iterate a map with `keys()` or `values()`."),
     ("C0001", "The native backend doesn't support this construct yet (`tov check` accepts it)."),
     ("C0002", "`tov run`/`tov build` need a `function main()`."),
