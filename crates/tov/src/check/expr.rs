@@ -3537,6 +3537,8 @@ impl<'a> Checker<'a> {
                         );
                         ERROR
                     }
+                    // (`[...Array(n).keys()]`: only its indexes are read)
+                    None if n == "Array" && args.len() == 1 && self.receiver_of(e, "keys") => self.types.array(UNDEFINED),
                     None => {
                         self.report(Diagnostic::new("T0301", span, "can't infer the element type of this array").note("instead", "`new Array<number>(n)`, `new Array(n).fill(0)`, or annotate the binding"));
                         ERROR
@@ -5223,6 +5225,17 @@ impl<'a> Checker<'a> {
     }
 
     /// Element types `new Array(n)` can fill with an empty value (numbers, booleans, strings).
+    /// `x.method()` is called on `x` (with no arguments).
+    fn receiver_of(&self, x: ExprId, method: &str) -> bool {
+        let ast = self.ast();
+        let sp = ast.expr(x).span;
+        ast.exprs.iter().any(|c| {
+            matches!(&c.kind, ExprKind::Call { callee, args, .. } if args.is_empty()
+                && c.span.file == sp.file && c.span.start == sp.start
+                && matches!(&ast.expr(*callee).kind, ExprKind::Member { obj, name, .. } if *obj == x && self.name(*name) == method))
+        })
+    }
+
     /// `new Array(n)` that `.fill(v)` fills at once.
     fn filled_at_once(&self, ne: ExprId) -> bool {
         let ast = self.ast();

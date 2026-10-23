@@ -75,7 +75,8 @@ impl<'a> Checker<'a> {
     /// `[]`, or `new Array(n)` / `Array(n)` without its element type.
     fn untyped_array(&self, i: ExprId) -> bool {
         match &self.ast().expr(i).kind {
-            ExprKind::Array(xs) => xs.is_empty(),
+            // (`[[]]`, `[[], []]` too: arrays of empty arrays, `graph = [[]]` passed as a `number[][]`)
+            ExprKind::Array(xs) => xs.iter().all(|&x| matches!(&self.ast().expr(x).kind, ExprKind::Array(inner) if inner.is_empty())),
             ExprKind::New { callee, type_args, args } => {
                 type_args.is_empty() && args.len() == 1 && matches!(self.ast().expr(*callee).kind, ExprKind::Ident(n) if self.name(n) == "Array" && self.lookup(n).is_none())
             }
