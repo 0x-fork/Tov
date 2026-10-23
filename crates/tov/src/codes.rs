@@ -20,7 +20,7 @@ pub const CODES: &[(&str, &str)] = &[
     ("N0002", "Unknown type name."),
     ("N0003", "The name is already declared in this scope."),
     ("N0004", "Two tests in one module have the same name."),
-    ("N0005", "Built-in type names can't be redeclared."),
+    ("N0005", "Primitive type names (`number`, `string`, ...) can't be redeclared, nor can a class take a built-in's name."),
     ("N0006", "A field or member is listed twice."),
     ("N0007", "A type alias refers to itself without a record or array in between (e.g. `type A = A | int`)."),
     ("N0101", "The imported module file doesn't exist. Paths are relative to the importing file, without extension."),

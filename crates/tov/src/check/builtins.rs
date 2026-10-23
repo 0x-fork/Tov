@@ -154,6 +154,12 @@ pub(super) fn is_builtin_type(name: &str) -> bool {
     BUILTIN_TYPES.contains(&name)
 }
 
+/// The primitive types' names, which no declaration can take (others, `Map`, `Partial`, a
+/// module's own types hide).
+pub(super) fn is_type_keyword(name: &str) -> bool {
+    BUILTIN_TYPES[..BUILTIN_TYPES.iter().position(|&n| n == "Array").unwrap()].contains(&name) || matches!(name, "bigint" | "decimal")
+}
+
 pub(super) fn is_builtin_ns(name: &str) -> bool {
     matches!(name, "Math" | "console" | "JSON" | "process" | "Date" | "performance" | "Promise" | "BigInt" | "Array" | "Number" | "String" | "Object")
 }

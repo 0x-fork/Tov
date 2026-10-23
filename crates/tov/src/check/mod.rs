@@ -905,7 +905,7 @@ impl<'a> Checker<'a> {
                     }
                     _ => continue,
                 };
-                if is_type && builtins::is_builtin_type(self.interner.get(name)) {
+                if is_type && builtins::is_type_keyword(self.interner.get(name)) {
                     let n = self.interner.get(name).to_string();
                     self.done.push(Diagnostic::new("N0005", span, format!("`{n}` is a built-in type and can't be redeclared")));
                     continue;
@@ -2378,10 +2378,14 @@ impl<'a> Checker<'a> {
                 }
                 return t;
             }
-            if let Some(t) = self.builtin_type(&text, &targs, span, name_span) {
-                return t;
+            // (a module's own `interface Map<K, V>` hides the built-in, as in TypeScript)
+            match self.scopes[self.cur as usize].types.get(&name).map(|d| d.0) {
+                Some(d) => Some(d),
+                None => match self.builtin_type(&text, &targs, span, name_span) {
+                    Some(t) => return t,
+                    None => None,
+                },
             }
-            self.scopes[self.cur as usize].types.get(&name).map(|d| d.0)
         };
         match decl {
             // a type from an npm package: its values are JavaScript's
