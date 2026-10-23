@@ -2233,6 +2233,25 @@ impl<'c, 'a> Gen<'c, 'a> {
                 }
                 Val::plain("0", VOID)
             }
+            (None, "__eachArg") => {
+                let v = self.expr(args[0].expr);
+                match self.tget(v.ty) {
+                    Ty::Array(e) => {
+                        let ect = self.ctype(e);
+                        let loc = self.loc(span);
+                        let at = Val::plain(format!("(*({ect} *)tv_arr_at({}, sizeof({ect}), 0, {loc}))", v.code), e);
+                        let at = self.own(at);
+                        self.coerce(at, ty)
+                    }
+                    Ty::Record(_) if self.tuple_of(v.ty).is_some() => {
+                        let f = self.tuple_of(v.ty).unwrap()[0].clone();
+                        let place = self.fld(v.ty, &v.code, self.sym(f.name));
+                        let at = self.own(Val::plain(place, f.ty));
+                        self.coerce(at, ty)
+                    }
+                    _ => self.coerce(v, ty),
+                }
+            }
             (None, "structuredClone") => {
                 let v = self.expr(args[0].expr);
                 self.structured_clone(v)

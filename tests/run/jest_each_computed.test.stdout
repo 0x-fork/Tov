@@ -1,0 +1,7 @@
+ok   log2(1)
+ok   log2(2)
+ok   log2(4)
+ok   log2(8)
+ok   a has 1
+ok   bb has 2
+6 passed, 0 failed

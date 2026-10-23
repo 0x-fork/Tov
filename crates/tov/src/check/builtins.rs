@@ -168,7 +168,7 @@ pub(super) fn is_builtin_ns(name: &str) -> bool {
 }
 
 pub(super) fn is_builtin_fn(name: &str) -> bool {
-    matches!(name, "expect" | "String" | "Number" | "Boolean" | "BigInt" | "decimal" | "parseInt" | "parseFloat" | "isNaN" | "isFinite" | "test" | "__test" | "structuredClone")
+    matches!(name, "expect" | "String" | "Number" | "Boolean" | "BigInt" | "decimal" | "parseInt" | "parseFloat" | "isNaN" | "isFinite" | "test" | "__test" | "structuredClone" | "__eachArg")
         || CONVERSIONS.contains(&name)
         || TIMER_FNS.contains(&name)
 }
@@ -1436,6 +1436,16 @@ impl<'a> Checker<'a> {
                     self.check_args_loose(args);
                 }
                 VOID
+            }
+            // (a `test.each` row for a test's one parameter: an array's first element, as Jest
+            // spreads an array row, else the row)
+            "__eachArg" => {
+                let Some(t) = one(self) else { return Some(ERROR) };
+                match *self.types.get(t) {
+                    Ty::Array(e) => e,
+                    Ty::Record(_) if self.tuple_of(t).is_some() => self.tuple_of(t).unwrap()[0].ty,
+                    _ => t,
+                }
             }
             // `structuredClone(v)`: a deep copy, of data (arrays, objects, maps, sets, and the
             // values in them)

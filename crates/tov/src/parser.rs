@@ -2284,7 +2284,13 @@ impl<'a> Parser<'a> {
         let mut ss = Vec::new();
         for (j, &(name, pspan, ty, rest)) in params.iter().enumerate() {
             let r = row_ref(self);
-            let init = if !spread {
+            let init = if !spread && !literal_rows {
+                // (a table made otherwise, `xs.map((x) => [x])`: an array row is spread, as Jest
+                // spreads it, which its type tells)
+                let f = self.interner.intern("__eachArg");
+                let callee = self.mk_expr(ExprKind::Ident(f), pspan);
+                self.mk_expr(ExprKind::Call { callee, type_args: Vec::new(), args: vec![Arg { expr: r, by_ref: None }], optional: false }, pspan)
+            } else if !spread {
                 r
             } else if rest {
                 if j == 0 {
