@@ -936,6 +936,11 @@ impl<'a> Checker<'a> {
                                         && tb == NEVER
                                     {
                                         self.blame_fn_type(f.ty);
+                                        // (of a generic interface: as declared, before its type
+                                        // arguments, which is where its sites are)
+                                        if let Some(raw) = self.iface_fields(i).into_iter().find(|g| g.name == f.name) {
+                                            self.blame_fn_type(raw.ty);
+                                        }
                                     }
                                     problems.push(format!("`{}` has type `{}`, expected `{}`", self.name(f.name), self.show(t), self.show(f.ty)));
                                 }
