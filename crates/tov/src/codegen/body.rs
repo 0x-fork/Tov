@@ -4619,6 +4619,10 @@ impl<'c, 'a> Gen<'c, 'a> {
                 Val::plain(if op == LooseEq { format!("(!{present})") } else { present }, BOOL)
             }
             Eq | Ne | LooseEq | LooseNe => {
+                // (`xs[i] === x` past either end: false, as JavaScript's `undefined` isn't `x`)
+                if let Some(v) = self.compare_past_end(op, l, r) {
+                    return v;
+                }
                 let lv = self.expr_before(l, &[r]);
                 let rv = self.expr(r);
                 let eq = self.equality(lv, rv, true);
@@ -5496,7 +5500,15 @@ impl<'c, 'a> Gen<'c, 'a> {
             None => (elem, self.expr(other)),
         };
         let (x, y) = self.numeric_operands(lv, rv);
-        Some(Val::plain(format!("({ok} && {x} {} {y})", op.as_str()), BOOL))
+        // (`===` of nothing is false, `!==` true)
+        Some(Val::plain(
+            match op {
+                BinOp::Eq | BinOp::LooseEq => format!("({ok} && {x} == {y})"),
+                BinOp::Ne | BinOp::LooseNe => format!("(!{ok} || {x} != {y})"),
+                _ => format!("({ok} && {x} {} {y})", op.as_str()),
+            },
+            BOOL,
+        ))
     }
 
     /// `xs[i]` known present (`xs[i]!`, or read as the element type): a bounds-checked read
