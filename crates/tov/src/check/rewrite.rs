@@ -36,6 +36,9 @@ pub struct Rewrites {
     pub(crate) tuple_places: Vec<(u32, ExprId, crate::intern::Sym)>,
     /// `g.next().value` where a value must be: `g.next().value!` (module, expression).
     pub(crate) nonnulls: Vec<(u32, ExprId)>,
+    /// `m as { a: T, b?: U }` of a `Record<string, V>`: (module, the cast, `m`, each field and
+    /// whether it may be absent).
+    pub(crate) record_casts: Vec<(u32, ExprId, ExprId, Vec<(crate::intern::Sym, bool)>)>,
     /// `{ [Color.Red]: v }` where a record type is expected (every key a string literal): (module,
     /// the `new Map(...)` it was written as, the field names), as `{ red: v }`.
     pub(crate) records: Vec<(u32, ExprId, Vec<crate::intern::Sym>)>,
@@ -74,7 +77,7 @@ pub struct Rewrites {
 
 impl Rewrites {
     pub fn is_empty(&self) -> bool {
-        self.args.is_empty() && self.prims.is_empty() && self.tuple_places.is_empty() && self.nonnulls.is_empty() && self.records.is_empty() && self.fn_values.is_empty() && self.enum_names.is_empty() && self.rests.is_empty() && self.setters.is_empty() && self.static_calls.is_empty() && self.logical.is_empty() && self.widen_casts.is_empty() && self.assigns.is_empty() && self.identities.is_empty() && self.keyed_places.is_empty() && self.iterators.is_empty() && self.consts.is_empty() && self.items.is_empty() && self.awaits.is_empty() && self.calls.is_empty() && self.elems.is_empty() && self.keys.is_empty() && self.spreads.is_empty() && self.keyed.is_empty()
+        self.args.is_empty() && self.prims.is_empty() && self.tuple_places.is_empty() && self.nonnulls.is_empty() && self.record_casts.is_empty() && self.records.is_empty() && self.fn_values.is_empty() && self.enum_names.is_empty() && self.rests.is_empty() && self.setters.is_empty() && self.static_calls.is_empty() && self.logical.is_empty() && self.widen_casts.is_empty() && self.assigns.is_empty() && self.identities.is_empty() && self.keyed_places.is_empty() && self.iterators.is_empty() && self.consts.is_empty() && self.items.is_empty() && self.awaits.is_empty() && self.calls.is_empty() && self.elems.is_empty() && self.keys.is_empty() && self.spreads.is_empty() && self.keyed.is_empty()
     }
 
     pub(crate) fn extend(&mut self, o: Rewrites) {
@@ -90,6 +93,7 @@ impl Rewrites {
         self.prims.extend(o.prims);
         self.tuple_places.extend(o.tuple_places);
         self.nonnulls.extend(o.nonnulls);
+        self.record_casts.extend(o.record_casts);
         self.records.extend(o.records);
         self.fn_values.extend(o.fn_values);
         self.enum_names.extend(o.enum_names);
@@ -276,12 +280,13 @@ pub fn apply(modules: &mut [Module], rw: &Rewrites) -> bool {
     for &(m, at, items, present) in &rw.elems {
         // `m[i]` → `m.items[i]` (`!` when it's read as present)
         let ast = &mut modules[m as usize].ast;
-        let ExprKind::Index { obj, .. } = ast.exprs[at as usize].kind else { continue };
+        let ExprKind::Index { obj, optional, .. } = ast.exprs[at as usize].kind else { continue };
         if matches!(ast.exprs[obj as usize].kind, ExprKind::Member { name, .. } if name == items) {
             continue;
         }
         let span = ast.exprs[obj as usize].span;
-        ast.exprs.push(crate::ast::Expr { kind: ExprKind::Member { obj, name: items, name_span: span, optional: false }, span });
+        // (`m?.[1]`: `m?.items[1]`, the chain short-circuited where `m` isn't there)
+        ast.exprs.push(crate::ast::Expr { kind: ExprKind::Member { obj, name: items, name_span: span, optional }, span });
         let member = ast.exprs.len() as ExprId - 1;
         let at_span = ast.exprs[at as usize].span;
         if let ExprKind::Index { obj, .. } = &mut ast.exprs[at as usize].kind {
@@ -448,6 +453,35 @@ pub fn apply(modules: &mut [Module], rw: &Rewrites) -> bool {
             fields.push(crate::ast::ObjField { name, name_span: ast.exprs[k as usize].span, value: v, quoted: false });
         }
         ast.exprs[*e as usize].kind = ExprKind::Object(fields);
+        changed = true;
+    }
+    for (m, cast, src, keys) in &rw.record_casts {
+        let ast = &mut modules[*m as usize].ast;
+        if !matches!(ast.exprs[*cast as usize].kind, ExprKind::As(..)) {
+            continue;
+        }
+        let span = ast.exprs[*cast as usize].span;
+        let mut fields = Vec::new();
+        for &(name, absent) in keys {
+            let Some(obj) = copy_path(ast, *src) else { continue };
+            let key_name = name;
+            ast.exprs.push(crate::ast::Expr { kind: ExprKind::Str(key_name), span });
+            let index = ast.exprs.len() as ExprId - 1;
+            ast.exprs.push(crate::ast::Expr { kind: ExprKind::Index { obj, index, optional: false }, span });
+            let mut value = ast.exprs.len() as ExprId - 1;
+            if !absent {
+                ast.exprs.push(crate::ast::Expr { kind: ExprKind::NonNull(value), span });
+                value = ast.exprs.len() as ExprId - 1;
+            } else {
+                // (`m["k"] ?? undefined`: read as maybe absent)
+                ast.exprs.push(crate::ast::Expr { kind: ExprKind::Undefined, span });
+                let u = ast.exprs.len() as ExprId - 1;
+                ast.exprs.push(crate::ast::Expr { kind: ExprKind::Binary(crate::ast::BinOp::Nullish, value, u), span });
+                value = ast.exprs.len() as ExprId - 1;
+            }
+            fields.push(crate::ast::ObjField { name, name_span: span, value, quoted: false });
+        }
+        ast.exprs[*cast as usize].kind = ExprKind::Object(fields);
         changed = true;
     }
     for &(m, x) in &rw.nonnulls {

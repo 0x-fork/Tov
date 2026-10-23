@@ -478,6 +478,27 @@ impl<'a> Checker<'a> {
                     }
                     return target;
                 }
+                // `m.groups as { value: string; unit?: string }` of a `Record<string, V>`: the
+                // record of its keys (rewritten as `{ value: m.groups["value"]!, unit: ... }`; a
+                // field that may be absent reads as `undefined`)
+                let src_base = self.types.without_undefined(src);
+                if let Ty::Map(k, v) = *self.types.get(src_base)
+                    && self.types.is_string(k)
+                    && super::rewrite::simple_path(self.ast(), *x)
+                    && matches!(self.types.get(target), Ty::Record(_))
+                    && self.tuple_of(target).is_none()
+                {
+                    let fields = self.types.fields_in_order(target);
+                    let fits = fields.iter().all(|f| {
+                        let ft = self.types.without_undefined(f.ty);
+                        self.assignable(v, ft)
+                    });
+                    if fits && !fields.is_empty() {
+                        let keys: Vec<(Sym, bool)> = fields.iter().map(|f| (f.name, f.optional || self.types.has_undefined(f.ty))).collect();
+                        self.rewrites.record_casts.push((self.cur, e, *x, keys));
+                        return target;
+                    }
+                }
                 if src == JS {
                     // a checked conversion from JavaScript (traps if the value doesn't fit)
                     if !self.js_receivable(target) {
@@ -5146,6 +5167,23 @@ impl<'a> Checker<'a> {
             }
             // `if (r.ok)`: the variants whose `ok` is `true` (`false` when it fails)
             ExprKind::Member { obj, name, optional: false, .. } if self.bool_discriminant(*obj, *name) => self.bool_field_narrowing(*obj, *name, positive),
+            // `if (m?.groups)`: `m` is there, and its `groups`
+            ExprKind::Member { obj, optional: true, .. } if positive => {
+                let mut v = Vec::new();
+                if let Some((target, ty)) = self.target_of(*obj)
+                    && self.types.has_nullish(ty)
+                {
+                    let t = self.types.without_nullish(ty);
+                    v.push(target.with(t));
+                }
+                if let Some((target, ty)) = self.target_of(e)
+                    && self.types.has_nullish(ty)
+                {
+                    let t = self.types.without_nullish(ty);
+                    v.push(target.with(t));
+                }
+                v
+            }
             ExprKind::Ident(_) | ExprKind::Member { optional: false, .. } => {
                 let Some((target, ty)) = self.target_of(e) else { return Vec::new() };
                 if !self.types.has_nullish(ty) {
@@ -5224,14 +5262,15 @@ impl<'a> Checker<'a> {
             ExprKind::Paren(x) => self.target_of(*x),
             // `(m = re.exec(s)) !== null`: the variable, as just assigned
             ExprKind::Assign(crate::ast::AssignOp::Assign, l, _) if matches!(self.ast().expr(*l).kind, ExprKind::Ident(_)) => self.target_of(*l),
-            ExprKind::Member { obj, name, optional: false, .. } => {
+            ExprKind::Member { obj, name, optional, .. } => {
                 let (mut target, base) = self.target_of(*obj)?;
                 // (a module constant's contents can change under it: only its own value narrows)
                 if target.global.is_some() {
                     return None;
                 }
                 target.path.push(*name);
-                let base = self.types.without_undefined(base);
+                // (`x?.f`: the field where `x` is there)
+                let base = if *optional { self.types.without_nullish(base) } else { self.types.without_undefined(base) };
                 let members = self.flat_members(base);
                 // Through a class instance: other references can change it (calls forget it); getters aren't narrowable.
                 for &m in &members {
