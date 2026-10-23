@@ -351,6 +351,20 @@ impl<'a> Checker<'a> {
                         self.absent_reads.insert((m, body));
                     }
                     self.stmt(st);
+                    // `let x: number;` read before anything is assigned to it
+                    if let StmtKind::Let { mutable: true, ty: Some(_), init: None, name, .. } = &ast.stmt(st).kind
+                        && let Some((_, t)) = self.lookup(*name)
+                        && !matches!(t, ERROR | UNKNOWN | JS | VOID)
+                        && !self.types.has_undefined(t)
+                    {
+                        let n = self.name(*name).to_string();
+                        for sp in assigned::unassigned_reads(ast, *name, &stmts[i + 1..]) {
+                            self.report(
+                                Diagnostic::new("T0310", sp, format!("`{n}` is read before anything is assigned to it"))
+                                    .note("why", "on some path to here nothing has been assigned to it yet"),
+                            );
+                        }
+                    }
                 }
                 let ends = self.end_types(&fx.assigned, entry);
                 self.pop_scope();

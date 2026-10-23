@@ -51,6 +51,7 @@ pub const CODES: &[(&str, &str)] = &[
     ("T0307", "The expression has no value (it is `void`, a namespace, or similar)."),
     ("T0308", "A module constant's value depends on itself."),
     ("T0309", "A `const` needs an initial value."),
+    ("T0310", "A variable is read before anything is assigned to it; assign it on every path first, or include `undefined` in its type."),
     ("T0401", "Conditions must be `bool` (or an optional non-primitive value, tested for presence). There is no implicit truthiness."),
     ("T0402", "`for...of` iterates arrays and sets."),
     ("T0501", "The operator doesn't apply to these operand types."),

@@ -665,7 +665,9 @@ impl<'a> Parser<'a> {
             if let ItemKind::Const { name, name_span, ty, init, mutable } = self.ast.items[ii].kind {
                 let span = self.ast.items[ii].span;
                 let st = if local[ii] {
-                    StmtKind::Let { mutable, name, name_span, ty, init: Some(init) }
+                    // (`let m: string;`, given no value: as a function's, read only once assigned)
+                    let given = !(mutable && ty.is_some() && matches!(self.ast.exprs[init as usize].kind, ExprKind::Undefined) && self.ast.exprs[init as usize].span == name_span);
+                    StmtKind::Let { mutable, name, name_span, ty, init: given.then_some(init) }
                 } else {
                     StmtKind::InitGlobal(new_index[ii])
                 };

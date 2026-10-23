@@ -1465,7 +1465,7 @@ fn ctor_stmt_exprs(ast: &Ast, s: StmtId, out: &mut Vec<ExprId>) {
     }
 }
 
-fn children(ast: &Ast, e: ExprId) -> Vec<ExprId> {
+pub(super) fn children(ast: &Ast, e: ExprId) -> Vec<ExprId> {
     use crate::ast::ArrowBody;
     let mut out = Vec::new();
     match &ast.expr(e).kind {

@@ -86,6 +86,7 @@ Status tags: **[M0]** checked today · **[Mn]** planned for milestone n.
 - `if/else`, `while`, `do/while`, `for (init; cond; step)`, `for (const x of xs)`, `switch`, `break`, `continue`, `return`, blocks.
 - Conditions, `!`, `&&` and `||` use JavaScript's truthiness: `false`, `0`, `NaN`, `""`, `0n` and `undefined` are false, everything else (objects, even empty arrays) true. `a || b` and `a && b` are values unless both are `bool` (`name || "anonymous"`, `node && node.next`); `if (x)` narrows `x` to defined.
 - A function with a non-`void` return type must return on every path.
+- A `let` given a type but no value (`let x: number;`) must be assigned on every path before it's read, as in TypeScript (`T0310`), unless its type includes `undefined`. Reads inside functions aren't checked, since they may run later.
 - `var` is `let`; `for (const k in obj)` iterates `Object.keys(obj)`; `==` and `!=` are `===` and `!==` (TypeScript already rejects comparing different types), except that `x == null` and `x == undefined` match both.
 - Removed: `with`, labels, `delete`, `arguments`, `eval`, the comma operator (but for steps: `i++, j--`).
 

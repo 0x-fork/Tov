@@ -1,0 +1,19 @@
+function pick(c: boolean): int {
+  let x: int
+  if (c) x = 1
+  return x
+}
+
+function last(n: int): int {
+  let y: int
+  for (let i = 0; i < n; i++) y = i
+  return y
+}
+
+function step(): int {
+  let z: int
+  z += 1
+  return z
+}
+
+console.log(pick(true), last(3), step())

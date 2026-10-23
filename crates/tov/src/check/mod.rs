@@ -7,6 +7,7 @@ pub(crate) fn promoted_ty(t: TyId) -> TyId {
     expr::promoted(t)
 }
 pub(crate) mod class;
+mod assigned;
 mod expr;
 pub mod facts;
 mod objects;

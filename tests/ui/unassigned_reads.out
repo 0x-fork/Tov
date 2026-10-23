@@ -1,0 +1,13 @@
+error[T0310] unassigned_reads.tov:4:10: `x` is read before anything is assigned to it
+    4 |   return x
+  why: on some path to here nothing has been assigned to it yet
+
+error[T0310] unassigned_reads.tov:10:10: `y` is read before anything is assigned to it
+   10 |   return y
+  why: on some path to here nothing has been assigned to it yet
+
+error[T0310] unassigned_reads.tov:15:3: `z` is read before anything is assigned to it
+   15 |   z += 1
+  why: on some path to here nothing has been assigned to it yet
+
+3 error(s)
