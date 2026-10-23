@@ -1,0 +1,4 @@
+ok   find > of 1,3,5, searching for 3, expected 1
+ok   find > of 2,4, searching for 5, expected -1
+ok   map with any
+3 passed, 0 failed

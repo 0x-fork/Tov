@@ -2244,6 +2244,17 @@ impl<'a> Checker<'a> {
         self.types.union(&out)
     }
 
+    /// Whether a written type mentions `any` (`any`, `any[]`, `Record<string, any>`).
+    fn mentions_any(&self, t: ast::TypeId) -> bool {
+        match &self.ast().ty(t).kind {
+            TypeExprKind::Named { ns, name, args, .. } => (ns.is_none() && self.name(*name) == "any") || args.iter().any(|&a| self.mentions_any(a)),
+            TypeExprKind::Array(e) => self.mentions_any(*e),
+            TypeExprKind::Union(ms) | TypeExprKind::Intersection(ms) => ms.iter().any(|&m| self.mentions_any(m)),
+            TypeExprKind::Record(fs) => fs.iter().any(|f| self.mentions_any(f.ty)),
+            _ => false,
+        }
+    }
+
     fn resolve_type(&mut self, te: ast::TypeId, tscope: &[(Sym, TyId)]) -> TyId {
         let ast = self.ast();
         let node = ast.ty(te);

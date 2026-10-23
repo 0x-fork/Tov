@@ -226,6 +226,9 @@ impl<'a> Checker<'a> {
                 let kw = Span::new(span.file, span.start, span.start + if *mutable { 3 } else { 5 });
                 let kind = if *mutable { LocalKind::Let } else { LocalKind::Const };
                 let tscope = self.tscope();
+                // (`const x: any = v`, a `test.each` row's `(xs: any[]) => ...`: `v`'s type, as if
+                // unannotated)
+                let ty = &ty.filter(|&te| !(init.is_some() && self.mentions_any(te)));
                 let (t, promotable) = match (ty, init) {
                     (Some(te), init) => {
                         let declared = self.resolve_type(*te, &tscope);

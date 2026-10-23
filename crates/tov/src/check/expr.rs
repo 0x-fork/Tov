@@ -2912,6 +2912,15 @@ impl<'a> Checker<'a> {
         let mut params = Vec::new();
         for (i, p) in f.params.iter().enumerate() {
             let ty = match p.ty {
+                // (`(xs: any[], x: any) => ...` where what's passed is known, `test.each`'s rows
+                // say: those types, as if it were unannotated)
+                Some(t) if self.mentions_any(t)
+                    && let Some(fp) = exp_fn.as_ref().and_then(|(ps, _)| ps.get(i))
+                    && !self.types.mentions(fp.ty, &self.infer_free)
+                    && fp.ty != ERROR =>
+                {
+                    fp.ty
+                }
                 // (`(e: unknown) => ...` where an `Error` is passed: it takes the `Error`, as it
                 // takes anything)
                 Some(t) if self.resolve_type(t, &tscope) == UNKNOWN
