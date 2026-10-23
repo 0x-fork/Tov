@@ -1726,6 +1726,25 @@ impl<'a> Checker<'a> {
                         e
                     }
                     Ty::Error => return None,
+                    // `edge[1] += w`: the tuple's element, a field (`edge.1`, rewritten so)
+                    Ty::Record(_) if self.tuple_of(t).is_some() => {
+                        let elems = self.tuple_of(t).unwrap();
+                        match self.ast().expr(*index).kind {
+                            ExprKind::Int(i) if (i as usize) < elems.len() => {
+                                self.expr(*index, Some(INT));
+                                let field = elems[i as usize].name;
+                                self.rewrites.tuple_places.push((self.cur, e, field));
+                                let root = self.check_mutable_root(*obj, span);
+                                return Some(Place { ty: elems[i as usize].ty, local: None, root, sites: Vec::new(), global: None, int_field: None });
+                            }
+                            _ => {
+                                self.expr(*index, None);
+                                let shown = self.show(t);
+                                self.report(Diagnostic::new("T0110", span, format!("a tuple `{shown}` is indexed with a constant from 0 to {}", elems.len() - 1)));
+                                return None;
+                            }
+                        }
+                    }
                     Ty::Map(k, v) => {
                         // `counts[w] = n`: sets the key
                         self.map_place = true;

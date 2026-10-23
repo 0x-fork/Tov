@@ -32,6 +32,8 @@ pub struct Rewrites {
     /// A class instance where a number is wanted (`Number(x)`, `+x`): (module, the value, the
     /// method), as `x.valueOf()` (JavaScript's conversion calls it).
     pub(crate) prims: Vec<(u32, ExprId, crate::intern::Sym)>,
+    /// `t[1] = v`, `t[1] += v` of a tuple: the element's field, `t.1` (module, index expression, field).
+    pub(crate) tuple_places: Vec<(u32, ExprId, crate::intern::Sym)>,
     /// `{ [Color.Red]: v }` where a record type is expected (every key a string literal): (module,
     /// the `new Map(...)` it was written as, the field names), as `{ red: v }`.
     pub(crate) records: Vec<(u32, ExprId, Vec<crate::intern::Sym>)>,
@@ -70,7 +72,7 @@ pub struct Rewrites {
 
 impl Rewrites {
     pub fn is_empty(&self) -> bool {
-        self.args.is_empty() && self.prims.is_empty() && self.records.is_empty() && self.fn_values.is_empty() && self.enum_names.is_empty() && self.rests.is_empty() && self.setters.is_empty() && self.static_calls.is_empty() && self.logical.is_empty() && self.widen_casts.is_empty() && self.assigns.is_empty() && self.identities.is_empty() && self.keyed_places.is_empty() && self.iterators.is_empty() && self.consts.is_empty() && self.items.is_empty() && self.awaits.is_empty() && self.calls.is_empty() && self.elems.is_empty() && self.keys.is_empty() && self.spreads.is_empty() && self.keyed.is_empty()
+        self.args.is_empty() && self.prims.is_empty() && self.tuple_places.is_empty() && self.records.is_empty() && self.fn_values.is_empty() && self.enum_names.is_empty() && self.rests.is_empty() && self.setters.is_empty() && self.static_calls.is_empty() && self.logical.is_empty() && self.widen_casts.is_empty() && self.assigns.is_empty() && self.identities.is_empty() && self.keyed_places.is_empty() && self.iterators.is_empty() && self.consts.is_empty() && self.items.is_empty() && self.awaits.is_empty() && self.calls.is_empty() && self.elems.is_empty() && self.keys.is_empty() && self.spreads.is_empty() && self.keyed.is_empty()
     }
 
     pub(crate) fn extend(&mut self, o: Rewrites) {
@@ -84,6 +86,7 @@ impl Rewrites {
         self.spreads.extend(o.spreads);
         self.keyed.extend(o.keyed);
         self.prims.extend(o.prims);
+        self.tuple_places.extend(o.tuple_places);
         self.records.extend(o.records);
         self.fn_values.extend(o.fn_values);
         self.enum_names.extend(o.enum_names);
@@ -443,6 +446,14 @@ pub fn apply(modules: &mut [Module], rw: &Rewrites) -> bool {
         }
         ast.exprs[*e as usize].kind = ExprKind::Object(fields);
         changed = true;
+    }
+    for &(m, x, field) in &rw.tuple_places {
+        let ast = &mut modules[m as usize].ast;
+        if let ExprKind::Index { obj, index, .. } = ast.exprs[x as usize].kind {
+            let name_span = ast.exprs[index as usize].span;
+            ast.exprs[x as usize].kind = ExprKind::Member { obj, name: field, name_span, optional: false };
+            changed = true;
+        }
     }
     for &(m, x, method) in &rw.prims {
         // `Number(x)` → `Number(x.valueOf())`: the node becomes the call, on a copy of itself
