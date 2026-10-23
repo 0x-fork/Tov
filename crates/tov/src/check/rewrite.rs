@@ -34,6 +34,8 @@ pub struct Rewrites {
     pub(crate) prims: Vec<(u32, ExprId, crate::intern::Sym)>,
     /// `t[1] = v`, `t[1] += v` of a tuple: the element's field, `t.1` (module, index expression, field).
     pub(crate) tuple_places: Vec<(u32, ExprId, crate::intern::Sym)>,
+    /// `g.next().value` where a value must be: `g.next().value!` (module, expression).
+    pub(crate) nonnulls: Vec<(u32, ExprId)>,
     /// `{ [Color.Red]: v }` where a record type is expected (every key a string literal): (module,
     /// the `new Map(...)` it was written as, the field names), as `{ red: v }`.
     pub(crate) records: Vec<(u32, ExprId, Vec<crate::intern::Sym>)>,
@@ -72,7 +74,7 @@ pub struct Rewrites {
 
 impl Rewrites {
     pub fn is_empty(&self) -> bool {
-        self.args.is_empty() && self.prims.is_empty() && self.tuple_places.is_empty() && self.records.is_empty() && self.fn_values.is_empty() && self.enum_names.is_empty() && self.rests.is_empty() && self.setters.is_empty() && self.static_calls.is_empty() && self.logical.is_empty() && self.widen_casts.is_empty() && self.assigns.is_empty() && self.identities.is_empty() && self.keyed_places.is_empty() && self.iterators.is_empty() && self.consts.is_empty() && self.items.is_empty() && self.awaits.is_empty() && self.calls.is_empty() && self.elems.is_empty() && self.keys.is_empty() && self.spreads.is_empty() && self.keyed.is_empty()
+        self.args.is_empty() && self.prims.is_empty() && self.tuple_places.is_empty() && self.nonnulls.is_empty() && self.records.is_empty() && self.fn_values.is_empty() && self.enum_names.is_empty() && self.rests.is_empty() && self.setters.is_empty() && self.static_calls.is_empty() && self.logical.is_empty() && self.widen_casts.is_empty() && self.assigns.is_empty() && self.identities.is_empty() && self.keyed_places.is_empty() && self.iterators.is_empty() && self.consts.is_empty() && self.items.is_empty() && self.awaits.is_empty() && self.calls.is_empty() && self.elems.is_empty() && self.keys.is_empty() && self.spreads.is_empty() && self.keyed.is_empty()
     }
 
     pub(crate) fn extend(&mut self, o: Rewrites) {
@@ -87,6 +89,7 @@ impl Rewrites {
         self.keyed.extend(o.keyed);
         self.prims.extend(o.prims);
         self.tuple_places.extend(o.tuple_places);
+        self.nonnulls.extend(o.nonnulls);
         self.records.extend(o.records);
         self.fn_values.extend(o.fn_values);
         self.enum_names.extend(o.enum_names);
@@ -445,6 +448,18 @@ pub fn apply(modules: &mut [Module], rw: &Rewrites) -> bool {
             fields.push(crate::ast::ObjField { name, name_span: ast.exprs[k as usize].span, value: v, quoted: false });
         }
         ast.exprs[*e as usize].kind = ExprKind::Object(fields);
+        changed = true;
+    }
+    for &(m, x) in &rw.nonnulls {
+        let ast = &mut modules[m as usize].ast;
+        if matches!(ast.exprs[x as usize].kind, ExprKind::NonNull(_)) {
+            continue;
+        }
+        let span = ast.exprs[x as usize].span;
+        let inner = crate::ast::Expr { kind: std::mem::replace(&mut ast.exprs[x as usize].kind, ExprKind::Error), span };
+        ast.exprs.push(inner);
+        let copy = ast.exprs.len() as ExprId - 1;
+        ast.exprs[x as usize].kind = ExprKind::NonNull(copy);
         changed = true;
     }
     for &(m, x, field) in &rw.tuple_places {

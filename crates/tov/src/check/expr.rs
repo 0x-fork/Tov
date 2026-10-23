@@ -273,7 +273,30 @@ impl<'a> Checker<'a> {
                 self.invalidate_heap();
                 t
             }
-            ExprKind::Member { obj, name, name_span, optional } => self.member(e, *obj, *name, *name_span, *optional, span),
+            ExprKind::Member { obj, name, name_span, optional } => {
+                let t = self.member(e, *obj, *name, *name_span, *optional, span);
+                // (`n = g.next().value` of a `Generator<T>`, whose result TypeScript leaves `any`:
+                // the value, checked to be there, as `g.next().value!`)
+                if let Some(x) = exp
+                    && !*optional
+                    && self.ts_module()
+                    && self.name(*name) == "value"
+                    && x != ERROR
+                    && x != UNKNOWN
+                    && !self.types.has_undefined(x)
+                    && self.types.has_undefined(t)
+                    && let ExprKind::Call { callee, args, optional: false, .. } = &self.ast().expr(*obj).kind
+                    && args.is_empty()
+                    && let ExprKind::Member { obj: g, name: nn, .. } = self.ast().expr(*callee).kind
+                    && self.name(nn) == "next"
+                    && let Some(gt) = self.expr_type_peek(g)
+                    && matches!(self.types.get(gt), Ty::Gen(_))
+                {
+                    self.rewrites.nonnulls.push((self.cur, e));
+                    return self.types.without_undefined(t);
+                }
+                t
+            }
             ExprKind::Index { obj, index, optional } => self.index(e, *obj, *index, *optional, *optional || want, span),
             ExprKind::Object(fields) if fields.iter().any(|f| matches!(self.ast().expr(f.value).kind, ExprKind::Spread(_))) => self.object_spread(e, fields, span),
             ExprKind::Object(fields) => self.object(fields, exp, span),
