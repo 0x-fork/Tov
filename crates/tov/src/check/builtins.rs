@@ -1490,6 +1490,55 @@ impl<'a> Checker<'a> {
         Some(result)
     }
 
+    /// `t` with each class instance in it as a record of the class's fields (a class that
+    /// holds itself stays a class).
+    fn erase_classes(&mut self, t: TyId, stack: &mut Vec<TyId>) -> TyId {
+        match *self.types.get(t) {
+            Ty::Class(c, _) => {
+                if stack.contains(&t) {
+                    return t;
+                }
+                self.resolve_class(c);
+                stack.push(t);
+                let names: Vec<Sym> = self.classes[c as usize].fields.iter().map(|f| f.name).collect();
+                let mut fields = Vec::new();
+                for n in names {
+                    if let Some(mr) = self.class_member(t, n) {
+                        let ft = self.member_type(&mr);
+                        if matches!(self.types.get(ft), Ty::Func(..)) {
+                            continue;
+                        }
+                        let ft = self.erase_classes(ft, stack);
+                        fields.push(Field { name: n, ty: ft, optional: false });
+                    }
+                }
+                stack.pop();
+                let order: Vec<Sym> = fields.iter().map(|f| f.name).collect();
+                let r = self.types.record(fields);
+                self.types.note_field_order(r, order);
+                r
+            }
+            Ty::Array(e) => {
+                let e = self.erase_classes(e, stack);
+                self.types.array(e)
+            }
+            Ty::Union(ms) => {
+                let ms: Vec<TyId> = self.types.tys(ms).to_vec();
+                let ms: Vec<TyId> = ms.into_iter().map(|m| self.erase_classes(m, stack)).collect();
+                self.types.union(&ms)
+            }
+            Ty::Record(_) => {
+                let fs = self.types.fields_in_order(t);
+                let order: Vec<Sym> = fs.iter().map(|f| f.name).collect();
+                let fs: Vec<Field> = fs.into_iter().map(|f| Field { ty: self.erase_classes(f.ty, stack), ..f }).collect();
+                let r = self.types.record(fs);
+                self.types.note_field_order(r, order);
+                r
+            }
+            _ => t,
+        }
+    }
+
     pub(super) fn expect_matcher(&mut self, subject: TyId, name: &str, name_span: Span, args: &[Arg], span: Span) -> TyId {
         match name {
             "toBe" | "toEqual" | "toStrictEqual" => {
@@ -1498,6 +1547,9 @@ impl<'a> Checker<'a> {
                     self.check_args_loose(args);
                     return VOID;
                 }
+                // (`toEqual` compares a class instance with an object of the same fields, as
+                // Jest does: `expect(m.entries()).toEqual([{ key: "a", value: 1 }])`)
+                let subject = if name == "toEqual" && has_object_literal(self.ast(), args[0].expr) { self.erase_classes(subject, &mut Vec::new()) } else { subject };
                 let t = self.expr(args[0].expr, Some(subject));
                 if !self.comparable(t, subject) {
                     // (while `number`s are speculated `int`: `Map<int, int>` and `Map<f64, f64>`
@@ -1664,5 +1716,16 @@ impl<'a> Checker<'a> {
         let ret = self.types.array(ut);
         let cs = CallSig { tparams: vec![u], params: vec![p(fty)], names: vec!["fn".into()], rest: None, ret, throws: NEVER };
         self.call_sig(&cs, "Array.from", &[], std::slice::from_ref(f), exp, span)
+    }
+}
+
+/// An object literal in `e`, through array literals (`[{ key: "a" }]`).
+pub(crate) fn has_object_literal(ast: &crate::ast::Ast, e: ExprId) -> bool {
+    use crate::ast::ExprKind;
+    match &ast.expr(e).kind {
+        ExprKind::Object(_) => true,
+        ExprKind::Array(xs) => xs.iter().any(|&x| has_object_literal(ast, x)),
+        ExprKind::Paren(x) | ExprKind::Spread(x) => has_object_literal(ast, *x),
+        _ => false,
     }
 }

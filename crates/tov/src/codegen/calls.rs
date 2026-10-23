@@ -2761,6 +2761,23 @@ impl<'c, 'a> Gen<'c, 'a> {
     // ------------------------------------------------------------ test matchers
 
     /// `t` holds arrays, records or maps (compared by identity).
+    /// A class instance in `t` (in an array, a record, a union).
+    fn has_classes(&mut self, t: TyId, stack: &mut Vec<TyId>) -> bool {
+        if stack.contains(&t) {
+            return false;
+        }
+        stack.push(t);
+        let r = match self.tget(t) {
+            Ty::Class(..) => true,
+            Ty::Array(e) => self.has_classes(e, stack),
+            Ty::Union(ms) => self.c.types.tys(ms).to_vec().into_iter().any(|m| self.has_classes(m, stack)),
+            Ty::Record(_) => self.c.types.fields_in_order(t).into_iter().any(|f| self.has_classes(f.ty, stack)),
+            _ => false,
+        };
+        stack.pop();
+        r
+    }
+
     fn has_objects(&mut self, t: TyId) -> bool {
         self.members(t).iter().any(|&m| matches!(self.tget(m), Ty::Array(_) | Ty::Map(..) | Ty::Set(_) | Ty::Record(_) | Ty::Rec(..)))
     }
@@ -2792,6 +2809,19 @@ impl<'c, 'a> Gen<'c, 'a> {
                     _ => unreachable!(),
                 };
                 (format!("tv_map_eq({}, {}, {kd}, {vd})", s.code, x.code), Some(x))
+            }
+            // (class instances against objects: alike when their fields print alike, as Jest
+            // compares them)
+            "toEqual" if crate::check::builtins::has_object_literal(self.ast(self.cur_m()), args[0].expr) && self.has_classes(s.ty, &mut Vec::new()) => {
+                let x = self.expr(args[0].expr);
+                let (a, b) = (self.fresh("sa"), self.fresh("sb"));
+                let ia = self.inspect_code(s.ty, &s.code, "0");
+                let ib = self.inspect_code(x.ty, &x.code, "0");
+                self.line(format!("tv_sb {a} = {{0}}, {b} = {{0}};"));
+                self.line(format!("{{ tv_sb *sb = &{a}; tv_inspect_anon++; {ia}; tv_inspect_anon--; }} {{ tv_sb *sb = &{b}; {ib}; }}"));
+                let r = self.fresh("eq");
+                self.line(format!("bool {r} = {a}.len == {b}.len && memcmp({a}.data, {b}.data, {a}.len) == 0; tv_sb_free(&{a}); tv_sb_free(&{b});"));
+                (r, Some(x))
             }
             // (deep: arrays, records, maps alike when they print alike, as Jest compares them)
             "toEqual" | "toStrictEqual" if self.has_objects(s.ty) => {

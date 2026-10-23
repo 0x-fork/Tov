@@ -3751,12 +3751,15 @@ void tv_inspect_tuple(tv_sb *sb, int depth, size_t n, const tv_type *const *type
     tv_reduce_to_single_string(sb, &out, "[", "]", true, depth + 1, numbers);
 }
 
+int tv_inspect_anon;
+
 void tv_inspect_object(tv_sb *sb, int depth, const char *cls, size_t n, const char *const *names, const tv_type *const *types,
                        const void *const *fields) {
+    if (tv_inspect_anon) cls = "";
     size_t cl = strlen(cls);
     if (n == 0) {
         tv_sb_push(sb, cls, cl);
-        tv_sb_push(sb, " {}", 3);
+        tv_sb_push_cstr(sb, cl ? " {}" : "{}");
         return;
     }
     char buf[160];
@@ -3772,7 +3775,7 @@ void tv_inspect_object(tv_sb *sb, int depth, const char *cls, size_t n, const ch
         tv_ictx.indent -= 2;
         tv_pieces_mark(&out);
     }
-    snprintf(buf, sizeof buf, "%s {", cls);
+    snprintf(buf, sizeof buf, "%s%s{", cls, cl ? " " : "");
     tv_reduce_to_single_string(sb, &out, buf, "}", false, depth + 1, false);
 }
 

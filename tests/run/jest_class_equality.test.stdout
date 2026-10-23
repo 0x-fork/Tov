@@ -1,0 +1,5 @@
+ok   instances equal objects
+FAIL a field differs
+  expected [ { x: 3, y: 5 } ], received [ Point { x: 3, y: 4 } ]
+  at tests/run/jest_class_equality.test.ts:25:3
+1 passed, 1 failed
