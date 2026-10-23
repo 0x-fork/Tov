@@ -1881,7 +1881,6 @@ impl<'c, 'a> Gen<'c, 'a> {
                 Val::plain("0", ty)
             }
             (Some("process"), "cwd") => self.tmp(STR, "tv_native_cwd()", true),
-            (Some("Date"), "now") => Val::plain("tv_date_now()", F64),
             (Some("performance"), "now") => Val::plain("tv_performance_now()", F64),
             (Some("stdout" | "stderr"), "write") => {
                 let v = self.expr(args[0].expr);

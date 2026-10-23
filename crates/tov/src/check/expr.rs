@@ -606,6 +606,9 @@ impl<'a> Checker<'a> {
                     return F64;
                 }
                 let t = self.expr(x, exp);
+                if t != ERROR && !self.types.is_num_like(t) && t != BIGINT && self.to_primitive(x, t) {
+                    return F64;
+                }
                 if t != ERROR && !self.types.is_num_like(t) && t != BIGINT {
                     let msg = format!("unary `-` needs a number, found `{}`", self.show(t));
                     self.report(Diagnostic::new("T0501", span, msg));
@@ -722,6 +725,7 @@ impl<'a> Checker<'a> {
             Eq | Ne | LooseEq | LooseNe => self.equality(e, l, r, span),
             Lt | Gt | Le | Ge => {
                 let (tl, tr) = self.numeric_pair(l, r, None);
+                let (tl, tr) = self.primitive_pair(l, r, tl, tr);
                 if tl == BIGINT || tr == BIGINT {
                     // bigint with bigint, or with an integer (compared exactly, as in JavaScript)
                     let ok = |t: TyId| t == BIGINT || t == ERROR || self.types.is_int(t);
@@ -773,6 +777,7 @@ impl<'a> Checker<'a> {
             }
             Sub | Mul | Rem | Pow => {
                 let (tl, tr) = self.numeric_pair(l, r, exp);
+                let (tl, tr) = self.primitive_pair(l, r, tl, tr);
                 if tl == DECIMAL || tr == DECIMAL {
                     return self.decimal_arith(op, l, r, tl, tr, span);
                 }
@@ -796,6 +801,7 @@ impl<'a> Checker<'a> {
             }
             Div => {
                 let (tl, tr) = self.numeric_pair(l, r, None);
+                let (tl, tr) = self.primitive_pair(l, r, tl, tr);
                 if tl == DECIMAL || tr == DECIMAL {
                     return self.decimal_arith(op, l, r, tl, tr, span);
                 }
@@ -868,6 +874,14 @@ impl<'a> Checker<'a> {
 
     /// `x` (of type `t`) is a class instance with `valueOf()`: where a number is wanted, it's
     /// read through that, as JavaScript converts it (rewritten as `x.valueOf()`).
+    /// Operands of `<`, `-`, `*`, ... that are objects with a `valueOf()` (a `Date`): its value,
+    /// as JavaScript compares and computes with them.
+    fn primitive_pair(&mut self, l: ExprId, r: ExprId, tl: TyId, tr: TyId) -> (TyId, TyId) {
+        let tl = if self.class_of(tl).is_some() && self.to_primitive(l, tl) { F64 } else { tl };
+        let tr = if self.class_of(tr).is_some() && self.to_primitive(r, tr) { F64 } else { tr };
+        (tl, tr)
+    }
+
     pub(super) fn to_primitive(&mut self, x: ExprId, t: TyId) -> bool {
         let Some(sym) = self.interner.lookup("valueOf") else { return false };
         if self.class_of(t).is_none() || !matches!(self.class_member(t, sym), Some(super::class::ClassMemberRef::Method(ref mm)) if mm.params.iter().all(|p| p.optional)) {

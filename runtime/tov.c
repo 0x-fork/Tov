@@ -4275,6 +4275,85 @@ double tv_date_now(void) {
     return (double)tv.tv_sec * 1000.0 + (double)(tv.tv_usec / 1000);
 }
 
+/* ---- Date's time zone (the system's: TZ, else /etc/localtime) */
+double tv_native_dateNow(void) { return tv_date_now(); }
+
+/* The seconds east of UTC at UTC second `s`. */
+static long tv_date_gmtoff(double s) {
+    time_t tt = (time_t)s;
+    struct tm tm;
+    if (!localtime_r(&tt, &tm)) return 0;
+    return tm.tm_gmtoff;
+}
+
+static double tv_floor_div(double a, double b) { return floor(a / b); }
+
+/* getTimezoneOffset(): minutes from local time to UTC (west of UTC positive), at time t (ms). */
+double tv_native_dateOffset(double t) {
+    if (t != t) return t;
+    return (double)(-tv_date_gmtoff(tv_floor_div(t, 1000.0))) / 60.0;
+}
+
+/* The UTC time (ms) of local wall-clock time `local` (ms, as if it were UTC): the offset in
+ * effect then (in a gap, the one before it; in an overlap, the earlier time, as JavaScript's). */
+double tv_native_dateLocalToUtc(double local) {
+    if (local != local) return local;
+    double s = tv_floor_div(local, 1000.0);
+    long off1 = tv_date_gmtoff(s);
+    long off2 = tv_date_gmtoff(s - (double)off1);
+    long off = off1;
+    if (off1 != off2) {
+        /* (near a change: the offset that maps back to this wall-clock time, else the earlier) */
+        long a = tv_date_gmtoff(s - (double)off2);
+        off = a == off2 ? off2 : (off1 > off2 ? off1 : off2);
+    }
+    /* (an overlap: two UTC times show this wall-clock time; JavaScript takes the earlier) */
+    long before = tv_date_gmtoff(s - (double)off - 3600.0);
+    if (before > off && tv_date_gmtoff(s - (double)before) == before) off = before;
+    return local - (double)off * 1000.0;
+}
+
+/* The zone's name at time t, as Node writes it in Date's toString ("Coordinated Universal Time",
+ * "Pacific Daylight Time"): ICU's long names for common zones, else the abbreviation. */
+tv_str tv_native_dateZoneName(double t) {
+    time_t tt = (time_t)tv_floor_div(t, 1000.0);
+    struct tm tm;
+    const char *abbr = localtime_r(&tt, &tm) && tm.tm_zone ? tm.tm_zone : "UTC";
+    /* (abbreviations several zones share, told apart by their offset) */
+    static const struct { const char *abbr; long off; const char *name; } shared[] = {
+        {"IST", 19800, "India Standard Time"}, {"IST", 3600, "Irish Standard Time"}, {"IST", 7200, "Israel Standard Time"},
+        {"CST", 28800, "China Standard Time"}, {"CST", -18000, "Cuba Standard Time"}, {"BST", 21600, "Bangladesh Standard Time"},
+    };
+    for (size_t i = 0; i < sizeof shared / sizeof shared[0]; i++)
+        if (strcmp(abbr, shared[i].abbr) == 0 && tm.tm_gmtoff == shared[i].off) return tv_str_from(shared[i].name, strlen(shared[i].name));
+    static const char *const names[][2] = {
+        {"UTC", "Coordinated Universal Time"}, {"GMT", "Greenwich Mean Time"}, {"BST", "British Summer Time"},
+        {"WET", "Western European Standard Time"}, {"WEST", "Western European Summer Time"},
+        {"IDT", "Israel Daylight Time"}, {"SAST", "South Africa Standard Time"}, {"WIB", "Western Indonesia Time"},
+        {"HKT", "Hong Kong Standard Time"}, {"PKT", "Pakistan Standard Time"}, {"MSK", "Moscow Standard Time"},
+        {"AWST", "Australian Western Standard Time"}, {"ACST", "Australian Central Standard Time"}, {"ACDT", "Australian Central Daylight Time"},
+        {"CET", "Central European Standard Time"}, {"CEST", "Central European Summer Time"},
+        {"EET", "Eastern European Standard Time"}, {"EEST", "Eastern European Summer Time"},
+        {"EST", "Eastern Standard Time"}, {"EDT", "Eastern Daylight Time"}, {"CST", "Central Standard Time"},
+        {"CDT", "Central Daylight Time"}, {"MST", "Mountain Standard Time"}, {"MDT", "Mountain Daylight Time"},
+        {"PST", "Pacific Standard Time"}, {"PDT", "Pacific Daylight Time"}, {"AKST", "Alaska Standard Time"},
+        {"AKDT", "Alaska Daylight Time"}, {"HST", "Hawaii-Aleutian Standard Time"}, {"JST", "Japan Standard Time"},
+        {"KST", "Korean Standard Time"}, {"AEST", "Australian Eastern Standard Time"}, {"AEDT", "Australian Eastern Daylight Time"},
+        {"NZST", "New Zealand Standard Time"}, {"NZDT", "New Zealand Daylight Time"},
+    };
+    for (size_t i = 0; i < sizeof names / sizeof names[0]; i++)
+        if (strcmp(abbr, names[i][0]) == 0) return tv_str_from(names[i][1], strlen(names[i][1]));
+    /* (an offset name, "+0530": GMT and the offset, as ICU writes zones without names) */
+    if (abbr[0] == '+' || abbr[0] == '-') {
+        char buf[32];
+        long off = tm.tm_gmtoff;
+        long a = off < 0 ? -off : off;
+        snprintf(buf, sizeof buf, "GMT%c%02ld:%02ld", off < 0 ? '-' : '+', a / 3600, (a / 60) % 60);
+        return tv_str_from(buf, strlen(buf));
+    }
+    return tv_str_from(abbr, strlen(abbr));
+}
+
 #ifndef __APPLE__
 static struct timespec tv_start_time;
 #endif

@@ -1185,7 +1185,12 @@ impl<'c, 'a> Gen<'c, 'a> {
             // inspect: `Name { field: value, ... }`.
             let cls = self.c.class_names[ci.decl as usize].clone();
             let mut b = String::new();
-            if fields.is_empty() {
+            // (a prelude class showing as Node shows it: a `Date` as its ISO time)
+            let shown = self.c.interner.lookup("__inspect").filter(|&m| matches!(self.c.class_member(*t, m), Some(crate::check::class::ClassMemberRef::Method(..))));
+            if let Some(m) = shown {
+                let call = self.method_call_code("x", *t, m, false, Vec::new());
+                let _ = writeln!(b, "    (void)depth;\n    tv_str s = {call};\n    tv_sb_push_str(sb, s);\n    tv_str_release(s);");
+            } else if fields.is_empty() {
                 let _ = writeln!(b, "    tv_inspect_object(sb, depth, {}, 0, NULL, NULL, NULL);", c_string(cls.as_bytes()));
             } else {
                 let names: Vec<String> = fields.iter().map(|f| c_string(self.sym(f.name).as_bytes())).collect();

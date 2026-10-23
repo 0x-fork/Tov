@@ -34,6 +34,9 @@ pub(super) fn native_sig(types: &mut Types, name: &str) -> Option<(Vec<TyId>, Ty
     let str_arr = types.array(STR);
     Some(match name {
         "takeError" | "cwd" => (vec![], STR),
+        "dateNow" => (vec![], F64),
+        "dateOffset" | "dateLocalToUtc" => (vec![F64], F64),
+        "dateZoneName" => (vec![F64], STR),
         "reCompile" => (vec![STR, STR], INT),
         "trap" => (vec![STR], NEVER),
         "reFlags" => (vec![INT], STR),
@@ -161,7 +164,7 @@ pub(super) fn is_type_keyword(name: &str) -> bool {
 }
 
 pub(super) fn is_builtin_ns(name: &str) -> bool {
-    matches!(name, "Math" | "console" | "JSON" | "process" | "Date" | "performance" | "Promise" | "BigInt" | "Array" | "Number" | "String" | "Object")
+    matches!(name, "Math" | "console" | "JSON" | "process" | "performance" | "Promise" | "BigInt" | "Array" | "Number" | "String" | "Object")
 }
 
 pub(super) fn is_builtin_fn(name: &str) -> bool {
@@ -637,7 +640,7 @@ impl<'a> Checker<'a> {
         let known: Vec<&str> = match ns {
             "Math" => MATH_CONSTS.iter().copied().chain(MATH_F64_FNS.iter().map(|f| f.0)).chain(MATH_INT_FNS.iter().copied()).chain(["abs", "min", "max", "imul", "clz32"]).collect(),
             "process" => vec!["argv", "env", "exit", "cwd", "platform", "arch", "pid", "stdout", "stderr"],
-            "Date" | "performance" => vec!["now"],
+            "performance" => vec!["now"],
             "JSON" => vec!["stringify", "parse"],
             "Promise" => vec!["resolve", "reject", "all", "race", "allSettled"],
             "BigInt" => vec!["asIntN", "asUintN"],
@@ -965,10 +968,10 @@ impl<'a> Checker<'a> {
                 let cs = CallSig { tparams: Vec::new(), params, names, rest: None, ret, throws: NEVER };
                 self.call_sig(&cs, &format!("process.{name}"), &[], args, exp, span)
             }
-            "Date" | "performance" => {
+            "performance" => {
                 if name != "now" {
                     self.check_args_loose(args);
-                    let msg = if ns == "Date" { "only `Date.now()` is supported (no `Date` objects yet)" } else { "only `performance.now()` is supported" };
+                    let msg = "only `performance.now()` is supported";
                     self.report(Diagnostic::new("U0017", name_span, msg));
                     return ERROR;
                 }

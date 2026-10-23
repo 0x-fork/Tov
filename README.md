@@ -46,7 +46,7 @@ Memory is where the gap is widest. A small program peaks at 1.7 MB under Tov, ag
 
 **Works today:** command-line programs and web servers; classes, generics, unions, async/await; `Bun.serve`, `fetch()`, `node:fs`/`path`/`process` and the rest of Node's built-ins; npm packages (run on JavaScriptCore, the engine Bun uses), including native addons; Jest-style tests; macOS (arm64) and Linux.
 
-**Not yet:** `any`, `Date`, classes passed around as values, function overloads, Windows.
+**Not yet:** `any` (beyond where the type is known anyway), classes passed around as values, Windows.
 
 We measure TypeScript parity on real code. [TheAlgorithms/TypeScript](https://github.com/TheAlgorithms/TypeScript) is a library of 99 test files written for Jest and `tsc`; 72 of them build and pass unchanged under `tov test`, and most of the rest stop at a compile error naming the missing feature. A known case still behaves differently from JavaScript instead of failing to compile: reading past the end of an array outside a comparison or condition traps (JavaScript gives `undefined`). Each gap we close is tested in `tests/run/`. The full list of differences is in [docs/spec.md](docs/spec.md).
 

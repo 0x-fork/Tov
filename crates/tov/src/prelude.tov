@@ -448,3 +448,316 @@ export async function __finally<T>(p: Promise<T, Error>, h: () => void throws Er
   }
   return await p
 }
+
+/** A point in time, as JavaScript's: milliseconds since 1970-01-01 UTC (`NaN` when invalid).
+ * Local times are the system time zone's. */
+export class Date {
+  private t: f64 = NaN
+  constructor(value?: f64 | string | Date, month?: f64, day?: f64, hours?: f64, minutes?: f64, seconds?: f64, ms?: f64) {
+    if (value === undefined) {
+      this.t = __native.dateNow()
+    } else if (month !== undefined) {
+      const v = value
+      const y = typeof v === "string" ? __dateNumber(v) : v instanceof Date ? v.t : v
+      this.t = __dateClip(__native.dateLocalToUtc(__dateMake(__dateYear(y), month, day ?? 1, hours ?? 0, minutes ?? 0, seconds ?? 0, ms ?? 0)))
+    } else if (typeof value === "string") {
+      this.t = __dateParse(value)
+    } else if (value instanceof Date) {
+      this.t = value.t
+    } else {
+      this.t = __dateClip(value)
+    }
+  }
+
+  static now(): f64 { return __native.dateNow() }
+  static parse(s: string): f64 { return __dateParse(s) }
+  static UTC(year: f64, month?: f64, day?: f64, hours?: f64, minutes?: f64, seconds?: f64, ms?: f64): f64 {
+    return __dateClip(__dateMake(__dateYear(year), month ?? 0, day ?? 1, hours ?? 0, minutes ?? 0, seconds ?? 0, ms ?? 0))
+  }
+
+  getTime(): f64 { return this.t }
+  valueOf(): f64 { return this.t }
+  setTime(t: f64): f64 {
+    this.t = __dateClip(t)
+    return this.t
+  }
+  getTimezoneOffset(): f64 { return this.t !== this.t ? this.t : __native.dateOffset(this.t) }
+
+  getUTCFullYear(): f64 { return __dateField(this.t, 0) }
+  getUTCMonth(): f64 { return __dateField(this.t, 1) }
+  getUTCDate(): f64 { return __dateField(this.t, 2) }
+  getUTCDay(): f64 { return __dateField(this.t, 3) }
+  getUTCHours(): f64 { return __dateField(this.t, 4) }
+  getUTCMinutes(): f64 { return __dateField(this.t, 5) }
+  getUTCSeconds(): f64 { return __dateField(this.t, 6) }
+  getUTCMilliseconds(): f64 { return __dateField(this.t, 7) }
+  getFullYear(): f64 { return __dateField(this.local(), 0) }
+  getMonth(): f64 { return __dateField(this.local(), 1) }
+  getDate(): f64 { return __dateField(this.local(), 2) }
+  getDay(): f64 { return __dateField(this.local(), 3) }
+  getHours(): f64 { return __dateField(this.local(), 4) }
+  getMinutes(): f64 { return __dateField(this.local(), 5) }
+  getSeconds(): f64 { return __dateField(this.local(), 6) }
+  getMilliseconds(): f64 { return __dateField(this.local(), 7) }
+
+  setUTCFullYear(year: f64, month?: f64, day?: f64): f64 { return this.setFields(false, 0, [year, month, day]) }
+  setUTCMonth(month: f64, day?: f64): f64 { return this.setFields(false, 1, [month, day]) }
+  setUTCDate(day: f64): f64 { return this.setFields(false, 2, [day]) }
+  setUTCHours(hours: f64, minutes?: f64, seconds?: f64, ms?: f64): f64 { return this.setFields(false, 3, [hours, minutes, seconds, ms]) }
+  setUTCMinutes(minutes: f64, seconds?: f64, ms?: f64): f64 { return this.setFields(false, 4, [minutes, seconds, ms]) }
+  setUTCSeconds(seconds: f64, ms?: f64): f64 { return this.setFields(false, 5, [seconds, ms]) }
+  setUTCMilliseconds(ms: f64): f64 { return this.setFields(false, 6, [ms]) }
+  setFullYear(year: f64, month?: f64, day?: f64): f64 { return this.setFields(true, 0, [year, month, day]) }
+  setMonth(month: f64, day?: f64): f64 { return this.setFields(true, 1, [month, day]) }
+  setDate(day: f64): f64 { return this.setFields(true, 2, [day]) }
+  setHours(hours: f64, minutes?: f64, seconds?: f64, ms?: f64): f64 { return this.setFields(true, 3, [hours, minutes, seconds, ms]) }
+  setMinutes(minutes: f64, seconds?: f64, ms?: f64): f64 { return this.setFields(true, 4, [minutes, seconds, ms]) }
+  setSeconds(seconds: f64, ms?: f64): f64 { return this.setFields(true, 5, [seconds, ms]) }
+  setMilliseconds(ms: f64): f64 { return this.setFields(true, 6, [ms]) }
+
+  toISOString(): string {
+    if (this.t !== this.t) throw new RangeError("Invalid time value")
+    return this.iso()
+  }
+  /** (the ISO text of a valid time) */
+  private iso(): string {
+    const t = this.t
+    const y = __dateField(t, 0)
+    const year = y >= 0 && y <= 9999 ? __datePad(y, 4) : (y < 0 ? "-" : "+") + __datePad(Math.abs(y), 6)
+    return `${year}-${__datePad(__dateField(t, 1) + 1, 2)}-${__datePad(__dateField(t, 2), 2)}T${__datePad(__dateField(t, 4), 2)}:${__datePad(__dateField(t, 5), 2)}:${__datePad(__dateField(t, 6), 2)}.${__datePad(__dateField(t, 7), 3)}Z`
+  }
+  toJSON(): string | null { return this.t !== this.t ? null : this.iso() }
+  toString(): string {
+    if (this.t !== this.t) return "Invalid Date"
+    return `${this.toDateString()} ${this.toTimeString()}`
+  }
+  toDateString(): string {
+    if (this.t !== this.t) return "Invalid Date"
+    const l = this.local()
+    return `${__DAYS[__dateField(l, 3)]!} ${__MONTHS[__dateField(l, 1)]!} ${__datePad(__dateField(l, 2), 2)} ${__dateYearText(__dateField(l, 0))}`
+  }
+  toTimeString(): string {
+    if (this.t !== this.t) return "Invalid Date"
+    const l = this.local()
+    const off = -__native.dateOffset(this.t)
+    const zone = `${off < 0 ? "-" : "+"}${__datePad(Math.floor(Math.abs(off) / 60), 2)}${__datePad(Math.abs(off) % 60, 2)}`
+    return `${__datePad(__dateField(l, 4), 2)}:${__datePad(__dateField(l, 5), 2)}:${__datePad(__dateField(l, 6), 2)} GMT${zone} (${__native.dateZoneName(this.t)})`
+  }
+  toUTCString(): string {
+    if (this.t !== this.t) return "Invalid Date"
+    const t = this.t
+    return `${__DAYS[__dateField(t, 3)]!}, ${__datePad(__dateField(t, 2), 2)} ${__MONTHS[__dateField(t, 1)]!} ${__dateYearText(__dateField(t, 0))} ${__datePad(__dateField(t, 4), 2)}:${__datePad(__dateField(t, 5), 2)}:${__datePad(__dateField(t, 6), 2)} GMT`
+  }
+  toGMTString(): string { return this.toUTCString() }
+  /** (as `en-US` writes it, the default) */
+  toLocaleDateString(): string {
+    if (this.t !== this.t) return "Invalid Date"
+    const l = this.local()
+    return `${__dateField(l, 1) + 1}/${__dateField(l, 2)}/${__dateField(l, 0)}`
+  }
+  toLocaleTimeString(): string {
+    if (this.t !== this.t) return "Invalid Date"
+    const l = this.local()
+    const h = __dateField(l, 4)
+    return `${h % 12 === 0 ? 12 : h % 12}:${__datePad(__dateField(l, 5), 2)}:${__datePad(__dateField(l, 6), 2)} ${h < 12 ? "AM" : "PM"}`
+  }
+  toLocaleString(): string {
+    if (this.t !== this.t) return "Invalid Date"
+    return `${this.toLocaleDateString()}, ${this.toLocaleTimeString()}`
+  }
+  /** (what `console.log` shows) */
+  __inspect(): string { return this.t !== this.t ? "Invalid Date" : this.iso() }
+
+  /** (the local time as if it were UTC: its fields are the local ones) */
+  private local(): f64 { return this.t !== this.t ? this.t : this.t - __native.dateOffset(this.t) * 60000 }
+  /** (sets fields from `first` on, `[year, month, day, hours, minutes, seconds, ms]` from
+   * year, month, day, hours...: those not given keep their values) */
+  private setFields(local: bool, first: int, given: (f64 | undefined)[]): f64 {
+    const t = local ? this.local() : this.t
+    if (t !== t && first !== 0) return t
+    const base = t !== t ? 0 : t
+    const f: f64[] = [__dateField(base, 0), __dateField(base, 1), __dateField(base, 2), __dateField(base, 4), __dateField(base, 5), __dateField(base, 6), __dateField(base, 7)]
+    for (let i = 0; i < given.length; i++) {
+      const g = given[i]
+      if (g !== undefined) f[first + i] = g
+      else if (i === 0) f[first + i] = NaN
+    }
+    const m = __dateMake(f[0]!, f[1]!, f[2]!, f[3]!, f[4]!, f[5]!, f[6]!)
+    this.t = __dateClip(local ? __native.dateLocalToUtc(m) : m)
+    return this.t
+  }
+}
+
+const __DAYS: string[] = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"]
+const __MONTHS: string[] = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
+
+/** (a year as `new Date(y, ...)` reads it: 0 to 99 are 1900 to 1999) */
+function __dateYear(y: f64): f64 {
+  const i = Math.trunc(y)
+  return i >= 0 && i <= 99 ? 1900 + i : y
+}
+
+function __dateYearText(y: f64): string {
+  return y < 0 ? "-" + __datePad(-y, 6) : __datePad(y, 4)
+}
+
+function __datePad(n: f64, width: int): string {
+  return `${n}`.padStart(width, "0")
+}
+
+/** (a value as `Number(s)` reads it, for `new Date("2020", 1)`) */
+function __dateNumber(s: string): f64 {
+  return Number(s)
+}
+
+/** (JavaScript's TimeClip) */
+function __dateClip(t: f64): f64 {
+  if (!(Math.abs(t) <= 8.64e15)) return NaN
+  return Math.trunc(t) + 0
+}
+
+/** (days from 1970-01-01 to the first of a month: `m` 1 to 12) */
+function __dateDays(y: f64, m: f64): f64 {
+  const yy = m <= 2 ? y - 1 : y
+  const era = Math.floor(yy / 400)
+  const yoe = yy - era * 400
+  const mp = (m + 9) % 12
+  const doy = Math.floor((153 * mp + 2) / 5)
+  const doe = yoe * 365 + Math.floor(yoe / 4) - Math.floor(yoe / 100) + doy
+  return era * 146097 + doe - 719468
+}
+
+/** (JavaScript's MakeDate(MakeDay(...), MakeTime(...)): a time from fields that may be out of
+ * range, `month` 0 to 11) */
+function __dateMake(year: f64, month: f64, day: f64, hours: f64, minutes: f64, seconds: f64, ms: f64): f64 {
+  const parts = [year, month, day, hours, minutes, seconds, ms]
+  for (const p of parts) {
+    if (!Number.isFinite(p)) return NaN
+  }
+  const y = Math.trunc(year)
+  const mo = Math.trunc(month)
+  const ym = y + Math.floor(mo / 12)
+  const mn = ((mo % 12) + 12) % 12
+  const days = __dateDays(ym, mn + 1) + Math.trunc(day) - 1
+  const time = Math.trunc(hours) * 3600000 + Math.trunc(minutes) * 60000 + Math.trunc(seconds) * 1000 + Math.trunc(ms)
+  return days * 86400000 + time
+}
+
+/** (a field of time `t`: 0 year, 1 month (0 to 11), 2 day of the month, 3 weekday, 4 hours,
+ * 5 minutes, 6 seconds, 7 milliseconds) */
+function __dateField(t: f64, which: int): f64 {
+  if (t !== t) return NaN
+  const day = Math.floor(t / 86400000)
+  const inDay = t - day * 86400000
+  if (which === 3) return ((day + 4) % 7 + 7) % 7
+  if (which === 4) return Math.floor(inDay / 3600000)
+  if (which === 5) return Math.floor(inDay / 60000) % 60
+  if (which === 6) return Math.floor(inDay / 1000) % 60
+  if (which === 7) return inDay % 1000
+  const z = day + 719468
+  const era = Math.floor(z / 146097)
+  const doe = z - era * 146097
+  const yoe = Math.floor((doe - Math.floor(doe / 1460) + Math.floor(doe / 36524) - Math.floor(doe / 146096)) / 365)
+  const doy = doe - (365 * yoe + Math.floor(yoe / 4) - Math.floor(yoe / 100))
+  const mp = Math.floor((5 * doy + 2) / 153)
+  const m = mp < 10 ? mp + 3 : mp - 9
+  if (which === 1) return m - 1
+  if (which === 2) return doy - Math.floor((153 * mp + 2) / 5) + 1
+  return yoe + era * 400 + (m <= 2 ? 1 : 0)
+}
+
+/** (`Date.parse`: the ISO format, `2019-01-16`, `2019-01-16T08:30:00.000Z`, `+002019-01`, with
+ * a time in local time unless a zone is given; a space for the `T` too. Otherwise `NaN`.) */
+function __dateParse(s: string): f64 {
+  let i = 0
+  const n = s.length
+  const digits = (count: int): f64 => {
+    if (i + count > n) return -1
+    let v = 0
+    for (let k = 0; k < count; k++) {
+      const c = s.charCodeAt(i + k)
+      if (c < 48 || c > 57) return -1
+      v = v * 10 + (c - 48)
+    }
+    i += count
+    return v
+  }
+  let sign = 1
+  let year: f64 = 0
+  if (s[0] === "+" || s[0] === "-") {
+    sign = s[0] === "-" ? -1 : 1
+    i = 1
+    year = digits(6)
+    if (year < 0 || (sign < 0 && year === 0)) return NaN
+  } else {
+    year = digits(4)
+    if (year < 0) return NaN
+  }
+  year *= sign
+  let month: f64 = 1
+  let day: f64 = 1
+  if (i < n && s[i] === "-") {
+    i++
+    month = digits(2)
+    if (month < 1 || month > 12) return NaN
+    if (i < n && s[i] === "-") {
+      i++
+      day = digits(2)
+      if (day < 1 || day > 31) return NaN
+    }
+  }
+  let h: f64 = 0
+  let mi: f64 = 0
+  let sec: f64 = 0
+  let ms: f64 = 0
+  let hasTime = false
+  if (i < n && (s[i] === "T" || s[i] === "t" || s[i] === " ")) {
+    hasTime = true
+    i++
+    h = digits(2)
+    if (h < 0 || i >= n || s[i] !== ":") return NaN
+    i++
+    mi = digits(2)
+    if (mi < 0) return NaN
+    if (i < n && s[i] === ":") {
+      i++
+      sec = digits(2)
+      if (sec < 0) return NaN
+      if (i < n && (s[i] === "." || s[i] === ",")) {
+        i++
+        const start = i
+        let frac = 0
+        let scale = 1
+        while (i < n && s.charCodeAt(i) >= 48 && s.charCodeAt(i) <= 57) {
+          if (i - start < 3) {
+            frac = frac * 10 + (s.charCodeAt(i) - 48)
+            scale *= 10
+          }
+          i++
+        }
+        if (i === start) return NaN
+        ms = Math.floor((frac * 1000) / scale)
+      }
+    }
+    if (h > 24 || mi > 59 || sec > 59 || (h === 24 && (mi > 0 || sec > 0 || ms > 0))) return NaN
+  }
+  let offset: f64 = 0
+  let zoned = !hasTime
+  if (i < n && (s[i] === "Z" || s[i] === "z")) {
+    zoned = true
+    i++
+  } else if (i < n && hasTime && (s[i] === "+" || s[i] === "-")) {
+    const zs = s[i] === "-" ? -1 : 1
+    i++
+    const oh = digits(2)
+    if (oh < 0) return NaN
+    if (i < n && s[i] === ":") i++
+    const om = digits(2)
+    if (om < 0 || oh > 23 || om > 59) return NaN
+    offset = zs * (oh * 60 + om)
+    zoned = true
+  }
+  if (i !== n) return NaN
+  const t = __dateMake(year, month - 1, day, h, mi, sec, ms)
+  return __dateClip(zoned ? t - offset * 60000 : __native.dateLocalToUtc(t))
+}

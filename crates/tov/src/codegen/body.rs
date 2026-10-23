@@ -4624,6 +4624,9 @@ impl<'c, 'a> Gen<'c, 'a> {
                 }
                 let lv = self.expr_before(l, &[r]);
                 let rv = self.expr(r);
+                // (what a type parameter stands for: an object with a `valueOf()`, a `Date`,
+                // compares by its value)
+                let (lv, rv) = (self.primitive_of(lv), self.primitive_of(rv));
                 let o = op.as_str();
                 if self.c.types.is_string(lv.ty) {
                     let (a, b) = (self.coerce(lv, STR), self.coerce(rv, STR));
@@ -5418,6 +5421,22 @@ impl<'c, 'a> Gen<'c, 'a> {
 
     /// `xs[i] < x` (either side) on an array of numbers, with `i` maybe past either end: false
     /// there, as JavaScript's `undefined < x` is (`while (xs[--j] > pivot);` stops at the start).
+    /// A class instance with a `valueOf()` method: what it returns (else `v` as it is).
+    fn primitive_of(&mut self, v: Val) -> Val {
+        if !matches!(self.tget(v.ty), Ty::Class(..)) {
+            return v;
+        }
+        let Some(m) = self.c.interner.lookup("valueOf") else { return v };
+        let Some(crate::check::class::ClassMemberRef::Method(mm)) = self.c.class_member(v.ty, m) else { return v };
+        if !mm.params.iter().all(|p| p.optional) {
+            return v;
+        }
+        let Some(ret) = mm.ret.filter(|&r| self.c.types.is_numeric(r) || self.c.types.is_string(r)) else { return v };
+        let call = self.method_call_code(&v.code, v.ty, m, false, Vec::new());
+        let rc = self.is_rc(ret);
+        self.tmp(ret, &call, rc)
+    }
+
     fn compare_past_end(&mut self, op: BinOp, l: ExprId, r: ExprId) -> Option<Val> {
         let m = self.cur_m();
         let strip = |c: &Self, mut e: ExprId| {

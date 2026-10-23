@@ -917,6 +917,10 @@ void tv_native_mkdir(tv_str path, bool recursive);
 void tv_native_unlink(tv_str path);
 void tv_native_rm(tv_str path, bool recursive, bool force);
 tv_str tv_native_cwd(void);
+double tv_native_dateNow(void);
+double tv_native_dateOffset(double t);
+double tv_native_dateLocalToUtc(double local);
+tv_str tv_native_dateZoneName(double t);
 struct tv_arr tv_process_argv(void);                   /* ["tov-binary-path", "program", args...] like Node's */
 bool tv_process_env(tv_str name, tv_str *out);
 tv_int tv_process_pid(void);
