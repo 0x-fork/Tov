@@ -3853,6 +3853,79 @@ static void tv_null_to_str(tv_sb *sb, const void *p) { (void)p; tv_sb_push(sb, "
 /* (one byte, a tv_unit: arrays of nulls hold their elements; undefined's 0 is for sets' values) */
 const tv_type tv_type_null = {1, NULL, NULL, tv_undef_eq, tv_null_hash, tv_null_to_str, NULL};
 
+/* ================================================================== unknown */
+
+tv_dyn tv_dyn_box(const tv_type *t, const void *v) {
+    if (t->size == 0 || t == &tv_type_null) return (tv_dyn){t, NULL};
+    tv_dynbox *b = (tv_dynbox *)tv_alloc(sizeof(tv_dynbox) + t->size);
+    b->rc = 1;
+    memcpy(b->data, v, t->size);
+    return (tv_dyn){t, b};
+}
+
+void tv_dyn_release(tv_dyn d) {
+    if (!d.b || --d.b->rc > 0) return;
+    if (d.t->release) d.t->release(d.b->data);
+    free(d.b);
+}
+
+static void tv_dynp_retain(void *p) { tv_dyn_retain(*(tv_dyn *)p); }
+static void tv_dynp_release(void *p) { tv_dyn_release(*(tv_dyn *)p); }
+bool tv_dyn_is_num(const tv_type *t) {
+    return t == &tv_type_f64 || t == &tv_type_int || t == &tv_type_f32 || t == &tv_type_i32 || t == &tv_type_u32 || t == &tv_type_i16 || t == &tv_type_u16 || t == &tv_type_i8 || t == &tv_type_u8 || t == &tv_type_u64;
+}
+double tv_dyn_number(tv_dyn d) {
+    const void *p = tv_dyn_data(d);
+    if (d.t == &tv_type_f64) return *(const double *)p;
+    if (d.t == &tv_type_int) return (double)*(const tv_int *)p;
+    if (d.t == &tv_type_f32) return (double)*(const float *)p;
+    if (d.t == &tv_type_i32) return (double)*(const int32_t *)p;
+    if (d.t == &tv_type_u32) return (double)*(const uint32_t *)p;
+    if (d.t == &tv_type_i16) return (double)*(const int16_t *)p;
+    if (d.t == &tv_type_u16) return (double)*(const uint16_t *)p;
+    if (d.t == &tv_type_i8) return (double)*(const int8_t *)p;
+    if (d.t == &tv_type_u8) return (double)*(const uint8_t *)p;
+    if (d.t == &tv_type_u64) return (double)*(const uint64_t *)p;
+    return NAN;
+}
+
+/* (===: numbers by value, whatever width holds them) */
+bool tv_dyn_eq(tv_dyn x, tv_dyn y) {
+    if (tv_dyn_is_num(x.t) && tv_dyn_is_num(y.t)) return tv_dyn_number(x) == tv_dyn_number(y);
+    if (x.t != y.t) return false;
+    if (!x.b || !y.b) return x.b == y.b;
+    return x.t->eq ? x.t->eq(x.b->data, y.b->data) : memcmp(x.b->data, y.b->data, x.t->size) == 0;
+}
+static bool tv_dynp_eq(const void *a, const void *b) { return tv_dyn_eq(*(const tv_dyn *)a, *(const tv_dyn *)b); }
+static uint64_t tv_dynp_hash(const void *p) {
+    const tv_dyn *d = p;
+    if (tv_dyn_is_num(d->t)) {
+        double x = tv_dyn_number(*d);
+        return tv_type_f64.hash(&x);
+    }
+    return d->t->hash ? d->t->hash(tv_dyn_data(*d)) : (uint64_t)(uintptr_t)d->t;
+}
+static void tv_dynp_to_str(tv_sb *sb, const void *p) {
+    const tv_dyn *d = p;
+    d->t->to_str(sb, tv_dyn_data(*d));
+}
+static void tv_dynp_inspect(tv_sb *sb, const void *p, int depth) {
+    const tv_dyn *d = p;
+    tv_inspect_value(sb, d->t, tv_dyn_data(*d), depth);
+}
+const tv_type tv_type_dyn = {sizeof(tv_dyn), tv_dynp_retain, tv_dynp_release, tv_dynp_eq, tv_dynp_hash, tv_dynp_to_str, tv_dynp_inspect};
+
+bool tv_dyn_truthy(tv_dyn d) {
+    if (d.t == &tv_type_undefined || d.t == &tv_type_null) return false;
+    if (d.t == &tv_type_bool) return *(const bool *)tv_dyn_data(d);
+    if (d.t == &tv_type_str) return ((const tv_str *)tv_dyn_data(d))->p->len != 0;
+    if (tv_dyn_is_num(d.t)) {
+        double x = tv_dyn_number(d);
+        return x == x && x != 0;
+    }
+    return true;
+}
+
 /* ================================================================== output */
 
 /* Output is buffered in 8 KiB inside the runtime's globals (a program that prints a little

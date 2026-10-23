@@ -37,7 +37,7 @@ impl<'c, 'a> Gen<'c, 'a> {
         self.tmp(STR, &format!("tv_str_from_sb(&{sbv})"), true)
     }
 
-    fn json_writer(&mut self, t: TyId) -> String {
+    pub(crate) fn json_writer(&mut self, t: TyId) -> String {
         let name = format!("js_{}", t.0);
         if !self.helpers_done.insert((t, 110)) {
             return name;
@@ -63,6 +63,10 @@ impl<'c, 'a> Gen<'c, 'a> {
                 format!("    tv_json_quote(sb, {lit});\n")
             }
             Ty::Undefined | Ty::Null | Ty::Void | Ty::Never | Ty::Error => "    tv_sb_push_cstr(sb, \"null\");\n".into(),
+            Ty::Unknown => {
+                let c = self.dyn_json_code("*v");
+                format!("    {c};\n")
+            }
             Ty::Array(e) => {
                 let w = self.json_writer(e);
                 let ect = self.ctype(e);

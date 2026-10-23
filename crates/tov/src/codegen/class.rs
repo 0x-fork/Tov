@@ -782,6 +782,11 @@ impl<'c, 'a> Gen<'c, 'a> {
                 }
                 if parts.is_empty() { "false".into() } else { format!("({})", parts.join(" || ")) }
             }
+            // (an `unknown`: the object it holds, if any, is one)
+            Ty::Unknown => {
+                let o = self.dyn_object(&v.code);
+                format!("({{ void *o_ = {o}; o_ && {isa}(((tvg_obj *)o_)->cid); }})")
+            }
             _ => "false".into(),
         }
     }

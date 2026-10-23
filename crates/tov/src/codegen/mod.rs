@@ -17,6 +17,7 @@ mod genfn;
 pub(crate) mod body;
 mod calls;
 mod clone;
+mod dynval;
 mod frame;
 pub(crate) mod class;
 mod iface;
@@ -132,6 +133,7 @@ pub struct Program {
 pub fn generate(c: &mut Checker, mode: Mode) -> Result<Program, Vec<Diagnostic>> {
     let mut g = Gen::new(c);
     g.program(mode);
+    g.dyn_dispatch();
     for msg in std::mem::take(&mut g.internal) {
         let file = g.c.modules[0].file;
         g.errors.push(Diagnostic::new("C0003", Span::new(file, 0, 0), format!("internal compiler error: {msg}")).note("note", "this is a bug in tov; please report it with the program"));
@@ -246,6 +248,9 @@ pub(crate) struct Gen<'c, 'a> {
     pub(crate) weak_slot_memo: FxMap<u32, bool>,
     /// Whether the program formats a value through descriptors (console.log of a container, ...).
     pub(crate) uses_inspect: bool,
+    /// The types put into `unknown`s, and whether code asks one what it holds (see dynval.rs).
+    pub(crate) dyn_types: Vec<TyId>,
+    pub(crate) dyn_tables: bool,
     /// Types some code retains (copies with a count increment), and the recursive-alias boxes
     /// defined: a box type no retained value can reach is never shared, so it has no count.
     pub(crate) rc_roots: FxSet<TyId>,
@@ -354,6 +359,8 @@ impl<'c, 'a> Gen<'c, 'a> {
             weak_memo: FxMap::default(),
             weak_slot_memo: FxMap::default(),
             uses_inspect: false,
+            dyn_types: Vec::new(),
+            dyn_tables: false,
             rc_roots: FxSet::default(),
             rc_helper_depth: 0,
             rec_boxes: Vec::new(),
@@ -750,7 +757,7 @@ impl<'c, 'a> Gen<'c, 'a> {
     /// Does this type own heap memory (needs retain/release)?
     pub(crate) fn is_rc(&mut self, t: TyId) -> bool {
         match self.tget(t) {
-            Ty::Str | Ty::Array(_) | Ty::Map(..) | Ty::Set(_) | Ty::Func(..) | Ty::Rec(..) | Ty::Class(..) | Ty::Interface(..) | Ty::Promise(..) | Ty::Gen(_) | Ty::Js | Ty::BigInt => true,
+            Ty::Str | Ty::Array(_) | Ty::Map(..) | Ty::Set(_) | Ty::Func(..) | Ty::Rec(..) | Ty::Class(..) | Ty::Interface(..) | Ty::Promise(..) | Ty::Gen(_) | Ty::Js | Ty::BigInt | Ty::Unknown => true,
             Ty::Record(_) if self.is_obj(t) => true,
             Ty::Record(fs) => {
                 let fs = self.c.types.fields(fs).to_vec();
@@ -834,7 +841,8 @@ impl<'c, 'a> Gen<'c, 'a> {
             Ty::BigInt => "tv_big".into(),
             Ty::Decimal => "tv_dec".into(),
             // (a class given as a value: nothing at run time, each call's code is its own)
-            Ty::StrLit(_) | Ty::Undefined | Ty::Null | Ty::Void | Ty::Never | Ty::Error | Ty::Unknown | Ty::ClassObj(_) => "tv_unit".into(),
+            Ty::StrLit(_) | Ty::Undefined | Ty::Null | Ty::Void | Ty::Never | Ty::Error | Ty::ClassObj(_) => "tv_unit".into(),
+            Ty::Unknown => "tv_dyn".into(),
             Ty::Array(_) => "tv_arr".into(),
             Ty::Promise(..) => "tv_promise *".into(),
             Ty::Gen(_) => "tv_gen *".into(),
@@ -1067,6 +1075,7 @@ impl<'c, 'a> Gen<'c, 'a> {
             Ty::Func(..) => "((tv_fn){NULL, NULL})".into(),
             Ty::Promise(..) | Ty::Gen(_) => "NULL".into(),
             Ty::Bool => "false".into(),
+            Ty::Unknown => "((tv_dyn){&tv_type_undefined, NULL})".into(),
             Ty::Class(..) => "NULL".into(),
             Ty::Interface(..) => "((tv_iface){NULL, NULL})".into(),
             Ty::Union(_) if self.niche(t).is_some() => "NULL".into(),
@@ -1354,6 +1363,7 @@ impl<'c, 'a> Gen<'c, 'a> {
             Ty::Promise(..) => format!("tv_promise_retain({place})"),
             Ty::Gen(_) => format!("tv_gen_retain({place})"),
             Ty::Js => format!("tv_js_retain({place})"),
+            Ty::Unknown => format!("tv_dyn_retain({place})"),
             Ty::Class(..) => format!("tvg_obj_retain({place})"),
             Ty::Interface(..) => format!("tv_iface_retain({place})"),
             Ty::Union(_) if self.niche_rec(t).is_some() => {
@@ -1390,6 +1400,7 @@ impl<'c, 'a> Gen<'c, 'a> {
             Ty::Promise(..) => format!("tv_promise_release({place})"),
             Ty::Gen(_) => format!("tv_gen_release({place})"),
             Ty::Js => format!("tv_js_release({place})"),
+            Ty::Unknown => format!("tv_dyn_release({place})"),
             Ty::Class(..) => self.class_release_code(t, place),
             Ty::Interface(..) => format!("tv_iface_release({place})"),
             Ty::Union(_) if self.niche_rec(t).is_some() => {
@@ -1418,6 +1429,7 @@ impl<'c, 'a> Gen<'c, 'a> {
             Ty::StrLit(_) | Ty::Undefined | Ty::Null | Ty::Void | Ty::Never => "true".into(),
             Ty::Array(_) | Ty::Map(..) | Ty::Set(_) => format!("(({a}).p == ({b}).p)"),
             Ty::Func(..) => format!("tvg_fn_eq({a}, {b})"),
+            Ty::Unknown => format!("tv_dyn_eq({a}, {b})"),
             Ty::Class(..) | Ty::Promise(..) | Ty::Gen(_) => format!("((void *)({a}) == (void *)({b}))"),
             Ty::Interface(..) => format!("(({a}).p == ({b}).p)"),
             Ty::Js => format!("tv_type_js.eq(&({a}), &({b}))"),
@@ -1480,6 +1492,7 @@ impl<'c, 'a> Gen<'c, 'a> {
             Ty::Promise(..) => "tv_sb_push_cstr(sb, \"[object Promise]\")".into(),
             Ty::Gen(_) => "tv_sb_push_cstr(sb, \"[object Generator]\")".into(),
             Ty::Js => format!("tv_type_js.to_str(sb, &({place}))"),
+            Ty::Unknown => format!("tv_type_dyn.to_str(sb, &({place}))"),
             _ => {
                 self.ensure_helper(t, H_STR);
                 format!("ts_{}(sb, &({place}))", self.box_name(t))
@@ -1529,6 +1542,7 @@ impl<'c, 'a> Gen<'c, 'a> {
             }
             Ty::Func(..) => "tv_sb_push_cstr(sb, \"[Function (anonymous)]\")".into(),
             Ty::Js => format!("tv_type_js.inspect(sb, &({place}), {depth})"),
+            Ty::Unknown => format!("tv_type_dyn.inspect(sb, &({place}), {depth})"),
             Ty::Class(..) => format!("tvg_obj_inspect(sb, (void *)({place}), {depth})"),
             Ty::Interface(..) => format!("(({place}).t ? ({place}).t->inspect(sb, ({place}).p, {depth}) : tv_sb_push_cstr(sb, \"undefined\"))"),
             Ty::Union(_) if self.niche_rec(t).is_some() => {
@@ -1566,7 +1580,8 @@ impl<'c, 'a> Gen<'c, 'a> {
             Ty::U16 => return "&tv_type_u16".into(),
             Ty::U32 => return "&tv_type_u32".into(),
             Ty::U64 => return "&tv_type_u64".into(),
-            Ty::Undefined | Ty::Void | Ty::Never | Ty::Error | Ty::Unknown => return "&tv_type_undefined".into(),
+            Ty::Undefined | Ty::Void | Ty::Never | Ty::Error => return "&tv_type_undefined".into(),
+            Ty::Unknown => return "&tv_type_dyn".into(),
             Ty::Null => return "&tv_type_null".into(),
             Ty::Promise(..) => return "&tv_type_promise".into(),
             Ty::Gen(_) => return "&tv_type_gen".into(),

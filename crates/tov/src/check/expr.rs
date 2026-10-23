@@ -5209,7 +5209,22 @@ impl<'a> Checker<'a> {
                                 let Some((target, ty)) = self.target_of(*x) else { return Vec::new() };
                                 let kind = self.name(lit).to_string();
                                 let members = self.flat_members(ty);
-                                let keep: Vec<TyId> = members.into_iter().filter(|&m| (typeof_name(&self.types, m) == Some(kind.as_str())) == eq).collect();
+                                let mut keep: Vec<TyId> = members.iter().copied().filter(|&m| m != UNKNOWN && (typeof_name(&self.types, m) == Some(kind.as_str())) == eq).collect();
+                                // (`unknown`: the type of that kind, or still `unknown` where it isn't)
+                                if members.contains(&UNKNOWN) {
+                                    let of_kind = match kind.as_str() {
+                                        "number" => Some(F64),
+                                        "string" => Some(STR),
+                                        "boolean" => Some(BOOL),
+                                        "undefined" => Some(UNDEFINED),
+                                        "bigint" => Some(BIGINT),
+                                        _ => None,
+                                    };
+                                    match (eq, of_kind) {
+                                        (true, Some(t)) => keep.push(t),
+                                        _ => keep.push(UNKNOWN),
+                                    }
+                                }
                                 vec![target.with(self.types.union(&keep))]
                             }
                             _ => {
@@ -5238,6 +5253,16 @@ impl<'a> Checker<'a> {
                 let Some((target, ty)) = self.target_of(*l) else { return Vec::new() };
                 let mut keep = Vec::new();
                 for m in self.flat_members(ty) {
+                    // (`unknown` that's a `C`: one, if `C` isn't generic)
+                    if m == UNKNOWN {
+                        self.resolve_class(c);
+                        if positive && self.classes[c as usize].params.is_empty() {
+                            keep.push(self.classes[c as usize].this_ty);
+                        } else {
+                            keep.push(m);
+                        }
+                        continue;
+                    }
                     let Some((mc, _)) = self.class_of(m) else {
                         if !positive {
                             keep.push(m);

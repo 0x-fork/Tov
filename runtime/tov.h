@@ -130,6 +130,20 @@ typedef struct tv_type {
  * program that never inspects doesn't link the formatter); this handles them. */
 void tv_inspect_value(tv_sb *sb, const tv_type *t, const void *p, int depth);
 
+/* `unknown`: a value of any type with its type's descriptor, `b` a counted box holding a copy of
+ * it (NULL for undefined and null, which have no data). */
+typedef struct tv_dynbox { int64_t rc; _Alignas(16) unsigned char data[]; } tv_dynbox;
+typedef struct tv_dyn { const struct tv_type *t; tv_dynbox *b; } tv_dyn;
+tv_dyn tv_dyn_box(const struct tv_type *t, const void *v);   /* moves *v into a new box */
+static inline void tv_dyn_retain(tv_dyn d) { if (d.b) d.b->rc++; }
+void tv_dyn_release(tv_dyn d);
+static inline void *tv_dyn_data(tv_dyn d) { return d.b ? (void *)d.b->data : NULL; }
+extern const struct tv_type tv_type_dyn;    /* an `unknown` value itself (a tv_dyn) */
+double tv_dyn_number(tv_dyn d);    /* the number an `unknown` holds (as tested) */
+bool tv_dyn_truthy(tv_dyn d);
+bool tv_dyn_eq(tv_dyn a, tv_dyn b);
+bool tv_dyn_is_num(const struct tv_type *t);
+
 /* Descriptors for primitives. */
 extern const tv_type tv_type_int, tv_type_f64, tv_type_f32, tv_type_bool, tv_type_str, tv_type_undefined, tv_type_null;
 extern const tv_type tv_type_promise;   /* every Promise<T> (a tv_promise *): Node's `Promise { ... }` */

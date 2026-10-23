@@ -28,6 +28,7 @@ Status tags: **[M0]** checked today · **[Mn]** planned for milestone n.
 | `bigint` | arbitrary-precision integer, as in TS (`123n`) |
 | `decimal` | exact base-10 number, 34 significant digits (Tov's own: `19.99m`, or `19.99` where a `decimal` is expected) |
 | `undefined`, `null`, `void`, `never`, `unknown` | as TS (`??`, `?.` and `!` treat `null` like `undefined`; `x == null` matches both) |
+| `unknown` | any value, kept with its type (boxed); `typeof`, `instanceof`, `===`, `==`, truthiness, printing and `JSON.stringify` read what it holds, and `typeof x === "number"` / `x instanceof C` narrow it |
 | `T[]` / `Array<T>` | growable array (value); `Uint8Array`, `Int32Array`, `Float64Array` and the other typed arrays are arrays of `u8`, `i32`, `f64`, ... |
 | `Map<K, V>`, `Set<T>` | hash map/set (value) |
 | `{ a: T, b?: U }` | exact record (value) |

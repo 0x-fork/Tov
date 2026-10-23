@@ -3043,6 +3043,10 @@ impl<'c, 'a> Gen<'c, 'a> {
                 let sv = self.coerce(s.clone(), F64);
                 (format!("(fabs(({}) - ({})) < pow(10.0, -({digits})) / 2.0)", x.code, sv.code), Some(x))
             }
+            "toBeUndefined" | "toBeDefined" if s.ty == UNKNOWN => {
+                let t = format!("(({}).t != &tv_type_undefined)", s.code);
+                (if name == "toBeUndefined" { format!("!({t})") } else { t }, None)
+            }
             "toBeUndefined" | "toBeDefined" => {
                 let t = self.truthy_val(s.clone());
                 (if name == "toBeUndefined" { format!("!({t})") } else { t }, None)

@@ -1109,6 +1109,8 @@ impl<'a> Checker<'a> {
             Ty::Error | Ty::Int | Ty::F64 | Ty::F32 | Ty::I8 | Ty::I16 | Ty::I32 | Ty::U8 | Ty::U16 | Ty::U32 | Ty::U64 | Ty::Decimal | Ty::Bool | Ty::BoolLit(_) | Ty::Str | Ty::StrLit(_) | Ty::Undefined | Ty::Null => true,
             // A generic `T`: the instantiated type is written (functions come out as `null`).
             Ty::Param(_) => true,
+            // (written as what it holds; `allow_class`: written, not parsed into)
+            Ty::Unknown => allow_class,
             Ty::Array(e) => self.json_ok_in(e, allow_class, seen),
             Ty::Map(k, v) => k == STR && self.json_ok_in(v, allow_class, seen),
             Ty::Record(fs) => {

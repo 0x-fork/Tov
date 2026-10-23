@@ -1,0 +1,17 @@
+num 2 number t
+num 5 number t
+str HI string t
+bool false boolean t
+undef undefined f
+null object f
+P 3 object t
+other object t
+[ 1, 2.5, 'hi', true, undefined, null, P { n: 3 }, [ 1, 2 ] ]
+[1,2.5,"hi",true,null,null,{"n":3},[1,2]]
+true true true 3! hi
+Map(2) { 'x' => 1, 'y' => 'two' } two
+undefined dflt
+ns 1 ns a no
+4 [ 1 ] { a: 1 }
+2 true 0
+7

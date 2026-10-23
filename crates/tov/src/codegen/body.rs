@@ -3858,6 +3858,12 @@ impl<'c, 'a> Gen<'c, 'a> {
         if to == JS {
             return self.js_of(v);
         }
+        if to == UNKNOWN {
+            return self.box_dyn(v);
+        }
+        if from == UNKNOWN {
+            return self.unbox_dyn(v, to);
+        }
         // (an array where something iterable is wanted: a generator over it)
         if let (Ty::Array(e), Ty::Gen(_)) = (self.tget(from), self.tget(to)) {
             let v = self.own(v);
@@ -4211,6 +4217,10 @@ impl<'c, 'a> Gen<'c, 'a> {
         if v.ty == to {
             return v;
         }
+        if v.ty == UNKNOWN {
+            let loc = self.loc(span);
+            return self.dyn_cast(v, to, &loc);
+        }
         if let (Ty::Class(fc, _), Ty::Class(tc, _)) = (self.tget(v.ty), self.tget(to))
             && !self.c.class_descends(fc, tc)
         {
@@ -4261,6 +4271,9 @@ impl<'c, 'a> Gen<'c, 'a> {
     }
 
     fn typeof_str(&mut self, v: Val) -> Val {
+        if v.ty == UNKNOWN {
+            return self.dyn_typeof(v);
+        }
         let name = |types: &Types, t: TyId| -> &'static str {
             if types.is_numeric(t) {
                 "number"
@@ -4335,6 +4348,7 @@ impl<'c, 'a> Gen<'c, 'a> {
         match self.tget(t) {
             Ty::Bool => v.code,
             Ty::Js => format!("tv_js_truthy({})", v.code),
+            Ty::Unknown => format!("tv_dyn_truthy({})", v.code),
             Ty::Int | Ty::I8 | Ty::I16 | Ty::I32 | Ty::U8 | Ty::U16 | Ty::U32 | Ty::U64 => format!("(({}) != 0)", v.code),
             Ty::F64 | Ty::F32 => format!("tv_f64_truthy({})", v.code),
             Ty::Str => format!("(tv_str_byte_len({}) != 0)", v.code),
@@ -4381,6 +4395,9 @@ impl<'c, 'a> Gen<'c, 'a> {
         }
         if v.ty == JS {
             return format!("tv_js_truthy({})", v.code);
+        }
+        if v.ty == UNKNOWN {
+            return format!("({{ tv_dyn d_ = {}; d_.t != &tv_type_undefined && d_.t != &tv_type_null; }})", v.code);
         }
         let v = if matches!(self.tget(v.ty), Ty::Rec(..)) { return "true".into() } else { v };
         // (present: neither `undefined` nor `null`)
@@ -4977,8 +4994,22 @@ impl<'c, 'a> Gen<'c, 'a> {
     }
 
     /// `a === b` as a C boolean.
-    pub(crate) fn equality(&mut self, a: Val, b: Val, _strict: bool) -> String {
+    pub(crate) fn equality(&mut self, a: Val, b: Val, strict: bool) -> String {
         let (ta, tb) = (a.ty, b.ty);
+        if ta == UNKNOWN || tb == UNKNOWN {
+            // (against `undefined`/`null`: what it holds; `==` takes either)
+            let (d, other) = if ta == UNKNOWN { (a, b) } else { (b, a) };
+            if matches!(self.tget(other.ty), Ty::Undefined | Ty::Null | Ty::Void) {
+                let what = if self.tget(other.ty) == Ty::Null { "tv_type_null" } else { "tv_type_undefined" };
+                return if strict {
+                    format!("(({}).t == &{what})", d.code)
+                } else {
+                    format!("({{ tv_dyn d_ = {}; d_.t == &tv_type_undefined || d_.t == &tv_type_null; }})", d.code)
+                };
+            }
+            let o = self.coerce(other, UNKNOWN);
+            return format!("tv_dyn_eq({}, {})", d.code, o.code);
+        }
         if ta == JS || tb == JS {
             // `=== undefined`: Tov has no `null`; JavaScript's reads as `undefined`
             if ta == UNDEFINED || tb == UNDEFINED {
