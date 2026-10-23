@@ -2504,6 +2504,10 @@ impl<'c, 'a> Gen<'c, 'a> {
         match &node.kind {
             StmtKind::Empty | StmtKind::Error => {}
             StmtKind::InitGlobal(ii) => {
+                // (an imported module's variables are set up with every module's, at the start)
+                if self.script_module != Some(m) {
+                    return;
+                }
                 // `g = init_g();` here, in source order (a script's module variable); an
                 // initializer that awaits is evaluated right here, in the async script body.
                 let g = self.const_ref(m, *ii);
@@ -3728,7 +3732,10 @@ impl<'c, 'a> Gen<'c, 'a> {
             // (a class given where a constructor is wanted: nothing at run time)
             Some(IdentFact::Class(_)) if matches!(self.tget(ty), Ty::ClassObj(_) | Ty::Param(_)) => Val::plain("0", ty),
             Some(IdentFact::Fn(fm, fi)) => {
-                let code = self.fn_value(fm, fi);
+                // (a generic one: the instance where it's used fixes, see `value_targs`)
+                let subst: FxMap<u32, TyId> = self.facts(m).value_targs.get(&e).map(|ts| ts.iter().map(|&(p, t)| (p, t)).collect()).unwrap_or_default();
+                let subst: FxMap<u32, TyId> = subst.into_iter().map(|(p, t)| (p, self.inst(t))).collect();
+                let code = self.fn_value_with(fm, fi, subst);
                 Val::plain(code, ty)
             }
             Some(IdentFact::Const(cm, ci)) => {
@@ -5069,6 +5076,12 @@ impl<'c, 'a> Gen<'c, 'a> {
             }
             Some(MemberFact::NsConst(cm, ci)) => return self.const_ref(cm, ci),
             Some(MemberFact::StaticField(c, mi)) => return self.static_field_ref(c, mi),
+            Some(MemberFact::StaticFn(c, mi)) => {
+                let subst: FxMap<u32, TyId> = self.facts(m).value_targs.get(&e).map(|ts| ts.iter().map(|&(p, t)| (p, t)).collect()).unwrap_or_default();
+                let subst: FxMap<u32, TyId> = subst.into_iter().map(|(p, t)| (p, self.inst(t))).collect();
+                let code = self.static_fn_value(c, mi, subst);
+                return Val::plain(code, ty);
+            }
             Some(MemberFact::TupleLength(n)) => {
                 let v = self.expr(obj);
                 if optional && self.c.types.has_nullish(v.ty) {

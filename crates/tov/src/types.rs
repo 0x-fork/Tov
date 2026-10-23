@@ -533,6 +533,11 @@ impl Types {
         matches!(self.get(ty), Ty::Str | Ty::StrLit(_))
     }
 
+    /// A string, or a union of strings (`"" | " -> "`).
+    pub fn is_stringish(&self, ty: TyId) -> bool {
+        self.is_string(ty) || matches!(self.get(ty), Ty::Union(ms) if self.tys(*ms).iter().all(|&m| self.is_string(m)))
+    }
+
     /// Primitive = compared and tested by value, never "present/absent" by truthiness.
     pub fn is_primitive(&self, ty: TyId) -> bool {
         self.is_numeric(ty) || self.is_string(ty) || self.is_bool(ty) || ty == BIGINT || ty == DECIMAL

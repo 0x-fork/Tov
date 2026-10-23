@@ -1464,6 +1464,10 @@ impl<'c, 'a> Gen<'c, 'a> {
                 let call = format!("{f}({}, {d}, &{xn})", arr.code);
                 if name == "includes" { Val::plain(format!("({call} >= 0)"), BOOL) } else { Val::plain(call, INT) }
             }
+            "toString" => {
+                let sep = self.lit(b",");
+                self.tmp(STR, &format!("tv_arr_join({}, {d}, {sep})", arr.code), true)
+            }
             "join" => {
                 let sep = match args.first() {
                     Some(a) => {
@@ -2242,6 +2246,18 @@ impl<'c, 'a> Gen<'c, 'a> {
                 }
                 Val::plain("0", VOID)
             }
+            (None, "__delete") => {
+                let o = self.expr(args[0].expr);
+                let ob = self.c.types.without_undefined(o.ty);
+                let Ty::Map(k, v) = self.tget(ob) else { return Val::plain("false", BOOL) };
+                let kv = self.expr(args[1].expr);
+                let kv = self.coerce(kv, k);
+                let kn = self.key_tmp(kv, k);
+                let (kd, vd) = (self.desc(k), self.desc(v));
+                let place = self.fresh("dm");
+                self.line(format!("tv_map {place} = {};", o.code));
+                Val::plain(format!("tv_map_delete(&{place}, {kd}, {vd}, &{kn})"), BOOL)
+            }
             (None, "__eachArg") => {
                 let v = self.expr(args[0].expr);
                 match self.tget(v.ty) {
@@ -2936,16 +2952,25 @@ impl<'c, 'a> Gen<'c, 'a> {
             }
             "toContain" => {
                 let x = self.expr(args[0].expr);
-                if let Ty::Array(et) = self.tget(s.ty) {
+                // (of a `T[] | undefined`: not when it's absent)
+                let (sv, guard) = if self.c.types.has_nullish(s.ty) {
+                    let inner = self.c.types.without_nullish(s.ty);
+                    let present = self.truthy_val(s.clone());
+                    (self.project(s.clone(), inner), Some(present))
+                } else {
+                    (s.clone(), None)
+                };
+                let (cond, x) = if let Ty::Array(et) = self.tget(sv.ty) {
                     let x = self.coerce(x, et);
                     let d = self.desc(et);
                     let xn = self.key_tmp(x.clone(), et);
-                    (format!("(tv_arr_index_of({}, {d}, &{xn}) >= 0)", s.code), Some(x))
+                    (format!("(tv_arr_index_of({}, {d}, &{xn}) >= 0)", sv.code), Some(x))
                 } else {
                     let x = self.coerce(x, STR);
-                    let sv = self.coerce(s.clone(), STR);
+                    let sv = self.coerce(sv, STR);
                     (format!("tv_str_includes({}, {})", sv.code, x.code), Some(x))
-                }
+                };
+                (guard.map(|g| format!("({g} && {cond})")).unwrap_or(cond), x)
             }
             "toThrow" | "toThrowError" => {
                 // (called, and what it throws dropped; a trap still fails the test)
@@ -2967,8 +2992,40 @@ impl<'c, 'a> Gen<'c, 'a> {
                     }
                 }
                 let thrown = self.fresh("threw");
-                self.line(format!("bool {thrown} = tvg_err != NULL; if ({thrown}) {{ tvg_obj_release(tvg_err); tvg_err = NULL; }}"));
-                let msg = if negate { "expected the function not to throw" } else { "expected the function to throw" };
+                // (`toThrow(RangeError)`: an error of that class; `toThrow("empty")`: one whose
+                // message contains it)
+                let m = self.cur_m();
+                let err = self.c.error_class();
+                let mut what = String::new();
+                let arg_ty = args.first().map(|a| self.ty(a.expr)).unwrap_or(ERROR);
+                let check = match args {
+                    [a] if let Some(crate::check::IdentFact::Class(c)) = self.ident_fact(m, a.expr) => {
+                        what = format!(" a {}", self.c.class_names[c as usize]);
+                        let ect = if err == ERROR { "void *".to_string() } else { self.ctype(err) };
+                        Some(self.instanceof_code(Val::plain(format!("(({ect})tvg_err)"), err), c))
+                    }
+                    [a] if err != ERROR && self.c.types.is_string(arg_ty) => {
+                        let sv = self.expr(a.expr);
+                        let sv = self.coerce(sv, STR);
+                        let msym = self.c.interner.lookup("message");
+                        match msym.and_then(|ms| self.c.class_member(err, ms)) {
+                            Some(crate::check::class::ClassMemberRef::Field(cf)) => {
+                                let ect = self.ctype(err);
+                                let lv = self.class_field_lv_pub(&format!("(({ect})tvg_err)"), err, &cf);
+                                what = " an error with that message".into();
+                                Some(format!("tv_str_includes({lv}, {})", sv.code))
+                            }
+                            _ => None,
+                        }
+                    }
+                    _ => None,
+                };
+                let ok = match check {
+                    Some(c) => format!("(tvg_err != NULL && {c})"),
+                    None => "(tvg_err != NULL)".to_string(),
+                };
+                self.line(format!("bool {thrown} = {ok}; if (tvg_err) {{ tvg_obj_release(tvg_err); tvg_err = NULL; }}"));
+                let msg = if negate { format!("expected the function not to throw{what}") } else { format!("expected the function to throw{what}") };
                 let cond = if negate { format!("!{thrown}") } else { thrown };
                 self.line(format!("if (!({cond})) {{ tv_sb msg_ = {{0}}; tv_sb_push_cstr(&msg_, {}); tv_expect_fail(&msg_, {loc}); }}", c_string(msg.as_bytes())));
                 return;

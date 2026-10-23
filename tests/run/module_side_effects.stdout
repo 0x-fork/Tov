@@ -1,0 +1,3 @@
+registry loaded
+plugins loaded
+main [ 'alpha', 'beta', 'p0', 'p1' ] 4

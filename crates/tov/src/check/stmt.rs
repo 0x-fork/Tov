@@ -84,9 +84,23 @@ impl<'a> Checker<'a> {
         }
     }
 
+    /// `name[k] = v` somewhere after `name` is declared (at `at`): it's a dictionary.
+    fn stored_by_key(&self, name: Sym, at: Span) -> bool {
+        let ast = self.ast();
+        ast.exprs.iter().any(|e| {
+            e.span.file == at.file
+                && e.span.start > at.start
+                && matches!(&e.kind, ExprKind::Assign(_, t, _) if matches!(&ast.expr(*t).kind, ExprKind::Index { obj, .. } if matches!(ast.expr(*obj).kind, ExprKind::Ident(n) if n == name)))
+        })
+    }
+
     /// `new Map()` (`Some(true)`) or `new Set()` (`Some(false)`), with neither type arguments nor
     /// entries.
     fn untyped_collection(&self, i: ExprId) -> Option<bool> {
+        // (`const seen = {}` stored into by key: a map, as JavaScript's object of keys)
+        if matches!(&self.ast().expr(i).kind, ExprKind::Object(fs) if fs.is_empty()) {
+            return Some(true);
+        }
         let ExprKind::New { callee, type_args, args } = &self.ast().expr(i).kind else { return None };
         if !type_args.is_empty() || !args.is_empty() {
             return None;
@@ -296,7 +310,7 @@ impl<'a> Checker<'a> {
                     }
                     // `const m = new Map()`: its keys and values are what it's given later
                     // (`m.set(k, v)`), as TypeScript's `Map<any, any>` holds them
-                    (None, Some(i)) if self.untyped_collection(*i).is_some() && !self.fcx.is_empty() => {
+                    (None, Some(i)) if self.untyped_collection(*i).is_some() && !self.fcx.is_empty() && (!matches!(self.ast().expr(*i).kind, ExprKind::Object(_)) || self.stored_by_key(*name, *name_span)) => {
                         let key = name_span.start;
                         let t = match self.fcx.last().unwrap().evolved.get(&key) {
                             Some(&t) => t,
@@ -311,6 +325,23 @@ impl<'a> Checker<'a> {
                         }
                         (t, false)
                     }
+                    // `let prev = null`: as `let prev;`, what's assigned to it too (TypeScript's
+                    // evolving `let`)
+                    (None, Some(i)) if *mutable && !self.fcx.is_empty() && matches!(self.ast().expr(*i).kind, ExprKind::Null | ExprKind::Undefined) => {
+                        let key = name_span.start;
+                        let start = if matches!(self.ast().expr(*i).kind, ExprKind::Null) { NULL } else { UNDEFINED };
+                        let t = match self.fcx.last().unwrap().evolved.get(&key) {
+                            Some(&t) => self.types.union(&[t, start]),
+                            None => {
+                                self.fcx().evolving.push((key, *name_span, vec![start], EV_LET));
+                                ERROR
+                            }
+                        };
+                        if t != ERROR {
+                            self.expr(*i, Some(t));
+                        }
+                        (t, false)
+                    }
                     (None, Some(i)) => {
                         let found = match self.recursive_arrow(*name, *name_span, *i, kind) {
                             Some(t) => t,
@@ -319,7 +350,9 @@ impl<'a> Checker<'a> {
                         let ispan = self.ast().expr(*i).span;
                         let t = self.check_inferred_binding(found, ispan);
                         let t = if *mutable { self.types.widen(t) } else { t };
-                        let promotable = *mutable && t == INT && self.is_int_literal(*i);
+                        // (in TypeScript, any `let` of an integer: `let min = INF` may take a float
+                        // later, its one `number`)
+                        let promotable = *mutable && t == INT && (self.is_int_literal(*i) || self.ts_module());
                         if promotable && self.fcx.last().unwrap().promoted.contains(&name_span.start) {
                             (F64, false)
                         } else {

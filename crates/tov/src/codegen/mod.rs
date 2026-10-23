@@ -440,6 +440,34 @@ impl<'c, 'a> Gen<'c, 'a> {
         // Then the event loop: timers, tasks and servers the program started.
         let async_run = ASYNC_RUN;
         let mut main_body = String::new();
+        // Imported modules' top-level statements first, each module after those it imports.
+        let mut order: Vec<u32> = Vec::new();
+        fn visit(mods: &[crate::check::Module], m: u32, order: &mut Vec<u32>, seen: &mut FxSet<u32>) {
+            if !seen.insert(m) {
+                return;
+            }
+            let mut deps: Vec<u32> = mods[m as usize].imports.values().copied().collect();
+            deps.sort();
+            for d in deps {
+                visit(mods, d, order, seen);
+            }
+            order.push(m);
+        }
+        let mut seen = FxSet::default();
+        for mi in 0..modules.len() as u32 {
+            visit(modules, mi, &mut order, &mut seen);
+        }
+        for mi in order {
+            let module = &modules[mi as usize];
+            if module.entry || module.std || module.builtin || module.npm.is_some() {
+                continue;
+            }
+            if let Some(si) = module.ast.script {
+                let cname = self.instance(mi, si, FxMap::default());
+                let _ = writeln!(main_body, "    {cname}();\n    if (tvg_err) {{ tvg_uncaught(); return 1; }}");
+                self.needs_uncaught = true;
+            }
+        }
         match mode {
             Mode::Run if script.is_some() && self.is_async_fn(script.unwrap().0, script.unwrap().1) => {
                 let (m, i) = script.unwrap();
@@ -1652,16 +1680,40 @@ impl<'c, 'a> Gen<'c, 'a> {
 
     /// A `tv_fn` value calling a (non-generic) module function.
     pub(crate) fn fn_value(&mut self, m: u32, item: u32) -> String {
-        let cname = self.instance(m, item, FxMap::default());
+        self.fn_value_with(m, item, FxMap::default())
+    }
+
+    /// `fn_value` of a generic function's instance (`subst`: its type arguments).
+    pub(crate) fn fn_value_with(&mut self, m: u32, item: u32, subst: FxMap<u32, TyId>) -> String {
+        let cname = self.instance(m, item, subst.clone());
         if let Some(n) = self.fn_values.get(&cname) {
             return format!("((tv_fn){{ (void *){n}, NULL }})");
         }
         let sig = self.c.sigs[&(m, item)].clone();
         let wname = format!("fv_{cname}");
-        let proto = self.fn_proto(&wname, &sig.params, sig.ret, &FxMap::default(), true);
+        let proto = self.fn_proto(&wname, &sig.params, sig.ret, &subst, true);
         let args: Vec<String> = (0..sig.params.len()).map(|i| format!("p{i}")).collect();
         let call = if self.is_async_fn(m, item) { format!("{cname}_spawn({})", args.join(", ")) } else { format!("{cname}({})", args.join(", ")) };
         let body = if sig.ret == VOID { format!("{call};") } else { format!("return {call};") };
+        let _ = writeln!(self.protos, "static {proto};");
+        let _ = writeln!(self.funcs, "static {proto} {{ (void)env_; {body} }}");
+        self.fn_values.insert(cname, wname.clone());
+        format!("((tv_fn){{ (void *){wname}, NULL }})")
+    }
+
+    /// A static method as a function value (`compareFn = Comparator.defaultCompareFn`).
+    pub(crate) fn static_fn_value(&mut self, c: u32, member: u32, subst: FxMap<u32, TyId>) -> String {
+        let cname = self.static_method_instance(c, member, subst.clone());
+        if let Some(n) = self.fn_values.get(&cname) {
+            return format!("((tv_fn){{ (void *){n}, NULL }})");
+        }
+        let Some(sm) = self.c.classes[c as usize].statics.iter().find(|m| m.member == member).cloned() else { return "((tv_fn){ NULL, NULL })".into() };
+        let ret = self.c.method_ret(&sm);
+        let wname = format!("fv_{cname}");
+        let proto = self.fn_proto(&wname, &sm.params, ret, &subst, true);
+        let args: Vec<String> = (0..sm.params.len()).map(|i| format!("p{i}")).collect();
+        let call = format!("{cname}({})", args.join(", "));
+        let body = if ret == VOID { format!("{call};") } else { format!("return {call};") };
         let _ = writeln!(self.protos, "static {proto};");
         let _ = writeln!(self.funcs, "static {proto} {{ (void)env_; {body} }}");
         self.fn_values.insert(cname, wname.clone());

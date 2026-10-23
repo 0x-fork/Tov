@@ -84,6 +84,8 @@ pub enum MemberFact {
     MathConst,
     /// `C.NAME`: a static readonly field (class, member).
     StaticField(u32, u32),
+    /// `C.method` as a value: a static method (class, member).
+    StaticFn(u32, u32),
     /// `m.keys().next().value` (`.values()` when true) on a map or set: its first key (value),
     /// `undefined` if it's empty, read without making the array (the expression `m`).
     First(ExprId, bool),
@@ -119,6 +121,9 @@ pub struct ModuleFacts {
     /// `new Array(n)` of elements without an empty value, filled by the loop after it (see
     /// `stmt::filled_by_next_loop`): made empty, with room for `n`.
     pub filled_arrays: crate::hash::FxSet<ExprId>,
+    /// A generic function or static method as a value, its type arguments fixed by where it's
+    /// used (`compareFn = Comparator.defaultCompareFn`): by the expression.
+    pub value_targs: crate::hash::FxMap<ExprId, Vec<(u32, TyId)>>,
 }
 
 impl ModuleFacts {

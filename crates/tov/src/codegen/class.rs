@@ -49,7 +49,7 @@ pub(crate) struct Dispatcher {
 
 /// C name of a class field.
 pub(crate) fn field_cname(name: &str) -> String {
-    format!("f_{}", name.replace('#', "P_"))
+    format!("f_{}", name.replace('#', "P_").replace('@', "_of_"))
 }
 
 impl<'c, 'a> Gen<'c, 'a> {
@@ -552,7 +552,7 @@ impl<'c, 'a> Gen<'c, 'a> {
         let mut subst = ci.subst.clone();
         subst.extend(msubst.iter().map(|(&k, &v)| (k, v)));
         let (params, ret) = self.own_method_sig(ci.decl, member, &subst);
-        let mname = self.sym(self.c.class_member_decl(ci.decl, member).name).replace('#', "P_");
+        let mname = self.sym(self.c.class_member_decl(ci.decl, member).name).replace('#', "P_").replace('@', "_of_");
         let cname = if targs.is_empty() {
             let n = format!("M{}_{mname}", ci.name);
             self.method_insts.insert((owner_ty, member), n.clone());
@@ -588,7 +588,7 @@ impl<'c, 'a> Gen<'c, 'a> {
         }
         let (params, ret) = self.own_method_sig(decl, member, &subst);
         let cls: String = self.c.class_names[decl as usize].chars().map(|c| if c.is_ascii_alphanumeric() { c } else { '_' }).collect();
-        let mname = self.sym(self.c.class_member_decl(decl, member).name).replace('#', "P_");
+        let mname = self.sym(self.c.class_member_decl(decl, member).name).replace('#', "P_").replace('@', "_of_");
         let cname = if subst.is_empty() { format!("S{decl}_{cls}_{mname}") } else { format!("S{decl}_{cls}_{mname}_{}", self.static_insts.len()) };
         self.static_insts.insert(key, cname.clone());
         let proto = self.fn_proto(&cname, &params, ret, &FxMap::default(), false);
@@ -647,7 +647,7 @@ impl<'c, 'a> Gen<'c, 'a> {
             return n.clone();
         }
         let ci = self.class_inst(recv_ty);
-        let mname = self.sym(name).replace('#', "P_");
+        let mname = self.sym(name).replace('#', "P_").replace('@', "_of_");
         let dname = format!("vd_{}_{mname}", ci.name);
         let ret = self.c.method_ret(mm);
         let proto = self.self_proto(&dname, &ci.name, &mm.params, ret);
@@ -1182,9 +1182,10 @@ impl<'c, 'a> Gen<'c, 'a> {
             }
             let _ = writeln!(drop_cases, "    case {}: drop_{}(p); break;", ci.cid, ci.name);
             let _ = writeln!(dropf_cases, "    case {}: dropf_{}(p); break;", ci.cid, ci.name);
-            // inspect: `Name { field: value, ... }`.
+            // inspect: `Name { field: value, ... }` (not `#private` ones, as Node shows them).
             let cls = self.c.class_names[ci.decl as usize].clone();
             let mut b = String::new();
+            let fields: Vec<CField> = fields.into_iter().filter(|f| !self.sym(f.name).starts_with('#')).collect();
             // (a prelude class showing as Node shows it: a `Date` as its ISO time)
             let shown = self.c.interner.lookup("__inspect").filter(|&m| matches!(self.c.class_member(*t, m), Some(crate::check::class::ClassMemberRef::Method(..))));
             if let Some(m) = shown {

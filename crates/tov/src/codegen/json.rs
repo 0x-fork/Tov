@@ -112,7 +112,8 @@ impl<'c, 'a> Gen<'c, 'a> {
                 let fields = self.c.class_as_fields(t);
                 let mut parts = Vec::new();
                 for f in fields {
-                    if matches!(self.tget(f.ty), Ty::Func(..)) {
+                    // (functions and `#private` fields aren't JSON's)
+                    if matches!(self.tget(f.ty), Ty::Func(..)) || self.sym(f.name).starts_with('#') {
                         continue;
                     }
                     let Some(crate::check::class::ClassMemberRef::Field(cf)) = self.c.class_member(t, f.name) else { continue };

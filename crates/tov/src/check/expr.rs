@@ -220,6 +220,19 @@ impl<'a> Checker<'a> {
                 {
                     return t;
                 }
+                // (a generic function where a function type is wanted: the instance it fixes)
+                if let Some(x) = exp
+                    && self.lookup(*sym).is_none()
+                    && let Some(Decl::Fn(m, i)) = self.scopes[self.cur as usize].values.get(sym).map(|d| d.0)
+                    && let Some(sig) = self.fn_sig(m, i)
+                    && !sig.tparams.is_empty()
+                {
+                    let ft = self.fn_value_type(sig.clone());
+                    if let Some(t) = self.generic_value(e, ft, &sig.tparams, x) {
+                        self.rec_ident(e, IdentFact::Fn(m, i));
+                        return t;
+                    }
+                }
                 self.ident(e, *sym, span)
             }
             ExprKind::Paren(x) => {
@@ -261,6 +274,20 @@ impl<'a> Checker<'a> {
                     && let Some(slot) = self.evolving_slot(obj)
                 {
                     self.evolve(slot, &[Arg { expr: *v, by_ref: None }]);
+                }
+                // `seen[k] = v` on an untyped `const seen = {}`: a map of those keys and values
+                if *op == AssignOp::Assign
+                    && let ExprKind::Index { obj, index, .. } = self.ast().expr(*t).kind
+                    && let Some(slot) = self.evolving_collection(obj)
+                {
+                    let mark = self.diags.len();
+                    let (k, val) = (self.expr(index, None), self.expr(*v, None));
+                    self.diags.truncate(mark);
+                    let (k, val) = (self.types.widen(k), self.types.widen(val));
+                    if !self.types.mentions_error(k) && !self.types.mentions_error(val) {
+                        let m = self.types.intern(Ty::Map(k, val));
+                        self.fcx().evolving[slot].2.push(m);
+                    }
                 }
                 if let Some(setter) = self.setter_of(*t) {
                     // (rewritten as `x.__set_name(v)`, checked then)
@@ -314,7 +341,9 @@ impl<'a> Checker<'a> {
                 t
             }
             ExprKind::Member { obj, name, name_span, optional } => {
+                self.member_exp = exp;
                 let t = self.member(e, *obj, *name, *name_span, *optional, span);
+                self.member_exp = None;
                 // (`n = g.next().value` of a `Generator<T>`, whose result TypeScript leaves `any`:
                 // the value, checked to be there, as `g.next().value!`)
                 if let Some(x) = exp
@@ -537,6 +566,10 @@ impl<'a> Checker<'a> {
                 self.types.without_nullish(t)
             }
             ExprKind::Typeof(x) => {
+                // (`typeof seen[k]` of a missing key is "undefined")
+                if matches!(self.ast().expr(*x).kind, ExprKind::Index { .. }) {
+                    self.want_optional = true;
+                }
                 self.expr(*x, None);
                 STR
             }
@@ -941,7 +974,7 @@ impl<'a> Checker<'a> {
             }
             Add => {
                 let (tl, tr) = self.numeric_pair(l, r, exp);
-                if self.types.is_string(tl) || self.types.is_string(tr) {
+                if self.types.is_stringish(tl) || self.types.is_stringish(tr) {
                     for (t, x) in [(tl, l), (tr, r)] {
                         if !self.printable(t) {
                             let msg = format!("can't concatenate `{}` to a string", self.show(t));
@@ -1341,8 +1374,11 @@ impl<'a> Checker<'a> {
             let tl = self.expr(l, Some(tr));
             (tl, tr)
         } else {
-            self.want_optional = ru;
+            // (`seen[k] === 0` of a `Record`: a missing key is `undefined`, which isn't 0)
+            let keyed = |c: &mut Self, x: ExprId| matches!(c.ast().expr(x).kind, ExprKind::Index { obj, .. } if c.expr_type_peek(obj).is_some_and(|t| matches!(c.types.get(t), Ty::Map(..))));
+            self.want_optional = ru || keyed(self, l);
             let tl = self.expr(l, None);
+            self.want_optional = keyed(self, r);
             let tr = self.expr(r, if self.types.is_num_like(tl) { Some(tl) } else { None });
             (tl, tr)
         };
@@ -1391,12 +1427,22 @@ impl<'a> Checker<'a> {
     }
 
     fn assign(&mut self, op: AssignOp, target: ExprId, value: ExprId, span: Span) -> TyId {
+        self.assigned_field = None;
         let t = self.assign_inner(op, target, value, span);
         // After the value: `cur = cur.left` reads the narrowed `cur.left` first.
         self.invalidate_place(target);
         // A field of a class instance may be reached through other references too.
         if !matches!(self.ast().expr(target).kind, ExprKind::Ident(_)) {
             self.invalidate_heap();
+        }
+        // (`current.next = new ListNode(v)`: then `current.next` is a `ListNode`, as TypeScript
+        // narrows it)
+        if let Some(tv) = self.assigned_field.take()
+            && matches!(self.ast().expr(target).kind, ExprKind::Member { .. })
+            && let Some((tg, _)) = self.target_of(target)
+            && !tg.path.is_empty()
+        {
+            self.apply(&[tg.with(tv)]);
         }
         t
     }
@@ -1438,6 +1484,12 @@ impl<'a> Checker<'a> {
                         c.expect_assignable(tv, place.ty, vspan, None);
                         c.wrap_store = false;
                     });
+                }
+                // (`current.next = node`: the field holds that, until something may change it)
+                if place.local.is_none() && matches!(self.types.get(place.ty), Ty::Union(_)) && tv != ERROR && self.assignable(tv, place.ty) {
+                    let declared = self.types.members(place.ty);
+                    let ms: Vec<TyId> = self.types.members(tv).into_iter().map(|m| if declared.contains(&m) { m } else { self.types.widen(m) }).collect();
+                    self.assigned_field = Some(self.types.union(&ms));
                 }
                 if let Some(local) = place.local
                     && self.assignable(tv, place.ty) && matches!(self.types.get(self.local(local).ty), Ty::Union(_)) {
@@ -2386,6 +2438,31 @@ impl<'a> Checker<'a> {
         }
         let n = self.name(name).to_string();
         let cls = self.class_names[c as usize].clone();
+        // `Comparator.defaultCompareFn` as a value: the function (a static method; a generic one
+        // as the function type wanted fixes it)
+        if let Some(sm) = info.statics.iter().find(|m| m.name == name && !m.getter).cloned() {
+            self.check_visible(sm.owner, sm.vis, name, name_span);
+            let ret = self.method_ret(&sm);
+            let throws = match sm.throws {
+                Some(t) if t != UNKNOWN => t,
+                _ => self.error_class(),
+            };
+            let ft = self.types.func_throws(sm.params.clone(), ret, throws);
+            let ft = if sm.tparams.is_empty() {
+                Some(ft)
+            } else {
+                match self.member_exp.take() {
+                    Some(want) => self.generic_value(e, ft, &sm.tparams, want),
+                    None => None,
+                }
+            };
+            if let Some(ft) = ft {
+                if let Some(fct) = self.facts_mut() {
+                    fct.members.insert(e, MemberFact::StaticFn(c, sm.member));
+                }
+                return ft;
+            }
+        }
         if info.statics.iter().any(|m| m.name == name) {
             self.report(Diagnostic::new("T0203", name_span, format!("static method `{cls}.{n}` must be called")));
             return ERROR;
@@ -2582,8 +2659,12 @@ impl<'a> Checker<'a> {
                 self.report(Diagnostic::new("N0006", f.name_span, format!("duplicate field `{n}`")));
             }
         }
-        // `{ "Content-Type": v }` for a `Record<string, V>`: a map literal.
-        if let Some(mt) = exp.and_then(|e| self.map_literal_target(e)) {
+        // `{ "Content-Type": v }` for a `Record<string, V>`: a map literal (`{}` of any map).
+        let empty_map = |c: &mut Self, e: TyId| {
+            let e = c.types.without_undefined(e);
+            (fields.is_empty() && matches!(c.types.get(e), Ty::Map(..))).then_some(e)
+        };
+        if let Some(mt) = exp.and_then(|e| self.map_literal_target(e).or_else(|| empty_map(self, e))) {
             let Ty::Map(_, vt) = *self.types.get(mt) else { unreachable!() };
             for f in fields {
                 let key = self.name(f.name).to_string();
@@ -4664,6 +4745,11 @@ impl<'a> Checker<'a> {
                 // (a constructor type's parameter: a class given for it is checked against it)
                 let ctor = matches!(*self.types.get(pty), Ty::Param(q) if self.gparam(q).ctor.is_some());
                 let hint = if is_arrow || ctor || !self.types.mentions(pty, &unhinted) { Some(pty) } else { None };
+                // (`chunk([], 3)` for a `T[]`: an array of nothing, `T` `never`, as TypeScript's)
+                let hint = match hint {
+                    None if matches!(&self.ast().expr(a.expr).kind, ExprKind::Array(xs) if xs.is_empty()) && matches!(self.types.get(pty), Ty::Array(_)) => Some(self.types.array(NEVER)),
+                    h => h,
+                };
                 self.infer_free = still_free;
                 let marks = self.diags.len();
                 if self.spec.on {
@@ -4905,9 +4991,10 @@ impl<'a> Checker<'a> {
                 }
             }
             Ty::Union(pms) => {
-                let pattern_rest: Vec<TyId> = self.types.tys(pms).iter().copied().filter(|&m| m != UNDEFINED).collect();
+                // (`N<T> | null`, `T | undefined`: the type that's there)
+                let pattern_rest: Vec<TyId> = self.types.tys(pms).iter().copied().filter(|&m| m != UNDEFINED && m != NULL).collect();
                 if pattern_rest.len() == 1 {
-                    let actual_rest = self.types.without_undefined(actual);
+                    let actual_rest = self.types.without_nullish(actual);
                     self.unify(pattern_rest[0], actual_rest, free, map);
                 } else {
                     // (variants of records: each with the actual one of the same fields)
@@ -5244,6 +5331,26 @@ impl<'a> Checker<'a> {
                 Ty::Record(fs) => self.types.fields(fs).iter().any(|f| f.name == name && matches!(self.types.get(f.ty), Ty::BoolLit(_))),
                 _ => false,
             })
+    }
+
+    /// A generic function value of type `ft` (type parameters `tparams`) where `want` is wanted:
+    /// the instance `want` fixes, if it fixes them all (recorded for code generation).
+    fn generic_value(&mut self, e: ExprId, ft: TyId, tparams: &[u32], want: TyId) -> Option<TyId> {
+        let want = self.types.without_undefined(want);
+        if !matches!(self.types.get(want), Ty::Func(..)) {
+            return None;
+        }
+        let mut map: HashMap<u32, TyId> = HashMap::default();
+        self.unify(ft, want, tparams, &mut map);
+        if !tparams.iter().all(|p| map.contains_key(p)) {
+            return None;
+        }
+        let t = self.types.subst(ft, &map);
+        let targs: Vec<(u32, TyId)> = tparams.iter().map(|p| (*p, map[p])).collect();
+        if let Some(f) = self.facts_mut() {
+            f.value_targs.insert(e, targs);
+        }
+        Some(t)
     }
 
     /// `x` from `const { x, y } = r` (`const x = $t.x`) tested for `value`, where `x` is a boolean

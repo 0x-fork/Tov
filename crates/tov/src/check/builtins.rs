@@ -168,7 +168,7 @@ pub(super) fn is_builtin_ns(name: &str) -> bool {
 }
 
 pub(super) fn is_builtin_fn(name: &str) -> bool {
-    matches!(name, "expect" | "String" | "Number" | "Boolean" | "BigInt" | "decimal" | "parseInt" | "parseFloat" | "isNaN" | "isFinite" | "test" | "__test" | "structuredClone" | "__eachArg")
+    matches!(name, "expect" | "String" | "Number" | "Boolean" | "BigInt" | "decimal" | "parseInt" | "parseFloat" | "isNaN" | "isFinite" | "test" | "__test" | "structuredClone" | "__eachArg" | "__delete")
         || CONVERSIONS.contains(&name)
         || TIMER_FNS.contains(&name)
 }
@@ -230,7 +230,7 @@ pub(super) fn property(types: &Types, ty: TyId, name: &str) -> Option<TyId> {
 
 const ARRAY_METHODS: &[&str] = &[
     "push", "pop", "shift", "unshift", "splice", "map", "filter", "forEach", "reduce", "some", "every", "find", "findIndex", "indexOf", "lastIndexOf", "includes", "join", "slice", "concat",
-    "reverse", "sort", "at", "flatMap", "fill", "entries", "keys", "flat",
+    "reverse", "sort", "at", "flatMap", "fill", "entries", "keys", "flat", "toString",
 ];
 const STRING_METHODS: &[&str] = &[
     "chars", "slice", "localeCompare", "includes", "startsWith", "endsWith", "indexOf", "lastIndexOf", "split", "trim", "trimStart", "trimEnd", "toUpperCase", "toLowerCase", "replace",
@@ -364,6 +364,8 @@ pub(super) fn method(c: &mut Checker, base: TyId, name: &str) -> Option<MethodSi
                     let sep = opt(c, STR);
                     mk(sig(vec![(sep, "separator")], STR), false)
                 }
+                // (`xs.toString()`: `xs.join(",")`)
+                "toString" => mk(sig(vec![], STR), false),
                 "slice" => {
                     let (a, b) = (opt(c, INT), opt(c, INT));
                     mk(sig(vec![(a, "start"), (b, "end")], arr), false)
@@ -1453,6 +1455,26 @@ impl<'a> Checker<'a> {
                 }
                 VOID
             }
+            // `delete o[k]` of a `Record` (a map): whether the key was there
+            "__delete" => {
+                let ot = self.expr(args[0].expr, None);
+                let ob = self.types.without_undefined(ot);
+                match *self.types.get(ob) {
+                    Ty::Map(k, _) => {
+                        let kt = self.expr(args[1].expr, Some(k));
+                        let s = self.ast().expr(args[1].expr).span;
+                        self.expect_assignable(kt, k, s, Some("the key".into()));
+                    }
+                    Ty::Error => {}
+                    _ => {
+                        self.expr(args[1].expr, None);
+                        let shown = self.show(ot);
+                        let s = self.ast().expr(args[0].expr).span;
+                        self.report(Diagnostic::new("X0008", s, format!("`delete o[k]` needs a map (a `Record`), found `{shown}`")).note("instead", "set an optional field to `undefined`"));
+                    }
+                }
+                BOOL
+            }
             // (a `test.each` row for a test's one parameter: an array's first element, as Jest
             // spreads an array row, else the row)
             "__eachArg" => {
@@ -1692,9 +1714,11 @@ impl<'a> Checker<'a> {
                 }
             }
             "toContain" => {
-                let el = match *self.types.get(subject) {
+                // (of a `T[] | undefined` too: it fails when the value is absent, as Jest's does)
+                let base = self.types.without_nullish(subject);
+                let el = match *self.types.get(base) {
                     Ty::Array(e) => Some(e),
-                    _ if self.types.is_string(subject) => Some(STR),
+                    _ if self.types.is_string(base) => Some(STR),
                     _ => None,
                 };
                 match (el, args) {
@@ -1713,8 +1737,16 @@ impl<'a> Checker<'a> {
                 }
             }
             "toThrow" | "toThrowError" => {
-                // (what it throws: any message, error class or pattern given is checked loosely)
-                self.check_args_loose(args);
+                // (what it throws: an error class, or a message it contains; a pattern isn't checked)
+                match args {
+                    [a] if let crate::ast::ExprKind::Ident(s) = self.ast().expr(a.expr).kind
+                        && self.lookup(s).is_none()
+                        && let Some(Decl::Class(c)) = self.scopes[self.cur as usize].values.get(&s).map(|d| d.0) =>
+                    {
+                        self.rec_ident(a.expr, IdentFact::Class(c));
+                    }
+                    _ => self.check_args_loose(args),
+                }
                 let callable = matches!(self.types.get(subject), Ty::Func(ps, _, _) if self.types.params(*ps).is_empty());
                 if subject != ERROR && !callable {
                     let msg = format!("`{name}` needs a function to call, found `{}`", self.show(subject));

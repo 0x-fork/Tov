@@ -20,7 +20,7 @@ pub fn parse(src: &str, file: FileId, interner: &mut Interner) -> (Ast, Vec<Diag
             lexed.tokens[i].kind = Tok::Ident;
         }
     }
-    let mut p = Parser { src, toks: lexed.tokens, strings: lexed.strings, pos: 0, file, interner, ast: Ast::default(), diags, script_stmts: Vec::new(), defaults: Vec::new(), more_stmts: Vec::new(), hidden: 0, prologue: Vec::new(), index_sig: None, call_sig: None, local_fns: Vec::new(), prop_defaults: false, extra_members: Vec::new(), generic_arrows: Vec::new(), local_types: Vec::new(), local_type_items: Vec::new(), runtime_tests: false, chai: false, lifted: Vec::new() };
+    let mut p = Parser { src, toks: lexed.tokens, strings: lexed.strings, pos: 0, file, interner, ast: Ast::default(), diags, script_stmts: Vec::new(), defaults: Vec::new(), more_stmts: Vec::new(), hidden: 0, prologue: Vec::new(), index_sig: None, call_sig: None, local_fns: Vec::new(), prop_defaults: false, extra_members: Vec::new(), generic_arrows: Vec::new(), local_types: Vec::new(), local_type_items: Vec::new(), runtime_tests: false, chai: false, lifted: Vec::new(), classes: Vec::new() };
     p.ast.iterator_sym = Some(p.interner.intern("__iterator"));
     // (`// @ts-expect-error`: the next line's start)
     let mut at = 0usize;
@@ -335,6 +335,8 @@ struct Parser<'a> {
     chai: bool,
     /// Function declarations in bodies, as `const`s (to hoist).
     local_fns: Vec<StmtId>,
+    /// The classes being parsed, innermost last: a `#name` is its class's own (see `private_name`).
+    classes: Vec<Sym>,
     /// Nested generators and generic functions, made module functions (see `lift_functions`): the
     /// name in its body (none for an expression), the module function's, where it's written.
     lifted: Vec<(Option<Sym>, Sym, Span)>,
@@ -1014,6 +1016,7 @@ impl<'a> Parser<'a> {
         }
         self.bump();
         let mut members = Vec::new();
+        self.classes.push(name);
         while !self.at(Tok::RBrace) && !self.at(Tok::Eof) {
             let before = self.pos;
             if self.eat(Tok::Semi) {
@@ -1026,6 +1029,7 @@ impl<'a> Parser<'a> {
                 self.bump();
             }
         }
+        self.classes.pop();
         // (fields made from parameter properties come first, as the parameters' own would)
         let extra = std::mem::take(&mut self.extra_members);
         members.splice(0..0, extra);
@@ -1033,6 +1037,16 @@ impl<'a> Parser<'a> {
         let span = start.to(self.prev_span());
         let decl = ClassDecl { name, name_span, tparams, is_abstract, cyclic, extends, implements, members };
         self.ast.items.push(Item { kind: ItemKind::Class(decl), span, exported });
+    }
+
+    /// `#name` in the class being parsed: that class's own (`#name@Class`), as each class's private
+    /// names are its own in JavaScript (a subclass can have a `#root` of its own).
+    fn private_name(&mut self, n: Sym) -> Sym {
+        let text = match self.classes.last() {
+            Some(&c) => format!("#{}@{}", self.interner.get(n), self.interner.get(c)),
+            None => format!("#{}", self.interner.get(n)),
+        };
+        self.interner.intern(&text)
     }
 
     /// Is the current word a modifier (followed by a member name) rather than the member's own name?
@@ -1116,9 +1130,8 @@ impl<'a> Parser<'a> {
                 self.recover_line();
                 return None;
             };
-            let text = format!("#{}", self.interner.get(n));
             vis = Visibility::Private;
-            (self.interner.intern(&text), self.span_of(h).to(s))
+            (self.private_name(n), self.span_of(h).to(s))
         } else {
             match self.prop_name() {
                 Some(x) => x,
@@ -2798,6 +2811,13 @@ impl<'a> Parser<'a> {
                 self.bump();
                 self.mk_ty(TypeExprKind::BoolLit(b), start)
             }
+            // (`-1 | 0 | 1` too)
+            Tok::Minus if matches!(self.nth(1), Tok::Int | Tok::Float) => {
+                self.bump();
+                self.bump();
+                let number = self.interner.intern("number");
+                self.mk_ty(TypeExprKind::Named { ns: None, name: number, name_span: start, args: Vec::new() }, start)
+            }
             // (`1 | 2 | 3`: a number; Tov has no numeric literal types)
             Tok::Int | Tok::Float => {
                 self.bump();
@@ -4002,13 +4022,31 @@ impl<'a> Parser<'a> {
                 let span = start.to(self.expr_span(e));
                 return self.mk_expr(ExprKind::Typeof(e), span);
             }
+            // `delete o[k]`: the key gone from the map (`__delete(o, k)`, see the checker);
+            // `delete o.f`: the optional field `undefined`, as TypeScript lets only those go
             Tok::Delete => {
                 self.bump();
+                let e = self.unary();
+                let span = start.to(self.expr_span(e));
+                match self.ast.exprs[e as usize].kind {
+                    ExprKind::Index { obj, index, optional: false } => {
+                        let f = self.interner.intern("__delete");
+                        let callee = self.mk_expr(ExprKind::Ident(f), span);
+                        return self.mk_expr(ExprKind::Call { callee, type_args: Vec::new(), args: vec![Arg { expr: obj, by_ref: None }, Arg { expr: index, by_ref: None }], optional: false }, span);
+                    }
+                    ExprKind::Member { optional: false, .. } => {
+                        let u = self.mk_expr(ExprKind::Undefined, span);
+                        let set = self.mk_expr(ExprKind::Assign(AssignOp::Assign, e, u), span);
+                        let t = self.mk_expr(ExprKind::Bool(true), span);
+                        return self.mk_expr(ExprKind::Seq(vec![set, t]), span);
+                    }
+                    _ => {}
+                }
                 self.push(
                     Diagnostic::new("X0008", start, "`delete` is not supported")
                         .note("instead", "records have fixed fields; use `Map` and `map.delete(key)` for dynamic keys"),
                 );
-                return self.unary();
+                return e;
             }
             Tok::Await => {
                 self.bump();
@@ -4071,7 +4109,8 @@ impl<'a> Parser<'a> {
                         let h = self.bump();
                         if self.at(Tok::Ident) && self.adjacent() {
                             let t = self.bump();
-                            let sym = self.interner.intern(&format!("#{}", self.text(t)));
+                            let n = self.interner.intern(self.text(t));
+                            let sym = self.private_name(n);
                             Some((sym, self.span_of(h).to(self.span_of(t))))
                         } else {
                             None

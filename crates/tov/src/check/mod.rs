@@ -293,6 +293,10 @@ fn intern_syms(interner: &mut Interner) -> Syms {
 /// phase B workers share them read-only and put new types in a per-module overlay, so results
 /// (and diagnostic text) don't depend on how modules are spread across threads.
 pub struct Checker<'a> {
+    /// What a field assignment just stored, when narrower than the field (see `assign`).
+    assigned_field: Option<TyId>,
+    /// The type wanted of the member being checked (for a generic static method as a value).
+    member_exp: Option<TyId>,
     pub(crate) modules: &'a [Module],
     pub(crate) interner: &'a Interner,
     pub(crate) sm: &'a SourceMap,
@@ -423,6 +427,8 @@ pub struct Checker<'a> {
 /// `threads`: phase-B worker count (default: all cores). Results don't depend on it.
 fn new_checker<'a>(modules: &'a [Module], interner: &'a Interner, sm: &'a SourceMap, syms: Syms, spec: Arc<spec::Spec>) -> Checker<'a> {
     Checker {
+        assigned_field: None,
+        member_exp: None,
         modules,
         interner,
         sm,
@@ -682,6 +688,8 @@ impl<'a> Checker<'a> {
     /// A phase-B checker sharing this checker's frozen tables.
     fn worker(&self, base: Arc<Types>) -> Checker<'a> {
         Checker {
+            assigned_field: None,
+            member_exp: None,
             modules: self.modules,
             interner: self.interner,
             sm: self.sm,
@@ -1300,13 +1308,15 @@ impl<'a> Checker<'a> {
     /// Phase A: everything other modules can depend on.
     fn check_interface(&mut self, m: u32) {
         let ast = self.ast();
+        // (an imported module's top-level statements run before the program's, once, as
+        // JavaScript runs a module when it's first imported; not those that wait)
         if let Some(span) = ast.script_span
             && !self.modules[m as usize].entry
+            && ast.script.is_some_and(|si| matches!(&ast.items[si as usize].kind, ItemKind::Function(f) if f.is_async))
         {
             self.done.push(
-                Diagnostic::new("P0201", span, "only the program's entry file can have top-level statements")
-                    .note("why", "importing a module has no side effects; its top level holds only declarations")
-                    .note("instead", "export a function and call it from the entry file"),
+                Diagnostic::new("P0201", span, "an imported module's top level can't `await`")
+                    .note("instead", "export an async function and call it from the entry file"),
             );
         }
         let mut test_names: HashMap<&str, Span> = HashMap::default();
