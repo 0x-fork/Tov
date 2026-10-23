@@ -1384,7 +1384,7 @@ impl<'c, 'a> Gen<'c, 'a> {
             Ty::Decimal => format!("tv_dec_eq({a}, {b})"),
             Ty::StrLit(_) | Ty::Undefined | Ty::Null | Ty::Void | Ty::Never => "true".into(),
             Ty::Array(_) | Ty::Map(..) | Ty::Set(_) => format!("(({a}).p == ({b}).p)"),
-            Ty::Func(..) => format!("(({a}).fn == ({b}).fn && ({a}).env == ({b}).env)"),
+            Ty::Func(..) => format!("tvg_fn_eq({a}, {b})"),
             Ty::Class(..) | Ty::Promise(..) | Ty::Gen(_) => format!("((void *)({a}) == (void *)({b}))"),
             Ty::Interface(..) => format!("(({a}).p == ({b}).p)"),
             Ty::Js => format!("tv_type_js.eq(&({a}), &({b}))"),
@@ -2000,6 +2000,10 @@ static inline void tvg_obj_retain(void *p) { if (p) ((tvg_obj *)p)->rc++; }
 /* A function value adapted to another function type: the environment holds the original. */
 typedef struct tvg_fnbox { tv_env h; tv_fn f; } tvg_fnbox;
 static void tvg_fnbox_drop(tv_env *e) { tv_env_release(((tvg_fnbox *)e)->f.env); }
+/* `===` on functions: the same function, seen through the adapters that fit it to other types
+ * (a function stored where one of fewer parameters is wanted is still itself). */
+static inline tv_fn tvg_fn_unwrap(tv_fn f) { while (f.env && f.env->drop == tvg_fnbox_drop) f = ((tvg_fnbox *)f.env)->f; return f; }
+static inline bool tvg_fn_eq(tv_fn a, tv_fn b) { a = tvg_fn_unwrap(a); b = tvg_fn_unwrap(b); return a.fn == b.fn && a.env == b.env; }
 static inline void tvg_obj_release(void *p) { if (p && --((tvg_obj *)p)->rc == 0) tvg_obj_drop(p); }
 static inline void tvg_weak_retain(void *p) { if (p) TVG_WEAK(p)++; }
 static inline void tvg_weak_release(void *p) { if (p && --TVG_WEAK(p) == 0 && ((tvg_obj *)p)->rc <= 0) tvg_obj_free(p); }

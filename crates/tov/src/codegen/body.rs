@@ -4057,7 +4057,7 @@ impl<'c, 'a> Gen<'c, 'a> {
 
     /// A C function with `to`'s signature that calls a `from` function (the one in its
     /// `tvg_fnbox` environment): arguments convert to `from`'s parameters (extra ones are
-    /// dropped), and the result to `to`'s return type.
+    /// dropped, missing optional ones `undefined`), and the result to `to`'s return type.
     fn fn_adapter(&mut self, from: TyId, to: TyId) -> String {
         if let Some(n) = self.fn_adapters.get(&(from, to)) {
             return n.clone();
@@ -4080,7 +4080,12 @@ impl<'c, 'a> Gen<'c, 'a> {
         self.begin_scratch(m);
         let mut argv = vec!["inner.env".to_string()];
         for (i, fp) in fps.iter().enumerate() {
-            let tp = tps.get(i).copied().unwrap_or(*fp);
+            // (an optional parameter the caller can't pass: `undefined`, which takes its default)
+            let Some(&tp) = tps.get(i) else {
+                let u = self.coerce(Val::plain("0", UNDEFINED), fp.ty);
+                argv.push(u.code);
+                continue;
+            };
             if fp.inout {
                 argv.push(format!("p{i}"));
             } else {
