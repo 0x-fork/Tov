@@ -3664,10 +3664,16 @@ impl<'c, 'a> Gen<'c, 'a> {
             }
             ExprKind::NonNull(x) => {
                 // `xs[i]!`: a direct bounds-checked read.
-                if let ExprKind::Index { obj, index, optional: false } = &ast.expr(*x).kind
-                    && let Some(v) = self.element(*obj, *index, ty, span)
-                {
-                    return v;
+                if let ExprKind::Index { obj, index, optional: false } = &ast.expr(*x).kind {
+                    // (of `(T | undefined)[]`: the element, checked to be a `T`)
+                    let ot = self.ty(*obj);
+                    let want = match self.tget(ot) {
+                        Ty::Array(el) if el != ty && self.c.types.has_undefined(el) => el,
+                        _ => ty,
+                    };
+                    if let Some(v) = self.element(*obj, *index, want, span) {
+                        return if v.ty == ty { v } else { self.downcast(v, ty, span) };
+                    }
                 }
                 let v = self.expr(*x);
                 self.downcast(v, ty, span)
