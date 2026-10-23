@@ -5093,6 +5093,7 @@ impl<'a> Checker<'a> {
                         let b = *b;
                         match &ast.expr(subject).kind {
                             ExprKind::Member { obj, name, optional: false, .. } => self.bool_field_narrowing(*obj, *name, b == eq),
+                            ExprKind::Ident(x) => self.linked_narrowing(*x, b == eq).unwrap_or_default(),
                             _ => Vec::new(),
                         }
                     }
@@ -5192,6 +5193,8 @@ impl<'a> Checker<'a> {
             }
             // `if (r.ok)`: the variants whose `ok` is `true` (`false` when it fails)
             ExprKind::Member { obj, name, optional: false, .. } if self.bool_discriminant(*obj, *name) => self.bool_field_narrowing(*obj, *name, positive),
+            // `const { done, value } = it.next(); if (done) break`: `value` is what it yields
+            ExprKind::Ident(x) if let Some(v) = self.linked_narrowing(*x, positive) => v,
             // `if (m?.groups)`: `m` is there, and its `groups`
             ExprKind::Member { obj, optional: true, .. } if positive => {
                 let mut v = Vec::new();
@@ -5241,6 +5244,40 @@ impl<'a> Checker<'a> {
                 Ty::Record(fs) => self.types.fields(fs).iter().any(|f| f.name == name && matches!(self.types.get(f.ty), Ty::BoolLit(_))),
                 _ => false,
             })
+    }
+
+    /// `x` from `const { x, y } = r` (`const x = $t.x`) tested for `value`, where `x` is a boolean
+    /// discriminant of `$t`'s union: `$t` narrowed so, and its other destructured locals with it.
+    fn linked_narrowing(&mut self, x: Sym, value: bool) -> Option<Vec<Narrowing>> {
+        let (id, _) = self.lookup(x)?;
+        let (_, obj, field) = *self.fcx.last()?.field_aliases.iter().find(|a| a.0 == id)?;
+        if !self.bool_discriminant(obj, field) {
+            return None;
+        }
+        let mut out = self.bool_field_narrowing(obj, field, value);
+        let Some(Narrowing::Local(tmp, tty)) = out.first().map(|n| match n {
+            Narrowing::Local(l, t) => Narrowing::Local(*l, *t),
+            _ => Narrowing::Local(usize::MAX, ERROR),
+        }) else { return None };
+        if tmp == usize::MAX {
+            return None;
+        }
+        let siblings: Vec<(LocalId, Sym)> = self
+            .fcx
+            .last()?
+            .field_aliases
+            .iter()
+            .filter(|a| a.0 != id && a.2 != field && matches!(self.ast().expr(a.1).kind, ExprKind::Ident(t) if self.lookup(t).map(|l| l.0) == Some(tmp)))
+            .map(|a| (a.0, a.2))
+            .collect();
+        for (sib, g) in siblings {
+            let tys: Option<Vec<TyId>> = self.flat_members(tty).into_iter().map(|m| self.field_of(m, g)).collect();
+            if let Some(tys) = tys {
+                let t = self.types.union(&tys);
+                out.push(Narrowing::Local(sib, t));
+            }
+        }
+        Some(out)
     }
 
     /// x narrowed to the members whose field `name` can be `value`.

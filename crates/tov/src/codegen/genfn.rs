@@ -174,6 +174,42 @@ impl<'c, 'a> Gen<'c, 'a> {
 
     /// `g.next()`: `{ value, done }`.
     pub(crate) fn gen_next(&mut self, g: Val, elem: TyId, ty: TyId) -> Val {
+        // (`{ value, done: false } | { value: undefined, done: true }`: the member it is)
+        if let Ty::Union(ms) = self.tget(ty) {
+            let ms = self.c.types.tys(ms).to_vec();
+            let field = |g2: &Self, m: TyId, n: &str| g2.c.types.fields_in_order(m).into_iter().find(|f| g2.sym(f.name) == n);
+            let (Some(more), Some(end)) = (
+                ms.iter().position(|&m| field(self, m, "done").is_some_and(|f| matches!(*self.c.types.get(f.ty), Ty::BoolLit(false)))),
+                ms.iter().position(|&m| field(self, m, "done").is_some_and(|f| matches!(*self.c.types.get(f.ty), Ty::BoolLit(true)))),
+            ) else {
+                return Val::plain("0", ty);
+            };
+            let (mt, et) = (ms[more], ms[end]);
+            let vt = field(self, mt, "value").map(|f| f.ty).unwrap_or(elem);
+            let ect = self.ctype(elem);
+            let d = self.fresh("gd");
+            self.line(format!("bool {d} = tv_gen_next({});", g.code));
+            let ct = self.ctype(ty);
+            let res = self.fresh("gr");
+            self.line(format!("{ct} {res};"));
+            self.open_block(&format!("if ({d}) {{"));
+            let lit = self.rec_lit(et, ".f_value = 0, .f_done = true");
+            let made = self.u_make(ty, end, Some(&lit));
+            self.line(format!("{res} = {made};"));
+            self.mid_block("} else {");
+            let present = self.coerce(Val::plain(format!("(*({ect} *)({}->yv))", g.code), elem), vt);
+            let present = self.own(present);
+            let pc = self.consume(present);
+            let lit = self.rec_lit(mt, &format!(".f_value = {pc}, .f_done = false"));
+            let made = self.u_make(ty, more, Some(&lit));
+            self.line(format!("{res} = {made};"));
+            self.close_block("}");
+            let owned = self.is_rc(ty);
+            if owned {
+                self.b().temps.last_mut().unwrap().push((res.clone(), ty));
+            }
+            return Val { code: res, ty, owned };
+        }
         let Ty::Record(fs) = self.tget(ty) else { return Val::plain("0", ty) };
         let fields = self.c.types.fields(fs).to_vec();
         let (Some(vf), Some(df)) = (fields.iter().find(|f| self.sym(f.name) == "value"), fields.iter().find(|f| self.sym(f.name) == "done")) else { return Val::plain("0", ty) };

@@ -350,6 +350,16 @@ impl<'a> Checker<'a> {
                 };
                 self.rec_binding(s, t);
                 let id = self.declare(*name, t, kind, *name_span, if *mutable { None } else { Some(kw) }, promotable);
+                // (`const done = $t.done` of `const { done, value } = r`: see `field_aliases`)
+                if !*mutable
+                    && let Some(i) = init
+                    && let ExprKind::Member { obj, name: field, optional: false, .. } = self.ast().expr(*i).kind
+                    && let ExprKind::Ident(tmp) = self.ast().expr(obj).kind
+                    && let Some((tid, _)) = self.lookup(tmp)
+                    && self.fcx().locals[tid].kind == LocalKind::Const
+                {
+                    self.fcx().field_aliases.push((id, obj, field));
+                }
                 if self.spec.on {
                     let sites = match (ty, init) {
                         (Some(te), _) => self.type_sites(self.cur, *te),

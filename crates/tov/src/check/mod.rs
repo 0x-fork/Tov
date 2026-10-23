@@ -227,6 +227,9 @@ struct FnCtx {
     /// (kind `EV_LET`: a `let x` with neither type nor value, typed by what's assigned to it;
     /// `EV_COLLECTION`: a `new Map()` / `new Set()`, given whole map and set types)
     evolving: Vec<(u32, Span, Vec<TyId>, u8)>,
+    /// `const { done, value } = r`'s locals (`const done = $t.done`): (the local, the `$t` read, the
+    /// field). Testing one of a discriminated union narrows `$t`, and so the others.
+    field_aliases: Vec<(LocalId, ExprId, Sym)>,
     /// A non-exhaustive `switch` was reported; "missing return" would only repeat it.
     reported_nonexhaustive: bool,
     /// Narrowings of field paths (`t.left`): (local, path, narrowed type or `None` = invalidated).

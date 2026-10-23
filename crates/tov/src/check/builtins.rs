@@ -487,12 +487,10 @@ pub(super) fn method(c: &mut Checker, base: TyId, name: &str) -> Option<MethodSi
             }
             _ => None,
         },
-        // `g.next()`: `{ value, done }` (value `undefined` once it's done)
+        // `g.next()`: `{ value, done: false } | { value: undefined, done: true }`, as TypeScript's
+        // IteratorResult (`if (r.done) break` makes `r.value` what it yields)
         Ty::Gen(e) if name == "next" => {
-            let (value, done) = (c.interner.lookup("value")?, c.interner.lookup("done")?);
-            let v = c.types.optional(e);
-            let r = c.types.record(vec![Field { name: value, ty: v, optional: false }, Field { name: done, ty: BOOL, optional: false }]);
-            c.types.note_field_order(r, vec![value, done]);
+            let r = c.iter_result(e)?;
             mk(sig(vec![], r), false)
         }
         Ty::Bool if name == "toString" => mk(sig(vec![], STR), false),
@@ -1612,6 +1610,17 @@ impl<'a> Checker<'a> {
             }
             _ => t,
         }
+    }
+
+    /// A generator's `next()` result: `{ value: T, done: false } | { value: undefined, done: true }`.
+    pub(crate) fn iter_result(&mut self, e: TyId) -> Option<TyId> {
+        let (value, done) = (self.interner.lookup("value")?, self.interner.lookup("done")?);
+        let (no, yes) = (self.types.bool_lit(false), self.types.bool_lit(true));
+        let more = self.types.record(vec![Field { name: value, ty: e, optional: false }, Field { name: done, ty: no, optional: false }]);
+        self.types.note_field_order(more, vec![value, done]);
+        let end = self.types.record(vec![Field { name: value, ty: UNDEFINED, optional: false }, Field { name: done, ty: yes, optional: false }]);
+        self.types.note_field_order(end, vec![value, done]);
+        Some(self.types.union(&[more, end]))
     }
 
     pub(super) fn expect_matcher(&mut self, subject: TyId, name: &str, name_span: Span, args: &[Arg], span: Span) -> TyId {
