@@ -91,6 +91,7 @@ Status tags: **[M0]** checked today · **[Mn]** planned for milestone n.
 - `if/else`, `while`, `do/while`, `for (init; cond; step)`, `for (const x of xs)`, `switch`, `break`, `continue`, `return`, blocks.
 - Conditions, `!`, `&&` and `||` use JavaScript's truthiness: `false`, `0`, `NaN`, `""`, `0n` and `undefined` are false, everything else (objects, even empty arrays) true. `a || b` and `a && b` are values unless both are `bool` (`name || "anonymous"`, `node && node.next`); `if (x)` narrows `x` to defined.
 - A function with a non-`void` return type must return on every path.
+- Containers made without types take them from what they're given, as TypeScript's evolving arrays: `const xs = []` (and `[[]]`, `new Array(n)`, `Array(n).fill(null)`) from `push`es, stores and where it's used; `new Map()` / `new Set()` from `set`/`add` and where they're used. A `get` of such a map where a value must be (`j = m.get(k)`, which TypeScript's `Map<any, any>` allows) is checked to find one.
 - A `let` given a type but no value (`let x: number;`) must be assigned on every path before it's read, as in TypeScript (`T0310`), unless its type includes `undefined`. Reads inside functions aren't checked, since they may run later.
 - `var` is `let`; `for (const k in obj)` iterates `Object.keys(obj)`; `==` and `!=` are `===` and `!==` (TypeScript already rejects comparing different types), except that `x == null` and `x == undefined` match both.
 - Removed: `with`, labels, `delete`, `arguments`, `eval`, the comma operator (but for steps: `i++, j--`).

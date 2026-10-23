@@ -87,6 +87,14 @@ impl<'a> Checker<'a> {
         {
             self.fcx().evolving[slot].2.push(el);
         }
+        // (an untyped map or set used where one is wanted: those keys and values)
+        if let Some(x) = exp
+            && matches!(self.types.get(x), Ty::Map(..) | Ty::Set(_))
+            && !self.types.mentions_error(x)
+            && let Some(slot) = self.evolving_collection(e)
+        {
+            self.fcx().evolving[slot].2.push(x);
+        }
         let t = self.expr_inner(e, exp, want);
         if self.spec.on {
             self.derive_sites(e);
@@ -265,6 +273,21 @@ impl<'a> Checker<'a> {
                     && let Some(c) = f.calls.get_mut(&e)
                 {
                     c.ret = t;
+                }
+                // (`j = m.get(k)` of an untyped `new Map()`, TypeScript's `Map<any, any>`: the
+                // value, checked to be there, as `m.get(k)!`)
+                if let Some(x) = exp
+                    && !*optional
+                    && x != ERROR
+                    && x != UNKNOWN
+                    && !self.types.has_undefined(x)
+                    && self.types.has_undefined(t)
+                    && let ExprKind::Member { obj, name, optional: false, .. } = self.ast().expr(*callee).kind
+                    && self.name(name) == "get"
+                    && self.untyped_map(obj)
+                {
+                    self.rewrites.nonnulls.push((self.cur, e));
+                    return self.types.without_undefined(t);
                 }
                 t
             }
@@ -1422,7 +1445,7 @@ impl<'a> Checker<'a> {
         let (id, _) = self.lookup(s)?;
         let fcx = self.fcx.last()?;
         let key = fcx.locals[id].span.start;
-        fcx.evolving.iter().position(|e| e.0 == key && !e.3)
+        fcx.evolving.iter().position(|e| e.0 == key && e.3 == EV_ARRAY)
     }
 
     /// `x` (an expression), when it's a `let x` still finding its type.
@@ -1431,7 +1454,24 @@ impl<'a> Checker<'a> {
         let (id, _) = self.lookup(s)?;
         let fcx = self.fcx.last()?;
         let key = fcx.locals[id].span.start;
-        fcx.evolving.iter().position(|e| e.0 == key && e.3)
+        fcx.evolving.iter().position(|e| e.0 == key && e.3 == EV_LET)
+    }
+
+    /// `m`, a map made with `new Map()`, its types found from what it's given.
+    fn untyped_map(&self, m: ExprId) -> bool {
+        let ExprKind::Ident(s) = self.ast().expr(m).kind else { return false };
+        let Some((id, t)) = self.lookup(s) else { return false };
+        let fcx = self.fcx.last().unwrap();
+        matches!(self.types.get(t), Ty::Map(..)) && fcx.evolved.contains_key(&fcx.locals[id].span.start)
+    }
+
+    /// `x` (an expression), when it's a `new Map()` / `new Set()` still finding its type.
+    fn evolving_collection(&self, x: ExprId) -> Option<usize> {
+        let ExprKind::Ident(s) = self.ast().expr(x).kind else { return None };
+        let (id, _) = self.lookup(s)?;
+        let fcx = self.fcx.last()?;
+        let key = fcx.locals[id].span.start;
+        fcx.evolving.iter().position(|e| e.0 == key && e.3 == EV_COLLECTION)
     }
 
     /// The array at `slot` is given the values `args`: their types join its elements'.
@@ -3858,6 +3898,22 @@ impl<'a> Checker<'a> {
                         && let Some(slot) = self.evolving_slot(obj)
                     {
                         self.evolve(slot, args);
+                    }
+                    // `m.set(k, v)` / `s.add(x)` on an untyped `new Map()` / `new Set()`
+                    if matches!((mtext.as_str(), args.len()), ("set", 2) | ("add", 1))
+                        && let Some(slot) = self.evolving_collection(obj)
+                    {
+                        let mut tys = Vec::new();
+                        for a in args {
+                            let mark = self.diags.len();
+                            let t = self.expr(a.expr, None);
+                            self.diags.truncate(mark);
+                            tys.push(self.types.widen(t));
+                        }
+                        if !tys.iter().any(|&t| t == ERROR || self.types.mentions_error(t)) {
+                            let t = if tys.len() == 2 { self.types.intern(Ty::Map(tys[0], tys[1])) } else { self.types.intern(Ty::Set(tys[0])) };
+                            self.fcx().evolving[slot].2.push(t);
+                        }
                     }
                     let r = self.call_sig(&sig, &desc, type_args, args, exp, span);
                     // `xs.filter((x): x is T => ...)`, `xs.find(isT)`: of what passes

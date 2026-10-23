@@ -195,6 +195,11 @@ impl Frame {
     }
 }
 
+/// Kinds of evolving bindings (see `FnCtx::evolving`).
+const EV_ARRAY: u8 = 0;
+const EV_LET: u8 = 1;
+const EV_COLLECTION: u8 = 2;
+
 #[derive(Default)]
 struct FnCtx {
     locals: Vec<Local>,
@@ -208,8 +213,9 @@ struct FnCtx {
     /// what it's given (`xs.push(x)`, `xs[i] = x`): the element type, by declaration.
     evolved: HashMap<u32, TyId>,
     /// Such arrays this check: what they're given so far (see `evolve`), and where they are.
-    /// (`true`: a `let x` with neither type nor value, typed by what's assigned to it)
-    evolving: Vec<(u32, Span, Vec<TyId>, bool)>,
+    /// (kind `EV_LET`: a `let x` with neither type nor value, typed by what's assigned to it;
+    /// `EV_COLLECTION`: a `new Map()` / `new Set()`, given whole map and set types)
+    evolving: Vec<(u32, Span, Vec<TyId>, u8)>,
     /// A non-exhaustive `switch` was reported; "missing return" would only repeat it.
     reported_nonexhaustive: bool,
     /// Narrowings of field paths (`t.left`): (local, path, narrowed type or `None` = invalidated).
@@ -1367,9 +1373,39 @@ impl<'a> Checker<'a> {
     /// After a check of a body: the element types its untyped empty arrays were given join
     /// `evolved` (true when any did: the body is checked again with them); one given nothing
     /// is reported, as TypeScript can't type it either.
-    fn settle_evolving(&mut self, evolved: &mut HashMap<u32, TyId>, evolving: Vec<(u32, Span, Vec<TyId>, bool)>) -> bool {
+    fn settle_evolving(&mut self, evolved: &mut HashMap<u32, TyId>, evolving: Vec<(u32, Span, Vec<TyId>, u8)>) -> bool {
         let mut grew = false;
-        for (key, span, given, whole) in evolving {
+        for (key, span, given, kind) in evolving {
+            let whole = kind == EV_LET;
+            if kind == EV_COLLECTION {
+                // (a map's keys and values, a set's elements: what each `set`/`add` gave it)
+                let (mut ks, mut vs, mut es) = (Vec::new(), Vec::new(), Vec::new());
+                for &g in &given {
+                    match *self.types.get(g) {
+                        Ty::Map(k, v) => {
+                            ks.push(k);
+                            vs.push(v);
+                        }
+                        Ty::Set(e) => es.push(e),
+                        _ => {}
+                    }
+                }
+                let t = if !ks.is_empty() {
+                    let (k, v) = (self.types.union(&ks), self.types.union(&vs));
+                    self.types.intern(Ty::Map(k, v))
+                } else if !es.is_empty() {
+                    let e = self.types.union(&es);
+                    self.types.intern(Ty::Set(e))
+                } else {
+                    let what = if self.src(span).contains("Set") { "the element type of this set" } else { "the key and value types of this map" };
+                    self.report(Diagnostic::new("T0301", span, format!("can't infer {what}")).note("instead", "`new Map<string, int>()`, or annotate the binding"));
+                    continue;
+                };
+                if evolved.insert(key, t) != Some(t) {
+                    grew = true;
+                }
+                continue;
+            }
             if given.is_empty() && whole {
                 let n = self.src(span).to_string();
                 self.report(

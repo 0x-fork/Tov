@@ -83,6 +83,20 @@ impl<'a> Checker<'a> {
         }
     }
 
+    /// `new Map()` (`Some(true)`) or `new Set()` (`Some(false)`), with neither type arguments nor
+    /// entries.
+    fn untyped_collection(&self, i: ExprId) -> Option<bool> {
+        let ExprKind::New { callee, type_args, args } = &self.ast().expr(i).kind else { return None };
+        if !type_args.is_empty() || !args.is_empty() {
+            return None;
+        }
+        match self.ast().expr(*callee).kind {
+            ExprKind::Ident(n) if self.lookup(n).is_none() && self.name(n) == "Map" => Some(true),
+            ExprKind::Ident(n) if self.lookup(n).is_none() && self.name(n) == "Set" => Some(false),
+            _ => None,
+        }
+    }
+
     /// `Array(n).fill(null)` (or `undefined`): what it's filled with, the first of what it holds
     /// (TypeScript's `any[]`: what's stored in it later counts too).
     pub(super) fn filled_with_nothing(&self, i: ExprId) -> Option<TyId> {
@@ -271,12 +285,29 @@ impl<'a> Checker<'a> {
                             None => {
                                 let span = self.ast().expr(*i).span;
                                 let given = self.filled_with_nothing(*i).into_iter().collect();
-                                self.fcx().evolving.push((key, span, given, false));
+                                self.fcx().evolving.push((key, span, given, EV_ARRAY));
                                 ERROR
                             }
                         };
                         let t = self.types.array(elem);
                         self.expr(*i, Some(t));
+                        (t, false)
+                    }
+                    // `const m = new Map()`: its keys and values are what it's given later
+                    // (`m.set(k, v)`), as TypeScript's `Map<any, any>` holds them
+                    (None, Some(i)) if self.untyped_collection(*i).is_some() && !self.fcx.is_empty() => {
+                        let key = name_span.start;
+                        let t = match self.fcx.last().unwrap().evolved.get(&key) {
+                            Some(&t) => t,
+                            None => {
+                                let span = self.ast().expr(*i).span;
+                                self.fcx().evolving.push((key, span, Vec::new(), EV_COLLECTION));
+                                if self.untyped_collection(*i) == Some(true) { self.types.intern(Ty::Map(ERROR, ERROR)) } else { self.types.intern(Ty::Set(ERROR)) }
+                            }
+                        };
+                        if !self.types.mentions_error(t) {
+                            self.expr(*i, Some(t));
+                        }
                         (t, false)
                     }
                     (None, Some(i)) => {
@@ -302,7 +333,7 @@ impl<'a> Checker<'a> {
                         match self.fcx.last().unwrap().evolved.get(&key) {
                             Some(&t) => (self.types.union(&[t, UNDEFINED]), false),
                             None => {
-                                self.fcx().evolving.push((key, *name_span, Vec::new(), true));
+                                self.fcx().evolving.push((key, *name_span, Vec::new(), EV_LET));
                                 (ERROR, false)
                             }
                         }
