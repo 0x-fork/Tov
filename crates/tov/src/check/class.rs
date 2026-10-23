@@ -301,7 +301,7 @@ impl<'a> Checker<'a> {
                             owner: c,
                             member: Some(mi),
                             prop_param: None,
-                            has_init: init.is_some(),
+                            has_init: init.is_some() || self.modules[module as usize].ast.definite_fields.contains(&mem.name_span.start),
                             span: mem.name_span,
                         });
                         continue;
@@ -328,7 +328,7 @@ impl<'a> Checker<'a> {
                         owner: c,
                         member: Some(mi),
                         prop_param: None,
-                        has_init: init.is_some(),
+                        has_init: init.is_some() || self.modules[module as usize].ast.definite_fields.contains(&mem.name_span.start),
                         span: mem.name_span,
                     });
                 }

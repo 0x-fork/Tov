@@ -23,6 +23,9 @@ pub struct Ast {
     /// Object literals with computed or number keys, written as `new Map([[k, v], ...])` (see
     /// `parser::keyed_object`; given a record type, they're record literals again).
     pub keyed_objects: Vec<ExprId>,
+    /// Fields declared `x!: T`: assigned somewhere the constructor reaches, as TypeScript
+    /// takes on trust (by the field name's position).
+    pub definite_fields: Vec<u32>,
     /// Comparisons a rewrite made (`k === "a"` choosing a field): never reported as always
     /// false, as where `k` is known.
     pub quiet_tests: Vec<ExprId>,

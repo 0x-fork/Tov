@@ -1187,13 +1187,9 @@ impl<'a> Parser<'a> {
         }
         // Field.
         let optional = self.eat(Tok::Question);
-        if self.at(Tok::Bang) {
-            let span = self.cur_span();
-            self.push(
-                Diagnostic::new("X0040", span, "definite-assignment assertions (`x!: T`) are not supported")
-                    .note("instead", "give the field an initializer, assign it in the constructor, or make it optional (`x?: T`)"),
-            );
-            self.bump();
+        // (`x!: T`: assigned by a method the constructor calls, say)
+        if self.eat(Tok::Bang) {
+            self.ast.definite_fields.push(name_span.start);
         }
         let ty = if self.eat(Tok::Colon) { Some(self.ty()) } else { None };
         let init = if self.eat(Tok::Eq) { Some(self.assign()) } else { None };
