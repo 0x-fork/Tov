@@ -732,6 +732,19 @@ impl<'a> Checker<'a> {
                 self.narrow_path(id, Vec::new(), None);
             }
         }
+        // (`this.tail = x` in a branch: what's narrowed through a field `tail`, not `this.head`)
+        for &(n, f) in &fx.fields {
+            if let Some((id, _)) = self.lookup(n)
+                && id < entry
+            {
+                let fcx = self.fcx.last().unwrap();
+                let mut paths: Vec<Vec<Sym>> = fcx.path_table.iter().filter(|(l, p, t)| *l == id && t.is_some() && p.contains(&f)).map(|(_, p, _)| p.clone()).collect();
+                paths.dedup();
+                for p in paths {
+                    self.narrow_path(id, p, None);
+                }
+            }
+        }
         if fx.call {
             self.invalidate_heap();
         }
@@ -1234,8 +1247,11 @@ fn collect_assigned_expr(ast: &Ast, e: ExprId, out: &mut Vec<Sym>) {
 pub(super) struct Effects {
     /// Locals assigned (`x = ...`, `x++`).
     pub assigned: Vec<Sym>,
-    /// Locals changed in place (`x.f = ...`, `x[i] = ...`, `&x`, method calls on `x...`).
+    /// Locals changed in place (`x[i] = ...`, `&x`, method calls on `x...`).
     pub roots: Vec<Sym>,
+    /// Fields assigned through a local (`x.f = ...`, `x.a.f++`): (the local, the field). Only
+    /// paths through a field of that name can change.
+    pub fields: Vec<(Sym, Sym)>,
     /// Contains a call (which may change class instances).
     pub call: bool,
 }
@@ -1244,6 +1260,7 @@ impl Effects {
     pub(super) fn extend(&mut self, o: Effects) {
         self.assigned.extend(o.assigned);
         self.roots.extend(o.roots);
+        self.fields.extend(o.fields);
         self.call |= o.call;
     }
 
@@ -1294,6 +1311,7 @@ fn effects_into(ast: &Ast, e: ExprId, fx: &mut Effects) {
         ExprKind::Assign(_, t, v) => {
             match &ast.expr(*t).kind {
                 ExprKind::Ident(s) => fx.assigned.push(*s),
+                ExprKind::Member { name, .. } if let Some(r) = root_sym(ast, *t) => fx.fields.push((r, *name)),
                 _ => fx.roots.extend(root_sym(ast, *t)),
             }
             effects_into(ast, *t, fx);
@@ -1302,6 +1320,7 @@ fn effects_into(ast: &Ast, e: ExprId, fx: &mut Effects) {
         ExprKind::Update { target, .. } => {
             match &ast.expr(*target).kind {
                 ExprKind::Ident(s) => fx.assigned.push(*s),
+                ExprKind::Member { name, .. } if let Some(r) = root_sym(ast, *target) => fx.fields.push((r, *name)),
                 _ => fx.roots.extend(root_sym(ast, *target)),
             }
             effects_into(ast, *target, fx);
@@ -1495,6 +1514,7 @@ fn closure_mutated_into(ast: &Ast, e: ExprId, inside: bool, out: &mut (HashSet<S
             out.1.extend(fx.assigned.iter().copied());
             out.0.extend(fx.assigned);
             out.0.extend(fx.roots);
+            out.0.extend(fx.fields.iter().map(|&(r, _)| r));
         }
         _ => {}
     }
