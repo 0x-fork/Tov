@@ -16,6 +16,7 @@ mod asyncfn;
 mod genfn;
 pub(crate) mod body;
 mod calls;
+mod clone;
 mod frame;
 pub(crate) mod class;
 mod iface;

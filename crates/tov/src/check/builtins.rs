@@ -168,7 +168,7 @@ pub(super) fn is_builtin_ns(name: &str) -> bool {
 }
 
 pub(super) fn is_builtin_fn(name: &str) -> bool {
-    matches!(name, "expect" | "String" | "Number" | "Boolean" | "BigInt" | "decimal" | "parseInt" | "parseFloat" | "isNaN" | "isFinite" | "test" | "__test")
+    matches!(name, "expect" | "String" | "Number" | "Boolean" | "BigInt" | "decimal" | "parseInt" | "parseFloat" | "isNaN" | "isFinite" | "test" | "__test" | "structuredClone")
         || CONVERSIONS.contains(&name)
         || TIMER_FNS.contains(&name)
 }
@@ -1233,6 +1233,30 @@ impl<'a> Checker<'a> {
     }
 
     /// Calls to built-in global functions; `None` if `name` isn't one.
+    /// What `structuredClone` can't copy in `t` (a class instance, a function, ...), if anything.
+    fn uncloneable(&mut self, t: TyId, stack: &mut Vec<TyId>) -> Option<TyId> {
+        if stack.contains(&t) {
+            return None;
+        }
+        stack.push(t);
+        let r = match *self.types.get(t) {
+            Ty::Array(e) | Ty::Set(e) => self.uncloneable(e, stack),
+            Ty::Map(k, v) => self.uncloneable(k, stack).or_else(|| self.uncloneable(v, stack)),
+            Ty::Union(ms) => {
+                let ms = self.types.tys(ms).to_vec();
+                ms.into_iter().find_map(|m| self.uncloneable(m, stack))
+            }
+            Ty::Record(_) => {
+                let fs = self.types.fields_in_order(t);
+                fs.into_iter().find_map(|f| self.uncloneable(f.ty, stack))
+            }
+            Ty::Class(..) | Ty::Func(..) | Ty::Promise(..) | Ty::Gen(_) | Ty::Js | Ty::Interface(..) | Ty::Rec(..) => Some(t),
+            _ => None,
+        };
+        stack.pop();
+        r
+    }
+
     pub(super) fn global_call(&mut self, name: &str, callee_span: Span, type_args: &[crate::ast::TypeId], args: &[Arg], _exp: Option<TyId>, span: Span) -> Option<TyId> {
         let _ = type_args;
         let one = |c: &mut Self| -> Option<TyId> {
@@ -1412,6 +1436,26 @@ impl<'a> Checker<'a> {
                     self.check_args_loose(args);
                 }
                 VOID
+            }
+            // `structuredClone(v)`: a deep copy, of data (arrays, objects, maps, sets, and the
+            // values in them)
+            "structuredClone" => {
+                if args.len() != 1 {
+                    self.report(Diagnostic::new("T0201", span, format!("`structuredClone` takes 1 argument, found {}", args.len())));
+                    self.check_args_loose(args);
+                    return Some(ERROR);
+                }
+                let t = self.expr(args[0].expr, _exp);
+                if let Some(bad) = self.uncloneable(t, &mut Vec::new()) {
+                    let shown = self.show(bad);
+                    let s = self.ast().expr(args[0].expr).span;
+                    self.report(
+                        Diagnostic::new("U0017", s, format!("`structuredClone` of a value holding `{shown}` is not supported"))
+                            .note("why", "it copies data: arrays, objects, maps, sets, strings, numbers (a class instance would lose its class, a function can't be copied)"),
+                    );
+                    return Some(ERROR);
+                }
+                t
             }
             "isNaN" | "isFinite" => {
                 if let Some(t) = one(self) {

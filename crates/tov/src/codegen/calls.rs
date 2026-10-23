@@ -2233,6 +2233,10 @@ impl<'c, 'a> Gen<'c, 'a> {
                 }
                 Val::plain("0", VOID)
             }
+            (None, "structuredClone") => {
+                let v = self.expr(args[0].expr);
+                self.structured_clone(v)
+            }
             (None, "queueMicrotask") => {
                 let cb = self.expr(args[0].expr);
                 self.line(format!("tv_queue_microtask({});", cb.code));

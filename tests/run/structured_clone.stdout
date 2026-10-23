@@ -1,0 +1,4 @@
+[ [ 0, 4, Infinity ], [ 4, 0, 1 ], [ Infinity, 1, 0 ] ] [ [ 0, 4, 5 ], [ 4, 0, 1 ], [ Infinity, 1, 0 ], [ 9 ] ]
+[{"id":"a","edges":[{"to":"b","w":1}]},{"id":"b","edges":[]}] [{"id":"a","edges":[{"to":"b","w":7}]},{"id":"b","edges":[],"seen":true}]
+Map(1) { 'x' => [ 1, 2 ] } Map(2) { 'x' => [ 1, 2, 3 ], 'y' => [] } Set(3) { 'p', 'q', 'r' } text 3.5 undefined
+[ [ 1 ], null ] [ [ 1, 2 ], null ]
