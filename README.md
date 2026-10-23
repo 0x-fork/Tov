@@ -48,7 +48,7 @@ Memory is where the gap is widest. A small program peaks at 1.7 MB under Tov, ag
 
 **Not yet:** `any`, `Date`, classes passed around as values, function overloads, Windows.
 
-We measure TypeScript parity on real code. [TheAlgorithms/TypeScript](https://github.com/TheAlgorithms/TypeScript) is a library of 99 test files written for Jest and `tsc`; 72 of them build and pass unchanged under `tov test`, and most of the rest stop at a compile error naming the missing feature. A few known cases still behave differently from JavaScript instead of failing to compile: reading past the end of an array outside a comparison or condition traps (JavaScript gives `undefined`), and a number variable read before it's assigned reads 0. Each gap we close is tested in `tests/run/`. The full list of differences is in [docs/spec.md](docs/spec.md).
+We measure TypeScript parity on real code. [TheAlgorithms/TypeScript](https://github.com/TheAlgorithms/TypeScript) is a library of 99 test files written for Jest and `tsc`; 72 of them build and pass unchanged under `tov test`, and most of the rest stop at a compile error naming the missing feature. A known case still behaves differently from JavaScript instead of failing to compile: reading past the end of an array outside a comparison or condition traps (JavaScript gives `undefined`). Each gap we close is tested in `tests/run/`. The full list of differences is in [docs/spec.md](docs/spec.md).
 
 ## Install
 
