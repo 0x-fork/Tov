@@ -20,9 +20,10 @@ pub fn parse(src: &str, file: FileId, interner: &mut Interner) -> (Ast, Vec<Diag
             lexed.tokens[i].kind = Tok::Ident;
         }
     }
-    let mut p = Parser { src, toks: lexed.tokens, strings: lexed.strings, pos: 0, file, interner, ast: Ast::default(), diags, script_stmts: Vec::new(), defaults: Vec::new(), more_stmts: Vec::new(), hidden: 0, prologue: Vec::new(), index_sig: None, call_sig: None, local_fns: Vec::new(), prop_defaults: false, extra_members: Vec::new(), generic_arrows: Vec::new(), local_types: Vec::new(), local_type_items: Vec::new() };
+    let mut p = Parser { src, toks: lexed.tokens, strings: lexed.strings, pos: 0, file, interner, ast: Ast::default(), diags, script_stmts: Vec::new(), defaults: Vec::new(), more_stmts: Vec::new(), hidden: 0, prologue: Vec::new(), index_sig: None, call_sig: None, local_fns: Vec::new(), prop_defaults: false, extra_members: Vec::new(), generic_arrows: Vec::new(), local_types: Vec::new(), local_type_items: Vec::new(), runtime_tests: false };
     p.ast.iterator_sym = Some(p.interner.intern("__iterator"));
     p.module();
+    p.runtime_tests();
     p.unhide_local_types();
     slot_records(&mut p.ast, p.interner);
     (p.ast, p.diags)
@@ -313,6 +314,9 @@ struct Parser<'a> {
     /// `{ (x: number): string }`: a call signature seen in the record type being read, the
     /// function type it is.
     call_sig: Option<(TypeId, Span)>,
+    /// Rewriting tests declared in a function a suite calls (see `runtime_tests`): named inside
+    /// the suites running, not by the suites written around them.
+    runtime_tests: bool,
     /// Function declarations in bodies, as `const`s (to hoist).
     local_fns: Vec<StmtId>,
     /// A parameter property in the list just parsed has a default value.
@@ -1937,7 +1941,7 @@ impl<'a> Parser<'a> {
         };
         let suite = kind == "describe";
         if suite {
-            self.suite_body(f, &name, &[], &[]);
+            self.suite_body(f, &name, &[], &[], None);
         }
         self.ast.items.push(Item { kind: ItemKind::Test { name, name_span, body: f, suite }, span, exported: false });
     }
@@ -1964,15 +1968,157 @@ impl<'a> Parser<'a> {
     /// later test of this suite and those in it (`afterEach(f)` last), `beforeAll(f)` a call
     /// there, `afterAll(f)` a call at the end, a nested `describe` its own body there, and
     /// `it("does", g)` a test `__test("Suite > does", g)`.
-    fn suite_body(&mut self, arrow: ExprId, prefix: &str, before: &[Sym], after: &[Sym]) {
+    fn suite_body(&mut self, arrow: ExprId, prefix: &str, before: &[Sym], after: &[Sym], own: Option<ExprId>) {
         let body = match &self.ast.exprs[arrow as usize].kind {
             ExprKind::Arrow(f) => match f.body {
                 ArrowBody::Block(b) => b,
-                ArrowBody::Expr(_) => return,
+                // (`describe("A", () => check(f))`: a body of that statement)
+                ArrowBody::Expr(x) => {
+                    let span = self.expr_span(x);
+                    let st = self.mk_stmt(StmtKind::Expr(x), span);
+                    let b = self.mk_stmt(StmtKind::Block(vec![st]), span);
+                    if let ExprKind::Arrow(f) = &mut self.ast.exprs[arrow as usize].kind {
+                        f.body = ArrowBody::Block(b);
+                    }
+                    b
+                }
             },
             _ => return,
         };
         self.suite_block(body, prefix, before, after);
+        // (its name, for tests declared in functions it calls: `__suiteEnter(name)` first,
+        // `__suiteLeave()` last)
+        let span = self.ast.stmts[body as usize].span;
+        let full = match own {
+            Some(n) => {
+                let f = self.interner.intern("__suiteName");
+                let callee = self.mk_expr(ExprKind::Ident(f), span);
+                self.mk_expr(ExprKind::Call { callee, type_args: Vec::new(), args: vec![Arg { expr: n, by_ref: None }], optional: false }, span)
+            }
+            None => {
+                let t = self.interner.intern(prefix);
+                self.mk_expr(ExprKind::Str(t), span)
+            }
+        };
+        let enter = self.helper_call("__suiteEnter", vec![full], span);
+        let leave = self.helper_call("__suiteLeave", Vec::new(), span);
+        if let StmtKind::Block(ss) = &mut self.ast.stmts[body as usize].kind {
+            ss.insert(0, enter);
+            ss.push(leave);
+        }
+    }
+
+    /// `name(args);`
+    fn helper_call(&mut self, name: &str, args: Vec<ExprId>, span: Span) -> StmtId {
+        let f = self.interner.intern(name);
+        let callee = self.mk_expr(ExprKind::Ident(f), span);
+        let args = args.into_iter().map(|expr| Arg { expr, by_ref: None }).collect();
+        let c = self.mk_expr(ExprKind::Call { callee, type_args: Vec::new(), args, optional: false }, span);
+        self.mk_stmt(StmtKind::Expr(c), span)
+    }
+
+    /// Tests declared in functions (`const check = (f) => it.each(rows)(name, ...)`, a helper
+    /// with `describe(...)` and `it(...)` in it): named inside the suites running when it's called.
+    fn runtime_tests(&mut self) {
+        // (a module's own `it` or `test` isn't Jest's)
+        let own = |p: &Self, n: &str| {
+            let Some(s) = p.interner.lookup(n) else { return false };
+            p.ast.stmts.iter().any(|st| matches!(st.kind, StmtKind::Let { name, .. } if name == s))
+                || p.ast.items.iter().any(|it| matches!(&it.kind, ItemKind::Const { name, .. } if *name == s) || matches!(&it.kind, ItemKind::Function(f) if f.name == s))
+        };
+        let shadowed: Vec<&str> = ["it", "test", "describe"].into_iter().filter(|n| own(self, n)).collect();
+        let is_test = |p: &Self, e: ExprId| {
+            if let Some((table, _, _)) = p.each_call(e) {
+                let _ = table;
+                let ExprKind::Call { callee, .. } = &p.ast.exprs[e as usize].kind else { return false };
+                let ExprKind::Call { callee: inner, .. } = &p.ast.exprs[*callee as usize].kind else { return false };
+                let ExprKind::Member { obj, .. } = &p.ast.exprs[*inner as usize].kind else { return false };
+                let ExprKind::Ident(s) = p.ast.exprs[*obj as usize].kind else { return false };
+                return !shadowed.contains(&p.interner.get(s));
+            }
+            matches!(p.jest_call(e), Some((k, _, args)) if matches!(k.as_str(), "it" | "test" | "describe") && args.len() >= 2 && !shadowed.contains(&k.as_str()))
+        };
+        // (an arrow that is one, `(f) => it.each(rows)(...)`: a body of that statement)
+        for i in 0..self.ast.exprs.len() {
+            let ExprKind::Arrow(f) = &self.ast.exprs[i].kind else { continue };
+            let ArrowBody::Expr(x) = f.body else { continue };
+            if !is_test(self, x) {
+                continue;
+            }
+            let span = self.expr_span(x);
+            let st = self.mk_stmt(StmtKind::Expr(x), span);
+            let b = self.mk_stmt(StmtKind::Block(vec![st]), span);
+            if let ExprKind::Arrow(f) = &mut self.ast.exprs[i].kind {
+                f.body = ArrowBody::Block(b);
+            }
+        }
+        let n = self.ast.stmts.len();
+        for b in 0..n {
+            let StmtKind::Block(ss) = &self.ast.stmts[b].kind else { continue };
+            if !ss.iter().any(|&s| matches!(self.ast.stmts[s as usize].kind, StmtKind::Expr(e) if is_test(self, e))) {
+                continue;
+            }
+            self.runtime_tests = true;
+            self.suite_block(b as StmtId, "", &[], &[]);
+            self.runtime_tests = false;
+        }
+        self.top_level_test_calls();
+    }
+
+    /// A script's statement calling a function that declares tests (`checkStack("top")`, at the
+    /// top level): a test item of its own, so `tov test` runs it (in its place among the others).
+    fn top_level_test_calls(&mut self) {
+        let Some(si) = self.ast.script else { return };
+        let Some(here) = self.interner.lookup("__testHere") else { return };
+        // (functions declaring tests, and those calling them: by name, with where their code is)
+        let mut fns: Vec<(Sym, Span)> = Vec::new();
+        for it in &self.ast.items {
+            match &it.kind {
+                ItemKind::Function(f) => fns.push((f.name, self.ast.stmts[f.body as usize].span)),
+                ItemKind::Const { name, init, .. } if matches!(self.ast.exprs[*init as usize].kind, ExprKind::Arrow(_)) => fns.push((*name, self.ast.exprs[*init as usize].span)),
+                _ => {}
+            }
+        }
+        for st in &self.ast.stmts {
+            if let StmtKind::Let { name, init: Some(i), .. } = st.kind
+                && matches!(self.ast.exprs[i as usize].kind, ExprKind::Arrow(_))
+            {
+                fns.push((name, self.ast.exprs[i as usize].span));
+            }
+        }
+        let mentions = |ast: &Ast, sp: Span, n: Sym| ast.exprs.iter().any(|e| matches!(e.kind, ExprKind::Ident(x) if x == n) && e.span.file == sp.file && e.span.start >= sp.start && e.span.end <= sp.end);
+        let mut declaring: Vec<Sym> = Vec::new();
+        loop {
+            let before = declaring.len();
+            for &(n, sp) in &fns {
+                if !declaring.contains(&n) && (mentions(&self.ast, sp, here) || declaring.iter().any(|&d| mentions(&self.ast, sp, d))) {
+                    declaring.push(n);
+                }
+            }
+            if declaring.len() == before {
+                break;
+            }
+        }
+        if declaring.is_empty() {
+            return;
+        }
+        let ItemKind::Function(f) = &self.ast.items[si as usize].kind else { return };
+        let body = f.body;
+        let StmtKind::Block(ss) = &self.ast.stmts[body as usize].kind else { return };
+        let ss = ss.clone();
+        let mut kept = Vec::new();
+        for s in ss {
+            let calls = matches!(self.ast.stmts[s as usize].kind, StmtKind::Expr(e) if matches!(&self.ast.exprs[e as usize].kind, ExprKind::Call { callee, .. } if matches!(self.ast.exprs[*callee as usize].kind, ExprKind::Ident(n) if declaring.contains(&n))));
+            if !calls {
+                kept.push(s);
+                continue;
+            }
+            let span = self.ast.stmts[s as usize].span;
+            let b = self.mk_stmt(StmtKind::Block(vec![s]), span);
+            let arrow = self.mk_expr(ExprKind::Arrow(Box::new(ArrowFn { params: Vec::new(), ret: None, throws: None, body: ArrowBody::Block(b), is_async: false })), span);
+            self.ast.items.push(Item { kind: ItemKind::Test { name: String::new(), name_span: span, body: arrow, suite: true }, span, exported: false });
+        }
+        self.ast.stmts[body as usize].kind = StmtKind::Block(kept);
     }
 
     /// Tests declared inside a suite's loops, `if`s and blocks (`for (const f of fns) it(...)`)
@@ -2039,8 +2185,8 @@ impl<'a> Parser<'a> {
                     if kind == "beforeAll" { out.push(st) } else { tail.push(st) }
                 }
                 ("describe", &[n, f, ..]) => {
-                    let name = self.jest_name(prefix, n);
-                    self.suite_body(f, &name, &before, &after);
+                    let (name, own) = if self.runtime_tests { (String::new(), Some(n)) } else { (self.jest_name(prefix, n), None) };
+                    self.suite_body(f, &name, &before, &after, own);
                     match &self.ast.exprs[f as usize].kind {
                         ExprKind::Arrow(a) => match a.body {
                             ArrowBody::Block(b) => out.push(b),
@@ -2052,6 +2198,7 @@ impl<'a> Parser<'a> {
                 ("it" | "test", &[n, f, ..]) => {
                     let ns = self.expr_span(n);
                     let full = match &self.ast.exprs[n as usize].kind {
+                        _ if self.runtime_tests => n,
                         ExprKind::Str(t) => {
                             let t = format!("{prefix} > {}", self.interner.get(*t));
                             let t = self.interner.intern(&t);
@@ -2064,7 +2211,7 @@ impl<'a> Parser<'a> {
                         }
                     };
                     self.with_hooks(f, &before);
-                    let test = self.interner.intern("__test");
+                    let test = self.interner.intern(if self.runtime_tests { "__testHere" } else { "__test" });
                     let cs = self.ast.exprs[e as usize].span;
                     let callee = self.mk_expr(ExprKind::Ident(test), cs);
                     let mut args = vec![Arg { expr: full, by_ref: None }, Arg { expr: f, by_ref: None }];
@@ -2227,7 +2374,7 @@ impl<'a> Parser<'a> {
             }
         };
         let callee = {
-            let t = self.interner.intern("__test");
+            let t = self.interner.intern(if self.runtime_tests { "__testHere" } else { "__test" });
             self.mk_expr(ExprKind::Ident(t), span)
         };
         let mut args = vec![Arg { expr: name, by_ref: None }, Arg { expr: test_fn, by_ref: None }];

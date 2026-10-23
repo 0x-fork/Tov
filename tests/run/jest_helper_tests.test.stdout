@@ -1,0 +1,13 @@
+ok   square > f(1) = 1
+ok   square > f(3) = 9
+ok   twice > f(1) = 2
+FAIL twice > f(3) = 7
+  expected 7, received 6
+  at tests/run/jest_helper_tests.test.ts:10:33
+ok   twice > nested > inner stack > starts with two
+ok   twice > nested > inner stack > pushes
+ok   twice > nested > is labelled
+ok   top stack > starts with two
+ok   top stack > pushes
+ok   is labelled
+9 passed, 1 failed

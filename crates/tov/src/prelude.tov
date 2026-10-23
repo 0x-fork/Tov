@@ -761,3 +761,26 @@ function __dateParse(s: string): f64 {
   const t = __dateMake(year, month - 1, day, h, mi, sec, ms)
   return __dateClip(zoned ? t - offset * 60000 : __native.dateLocalToUtc(t))
 }
+
+/** (the suites running, innermost last, by their full names: tests declared in functions a
+ * suite calls, `it(...)` in a helper, are named by them) */
+const __suites: string[] = []
+
+/** (a suite's full name, inside the suites running) */
+export function __suiteName(name: string): string {
+  return __suites.length > 0 ? `${__suites[__suites.length - 1]!} > ${name}` : name
+}
+
+export function __suiteEnter(full: string): void {
+  __suites.push(full)
+}
+
+export function __suiteLeave(): void {
+  __suites.pop()
+}
+
+/** (a test declared in a function a suite calls: named inside the suites running) */
+export function __testHere(name: string, f: () => void, after?: () => void): void {
+  if (after === undefined) __test(__suiteName(name), () => f())
+  else __test(__suiteName(name), () => f(), () => after())
+}

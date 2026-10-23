@@ -427,7 +427,7 @@ impl<'c, 'a> Gen<'c, 'a> {
             for (ii, item) in module.ast.items.iter().enumerate() {
                 match &item.kind {
                     ItemKind::Function(f) if self.sym(f.name) == "main" && main_fn.is_none() => main_fn = Some((mi as u32, ii as u32)),
-                    ItemKind::Test { name, body, suite, .. } => tests.push((mi as u32, name.clone(), *body, *suite)),
+                    ItemKind::Test { name, body, suite, .. } => tests.push((mi as u32, name.clone(), *body, *suite, item.span.start)),
                     _ => {}
                 }
             }
@@ -482,7 +482,10 @@ impl<'c, 'a> Gen<'c, 'a> {
             }
             Mode::Test => {
                 self.needs_uncaught = true;
-                for (m, name, body, suite) in tests {
+                // (in the order they're written: a test item made later, a script's call of a
+                // function declaring tests, runs in its place)
+                tests.sort_by_key(|t| (t.0, t.4));
+                for (m, name, body, suite, _) in tests {
                     let f = self.test_fn(m, body);
                     let _ = writeln!(main_body, "    tv_test_run_ctx({}, {}, tv_test_call, (void *){f}, {suite});", c_string(name.as_bytes()), name.len());
                 }
