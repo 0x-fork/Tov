@@ -2502,6 +2502,8 @@ impl<'a> Checker<'a> {
     }
 
     fn resolve_named(&mut self, ns: Option<(Sym, Span)>, name: Sym, name_span: Span, args: &[ast::TypeId], span: Span, tscope: &[(Sym, TyId)]) -> TyId {
+        // (`Generator<T, TReturn, TNext>`: only what it yields matters here)
+        let args = if ns.is_none() && args.len() > 1 && matches!(self.name(name), "Generator" | "Iterator" | "IterableIterator" | "AsyncGenerator") && !self.scopes[self.cur as usize].types.contains_key(&name) { &args[..1] } else { args };
         let targs: Vec<TyId> = args.iter().map(|&a| self.resolve_type(a, tscope)).collect();
         let text = self.name(name).to_string();
         let decl = if let Some((ns_sym, ns_span)) = ns {

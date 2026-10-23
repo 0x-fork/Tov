@@ -20,7 +20,7 @@ pub fn parse(src: &str, file: FileId, interner: &mut Interner) -> (Ast, Vec<Diag
             lexed.tokens[i].kind = Tok::Ident;
         }
     }
-    let mut p = Parser { src, toks: lexed.tokens, strings: lexed.strings, pos: 0, file, interner, ast: Ast::default(), diags, script_stmts: Vec::new(), defaults: Vec::new(), more_stmts: Vec::new(), hidden: 0, prologue: Vec::new(), index_sig: None, call_sig: None, local_fns: Vec::new(), prop_defaults: false, extra_members: Vec::new(), generic_arrows: Vec::new(), local_types: Vec::new(), local_type_items: Vec::new(), runtime_tests: false, chai: false };
+    let mut p = Parser { src, toks: lexed.tokens, strings: lexed.strings, pos: 0, file, interner, ast: Ast::default(), diags, script_stmts: Vec::new(), defaults: Vec::new(), more_stmts: Vec::new(), hidden: 0, prologue: Vec::new(), index_sig: None, call_sig: None, local_fns: Vec::new(), prop_defaults: false, extra_members: Vec::new(), generic_arrows: Vec::new(), local_types: Vec::new(), local_type_items: Vec::new(), runtime_tests: false, chai: false, lifted: Vec::new() };
     p.ast.iterator_sym = Some(p.interner.intern("__iterator"));
     // (`// @ts-expect-error`: the next line's start)
     let mut at = 0usize;
@@ -32,6 +32,7 @@ pub fn parse(src: &str, file: FileId, interner: &mut Interner) -> (Ast, Vec<Diag
         at += line.len();
     }
     p.module();
+    p.lift_functions();
     p.runtime_tests();
     if p.chai {
         p.chai_assertions();
@@ -334,6 +335,9 @@ struct Parser<'a> {
     chai: bool,
     /// Function declarations in bodies, as `const`s (to hoist).
     local_fns: Vec<StmtId>,
+    /// Nested generators and generic functions, made module functions (see `lift_functions`): the
+    /// name in its body (none for an expression), the module function's, where it's written.
+    lifted: Vec<(Option<Sym>, Sym, Span)>,
     /// A parameter property in the list just parsed has a default value.
     prop_defaults: bool,
     /// Fields made from a constructor's parameter properties, for the class being parsed.
@@ -3008,20 +3012,125 @@ impl<'a> Parser<'a> {
     }
 
     fn local_function(&mut self, start: Span, is_async: bool) -> StmtId {
-        let Some(f) = self.function() else { return self.mk_stmt(StmtKind::Error, start) };
+        let Some(mut f) = self.function() else { return self.mk_stmt(StmtKind::Error, start) };
         let span = start.to(self.prev_span());
-        if !f.tparams.is_empty() {
-            self.push(
-                Diagnostic::new("U0010", span, "generic nested functions are not supported yet")
-                    .note("instead", "declare it at the top level"),
-            );
-            return self.mk_stmt(StmtKind::Error, span);
+        // (a generator, or a generic function: a module function of its own, when it uses nothing
+        // of the function around it; see `lift_functions`)
+        if f.is_gen || !f.tparams.is_empty() {
+            f.is_async = is_async;
+            self.lift(Some(f.name), f, span);
+            return self.mk_stmt(StmtKind::Empty, span);
         }
         let (name, name_span) = (f.name, f.name_span);
         let init = self.arrow_of(f, is_async, span);
         let s = self.mk_stmt(StmtKind::Let { mutable: false, name, name_span, ty: None, init: Some(init) }, span);
         self.local_fns.push(s);
         s
+    }
+
+    /// `f` (written at `span`), as a module function of a hidden name: what it's called by.
+    fn lift(&mut self, name: Option<Sym>, mut f: FnDecl, span: Span) -> Sym {
+        let base = name.map(|n| self.interner.get(n).to_string()).unwrap_or_else(|| "gen".into());
+        let hidden = self.interner.intern(&format!("__{base}_{}", self.lifted.len()));
+        f.name = hidden;
+        self.ast.items.push(Item { kind: ItemKind::Function(f), span, exported: false });
+        self.lifted.push((name, hidden, span));
+        hidden
+    }
+
+    /// The nested generators and generic functions `lift` made module functions: each is called
+    /// by its module name in the function around it, which works when it uses nothing of that
+    /// function's (its parameters and variables); otherwise it's an error, as before.
+    fn lift_functions(&mut self) {
+        let lifted = std::mem::take(&mut self.lifted);
+        for (name, hidden, span) in lifted {
+            let within = |s: Span, outer: Span| s.file == outer.file && s.start >= outer.start && s.end <= outer.end;
+            // (the function around it: the smallest function body or arrow holding it)
+            let mut around: Option<(Span, Vec<Sym>)> = None;
+            let consider = |sp: Span, params: Vec<Sym>, around: &mut Option<(Span, Vec<Sym>)>| {
+                if within(span, sp) && sp != span && around.as_ref().is_none_or(|(a, _)| sp.end - sp.start < a.end - a.start) {
+                    *around = Some((sp, params));
+                }
+            };
+            for it in &self.ast.items {
+                match &it.kind {
+                    ItemKind::Function(f) if f.name != hidden => consider(self.ast.stmts[f.body as usize].span, f.params.iter().map(|p| p.name).collect(), &mut around),
+                    ItemKind::Class(c) => {
+                        for m in &c.members {
+                            if let crate::ast::MemberKind::Method(f) | crate::ast::MemberKind::Getter(f) | crate::ast::MemberKind::Constructor(f) = &m.kind {
+                                consider(self.ast.stmts[f.body as usize].span, f.params.iter().map(|p| p.name).collect(), &mut around);
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            for e in &self.ast.exprs {
+                if let ExprKind::Arrow(a) = &e.kind {
+                    consider(e.span, a.params.iter().map(|p| p.name).collect(), &mut around);
+                }
+            }
+            let Some((outer, mut declared)) = around else { continue };
+            // (what the function around declares outside it: its parameters, its variables, the
+            // parameters of the closures in it)
+            for st in &self.ast.stmts {
+                match &st.kind {
+                    StmtKind::Let { name: n, name_span, .. } | StmtKind::ForOf { name: n, name_span, .. } if within(*name_span, outer) && !within(*name_span, span) => declared.push(*n),
+                    _ => {}
+                }
+            }
+            for e in &self.ast.exprs {
+                if let ExprKind::Arrow(a) = &e.kind
+                    && within(e.span, outer)
+                    && !within(e.span, span)
+                {
+                    declared.extend(a.params.iter().map(|p| p.name));
+                }
+            }
+            let used: Vec<Sym> = self.ast.exprs.iter().filter(|e| within(e.span, span)).filter_map(|e| match e.kind {
+                ExprKind::Ident(n) => Some(n),
+                _ => None,
+            }).collect();
+            // (less what it declares itself: its parameters, variables, closures' parameters)
+            let mut own: Vec<Sym> = Vec::new();
+            for it in &self.ast.items {
+                if let ItemKind::Function(f) = &it.kind
+                    && f.name == hidden
+                {
+                    own.extend(f.params.iter().map(|p| p.name));
+                }
+            }
+            for st in &self.ast.stmts {
+                match &st.kind {
+                    StmtKind::Let { name: n, name_span, .. } | StmtKind::ForOf { name: n, name_span, .. } if within(*name_span, span) => own.push(*n),
+                    _ => {}
+                }
+            }
+            for e in &self.ast.exprs {
+                if let ExprKind::Arrow(a) = &e.kind
+                    && within(e.span, span)
+                {
+                    own.extend(a.params.iter().map(|p| p.name));
+                }
+            }
+            let captured: Vec<Sym> = used.iter().copied().filter(|n| Some(*n) != name && declared.contains(n) && !own.contains(n)).collect();
+            if let Some(&c) = captured.first() {
+                let what = self.interner.get(c).to_string();
+                self.push(
+                    Diagnostic::new("U0013", span, "generators and generic functions in a function are supported only when they use none of its variables")
+                        .note("why", format!("this one uses `{what}` from the function around it"))
+                        .note("instead", "declare it at the top level, passing what it uses"),
+                );
+                continue;
+            }
+            if let Some(n) = name {
+                for e in self.ast.exprs.iter_mut() {
+                    if matches!(e.kind, ExprKind::Ident(x) if x == n) && within(e.span, outer) {
+                        e.kind = ExprKind::Ident(hidden);
+                    }
+                }
+            }
+        }
     }
 
     fn arrow_of(&mut self, f: FnDecl, is_async: bool, span: Span) -> ExprId {
@@ -4344,6 +4453,17 @@ impl<'a> Parser<'a> {
                 let Some(f) = self.function_rest(name, name_span) else { return self.mk_expr(ExprKind::Error, start) };
                 let span = start.to(self.prev_span());
                 self.arrow_of(f, false, span)
+            }
+            // `function* () { ... }`: a module function of its own (see `lift_functions`)
+            Tok::Function if self.nth(1) == Tok::Star => {
+                self.bump();
+                self.bump();
+                let (name, name_span) = if self.at(Tok::Ident) { self.ident("a function name").unwrap() } else { (self.interner.intern(""), start) };
+                let Some(mut f) = self.function_rest(name, name_span) else { return self.mk_expr(ExprKind::Error, start) };
+                f.is_gen = true;
+                let span = start.to(self.prev_span());
+                let hidden = self.lift(None, f, span);
+                self.mk_expr(ExprKind::Ident(hidden), span)
             }
             Tok::Function => {
                 self.push(
