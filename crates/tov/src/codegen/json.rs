@@ -248,7 +248,9 @@ impl<'c, 'a> Gen<'c, 'a> {
                     text.len()
                 )
             }
-            Ty::Undefined | Ty::Null | Ty::Void => "    return tv_jp_word(p, \"null\");\n".into(),
+            // (a value nothing reads, `JSON.parse(text);`: any, checked to be JSON)
+            Ty::Void => "    (void)out;\n    return tv_jp_skip(p);\n".into(),
+            Ty::Undefined | Ty::Null => "    return tv_jp_word(p, \"null\");\n".into(),
             Ty::Array(e) => {
                 let pe = self.json_parser(e);
                 let (ect, d, ed) = (self.ctype(e), self.desc(e), self.default_value(e));

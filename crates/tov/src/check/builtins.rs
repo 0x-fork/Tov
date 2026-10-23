@@ -1044,6 +1044,10 @@ impl<'a> Checker<'a> {
                 let t = self.expr(args[0].expr, Some(STR));
                 let s = self.ast().expr(args[0].expr).span;
                 self.expect_assignable(t, STR, s, None);
+                // (its value unused, `expect(() => JSON.parse(text)).toThrow()`: checked to be JSON)
+                if exp == Some(VOID) {
+                    return VOID;
+                }
                 let Some(target) = exp.filter(|&x| x != ERROR && x != UNKNOWN) else {
                     if exp != Some(ERROR) {
                         self.report(
@@ -1268,6 +1272,20 @@ impl<'a> Checker<'a> {
             Some(c.expr(args[0].expr, None))
         };
         let result = match name {
+            // (`expect(() => parse(text))`: a function to call, its result unused)
+            "expect" if args.len() == 1 && matches!(&self.ast().expr(args[0].expr).kind, crate::ast::ExprKind::Arrow(f) if f.params.is_empty() && f.ret.is_none()) => {
+                // (it may throw: what `toThrow` checks)
+                let err = self.error_class();
+                let want = self.types.func_throws(Vec::new(), VOID, err);
+                let t = self.expr(args[0].expr, Some(want));
+                self.types.intern(Ty::Expect(t))
+            }
+            // (`expect([])`: an empty array of nothing in particular)
+            "expect" if args.len() == 1 && matches!(&self.ast().expr(args[0].expr).kind, crate::ast::ExprKind::Array(xs) if xs.is_empty()) => {
+                let t = self.types.array(UNDEFINED);
+                let t = self.expr(args[0].expr, Some(t));
+                self.types.intern(Ty::Expect(t))
+            }
             "expect" => match one(self) {
                 Some(t) => self.types.intern(Ty::Expect(t)),
                 None => ERROR,
@@ -1608,6 +1626,8 @@ impl<'a> Checker<'a> {
                 // Jest does: `expect(m.entries()).toEqual([{ key: "a", value: 1 }])`)
                 let subject = if name == "toEqual" && has_object_literal(self.ast(), args[0].expr) { self.erase_classes(subject, &mut Vec::new()) } else { subject };
                 let t = self.expr(args[0].expr, Some(subject));
+                // (`expect("abc").not.toBe("abd")`: strings, as Jest's types take any value)
+                let (t, subject) = (self.types.widen(t), self.types.widen(subject));
                 if !self.comparable(t, subject) {
                     // (while `number`s are speculated `int`: `Map<int, int>` and `Map<f64, f64>`
                     // become `f64` both)

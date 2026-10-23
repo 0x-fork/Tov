@@ -3275,6 +3275,10 @@ impl<'a> Checker<'a> {
         let body_ty = match &f.body {
             ArrowBody::Expr(x) => {
                 let ret_sites = self.fcx().frames.last().unwrap().ret_sites.clone();
+                // (`() => JSON.parse(text)` where nothing reads its result: checked to be JSON)
+                let parse = matches!(&self.ast().expr(*x).kind, ExprKind::Call { callee, .. } if matches!(&self.ast().expr(*callee).kind, ExprKind::Member { obj, name, .. } if self.name(*name) == "parse" && matches!(self.ast().expr(*obj).kind, ExprKind::Ident(j) if self.name(j) == "JSON")));
+                let void_exp = exp_fn.as_ref().is_some_and(|(_, r)| *r == VOID);
+                let ret = if parse && void_exp && declared_ret.is_none() { Some(VOID) } else { ret };
                 let t = self.flow(ret_sites.clone(), |c| c.expr(*x, ret));
                 // `async () => promise`: its value (`async () => await promise`, see `rewrite`)
                 let t = if is_async && matches!(self.types.get(t), Ty::Promise(..)) && !ret.is_some_and(|r| self.flat_members(r).iter().any(|&m| matches!(self.types.get(m), Ty::Promise(..)))) {

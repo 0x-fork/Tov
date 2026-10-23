@@ -252,16 +252,31 @@ pub fn build(paths: &[PathBuf], base: &Path, opts: &Options) -> Result<Built, Bu
     }
     // npm packages resolve from the entry file's directory
     let npm_root = modules.iter().find(|m| m.entry).and_then(|m| m.path.parent()).map(Path::to_path_buf).unwrap_or_else(|| base.to_path_buf());
-    let first = check::check_for_build(&modules, &mut interner, &sm);
-    let (diags, mut checker) = if first.1.rewrites.is_empty() {
-        first
-    } else {
-        // TypeScript that changes parameters in place, or returns promises from async functions:
-        // rewritten (`inout`, `await`) and checked again
-        let rw = first.1.rewrites.clone();
-        drop(first);
-        driver::rewrite_rounds(&mut modules, &mut interner, &sm, rw);
-        check::check_for_build(&modules, &mut interner, &sm)
+    let mut expect_rounds = 0;
+    let (diags, mut checker) = loop {
+        let first = check::check_for_build(&modules, &mut interner, &sm);
+        let (diags, checker) = if first.1.rewrites.is_empty() {
+            first
+        } else {
+            // TypeScript that changes parameters in place, or returns promises from async functions:
+            // rewritten (`inout`, `await`) and checked again
+            let rw = first.1.rewrites.clone();
+            drop(first);
+            driver::rewrite_rounds(&mut modules, &mut interner, &sm, rw);
+            check::check_for_build(&modules, &mut interner, &sm)
+        };
+        // (a test's `// @ts-expect-error` statement: one that doesn't check throws a TypeError,
+        // as the input checks it gets past would)
+        if opts.mode == crate::codegen::Mode::Test && !diags.is_empty() && expect_rounds < 3 {
+            let targets = expected_errors(&modules, &sm, &diags);
+            if !targets.is_empty() {
+                drop(checker);
+                throw_instead(&mut modules, &mut interner, &targets);
+                expect_rounds += 1;
+                continue;
+            }
+        }
+        break (diags, checker);
     };
     if !diags.is_empty() {
         drop(checker);
@@ -966,4 +981,51 @@ pub(crate) fn tmp_tag() -> String {
 
 pub fn hash_hex(parts: &[&[u8]]) -> String {
     tls_flags::hash_hex(parts)
+}
+
+/// Statements (module, statement) a `// @ts-expect-error` covers that have errors.
+fn expected_errors(modules: &[crate::check::Module], sm: &crate::source::SourceMap, diags: &[crate::diag::Diagnostic]) -> Vec<(usize, crate::ast::StmtId)> {
+    let mut out = Vec::new();
+    for d in diags {
+        let Some(mi) = modules.iter().position(|m| m.file == d.span.file && !m.ast.ts_expect.is_empty()) else { continue };
+        let ast = &modules[mi].ast;
+        let file = sm.get(d.span.file);
+        let line = file.line_col(d.span.start).0;
+        if !ast.ts_expect.iter().any(|&o| file.line_col(o).0 == line) {
+            continue;
+        }
+        // (the smallest statement holding the error that starts on that line)
+        let best = ast
+            .stmts
+            .iter()
+            .enumerate()
+            .filter(|(_, st)| st.span.file == d.span.file && st.span.start <= d.span.start && d.span.end <= st.span.end && file.line_col(st.span.start).0 == line)
+            .filter(|(_, st)| !matches!(st.kind, crate::ast::StmtKind::Block(_)))
+            .min_by_key(|(_, st)| st.span.end - st.span.start)
+            .map(|(i, _)| i as crate::ast::StmtId);
+        if let Some(s) = best
+            && !out.contains(&(mi, s))
+        {
+            out.push((mi, s));
+        }
+    }
+    out
+}
+
+/// Each statement becomes `throw new TypeError(...)`.
+fn throw_instead(modules: &mut [crate::check::Module], interner: &mut crate::intern::Interner, targets: &[(usize, crate::ast::StmtId)]) {
+    use crate::ast::{Arg, Expr, ExprKind, StmtKind};
+    let te = interner.intern("TypeError");
+    let msg = interner.intern("a value of the wrong type (`@ts-expect-error`)");
+    for &(mi, s) in targets {
+        let ast = &mut modules[mi].ast;
+        let span = ast.stmts[s as usize].span;
+        ast.exprs.push(Expr { kind: ExprKind::Ident(te), span });
+        let callee = ast.exprs.len() as crate::ast::ExprId - 1;
+        ast.exprs.push(Expr { kind: ExprKind::Str(msg), span });
+        let m = ast.exprs.len() as crate::ast::ExprId - 1;
+        ast.exprs.push(Expr { kind: ExprKind::New { callee, type_args: Vec::new(), args: vec![Arg { expr: m, by_ref: None }] }, span });
+        let n = ast.exprs.len() as crate::ast::ExprId - 1;
+        ast.stmts[s as usize].kind = StmtKind::Throw(n);
+    }
 }

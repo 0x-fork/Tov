@@ -20,10 +20,22 @@ pub fn parse(src: &str, file: FileId, interner: &mut Interner) -> (Ast, Vec<Diag
             lexed.tokens[i].kind = Tok::Ident;
         }
     }
-    let mut p = Parser { src, toks: lexed.tokens, strings: lexed.strings, pos: 0, file, interner, ast: Ast::default(), diags, script_stmts: Vec::new(), defaults: Vec::new(), more_stmts: Vec::new(), hidden: 0, prologue: Vec::new(), index_sig: None, call_sig: None, local_fns: Vec::new(), prop_defaults: false, extra_members: Vec::new(), generic_arrows: Vec::new(), local_types: Vec::new(), local_type_items: Vec::new(), runtime_tests: false };
+    let mut p = Parser { src, toks: lexed.tokens, strings: lexed.strings, pos: 0, file, interner, ast: Ast::default(), diags, script_stmts: Vec::new(), defaults: Vec::new(), more_stmts: Vec::new(), hidden: 0, prologue: Vec::new(), index_sig: None, call_sig: None, local_fns: Vec::new(), prop_defaults: false, extra_members: Vec::new(), generic_arrows: Vec::new(), local_types: Vec::new(), local_type_items: Vec::new(), runtime_tests: false, chai: false };
     p.ast.iterator_sym = Some(p.interner.intern("__iterator"));
+    // (`// @ts-expect-error`: the next line's start)
+    let mut at = 0usize;
+    for line in src.split_inclusive('\n') {
+        let t = line.trim_start();
+        if t.starts_with("//") && (t.contains("@ts-expect-error") || t.contains("@ts-ignore")) {
+            p.ast.ts_expect.push((at + line.len()) as u32);
+        }
+        at += line.len();
+    }
     p.module();
     p.runtime_tests();
+    if p.chai {
+        p.chai_assertions();
+    }
     p.unhide_local_types();
     slot_records(&mut p.ast, p.interner);
     (p.ast, p.diags)
@@ -317,6 +329,9 @@ struct Parser<'a> {
     /// Rewriting tests declared in a function a suite calls (see `runtime_tests`): named inside
     /// the suites running, not by the suites written around them.
     runtime_tests: bool,
+    /// `import { expect } from "chai"`: its assertions (`expect(x).to.equal(y)`) are rewritten as
+    /// the built-in matchers.
+    chai: bool,
     /// Function declarations in bodies, as `const`s (to hoist).
     local_fns: Vec<StmtId>,
     /// A parameter property in the list just parsed has a default value.
@@ -1277,6 +1292,16 @@ impl<'a> Parser<'a> {
         let path_span = self.span_of(t);
         self.terminator();
         let span = start.to(path_span);
+        // (`import { describe, expect, it } from "@jest/globals"`, or Vitest's, or Bun's: the
+        // test API, which is built in)
+        if matches!(path.as_str(), "@jest/globals" | "vitest" | "bun:test") && namespace.is_none() && default.is_none() {
+            return;
+        }
+        // (Chai's `expect`: its assertions become the built-in matchers, see `chai_assertions`)
+        if path == "chai" && namespace.is_none() && default.is_none() && names.iter().all(|(n, _)| self.interner.get(*n) == "expect") {
+            self.chai = true;
+            return;
+        }
         self.ast.items.push(Item { kind: ItemKind::Import(Import { names, locals, reexport: false, namespace, default, path, path_span }), span, exported: false });
     }
 
@@ -2064,6 +2089,136 @@ impl<'a> Parser<'a> {
             self.runtime_tests = false;
         }
         self.top_level_test_calls();
+    }
+
+    /// Chai's assertions, `expect(x).to.equal(y)`, `expect(f).to.throw()`, `expect(v).to.be.true`:
+    /// the built-in matchers (`expect(x).toBe(y)`, ...).
+    fn chai_assertions(&mut self) {
+        for i in 0..self.ast.exprs.len() {
+            if let Some(kind) = self.chai_chain(i as ExprId) {
+                self.ast.exprs[i].kind = kind;
+            }
+        }
+        // (Mocha's `this.timeout(ms)`, `this.slow(ms)`, `this.retries(n)` in a test: tests run to
+        // the end here)
+        for i in 0..self.ast.stmts.len() {
+            let StmtKind::Expr(e) = self.ast.stmts[i].kind else { continue };
+            let ExprKind::Call { callee, .. } = &self.ast.exprs[e as usize].kind else { continue };
+            if let ExprKind::Member { obj, name, .. } = &self.ast.exprs[*callee as usize].kind
+                && matches!(self.ast.exprs[*obj as usize].kind, ExprKind::This)
+                && matches!(self.interner.get(*name), "timeout" | "slow" | "retries")
+            {
+                self.ast.stmts[i].kind = StmtKind::Empty;
+            }
+        }
+    }
+
+    /// `e` as a Chai assertion, rewritten: the matcher call.
+    fn chai_chain(&mut self, e: ExprId) -> Option<ExprKind> {
+        // (the assertion's last word and its arguments, then the words before it)
+        let (last, args, mut cur) = match &self.ast.exprs[e as usize].kind {
+            ExprKind::Call { callee, args, .. } => match &self.ast.exprs[*callee as usize].kind {
+                ExprKind::Member { obj, name, .. } => (*name, Some(args.iter().map(|a| a.expr).collect::<Vec<_>>()), *obj),
+                _ => return None,
+            },
+            ExprKind::Member { obj, name, .. } => (*name, None, *obj),
+            _ => return None,
+        };
+        let (mut not, mut deep) = (false, false);
+        let subject = loop {
+            match &self.ast.exprs[cur as usize].kind {
+                ExprKind::Member { obj, name, .. } => {
+                    match self.interner.get(*name) {
+                        "not" => not = !not,
+                        "deep" => deep = true,
+                        "to" | "be" | "been" | "is" | "that" | "which" | "and" | "has" | "have" | "with" | "at" | "of" | "same" | "but" | "does" | "still" | "also" | "own" | "nested" => {}
+                        _ => return None,
+                    }
+                    cur = *obj;
+                }
+                ExprKind::Call { callee, args, .. } if args.len() == 1 && matches!(self.ast.exprs[*callee as usize].kind, ExprKind::Ident(s) if self.interner.get(s) == "expect") => break args[0].expr,
+                _ => return None,
+            }
+        };
+        let span = self.ast.exprs[e as usize].span;
+        let word = self.interner.get(last).to_string();
+        let lit = |p: &mut Self, b: bool| p.mk_expr(ExprKind::Bool(b), span);
+        let (matcher, margs, subject) = match (word.as_str(), args) {
+            ("equal" | "equals" | "eq" | "strictEqual", Some(a)) if a.len() == 1 => (if deep { "toEqual" } else { "toBe" }, a, subject),
+            ("eql" | "eqls", Some(a)) if a.len() == 1 => ("toEqual", a, subject),
+            ("include" | "includes" | "contain" | "contains", Some(a)) if a.len() == 1 => ("toContain", a, subject),
+            ("lengthOf" | "length", Some(a)) if a.len() == 1 => ("toHaveLength", a, subject),
+            ("above" | "gt" | "greaterThan", Some(a)) if a.len() == 1 => ("toBeGreaterThan", a, subject),
+            ("least" | "gte" | "greaterThanOrEqual", Some(a)) if a.len() == 1 => ("toBeGreaterThanOrEqual", a, subject),
+            ("below" | "lt" | "lessThan", Some(a)) if a.len() == 1 => ("toBeLessThan", a, subject),
+            ("most" | "lte" | "lessThanOrEqual", Some(a)) if a.len() == 1 => ("toBeLessThanOrEqual", a, subject),
+            ("throw" | "throws" | "Throw", Some(_)) => ("toThrow", Vec::new(), subject),
+            // (`.closeTo(v, delta)`: `Math.abs(x - v) <= delta`)
+            ("closeTo" | "approximately", Some(a)) if a.len() == 2 => {
+                let d = self.mk_expr(ExprKind::Binary(BinOp::Sub, subject, a[0]), span);
+                let math = self.interner.intern("Math");
+                let abs = self.interner.intern("abs");
+                let m = self.mk_expr(ExprKind::Ident(math), span);
+                let f = self.mk_expr(ExprKind::Member { obj: m, name: abs, name_span: span, optional: false }, span);
+                let c = self.mk_expr(ExprKind::Call { callee: f, type_args: Vec::new(), args: vec![Arg { expr: d, by_ref: None }], optional: false }, span);
+                let le = self.mk_expr(ExprKind::Binary(BinOp::Le, c, a[1]), span);
+                let t = lit(self, true);
+                ("toBe", vec![t], le)
+            }
+            // (`.instanceOf(C)`: `x instanceof C`)
+            ("instanceOf" | "instanceof", Some(a)) if a.len() == 1 => {
+                let x = self.mk_expr(ExprKind::Binary(BinOp::Instanceof, subject, a[0]), span);
+                let t = lit(self, true);
+                ("toBe", vec![t], x)
+            }
+            // (`.a("string")`: `typeof x`, an array's `Array.isArray(x)`)
+            ("a" | "an", Some(a)) if a.len() == 1 => {
+                let what = match &self.ast.exprs[a[0] as usize].kind {
+                    ExprKind::Str(s) => self.interner.get(*s).to_string(),
+                    _ => return None,
+                };
+                if what == "array" {
+                    let arr = self.interner.intern("Array");
+                    let is = self.interner.intern("isArray");
+                    let m = self.mk_expr(ExprKind::Ident(arr), span);
+                    let f = self.mk_expr(ExprKind::Member { obj: m, name: is, name_span: span, optional: false }, span);
+                    let c = self.mk_expr(ExprKind::Call { callee: f, type_args: Vec::new(), args: vec![Arg { expr: subject, by_ref: None }], optional: false }, span);
+                    let t = lit(self, true);
+                    ("toBe", vec![t], c)
+                } else {
+                    let t = self.mk_expr(ExprKind::Typeof(subject), span);
+                    ("toBe", vec![a[0]], t)
+                }
+            }
+            ("true", None) => {
+                let t = lit(self, true);
+                ("toBe", vec![t], subject)
+            }
+            ("false", None) => {
+                let f = lit(self, false);
+                ("toBe", vec![f], subject)
+            }
+            ("null", None) => ("toBeNull", Vec::new(), subject),
+            ("undefined", None) => ("toBeUndefined", Vec::new(), subject),
+            ("ok", None) => ("toBeTruthy", Vec::new(), subject),
+            ("NaN", None) => ("toBeNaN", Vec::new(), subject),
+            ("exist", None) => ("toBeDefined", Vec::new(), subject),
+            ("empty", None) => {
+                let z = self.mk_expr(ExprKind::Int(0), span);
+                ("toHaveLength", vec![z], subject)
+            }
+            _ => return None,
+        };
+        let expect = self.interner.intern("expect");
+        let ex = self.mk_expr(ExprKind::Ident(expect), span);
+        let mut obj = self.mk_expr(ExprKind::Call { callee: ex, type_args: Vec::new(), args: vec![Arg { expr: subject, by_ref: None }], optional: false }, span);
+        if not {
+            let n = self.interner.intern("not");
+            obj = self.mk_expr(ExprKind::Member { obj, name: n, name_span: span, optional: false }, span);
+        }
+        let m = self.interner.intern(matcher);
+        let callee = self.mk_expr(ExprKind::Member { obj, name: m, name_span: span, optional: false }, span);
+        Some(ExprKind::Call { callee, type_args: Vec::new(), args: margs.into_iter().map(|expr| Arg { expr, by_ref: None }).collect(), optional: false })
     }
 
     /// A script's statement calling a function that declares tests (`checkStack("top")`, at the

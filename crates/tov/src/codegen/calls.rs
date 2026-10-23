@@ -2814,6 +2814,12 @@ impl<'c, 'a> Gen<'c, 'a> {
     }
 
     fn matcher(&mut self, s: Val, name: &str, args: &[Arg], span: Span, negate: bool) {
+        // (a literal's type widened: `expect("abc").not.toBe("abd")` compares strings)
+        let s = match self.tget(s.ty) {
+            Ty::StrLit(_) => self.coerce(s, STR),
+            Ty::BoolLit(_) => self.coerce(s, BOOL),
+            _ => s,
+        };
         let loc = self.loc(span);
         // (what's expected, when there's no value to show: "expected null, received 3")
         let what = match name {
@@ -2880,6 +2886,12 @@ impl<'c, 'a> Gen<'c, 'a> {
                 let x = self.coerce(x, s.ty);
                 let eq = self.equality(s.clone(), x.clone(), true);
                 (eq, Some(x))
+            }
+            // (of `undefined` or `null` itself: known)
+            "toBeNull" if matches!(self.tget(s.ty), Ty::Undefined | Ty::Null | Ty::Void) => ((if s.ty == NULL { "true" } else { "false" }).into(), None),
+            "toBeUndefined" | "toBeDefined" if matches!(self.tget(s.ty), Ty::Undefined | Ty::Null | Ty::Void) => {
+                let undef = s.ty != NULL;
+                ((if (name == "toBeUndefined") == undef { "true" } else { "false" }).into(), None)
             }
             "toBeNull" => {
                 let n = self.coerce(Val::plain("0", NULL), s.ty);

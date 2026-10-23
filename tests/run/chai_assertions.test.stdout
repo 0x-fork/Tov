@@ -1,0 +1,6 @@
+ok   chai > compares
+ok   chai > checks kinds
+FAIL chai > fails
+  expected 3, received 2
+  at tests/run/chai_assertions.test.ts:32:5
+2 passed, 1 failed
