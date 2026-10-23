@@ -1,0 +1,9 @@
+{
+  "compilerOptions": {
+    // module resolution, as tsconfig-paths sets it up
+    "baseUrl": ".", /* imports under this directory */
+    "paths": {
+      "@lib/*": ["lib/*"],
+    },
+  }
+}

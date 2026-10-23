@@ -381,6 +381,105 @@ fn display_name(path: &Path, base: &Path) -> String {
     path.strip_prefix(base).map(|p| p.to_string_lossy().into_owned()).unwrap_or_else(|_| path.to_string_lossy().into_owned())
 }
 
+/// A bare import mapped by the nearest tsconfig.json: its `paths` (`"src/*": ["src/*"]`), then
+/// its `baseUrl` (the specifier under it), to a file of the program.
+fn tsconfig_path(from: &Path, spec: &str, span: Span, npm: &crate::npm::resolve::Resolver) -> Option<PathBuf> {
+    let mut dir = from.parent()?;
+    let (cfg_dir, cfg) = loop {
+        let f = dir.join("tsconfig.json");
+        if f.is_file() {
+            break (dir.to_path_buf(), std::fs::read_to_string(&f).ok()?);
+        }
+        dir = dir.parent()?;
+    };
+    let json = crate::npm::json::parse(&strip_jsonc(&cfg)).ok()?;
+    let opts = json.get("compilerOptions")?;
+    let base = cfg_dir.join(opts.get("baseUrl").and_then(|b| b.as_str()).unwrap_or("."));
+    let try_at = |target: &str| -> Option<PathBuf> {
+        let path = base.join(target);
+        let (parent, name) = (path.parent()?, path.file_name()?.to_string_lossy().into_owned());
+        resolve_import(&parent.join("tsconfig.json"), &format!("./{name}"), span, npm).ok()
+    };
+    if let Some(crate::npm::json::Json::Object(paths)) = opts.get("paths") {
+        for (pattern, targets) in paths {
+            let rest = match pattern.strip_suffix('*') {
+                Some(prefix) => match spec.strip_prefix(prefix) {
+                    Some(r) => r,
+                    None => continue,
+                },
+                None if pattern == spec => "",
+                None => continue,
+            };
+            let crate::npm::json::Json::Array(ts) = targets else { continue };
+            for t in ts.iter().filter_map(|t| t.as_str()) {
+                if let Some(p) = try_at(&t.replace('*', rest)) {
+                    return Some(p);
+                }
+            }
+        }
+    }
+    opts.get("baseUrl")?;
+    try_at(spec)
+}
+
+/// JSON with comments and trailing commas (tsconfig.json's) as JSON.
+fn strip_jsonc(text: &str) -> String {
+    // (outside strings: comments, then commas before `}` or `]`)
+    fn pass(text: &str, commas: bool) -> String {
+        let b = text.as_bytes();
+        let mut out: Vec<u8> = Vec::with_capacity(b.len());
+        let mut i = 0;
+        while i < b.len() {
+            match b[i] {
+                b'"' => {
+                    out.push(b'"');
+                    i += 1;
+                    while i < b.len() && b[i] != b'"' {
+                        if b[i] == b'\\' && i + 1 < b.len() {
+                            out.push(b[i]);
+                            i += 1;
+                        }
+                        out.push(b[i]);
+                        i += 1;
+                    }
+                    if i < b.len() {
+                        out.push(b'"');
+                        i += 1;
+                    }
+                }
+                b'/' if !commas && b.get(i + 1) == Some(&b'/') => {
+                    while i < b.len() && b[i] != b'\n' {
+                        i += 1;
+                    }
+                }
+                b'/' if !commas && b.get(i + 1) == Some(&b'*') => {
+                    i += 2;
+                    while i + 1 < b.len() && !(b[i] == b'*' && b[i + 1] == b'/') {
+                        i += 1;
+                    }
+                    i += 2;
+                }
+                b',' if commas => {
+                    let mut j = i + 1;
+                    while j < b.len() && b[j].is_ascii_whitespace() {
+                        j += 1;
+                    }
+                    if !matches!(b.get(j), Some(b'}') | Some(b']')) {
+                        out.push(b',');
+                    }
+                    i += 1;
+                }
+                c => {
+                    out.push(c);
+                    i += 1;
+                }
+            }
+        }
+        String::from_utf8(out).unwrap_or_default()
+    }
+    pass(&pass(text, false), true)
+}
+
 fn resolve_import(from: &Path, spec: &str, span: Span, npm: &crate::npm::resolve::Resolver) -> Result<PathBuf, Diagnostic> {
     if let Some(m) = std_module(spec) {
         return Ok(PathBuf::from(format!("<std>/{}", m.0)));
@@ -399,6 +498,12 @@ fn resolve_import(from: &Path, spec: &str, span: Span, npm: &crate::npm::resolve
     }
     if let Some(s) = npm_shim(spec) {
         return Ok(PathBuf::from(format!("<std>/npm/{}", s.0)));
+    }
+    // (tsconfig.json's `paths` and `baseUrl`: `import { x } from "src/tree"`, `"@/util"`)
+    if !spec.starts_with("./") && !spec.starts_with("../") && !spec.starts_with('/')
+        && let Some(found) = tsconfig_path(from, spec, span, npm)
+    {
+        return Ok(found);
     }
     if !spec.starts_with("./") && !spec.starts_with("../") && !spec.starts_with('/') {
         // an npm package, from the nearest node_modules
