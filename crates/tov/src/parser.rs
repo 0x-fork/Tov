@@ -1972,6 +1972,30 @@ impl<'a> Parser<'a> {
             },
             _ => return,
         };
+        self.suite_block(body, prefix, before, after);
+    }
+
+    /// Tests declared inside a suite's loops, `if`s and blocks (`for (const f of fns) it(...)`)
+    /// are its tests too, declared as the statement runs.
+    fn suite_nested(&mut self, s: StmtId, prefix: &str, before: &[Sym], after: &[Sym]) {
+        let inner: Vec<StmtId> = match &self.ast.stmts[s as usize].kind {
+            StmtKind::For { body, .. } | StmtKind::ForOf { body, .. } | StmtKind::While(_, body) | StmtKind::DoWhile(body, _) => vec![*body],
+            StmtKind::If(_, t, e) => std::iter::once(*t).chain(*e).collect(),
+            StmtKind::Block(_) => return self.suite_block(s, prefix, before, after),
+            _ => return,
+        };
+        for b in inner {
+            if !matches!(self.ast.stmts[b as usize].kind, StmtKind::Block(_)) {
+                let span = self.ast.stmts[b as usize].span;
+                let k = std::mem::replace(&mut self.ast.stmts[b as usize].kind, StmtKind::Empty);
+                let one = self.mk_stmt(k, span);
+                self.ast.stmts[b as usize].kind = StmtKind::Block(vec![one]);
+            }
+            self.suite_block(b, prefix, before, after);
+        }
+    }
+
+    fn suite_block(&mut self, body: StmtId, prefix: &str, before: &[Sym], after: &[Sym]) {
         let StmtKind::Block(ss) = &self.ast.stmts[body as usize].kind else { return };
         let ss = ss.clone();
         let (mut before, mut after) = (before.to_vec(), after.to_vec());
@@ -1993,6 +2017,7 @@ impl<'a> Parser<'a> {
                 _ => None,
             };
             let Some((e, (kind, modifier, args))) = call else {
+                self.suite_nested(s, prefix, &before, &after);
                 out.push(s);
                 continue;
             };

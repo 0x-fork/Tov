@@ -1,0 +1,6 @@
+ok   finds > is defined
+ok   finds > finds 2
+ok   finds > is defined
+ok   finds > finds 2
+ok   finds > misses 9
+5 passed, 0 failed

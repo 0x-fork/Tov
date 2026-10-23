@@ -1569,12 +1569,10 @@ impl<'a> Checker<'a> {
                     self.report(Diagnostic::new("T0001", name_span, msg));
                 }
             }
+            // (of a type without `undefined` too, as TypeScript allows: `toBeDefined()` then
+            // always passes)
             "toBeUndefined" | "toBeDefined" => {
                 self.check_args_loose(args);
-                if !self.types.has_undefined(subject) && subject != ERROR {
-                    let msg = format!("`{}` is never `undefined`", self.show(subject));
-                    self.report(Diagnostic::new("T0503", name_span, msg));
-                }
             }
             "toBeTruthy" | "toBeFalsy" | "toBeNull" | "toBeNaN" => {
                 if !args.is_empty() {

@@ -266,7 +266,7 @@ test("adds", () => {
   expect(add(1, 2)).toBe(3)
 })
 ```
-`test` calls are top-level only, or in a suite. Jest's and Vitest's API works as it is: `describe("name", () => { ... })` suites (nested too) whose `it`/`test` calls are tests of their own (`suite > name`), `beforeEach`/`afterEach` (run around each test of the suite and the suites in it), `beforeAll`/`afterAll`, `.skip`/`.todo`/`.only`, and `it.each(table)(name, fn)` / `test.each` (a row is spread over the parameters when it's an array, else it's the one parameter; `%s`, `%i`, `%p`... in the name show its values, `$field` an object row's fields, `%#` its number). A table of array literals has rows of tuples, as `as const` makes them.
+`test` calls are top-level only, or in a suite (in its loops and `if`s too: `for (const f of fns) it(...)` declares a test per function). Jest's and Vitest's API works as it is: `describe("name", () => { ... })` suites (nested too) whose `it`/`test` calls are tests of their own (`suite > name`), `beforeEach`/`afterEach` (run around each test of the suite and the suites in it), `beforeAll`/`afterAll`, `.skip`/`.todo`/`.only`, and `it.each(table)(name, fn)` / `test.each` (a row is spread over the parameters when it's an array, else it's the one parameter; `%s`, `%i`, `%p`... in the name show its values, `$field` an object row's fields, `%#` its number). A table of array literals has rows of tuples, as `as const` makes them.
 
 `tov test dir` runs every `*.test.ts` / `*.spec.ts` file under `dir` as `bun test` does: each is built (on every core, the build cache keeping unchanged ones) and run on its own, so one that doesn't build doesn't stop the others; the totals come last. (A directory of `.tov` files is one program, as before.)
 
