@@ -3393,6 +3393,8 @@ impl<'a> Checker<'a> {
                 }
                 match elem {
                     Some(el) if typed.is_some() || self.has_default(el) => self.types.array(el),
+                    // (filled as it's made, `Array(n).fill(null)`: no hole is seen)
+                    Some(el) if n == "Array" && args.len() == 1 && self.filled_at_once(e) => self.types.array(el),
                     Some(el) if n == "Array" && args.len() == 1 && super::stmt::filled_by_next_loop(self.ast(), e) => {
                         if let Some(f) = self.facts_mut() {
                             f.filled_arrays.insert(e);
@@ -3572,8 +3574,8 @@ impl<'a> Checker<'a> {
                         _ => None,
                     }));
                     let vt = match exp_elem {
-                        Some(t) => t,
-                        None => {
+                        Some(t) if t != ERROR => t,
+                        _ => {
                             let t = self.expr(a.expr, None);
                             self.types.widen(t)
                         }
@@ -5077,6 +5079,17 @@ impl<'a> Checker<'a> {
     }
 
     /// Element types `new Array(n)` can fill with an empty value (numbers, booleans, strings).
+    /// `new Array(n)` that `.fill(v)` fills at once.
+    fn filled_at_once(&self, ne: ExprId) -> bool {
+        let ast = self.ast();
+        let sp = ast.expr(ne).span;
+        ast.exprs.iter().any(|x| {
+            matches!(&x.kind, ExprKind::Call { callee, args, .. } if args.len() == 1
+                && x.span.file == sp.file && x.span.start == sp.start
+                && matches!(&ast.expr(*callee).kind, ExprKind::Member { obj, name, .. } if *obj == ne && self.name(*name) == "fill"))
+        })
+    }
+
     fn has_default(&self, t: TyId) -> bool {
         self.types.is_numeric(t) || matches!(*self.types.get(t), Ty::Bool | Ty::Str)
     }

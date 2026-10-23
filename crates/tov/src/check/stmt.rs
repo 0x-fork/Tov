@@ -79,7 +79,23 @@ impl<'a> Checker<'a> {
             ExprKind::New { callee, type_args, args } => {
                 type_args.is_empty() && args.len() == 1 && matches!(self.ast().expr(*callee).kind, ExprKind::Ident(n) if self.name(n) == "Array" && self.lookup(n).is_none())
             }
-            _ => false,
+            _ => self.filled_with_nothing(i).is_some(),
+        }
+    }
+
+    /// `Array(n).fill(null)` (or `undefined`): what it's filled with, the first of what it holds
+    /// (TypeScript's `any[]`: what's stored in it later counts too).
+    pub(super) fn filled_with_nothing(&self, i: ExprId) -> Option<TyId> {
+        let ast = self.ast();
+        let ExprKind::Call { callee, args, .. } = &ast.expr(i).kind else { return None };
+        let ExprKind::Member { obj, name, .. } = &ast.expr(*callee).kind else { return None };
+        if self.name(*name) != "fill" || args.len() != 1 || !matches!(&ast.expr(*obj).kind, ExprKind::New { .. }) || !self.untyped_array(*obj) {
+            return None;
+        }
+        match ast.expr(args[0].expr).kind {
+            ExprKind::Null => Some(NULL),
+            ExprKind::Undefined => Some(UNDEFINED),
+            _ => None,
         }
     }
 
@@ -254,7 +270,8 @@ impl<'a> Checker<'a> {
                             Some(&e) => e,
                             None => {
                                 let span = self.ast().expr(*i).span;
-                                self.fcx().evolving.push((key, span, Vec::new(), false));
+                                let given = self.filled_with_nothing(*i).into_iter().collect();
+                                self.fcx().evolving.push((key, span, given, false));
                                 ERROR
                             }
                         };
