@@ -4200,7 +4200,7 @@ impl<'c, 'a> Gen<'c, 'a> {
     }
 
     /// `x!` / `x as T`: checks the tag at run time, then projects.
-    fn downcast(&mut self, v: Val, to: TyId, span: Span) -> Val {
+    pub(crate) fn downcast(&mut self, v: Val, to: TyId, span: Span) -> Val {
         if v.ty == to {
             return v;
         }

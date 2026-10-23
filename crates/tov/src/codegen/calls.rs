@@ -61,7 +61,8 @@ impl<'c, 'a> Gen<'c, 'a> {
                     let arr = self.pack_rest(&args[params.len().min(args.len())..], rest);
                     argv.push(arr);
                 }
-                let ret = self.inst(fact.ret);
+                // (the function's own result: an overload's, the call's type, may be narrower)
+                let ret = self.inst(if fact.own_ret != ERROR { fact.own_ret } else { fact.ret });
                 // `/re/g`: each evaluation makes a new RegExp; the site keeps its first, and gives
                 // it out again whenever nothing else holds it (lastIndex back at 0, it's as good
                 // as new: nothing can tell)
@@ -79,6 +80,10 @@ impl<'c, 'a> Gen<'c, 'a> {
                     ));
                     let r = self.tmp(ret, &v, true);
                     return self.coerce(r, ty);
+                }
+                if ret != ty && ret != VOID && ret != NEVER && self.c.types.members(ret).len() > 1 && !self.c.types.members(ty).iter().any(|m| !self.c.types.members(ret).contains(m)) && self.c.types.members(ty).len() < self.c.types.members(ret).len() {
+                    let v = self.tmp(ret, &format!("{cname}({})", argv.join(", ")), true);
+                    return self.downcast(v, ty, span);
                 }
                 self.finish_call(&format!("{cname}({})", argv.join(", ")), ret, ty)
             }

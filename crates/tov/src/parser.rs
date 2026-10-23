@@ -1528,6 +1528,7 @@ impl<'a> Parser<'a> {
         // `function f(...) { ... }`): calls are checked against the implementation's
         if !self.at(Tok::LBrace) && self.overload_follows(name) {
             self.eat(Tok::Semi);
+            self.ast.overloads.push((name, tparams, params, ret));
             return None;
         }
         if !self.at(Tok::LBrace) {

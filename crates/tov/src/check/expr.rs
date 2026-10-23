@@ -557,6 +557,106 @@ impl<'a> Checker<'a> {
         self.types.union(&[ta, tb])
     }
 
+    /// A call of function `(m, i)` with overload signatures: the result type of the first that
+    /// takes the arguments (as checked against the implementation), if it's one of its results.
+    fn overload_ret(&mut self, m: u32, i: u32, args: &[Arg], t: TyId) -> TyId {
+        let ItemKind::Function(f) = &self.modules[m as usize].ast.items[i as usize].kind else { return t };
+        let name = f.name;
+        if t == ERROR || !self.modules[m as usize].ast.overloads.iter().any(|o| o.0 == name) {
+            return t;
+        }
+        let cur = self.cur as usize;
+        let Some(arg_tys) = self.facts.as_ref().map(|fs| args.iter().map(|a| fs[cur].expr_ty.get(a.expr as usize).copied().unwrap_or(ERROR)).collect::<Vec<TyId>>()) else { return t };
+        let n = self.modules[m as usize].ast.overloads.len();
+        for k in 0..n {
+            let (oname, generic, nparams) = {
+                let o = &self.modules[m as usize].ast.overloads[k];
+                (o.0, !o.1.is_empty(), o.2.len())
+            };
+            if oname != name || generic || args.len() > nparams {
+                continue;
+            }
+            let (params, ret) = self.with_module(m, |c| {
+                let ast = &c.modules[m as usize].ast;
+                let ps: Vec<(Option<crate::ast::TypeId>, bool)> = ast.overloads[k].2.iter().map(|p| (p.ty, p.optional)).collect();
+                let r = ast.overloads[k].3;
+                let params: Vec<(TyId, bool)> = ps.into_iter().map(|(te, opt)| (te.map(|te| c.resolve_type(te, &[])).unwrap_or(ERROR), opt)).collect();
+                (params, r.map(|te| c.resolve_type(te, &[])))
+            });
+            let required = params.iter().filter(|p| !p.1).count();
+            if args.len() < required || params.iter().any(|p| p.0 == ERROR) {
+                continue;
+            }
+            if arg_tys.iter().zip(&params).all(|(&a, p)| a != ERROR && self.assignable(a, p.0)) {
+                // (as the implementation's result has it: the member the overload's is)
+                return match ret {
+                    Some(r) if r != t && self.assignable(r, t) => {
+                        let ms = self.flat_members(t);
+                        ms.iter().copied().find(|&m| m == r).or_else(|| ms.iter().copied().find(|&m| self.assignable(r, m))).unwrap_or(r)
+                    }
+                    _ => t,
+                };
+            }
+        }
+        t
+    }
+
+    /// Class `sym` given where `want` (a constructor type's parameter, or the class it was bound
+    /// to) is wanted: checked against the constructor type, and the class itself.
+    fn class_value(&mut self, e: ExprId, sym: Sym, want: TyId, span: Span) -> Option<TyId> {
+        if self.lookup(sym).is_some() {
+            return None;
+        }
+        let Some(Decl::Class(c)) = self.scopes[self.cur as usize].values.get(&sym).map(|d| d.0) else { return None };
+        let sig = match *self.types.get(want) {
+            Ty::Param(p) => self.gparam(p).ctor.clone()?,
+            Ty::ClassObj(_) => {
+                self.rec_ident(e, IdentFact::Class(c));
+                return Some(self.types.intern(Ty::ClassObj(c)));
+            }
+            _ => return None,
+        };
+        self.rec_ident(e, IdentFact::Class(c));
+        self.resolve_class(c);
+        let info = self.classes[c as usize].clone();
+        let n = self.name(sym).to_string();
+        let shown = {
+            let tps: Vec<String> = sig.tparams.iter().map(|&p| self.name(self.gparam(p).name).to_string()).collect();
+            let ps: Vec<String> = sig.params.iter().map(|p| self.show(p.ty)).collect();
+            let tps = if tps.is_empty() { String::new() } else { format!("<{}>", tps.join(", ")) };
+            format!("new {tps}({}) => {}", ps.join(", "), self.show(sig.ret))
+        };
+        let mut problems = Vec::new();
+        if info.params.len() != sig.tparams.len() {
+            problems.push(format!("it takes {} type parameter(s), the constructor type {}", info.params.len(), sig.tparams.len()));
+        } else {
+            // (its instances, with the constructor type's own type parameters for its own)
+            let map: HashMap<u32, TyId> = info.params.iter().zip(&sig.tparams).map(|(&cp, &sp)| (cp, self.types.intern(Ty::Param(sp)))).collect();
+            let inst = self.types.subst(info.this_ty, &map);
+            if !self.assignable(inst, sig.ret) {
+                problems.push(format!("its instances are `{}`, not `{}`", self.show(inst), self.show(sig.ret)));
+            }
+            let required = info.ctor.params.iter().filter(|p| !p.optional).count();
+            if required > sig.params.len() {
+                problems.push(format!("its constructor needs {required} argument(s), the constructor type gives {}", sig.params.len()));
+            }
+            for (i, (cp, sp)) in info.ctor.params.iter().zip(&sig.params).enumerate() {
+                let cpt = self.types.subst(cp.ty, &map);
+                if !self.assignable(sp.ty, cpt) {
+                    problems.push(format!("argument {} is `{}`, its constructor takes `{}`", i + 1, self.show(sp.ty), self.show(cpt)));
+                }
+            }
+        }
+        if info.is_abstract {
+            problems.push("it's abstract".to_string());
+        }
+        if !problems.is_empty() {
+            self.report(Diagnostic::new("T0803", span, format!("class `{n}` doesn't fit `{shown}`")).note("problems", problems.join("; ")));
+            return Some(ERROR);
+        }
+        Some(self.types.intern(Ty::ClassObj(c)))
+    }
+
     fn ident(&mut self, e: ExprId, sym: Sym, span: Span) -> TyId {
         if let Some((id, ty)) = self.lookup(sym) {
             if self.spec.on {
@@ -3639,7 +3739,9 @@ impl<'a> Checker<'a> {
                         self.pending_call = Some(e);
                         let sites = self.fn_item_sites(m, i);
                         self.set_call_spec(sites);
-                        return self.call_sig(&cs, &text, type_args, args, exp, span);
+                        let t = self.call_sig(&cs, &text, type_args, args, exp, span);
+                        // (overloads: the result of the first whose parameters take the arguments)
+                        return self.overload_ret(m, i, args, t);
                     }
                     // `Big(x)`: a class standing in for an npm package's constructor function,
                     // callable without `new` as the package's is
