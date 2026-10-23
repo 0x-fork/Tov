@@ -148,6 +148,7 @@ pub const CODES: &[(&str, &str)] = &[
     ("U0017", "This built-in is not supported yet."),
     ("U0019", "Setters are not supported yet; use a method."),
     ("U0020", "`cyclic class` is not supported yet (the cycle collector is planned for M2)."),
+    ("U0021", "A call signature (`{ (x: T): R }`) is supported only as the whole type: a function type. Not yet with other members, more than one, or in an interface."),
 ];
 
 pub fn lookup(code: &str) -> Option<&'static str> {

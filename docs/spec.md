@@ -65,6 +65,7 @@ Status tags: **[M0]** checked today · **[Mn]** planned for milestone n.
 - `type P = { x: f64, y: f64 }` declares an exact record. Two record types with the same fields are the same type.
 - An object literal must provide every required field and no others. Optional fields (`b?: U`) may be omitted and have type `U | undefined`.
 - Records, arrays, maps, sets, and strings are **values**: assignment copies (cheaply, copy-on-write). See §6.
+- A record type that's only a call signature, `{ (xs: number[], x: number): number | null }`, is that function type.
 
 ### Unions and narrowing
 - A **discriminated union** is a union of records sharing a string-literal field (e.g. `kind`). It compiles to a tagged union.

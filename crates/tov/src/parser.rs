@@ -20,7 +20,7 @@ pub fn parse(src: &str, file: FileId, interner: &mut Interner) -> (Ast, Vec<Diag
             lexed.tokens[i].kind = Tok::Ident;
         }
     }
-    let mut p = Parser { src, toks: lexed.tokens, strings: lexed.strings, pos: 0, file, interner, ast: Ast::default(), diags, script_stmts: Vec::new(), defaults: Vec::new(), more_stmts: Vec::new(), hidden: 0, prologue: Vec::new(), index_sig: None, local_fns: Vec::new(), prop_defaults: false, extra_members: Vec::new(), generic_arrows: Vec::new(), local_types: Vec::new(), local_type_items: Vec::new() };
+    let mut p = Parser { src, toks: lexed.tokens, strings: lexed.strings, pos: 0, file, interner, ast: Ast::default(), diags, script_stmts: Vec::new(), defaults: Vec::new(), more_stmts: Vec::new(), hidden: 0, prologue: Vec::new(), index_sig: None, call_sig: None, local_fns: Vec::new(), prop_defaults: false, extra_members: Vec::new(), generic_arrows: Vec::new(), local_types: Vec::new(), local_type_items: Vec::new() };
     p.ast.iterator_sym = Some(p.interner.intern("__iterator"));
     p.module();
     p.unhide_local_types();
@@ -310,6 +310,9 @@ struct Parser<'a> {
     prologue: Vec<StmtId>,
     /// The index signature `[k: K]: V` of the object type just parsed.
     index_sig: Option<(TypeId, TypeId, Span)>,
+    /// `{ (x: number): string }`: a call signature seen in the record type being read, the
+    /// function type it is.
+    call_sig: Option<(TypeId, Span)>,
     /// Function declarations in bodies, as `const`s (to hoist).
     local_fns: Vec<StmtId>,
     /// A parameter property in the list just parsed has a default value.
@@ -1625,7 +1628,11 @@ impl<'a> Parser<'a> {
             return;
         }
         let body_start = self.cur_span();
+        let saved_call = self.call_sig.take();
         let members = self.record_fields();
+        if let Some((_, cspan)) = std::mem::replace(&mut self.call_sig, saved_call) {
+            self.err("U0021", cspan, "an interface with a call signature is not supported yet; use a function type (`type F = (x: T) => R`)");
+        }
         let body = self.mk_ty(TypeExprKind::Record(members.clone()), body_start.to(self.prev_span()));
         let span = start.to(self.prev_span());
         self.ast.items.push(Item { kind: ItemKind::Interface { name, name_span, tparams, members, body }, span, exported });
@@ -2329,9 +2336,16 @@ impl<'a> Parser<'a> {
             }
             Tok::LBrace => {
                 let saved = self.index_sig.take();
+                let saved_call = self.call_sig.take();
                 let fields = self.record_fields();
                 let span = start.to(self.prev_span());
                 let sig = std::mem::replace(&mut self.index_sig, saved);
+                if let Some((f, cspan)) = std::mem::replace(&mut self.call_sig, saved_call) {
+                    if !fields.is_empty() || sig.is_some() {
+                        self.err("U0021", cspan, "a call signature with other members is not supported yet");
+                    }
+                    return f;
+                }
                 if let Some((k, v, sspan)) = sig {
                     if !fields.is_empty() {
                         self.err("X0017", sspan, "an index signature with other fields is not supported; use a `Map<K, V>` field for the dynamic keys");
@@ -2500,6 +2514,20 @@ impl<'a> Parser<'a> {
                     let ty = self.ty();
                     fields.push(FieldTy { name, name_span, optional, ty });
                 }
+            } else if self.at(Tok::LParen) {
+                // `{ (array: number[], target: number): number }`: a function type
+                let params = self.params();
+                self.defaults.clear();
+                self.prologue.clear();
+                self.expect(Tok::Colon, "before the call signature's return type");
+                let ret = self.ty();
+                let throws = self.effects_clause();
+                let span = start.to(self.prev_span());
+                let f = self.mk_ty(TypeExprKind::Func(params, ret, throws), span);
+                if self.call_sig.is_some() {
+                    self.err("U0021", span, "a type with more than one call signature (an overloaded function type) is not supported yet");
+                }
+                self.call_sig = Some((f, span));
             } else {
                 let msg = format!("expected a field name, found {}", self.found());
                 self.err("P0001", start, msg);
