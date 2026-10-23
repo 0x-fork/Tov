@@ -760,6 +760,7 @@ impl<'a> Checker<'a> {
         }
         // Fields that must be assigned: own, without initializer, not optional.
         let mut pending: Vec<Sym> = info.fields.iter().filter(|fl| fl.owner == c && !fl.has_init && !fl.optional && !self.types.has_undefined(fl.ty)).map(|fl| fl.name).collect();
+        let required = pending.clone();
         let mut assigned: Vec<Sym> = info.fields.iter().filter(|fl| fl.owner != c || fl.has_init || fl.optional).map(|fl| fl.name).collect();
         for &s in rest {
             if pending.is_empty() {
@@ -781,16 +782,29 @@ impl<'a> Checker<'a> {
             for e in exprs {
                 self.check_this_uses(c, e, &assigned, &pending);
             }
-            // Assignments nested in control flow count once they're unconditional; keep it simple.
+            // (assigned on every path through it, `if (x) this.f = a; else this.f = b`, as
+            // TypeScript's definite assignment sees)
+            let done: Vec<Sym> = pending.iter().copied().filter(|&n| super::assigned::assigns_field(ast, n, s)).collect();
+            pending.retain(|n| !done.contains(n));
+            assigned.extend(done);
         }
-        for n in pending {
+        // (on every path out of the body: a `return` before a field's assigned leaves it without)
+        let unassigned: Vec<Sym> = required.into_iter().filter(|&n| pending.contains(&n) || !super::assigned::assigns_field(ast, n, f.body)).collect();
+        let bsp = ast.stmt(f.body).span;
+        let written = |n: Sym| {
+            ast.exprs.iter().any(|e| {
+                e.span.file == bsp.file && e.span.start >= bsp.start && e.span.end <= bsp.end
+                    && matches!(&e.kind, ExprKind::Assign(_, t, _) if matches!(&ast.expr(*t).kind, ExprKind::Member { obj, name, .. } if *name == n && matches!(ast.expr(*obj).kind, ExprKind::This)))
+            })
+        };
+        for n in unassigned {
             let fl = info.fields.iter().find(|fl| fl.name == n).unwrap().clone();
             let fname = self.name(n).to_string();
             let shown = self.show(fl.ty);
             self.report(
-                Diagnostic::new("T0812", fl.span, format!("field `{fname}` is never assigned in the constructor"))
+                Diagnostic::new("T0812", fl.span, if !written(n) { format!("field `{fname}` is never assigned in the constructor") } else { format!("field `{fname}` isn't assigned on every path through the constructor") })
                     .note("why", "every field needs a value before the object is used")
-                    .note("instead", format!("assign `this.{fname} = ...` at the top level of the constructor, give it an initializer, or make it optional (`{fname}?: {shown}`)")),
+                    .note("instead", format!("assign `this.{fname} = ...` on every path through the constructor, give it an initializer, or make it optional (`{fname}?: {shown}`)")),
             );
         }
     }
@@ -1497,6 +1511,8 @@ fn any_expr(ast: &Ast, e: ExprId, pred: &dyn Fn(&ExprKind) -> bool) -> bool {
 /// Calls `f(span, Some(field))` for `this.field` reads and `f(span, None)` for any other use of `this`.
 fn walk_this(ast: &Ast, e: ExprId, parent_member: Option<(Sym, bool)>, f: &mut dyn FnMut(Span, Option<Sym>)) {
     match &ast.expr(e).kind {
+        // `this.f = v` (in a branch, say) writes the field: only `v` uses `this`
+        ExprKind::Assign(crate::ast::AssignOp::Assign, t, v) if matches!(&ast.expr(*t).kind, ExprKind::Member { obj, .. } if matches!(ast.expr(*obj).kind, ExprKind::This)) => walk_this(ast, *v, None, f),
         ExprKind::This => match parent_member {
             Some((name, false)) => f(ast.expr(e).span, Some(name)),
             _ => f(ast.expr(e).span, None),

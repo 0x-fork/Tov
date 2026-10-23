@@ -1,0 +1,16 @@
+class Half {
+  x: int
+  constructor(c: bool) {
+    if (c) this.x = 1
+  }
+}
+
+class Early {
+  y: int
+  constructor(c: bool) {
+    if (c) return
+    this.y = 2
+  }
+}
+
+console.log(new Half(true).x, new Early(false).y)

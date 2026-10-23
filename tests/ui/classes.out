@@ -1,7 +1,7 @@
 error[T0812] classes.tov:23:3: field `count` is never assigned in the constructor
    23 |   count: int
   why: every field needs a value before the object is used
-  instead: assign `this.count = ...` at the top level of the constructor, give it an initializer, or make it optional (`count?: int`)
+  instead: assign `this.count = ...` on every path through the constructor, give it an initializer, or make it optional (`count?: int`)
 
 error[T0813] classes.tov:34:5: `this` is used before every field is assigned
    34 |     this.log()

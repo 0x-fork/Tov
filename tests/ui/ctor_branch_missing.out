@@ -1,0 +1,11 @@
+error[T0812] ctor_branch_missing.tov:2:3: field `x` isn't assigned on every path through the constructor
+    2 |   x: int
+  why: every field needs a value before the object is used
+  instead: assign `this.x = ...` on every path through the constructor, give it an initializer, or make it optional (`x?: int`)
+
+error[T0812] ctor_branch_missing.tov:9:3: field `y` isn't assigned on every path through the constructor
+    9 |   y: int
+  why: every field needs a value before the object is used
+  instead: assign `this.y = ...` on every path through the constructor, give it an initializer, or make it optional (`y?: int`)
+
+2 error(s)

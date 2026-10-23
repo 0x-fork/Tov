@@ -1,5 +1,6 @@
 //! Definite assignment, as TypeScript's "used before being assigned": where a `let x: T;`
-//! (no value, and `T` without `undefined`) may be read before anything is assigned to it.
+//! (no value, and `T` without `undefined`) may be read before anything is assigned to it, and
+//! whether a constructor's statement assigns a field (`this.x = ...`) on every path.
 
 use crate::ast::{AssignOp, Ast, BinOp, ExprId, ExprKind, StmtId, StmtKind};
 use crate::intern::Sym;
@@ -31,7 +32,11 @@ struct Target {
 struct Da<'a> {
     ast: &'a Ast,
     name: Sym,
+    /// `this.name` rather than the variable `name`.
+    field: bool,
     reads: Vec<Span>,
+    /// What's assigned where it returns.
+    returns: State,
     targets: Vec<Target>,
     /// Inside a declaration that hides `x` (a block's own `let x`, a loop's or a `catch`'s).
     hidden: u32,
@@ -42,9 +47,17 @@ struct Da<'a> {
 /// The reads of `name` in `stmts` (which follow its declaration) that may come before it's
 /// assigned. Reads inside functions aren't counted (they may run later), nor are assignments.
 pub(super) fn unassigned_reads(ast: &Ast, name: Sym, stmts: &[StmtId]) -> Vec<Span> {
-    let mut da = Da { ast, name, reads: Vec::new(), targets: Vec::new(), hidden: 0, gave_up: false };
+    let mut da = Da { ast, name, field: false, reads: Vec::new(), returns: State::Dead, targets: Vec::new(), hidden: 0, gave_up: false };
     da.stmts(stmts, State::Unassigned);
     if da.gave_up { Vec::new() } else { da.reads }
+}
+
+/// Whether `stmt` (of a constructor) assigns `this.name` on every path that leaves it, by its
+/// end or a `return` (a path that throws needn't).
+pub(super) fn assigns_field(ast: &Ast, name: Sym, stmt: StmtId) -> bool {
+    let mut da = Da { ast, name, field: true, reads: Vec::new(), returns: State::Dead, targets: Vec::new(), hidden: 0, gave_up: false };
+    let end = da.stmt(stmt, State::Unassigned);
+    !da.gave_up && join(end, da.returns) != State::Unassigned
 }
 
 impl Da<'_> {
@@ -131,9 +144,11 @@ impl Da<'_> {
                 join(exit, t.breaks)
             }
             StmtKind::Return(e) => {
-                if let Some(e) = e {
-                    self.expr(*e, st);
-                }
+                let st = match e {
+                    Some(e) => self.expr(*e, st),
+                    None => st,
+                };
+                self.returns = join(self.returns, st);
                 State::Dead
             }
             StmtKind::Throw(e) => {
@@ -187,7 +202,11 @@ impl Da<'_> {
     }
 
     fn is_x(&self, e: ExprId) -> bool {
-        self.hidden == 0 && matches!(self.ast.expr(e).kind, ExprKind::Ident(n) if n == self.name)
+        match &self.ast.expr(e).kind {
+            ExprKind::Member { obj, name, optional: false, .. } if self.field => *name == self.name && matches!(self.ast.expr(*obj).kind, ExprKind::This),
+            ExprKind::Ident(n) if !self.field => self.hidden == 0 && *n == self.name,
+            _ => false,
+        }
     }
 
     fn read(&mut self, e: ExprId, st: State) {
@@ -199,10 +218,8 @@ impl Da<'_> {
     fn expr(&mut self, e: ExprId, st: State) -> State {
         let ast = self.ast;
         match &ast.expr(e).kind {
-            ExprKind::Ident(_) => {
-                if self.is_x(e) {
-                    self.read(e, st);
-                }
+            ExprKind::Ident(_) | ExprKind::Member { .. } if self.is_x(e) => {
+                self.read(e, st);
                 st
             }
             // (functions may run later: neither their reads nor their assignments count)
