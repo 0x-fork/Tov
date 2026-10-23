@@ -238,7 +238,24 @@ pub struct Lexed {
 pub fn lex(src: &str, file: FileId, diags: &mut Vec<Diagnostic>) -> Lexed {
     let mut lx = Lexer { src: src.as_bytes(), text: src, pos: 0, file, diags, tokens: Vec::new(), strings: Vec::new(), braces: Vec::new() };
     lx.run();
-    Lexed { tokens: lx.tokens, strings: lx.strings }
+    let mut tokens = lx.tokens;
+    // `type` is a keyword only where it starts a declaration (`type X = ...`, `type X<T>`,
+    // `import type`, `export type`, `import { type X }`); elsewhere it's a name (`const type = ...`,
+    // `for (const type of types)`), as in TypeScript.
+    for i in 0..tokens.len() {
+        if tokens[i].kind != Tok::Type {
+            continue;
+        }
+        let at = |k: usize| tokens.get(k).map(|t| t.kind);
+        let prev = if i > 0 { at(i - 1) } else { None };
+        let decl = (at(i + 1) == Some(Tok::Ident) && matches!(at(i + 2), Some(Tok::Eq) | Some(Tok::Lt)))
+            || matches!(prev, Some(Tok::Import) | Some(Tok::Export))
+            || (matches!(prev, Some(Tok::LBrace) | Some(Tok::Comma)) && at(i + 1) == Some(Tok::Ident) && matches!(at(i + 2), Some(Tok::Comma) | Some(Tok::RBrace) | Some(Tok::Ident)));
+        if !decl {
+            tokens[i].kind = Tok::Ident;
+        }
+    }
+    Lexed { tokens, strings: lx.strings }
 }
 
 struct Lexer<'a> {

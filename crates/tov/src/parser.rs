@@ -1145,6 +1145,12 @@ impl<'a> Parser<'a> {
             let prop_defaults = std::mem::take(&mut self.prop_defaults);
             let ret = if self.eat(Tok::Colon) { Some(self.ty()) } else { None };
             let throws = self.effects_clause();
+            // (an overload's signature, `get(i: number): T;` before `get(i: number) { ... }`:
+            // calls are checked against the implementation's)
+            if !self.at(Tok::LBrace) && !is_abstract && self.member_named_next(&text) {
+                self.eat(Tok::Semi);
+                return None;
+            }
             let body = if self.at(Tok::LBrace) {
                 let b = self.block();
                 self.with_defaults(defaults, b)
@@ -1568,6 +1574,24 @@ impl<'a> Parser<'a> {
         Some(FnDecl { name, name_span, tparams, params, ret, throws, body, is_async: false, is_gen: false })
     }
 
+    /// After a method's signature without a body: the next member is one of the same name (after
+    /// a `;` and modifiers).
+    fn member_named_next(&self, name: &str) -> bool {
+        let mut i = self.pos + usize::from(self.at(Tok::Semi));
+        if !(self.at(Tok::Semi) || self.tok().nl_before) {
+            return false;
+        }
+        while let Some(t) = self.toks.get(i) {
+            let w = self.text(*t);
+            if (t.kind == Tok::Async || (t.kind == Tok::Ident && matches!(w, "public" | "private" | "protected" | "static" | "readonly" | "override" | "abstract"))) && self.toks.get(i + 1).is_some_and(|n| n.kind == Tok::Ident) {
+                i += 1;
+                continue;
+            }
+            return (t.kind == Tok::Ident || matches!(w, "constructor")) && w == name;
+        }
+        false
+    }
+
     /// After a signature without a body: another declaration of `name` comes next (perhaps
     /// after a `;`, `export`, `async`).
     fn overload_follows(&self, name: Sym) -> bool {
@@ -1579,7 +1603,9 @@ impl<'a> Parser<'a> {
         while matches!(at(i), Tok::Export | Tok::Async) {
             i += 1;
         }
-        at(i) == Tok::Function && self.toks.get(i + 1).is_some_and(|t| t.kind == Tok::Ident && self.text(*t) == self.interner.get(name))
+        // (`function* f`: a generator's)
+        let star = usize::from(at(i + 1) == Tok::Star);
+        at(i) == Tok::Function && self.toks.get(i + 1 + star).is_some_and(|t| t.kind == Tok::Ident && self.text(*t) == self.interner.get(name))
     }
 
     /// `throws E` (returned) / `uses fs | net` (not supported yet).
@@ -4302,6 +4328,15 @@ impl<'a> Parser<'a> {
                 self.mk_expr(ExprKind::Array(elems), span)
             }
             Tok::LBrace => self.object_literal(),
+            // `async function (x) { }`: an async arrow function
+            Tok::Async if self.nth(1) == Tok::Function && matches!(self.nth(2), Tok::LParen | Tok::Ident) => {
+                self.bump();
+                self.bump();
+                let (name, name_span) = if self.at(Tok::Ident) { self.ident("a function name").unwrap() } else { (self.interner.intern(""), start) };
+                let Some(f) = self.function_rest(name, name_span) else { return self.mk_expr(ExprKind::Error, start) };
+                let span = start.to(self.prev_span());
+                self.arrow_of(f, true, span)
+            }
             // `function (x) { }`: an arrow function (`this` and `arguments` aren't supported)
             Tok::Function if matches!(self.nth(1), Tok::LParen | Tok::Ident) && !(self.nth(1) == Tok::Ident && self.nth(2) == Tok::Lt) => {
                 self.bump();
