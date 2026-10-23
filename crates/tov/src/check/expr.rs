@@ -2736,6 +2736,18 @@ impl<'a> Checker<'a> {
 
     /// `a` and `b` as one type, TypeScript's `number` being `int` or `f64` (`int[]` and `f64[]`
     /// are `f64[]`; tuples join by element), else their union.
+    /// Two record types with the same fields, the same ones optional, whose types join
+    /// (numbers with numbers, or the same type).
+    fn same_fields(&mut self, a: TyId, b: TyId) -> bool {
+        let (fa, fb) = (self.types.fields_in_order(a), self.types.fields_in_order(b));
+        fa.len() == fb.len()
+            && fa.iter().all(|f| {
+                fb.iter().any(|g| {
+                    g.name == f.name && g.optional == f.optional && (g.ty == f.ty || (self.types.is_numeric(g.ty) && self.types.is_numeric(f.ty)) || matches!((self.types.get(f.ty), self.types.get(g.ty)), (Ty::Record(_), Ty::Record(_)) | (Ty::Array(_), Ty::Array(_))))
+                })
+            })
+    }
+
     fn join_numbers(&mut self, a: TyId, b: TyId) -> TyId {
         if a == b || b == NEVER {
             return a;
@@ -2755,6 +2767,21 @@ impl<'a> Checker<'a> {
                 (Some(x), Some(y)) if x.len() == y.len() => {
                     let tys: Vec<TyId> = x.iter().zip(&y).map(|(p, q)| (p.ty, q.ty)).collect::<Vec<_>>().into_iter().map(|(p, q)| self.join_numbers(p, q)).collect();
                     self.tuple_ty(&tys)
+                }
+                // (records of the same fields, `[{ year: 0 }, { year: 12.2 }]`: field by field, a
+                // `{ year: number }` as TypeScript's)
+                (None, None) if matches!((self.types.get(a), self.types.get(b)), (Ty::Record(_), Ty::Record(_))) && self.same_fields(a, b) => {
+                    let (fa, fb) = (self.types.fields_in_order(a), self.types.fields_in_order(b));
+                    let mut fields = Vec::new();
+                    for f in &fa {
+                        let g = fb.iter().find(|g| g.name == f.name).unwrap();
+                        let ty = self.join_numbers(f.ty, g.ty);
+                        fields.push(Field { name: f.name, ty, optional: f.optional });
+                    }
+                    let order: Vec<Sym> = fields.iter().map(|f| f.name).collect();
+                    let r = self.types.record(fields);
+                    self.types.note_field_order(r, order);
+                    r
                 }
                 _ => self.types.union(&[a, b]),
             },
@@ -2853,6 +2880,11 @@ impl<'a> Checker<'a> {
         }
         if tys.iter().all(|&t| self.types.is_numeric(t)) && tys.iter().any(|&t| self.types.is_float(t)) && tys.iter().all(|&t| t == INT || t == F64) {
             return self.types.array(F64);
+        }
+        // (`[{ year: 0 }, { year: 12.2 }]`: one record type, `{ year: number }`, as TypeScript's)
+        if tys.len() > 1 && tys.iter().all(|&t| matches!(self.types.get(t), Ty::Record(_)) && self.tuple_of(t).is_none()) && tys[1..].iter().all(|&t| self.same_fields(tys[0], t)) {
+            let one = tys[1..].iter().fold(tys[0], |a, &b| self.join_numbers(a, b));
+            return self.types.array(one);
         }
         let u = self.types.union(&tys);
         self.types.array(u)
