@@ -406,7 +406,9 @@ pub enum ItemKind {
     Function(FnDecl),
     TypeAlias { name: Sym, name_span: Span, tparams: Vec<TypeParam>, ty: TypeId },
     /// `body`: the members as a record type (what an interface no class implements is).
-    Interface { name: Sym, name_span: Span, tparams: Vec<TypeParam>, members: Vec<FieldTy>, body: TypeId },
+    /// `interface I<T> extends A, B<T> { ... }`: its own members, and the types it extends (`body`:
+    /// the record of all of them).
+    Interface { name: Sym, name_span: Span, tparams: Vec<TypeParam>, members: Vec<FieldTy>, body: TypeId, extends: Vec<TypeId> },
     /// A module-level `const` (or `let`, with `mutable`).
     Const { name: Sym, name_span: Span, ty: Option<TypeId>, init: ExprId, mutable: bool },
     /// `test("name", () => ...)`; `suite`: a `describe` block, whose `it`s are tests of their own.

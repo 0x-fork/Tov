@@ -141,7 +141,6 @@ pub const CODES: &[(&str, &str)] = &[
     ("U0011", "Spread and rest syntax are not supported yet."),
     ("U0012", "Methods in object literals are not supported yet."),
     ("U0013", "Generators are not supported yet."),
-    ("U0014", "Interface inheritance is not supported yet."),
     ("U0015", "Generic arrow functions and generic interface methods are not supported yet."),
     ("U0016", "Regular expression literals are not supported yet."),
     ("U0017", "This built-in is not supported yet."),

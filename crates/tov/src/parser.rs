@@ -1651,7 +1651,7 @@ impl<'a> Parser<'a> {
         // types are structural, a class instance with them is one), a record until one is given
         if let TypeExprKind::Record(fields) = &self.ast.ty(ty).kind {
             let members = fields.clone();
-            self.ast.items.push(Item { kind: ItemKind::Interface { name, name_span, tparams, members, body: ty }, span, exported });
+            self.ast.items.push(Item { kind: ItemKind::Interface { name, name_span, tparams, members, body: ty, extends: Vec::new() }, span, exported });
             return;
         }
         self.ast.items.push(Item { kind: ItemKind::TypeAlias { name, name_span, tparams, ty }, span, exported });
@@ -1664,12 +1664,14 @@ impl<'a> Parser<'a> {
             return;
         };
         let tparams = self.tparams();
-        if self.at(Tok::Extends) {
-            let span = self.cur_span();
-            self.err("U0014", span, "interface inheritance is not supported yet; repeat the members");
-            self.bump();
-            while !self.at(Tok::LBrace) && !self.at(Tok::Eof) {
-                self.bump();
+        // `extends A, B<T>`: their members too
+        let mut extends = Vec::new();
+        if self.eat(Tok::Extends) {
+            loop {
+                extends.push(self.ty());
+                if !self.eat(Tok::Comma) {
+                    break;
+                }
             }
         }
         if !self.at(Tok::LBrace) {
@@ -1684,8 +1686,16 @@ impl<'a> Parser<'a> {
             self.err("U0021", cspan, "an interface with a call signature is not supported yet; use a function type (`type F = (x: T) => R`)");
         }
         let body = self.mk_ty(TypeExprKind::Record(members.clone()), body_start.to(self.prev_span()));
+        // (as a record: those it extends and its own members, `A & B<T> & { ... }`)
+        let body = if extends.is_empty() {
+            body
+        } else {
+            let mut parts = extends.clone();
+            parts.push(body);
+            self.mk_ty(TypeExprKind::Intersection(parts), body_start.to(self.prev_span()))
+        };
         let span = start.to(self.prev_span());
-        self.ast.items.push(Item { kind: ItemKind::Interface { name, name_span, tparams, members, body }, span, exported });
+        self.ast.items.push(Item { kind: ItemKind::Interface { name, name_span, tparams, members, body, extends }, span, exported });
     }
 
     fn const_item(&mut self, start: Span, exported: bool) {

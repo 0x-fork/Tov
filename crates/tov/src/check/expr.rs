@@ -4941,7 +4941,28 @@ impl<'a> Checker<'a> {
                         for (p, a) in pargs.iter().zip(&aargs) {
                             self.unify(*p, *a, free, map);
                         }
+                        return;
                     }
+                // (a class or an object given for an interface, `drain(stack)` for a
+                // `Collection<T>`: its members' types against the interface's)
+                if let Ty::Interface(i, pargs) = *self.types.get(pattern)
+                    && matches!(self.types.get(actual), Ty::Class(..) | Ty::Record(_) | Ty::Interface(..))
+                {
+                    let pargs = self.types.tys(pargs).to_vec();
+                    let fields = self.iface_fields_inst(i, &pargs);
+                    for f in fields {
+                        if !self.types.mentions(f.ty, free) {
+                            continue;
+                        }
+                        let mt = match *self.types.get(actual) {
+                            Ty::Class(..) => self.class_member(actual, f.name).map(|mr| self.member_type(&mr)),
+                            _ => self.field_of(actual, f.name),
+                        };
+                        if let Some(mt) = mt {
+                            self.unify(f.ty, mt, free, map);
+                        }
+                    }
+                }
             }
             _ => {}
         }

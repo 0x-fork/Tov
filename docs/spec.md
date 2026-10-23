@@ -74,7 +74,7 @@ Status tags: **[M0]** checked today · **[Mn]** planned for milestone n.
 - A `switch` over a union discriminant or literal union must be exhaustive or have `default`.
 
 ### Interfaces **[M2]**
-- `interface` is structural and implicit: any record or class with the members (and matching types) satisfies it. As a generic bound it is statically dispatched; as a value type (`function f(x: Named)`, `Shape[]`) it holds any satisfying value. A record behind an interface is a copy (records stay values); a class instance is shared.
+- `interface` is structural and implicit: any record or class with the members (and matching types) satisfies it. `interface B extends A, C<T>` has their members too. As a generic bound it is statically dispatched; as a value type (`function f(x: Named)`, `Shape[]`) it holds any satisfying value. A record behind an interface is a copy (records stay values); a class instance is shared.
 - Methods in interfaces (`area(): f64`) are function-typed members: a class satisfies them with methods, a record with fields holding functions.
 
 ### Generics
@@ -135,7 +135,7 @@ class Circle extends Shape {
   get diameter(): f64 { return 2 * this.r }
 }
 ```
-- Single inheritance (`extends`, `super(...)`, `super.method(...)`), `abstract` classes and methods, `implements` (checked structurally), `static` methods and fields, getters and setters (`set name(v)`: `x.name = v`, `x.name += 1`), `x.constructor.name`, `public`/`protected`/`private` and `#private` members, `readonly` fields (set only by their initializer or the constructor), parameter properties. No generic methods yet (make the class generic, or use a top-level generic function).
+- Single inheritance (`extends`, `super(...)`, `super.method(...)`), `abstract` classes and methods, `implements` (checked structurally), `static` methods and fields, getters and setters (`set name(v)`: `x.name = v`, `x.name += 1`), `x.constructor.name`, `public`/`protected`/`private` and `#private` members, `readonly` fields (set only by their initializer or the constructor), parameter properties, generic methods (`map<U>(f: (x: T) => U): List<U>`).
 - Every field needs a value: an initializer, an assignment on every path through the constructor (in each branch of an `if` or a `switch`, before any `return`; a path that throws needn't), `?` (optional), or `!` (`size!: number`: assigned later, by a method the constructor calls, say, which TypeScript takes on trust; read before then, it holds its type's empty value, `0` or `""` or `[]`, where JavaScript has `undefined`). In a constructor, `this` is only used to set fields until all are set. A derived class's constructor starts with `super(...)`.
 - An override takes the same parameters (or wider types) and returns the same type (or a narrower one). Methods nobody overrides are called directly.
 - A class can be given as a value where a function's parameter is a constructor type: `new () => Shape`, `new <T>() => Queue<T>` (a generic class for it), or `typeof Shape` (it or a class extending it). `new Q(...)` makes one of the class each call gives; the class is checked against the type (its constructor's parameters, its instances' type) where it's given. Each call's class is known when it's compiled, so `new Q()` costs what `new ArrayQueue()` does. Not yet: classes in variables, arrays or fields.

@@ -867,6 +867,26 @@ impl<'a> Checker<'a> {
                 }
             }
         }
+        // (an interface a class implements implements those it extends too)
+        loop {
+            let before = implemented.len();
+            for module in modules.iter() {
+                for item in &module.ast.items {
+                    if let ItemKind::Interface { name, extends, .. } = &item.kind
+                        && implemented.contains(name)
+                    {
+                        for &te in extends {
+                            if let TypeExprKind::Named { name, .. } = &module.ast.ty(te).kind {
+                                implemented.insert(*name);
+                            }
+                        }
+                    }
+                }
+            }
+            if implemented.len() == before {
+                break;
+            }
+        }
         for (mi, module) in modules.iter().enumerate() {
             let mi = mi as u32;
             let mut scope = ModScope::default();
@@ -2076,7 +2096,7 @@ impl<'a> Checker<'a> {
         }
         Arc::make_mut(&mut self.ifaces)[i as usize].resolving = true;
         let (m, ii) = (self.ifaces[i as usize].module, self.ifaces[i as usize].item);
-        let ItemKind::Interface { tparams, members, .. } = &self.modules[m as usize].ast.items[ii as usize].kind else { return Vec::new() };
+        let ItemKind::Interface { tparams, members, extends, .. } = &self.modules[m as usize].ast.items[ii as usize].kind else { return Vec::new() };
         let fields = self.committed(|c| {
             c.with_module(m, |c| {
                 let mut tscope = Vec::new();
@@ -2098,6 +2118,30 @@ impl<'a> Checker<'a> {
                     let ty = c.resolve_type(f.ty, &tscope);
                     let ty = if f.optional { c.types.optional(ty) } else { ty };
                     fields.push(Field { name: f.name, ty, optional: f.optional });
+                }
+                // (`extends A, B<T>`: their members, unless it has its own of the name)
+                for &te in extends {
+                    let t = c.resolve_type(te, &tscope);
+                    let base: Vec<Field> = match *c.types.get(t) {
+                        Ty::Interface(j, args) => {
+                            let args = c.types.tys(args).to_vec();
+                            c.iface_fields_inst(j, &args)
+                        }
+                        Ty::Record(_) => c.types.fields_in_order(t),
+                        Ty::Class(..) => c.class_as_fields(t),
+                        Ty::Error => Vec::new(),
+                        _ => {
+                            let shown = c.show(t);
+                            let s = c.ast().ty(te).span;
+                            c.report(Diagnostic::new("T0809", s, format!("an interface extends interfaces and object types, found `{shown}`")));
+                            Vec::new()
+                        }
+                    };
+                    for f in base {
+                        if seen.insert(f.name) {
+                            fields.push(f);
+                        }
+                    }
                 }
                 fields.sort_by_key(|f| f.name);
                 fields
