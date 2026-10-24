@@ -895,7 +895,7 @@ impl<'a> Checker<'a> {
 
     /// An object literal given where a dictionary goes, checked again as one: a map of what its
     /// fields hold.
-    fn as_dict(&mut self, init: ExprId, found: TyId) -> TyId {
+    pub(super) fn as_dict(&mut self, init: ExprId, found: TyId) -> TyId {
         let Ty::Record(fs) = *self.types.get(found) else { return found };
         if !matches!(self.ast().expr(init).kind, ast::ExprKind::Object(_)) {
             return found;

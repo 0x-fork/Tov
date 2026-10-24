@@ -490,6 +490,24 @@ impl<'a> Checker<'a> {
                                 return self.expr(*x, Some(tuple));
                             }
                         }
+                        // `["free", "pro", "team"] as const`: its strings keep their literal types
+                        // (an element is any of them: `tiers[i]` is `"free" | "pro" | "team"`)
+                        if exp.is_none()
+                            && let ExprKind::Array(xs) = &self.ast().expr(*x).kind
+                            && !xs.is_empty()
+                            && xs.iter().all(|&el| matches!(self.ast().expr(el).kind, ExprKind::Str(_)))
+                        {
+                            let lits: Vec<TyId> = xs
+                                .iter()
+                                .map(|&el| match self.ast().expr(el).kind {
+                                    ExprKind::Str(s) => self.types.intern(Ty::StrLit(s)),
+                                    _ => STR,
+                                })
+                                .collect();
+                            let el = self.types.union(&lits);
+                            let t = self.types.array(el);
+                            return self.expr(*x, Some(t));
+                        }
                         // `{ next: "green" } as const`: its strings keep their literal types
                         let object = matches!(self.ast().expr(*x).kind, ExprKind::Object(_));
                         let saved = std::mem::replace(&mut self.as_const, object);
@@ -2154,7 +2172,26 @@ impl<'a> Checker<'a> {
                 return STR;
             }
         }
-        let t = self.expr(obj, None);
+        // (`({ "&": "&amp;", "<": "&lt;" })[c]` with a string `c`: the object is a dictionary,
+        // its keys any strings; checked quietly first for the types of the key and the values)
+        let mut lit = obj;
+        while let ExprKind::Paren(x) = self.ast().expr(lit).kind {
+            lit = x;
+        }
+        let dict = if matches!(self.ast().expr(lit).kind, ExprKind::Object(_)) && !matches!(self.ast().expr(index).kind, ExprKind::Str(_)) {
+            let saved = std::mem::take(&mut self.diags);
+            let it = self.expr(index, None);
+            let found = self.expr(lit, None);
+            self.diags = saved;
+            let any_string = self.types.is_string(it) && self.flat_members(it).iter().all(|&m| !matches!(self.types.get(m), Ty::StrLit(_)));
+            (any_string && matches!(self.types.get(found), Ty::Record(_))).then_some(found)
+        } else {
+            None
+        };
+        let t = match dict {
+            Some(found) => self.as_dict(lit, found),
+            None => self.expr(obj, None),
+        };
         let base = if optional {
             self.types.without_nullish(t)
         } else {
