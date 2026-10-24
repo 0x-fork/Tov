@@ -2810,13 +2810,7 @@ impl<'c, 'a> Gen<'c, 'a> {
                 };
                 let coll = self.expr(*iter);
                 // a string: its characters (code points), as JavaScript iterates it
-                let coll = if matches!(self.tget(coll.ty), Ty::Str | Ty::StrLit(_)) {
-                    let sv = self.coerce(coll, STR);
-                    let arr = self.c.types.array(STR);
-                    self.tmp(arr, &format!("tv_str_chars({})", sv.code), true)
-                } else {
-                    coll
-                };
+                let coll = if matches!(self.tget(coll.ty), Ty::Str | Ty::StrLit(_)) { self.coerce(coll, STR) } else { coll };
                 let coll_ty = coll.ty;
                 // Iterate a snapshot (retained), so the loop is unaffected by mutation of the collection.
                 let snap = self.consume(coll);
@@ -2860,6 +2854,14 @@ impl<'c, 'a> Gen<'c, 'a> {
                         } else {
                             self.line(format!("{ect} {var} = ({ect}){{ .f_{f0} = *({kct} *){cur}k, .f_{f1} = *({vct} *){cur}v }};"));
                         }
+                    }
+                    // (each code point, made as it's reached)
+                    Ty::Str => {
+                        let cur = self.fresh("i");
+                        self.line(format!("tv_int {cur} = 0;"));
+                        self.open("for (;;) {");
+                        self.line(format!("tv_str {var}; if (!tv_str_next_char({sn}, &{cur}, &{var})) break;"));
+                        self.b().iter_release = Some(format!("tv_str_release({var});"));
                     }
                     Ty::Set(_) => {
                         let kd = self.desc(elem);

@@ -247,6 +247,7 @@ static inline tv_int tv_str_char_code_at(tv_str s, tv_int i) {
     return tv_str_char_code_at_slow(s, i);
 }
 tv_int tv_str_code_point_at(tv_str s, tv_int i);            /* -1 out of range */
+bool tv_str_next_char(tv_str s, tv_int *pos, tv_str *out);   /* for...of: the next code point, owned */
 tv_str tv_str_unit_at(tv_str s, tv_int i);                  /* one unit as a string (0 <= i < length) */
 tv_str tv_str_char_at(tv_str s, tv_int i);                  /* charAt: "" out of range */
 tv_str tv_str_from_char_code(tv_int c);                     /* String.fromCharCode(c) */

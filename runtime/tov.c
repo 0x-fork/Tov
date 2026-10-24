@@ -1969,6 +1969,25 @@ tv_int tv_str_index_of(tv_str s, tv_str needle) {
 
 static tv_arrbuf *tv_arrbuf_new(size_t esize, int64_t cap);
 
+/* `for (const ch of s)`: the code point at byte *pos as a string, *pos moved past it; false at
+ * the end. (No array of them: printable ASCII characters are immortal strings.) */
+bool tv_str_next_char(tv_str s, tv_int *pos, tv_str *out) {
+    size_t n = (size_t)s.p->len, i = (size_t)*pos;
+    if (i >= n) return false;
+    const char *d = s.p->data;
+    unsigned char c = (unsigned char)d[i];
+    if (c - 32u < 96u) {
+        *out = tv_ascii_str(c);
+        *pos = (tv_int)i + 1;
+        return true;
+    }
+    size_t l = tv_utf8_len(c);
+    if (l > n - i) l = n - i;
+    *out = tv_str_from(d + i, l);
+    *pos = (tv_int)(i + l);
+    return true;
+}
+
 tv_arr tv_str_chars(tv_str s) {
     int64_t count = tv_str_char_count(s);
     if (count == 0) return tv_arr_fresh();
