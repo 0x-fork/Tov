@@ -869,8 +869,14 @@ impl<'c, 'a> Gen<'c, 'a> {
         if self.uses_inspect {
             return bare;
         }
+        // (errors are thrown, retained as `tvg_err` wherever they go: never bare)
+        let error = self.c.error_class();
+        let error_decl = self.c.class_of(error).map(|(d, _)| d);
         for t in self.class_list.clone() {
             let ci = self.class_insts[&t].clone();
+            if error_decl.is_some_and(|e| self.c.class_descends(ci.decl, e)) {
+                continue;
+            }
             let info = &self.c.classes[ci.decl as usize];
             let has_fields = info.fields.iter().any(|f| f.owner == ci.decl);
             if info.base.is_some() || ci.cyclic || !has_fields || shared.contains(&t) || self.cid_decls.contains(&ci.decl) {

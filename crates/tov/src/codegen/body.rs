@@ -4752,6 +4752,12 @@ impl<'c, 'a> Gen<'c, 'a> {
                 let conds: Vec<String> = allowed.iter().map(|&i| format!("!{}", self.u_is(&v.code, v.ty, i))).collect();
                 let msg = if to == self.c.types.without_nullish(v.ty) { "value is undefined (`!` assertion failed)" } else { "`as` cast failed: the value has a different type" };
                 self.line(format!("if ({}) tv_trap({}, {loc});", conds.join(" && "), c_string(msg.as_bytes())));
+                // (a value of its own, `return x!` moving x: still its own, as the member)
+                if v.owned && self.is_rc(to) {
+                    let code = self.consume(v.clone());
+                    let p = self.project(Val { code, ..v }, to);
+                    return self.tmp(to, &p.code, true);
+                }
                 return self.project(v, to);
             }
         }

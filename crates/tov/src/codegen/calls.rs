@@ -88,9 +88,11 @@ impl<'c, 'a> Gen<'c, 'a> {
                     let ct = self.ctype(ret);
                     let (cache, v) = (self.fresh("rec"), self.fresh("re"));
                     let call = format!("{cname}({})", argv.join(", "));
+                    // (through retain_code: the class is counted, so it keeps its header)
+                    let rt = self.retain_code(ret, &v);
                     self.line(format!("static {ct} {cache}; {ct} {v};"));
                     self.line(format!(
-                        "if ({cache} && ((tvg_obj *){cache})->rc == 1) {{ {v} = {cache}; {v}->f_lastIndex = 0; tvg_obj_retain({v}); }} else {{ {v} = {call}; if (!{cache}) {{ {cache} = {v}; tvg_obj_retain({v}); }} }}"
+                        "if ({cache} && ((tvg_obj *){cache})->rc == 1) {{ {v} = {cache}; {v}->f_lastIndex = 0; {rt}; }} else {{ {v} = {call}; if (!{cache}) {{ {cache} = {v}; {rt}; }} }}"
                     ));
                     let r = self.tmp(ret, &v, true);
                     return self.coerce(r, ty);
