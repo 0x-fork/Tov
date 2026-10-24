@@ -1060,7 +1060,14 @@ impl<'c, 'a> Gen<'c, 'a> {
                 let ect = self.ctype(et);
                 let out = self.fresh("e");
                 let ok = self.fresh("ok");
-                self.line(format!("{ect} {out}; bool {ok} = tv_arr_{name}(&{lv}, {d}, &{out});"));
+                if name == "pop" {
+                    // (inline: the last element moved out; an array with elements is its own, the
+                    // immortal empty one having none)
+                    let pb = self.fresh("pb");
+                    self.line(format!("{ect} {out}; bool {ok}; {{ tv_arrbuf *{pb} = ({lv}).p; {ok} = {pb}->len > 0; if ({ok}) {out} = (({ect} *)(void *)tv_arrbuf_data({pb}))[--{pb}->len]; }}"));
+                } else {
+                    self.line(format!("{ect} {out}; bool {ok} = tv_arr_{name}(&{lv}, {d}, &{out});"));
+                }
                 self.optional_from(&ok, Val { code: out, ty: et, owned: true }, ty)
             }
             (Ty::Array(et), "fill") => {
