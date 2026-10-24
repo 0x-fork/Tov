@@ -208,10 +208,26 @@ index d4da3311..855c9dc0 100644
      VM* m_vm;
      AtomStringTable* m_entryAtomStringTable; 
 diff --git a/Source/JavaScriptCore/runtime/VM.cpp b/Source/JavaScriptCore/runtime/VM.cpp
-index 808600c4..45e6637f 100644
+index 808600c4..26119403 100644
 --- a/Source/JavaScriptCore/runtime/VM.cpp
 +++ b/Source/JavaScriptCore/runtime/VM.cpp
-@@ -1466,6 +1466,12 @@ void VM::drainMicrotasks()
+@@ -546,11 +546,10 @@ WTF_ALLOW_UNSAFE_BUFFER_USAGE_END
+ 
+     Config::finalize();
+ 
+-    if (!isInMiniMode()) {
+-        initializeAvailableTimeZones();
+-        if (heapType == HeapType::Large)
+-            dateCache.timeZoneDisplayName(/* isDST */ false);
+-    }
++    // (Tov: neither the table of every time zone ICU knows, enumerated and canonicalized, nor the
++    // host zone's name, made here: a tenth of a program's start; both are made the first time
++    // a date or time zone needs them)
++    UNUSED_PARAM(heapType);
+ 
+     // We must set this at the end only after the VM is fully initialized.
+     WTF::storeStoreFence();
+@@ -1466,6 +1465,12 @@ void VM::drainMicrotasks()
      if (m_drainMicrotaskDelayScopeCount) [[unlikely]]
          return;
  
