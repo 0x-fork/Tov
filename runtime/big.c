@@ -632,7 +632,21 @@ static void tv_mag_divrem(tv_limb *q, tv_limb *r, const tv_limb *a, uint32_t n, 
             big_r = rhat < old;
         }
         tv_limb top = u[k];
-        tv_limb borrow = tv_mag_submul1(u + j, b, m, qhat);
+        tv_limb borrow;
+        if (m <= 4) {
+            /* (a divisor of up to four limbs: the product subtracted inline) */
+            tv_limb c = 0;
+            for (uint32_t i = 0; i < 4; i++) {
+                if (i >= m) break;
+                tv_dlimb p = (tv_dlimb)b[i] * qhat + c;
+                tv_limb lo = (tv_limb)p, x = u[j + i];
+                c = (tv_limb)(p >> 64) + (x < lo);
+                u[j + i] = x - lo;
+            }
+            borrow = c;
+        } else {
+            borrow = tv_mag_submul1(u + j, b, m, qhat);
+        }
         if (top < borrow) {
             /* one too many: add the divisor back */
             qhat--;
@@ -689,6 +703,33 @@ tv_big tv_big_sub_slow(tv_big a, tv_big b) {
     return tv_big_addv(&x, &y, y.n ? !y.neg : false);
 }
 
+/* r[0..an+bn) = a * b for numbers of at most four limbs each (256 bits: elliptic curves, hashes),
+ * in one inlined loop nest the compiler unrolls, with no calls or size dispatch. */
+static inline void tv_mag_mul_small(tv_limb *restrict r, const tv_limb *a, uint32_t an, const tv_limb *b, uint32_t bn) {
+    /* (the first row written, the rest added in: no buffer to clear or copy, which the compiler
+     * would make calls to memset and memcpy) */
+    tv_limb c = 0, b0 = b[0];
+    for (uint32_t i = 0; i < 4; i++) {
+        if (i >= an) break;
+        tv_dlimb p = (tv_dlimb)a[i] * b0 + c;
+        r[i] = (tv_limb)p;
+        c = (tv_limb)(p >> 64);
+    }
+    r[an] = c;
+    for (uint32_t j = 1; j < 4; j++) {
+        if (j >= bn) break;
+        tv_limb bj = b[j];
+        c = 0;
+        for (uint32_t i = 0; i < 4; i++) {
+            if (i >= an) break;
+            tv_dlimb p = (tv_dlimb)a[i] * bj + r[i + j] + c;
+            r[i + j] = (tv_limb)p;
+            c = (tv_limb)(p >> 64);
+        }
+        r[an + j] = c;
+    }
+}
+
 tv_big tv_big_mul_slow(tv_big a, tv_big b) {
     if (tv_big_is_small(a) && tv_big_is_small(b)) return tv_big_from_i128((__int128)(a.v >> 1) * (b.v >> 1));
     tv_bview x, y;
@@ -696,7 +737,8 @@ tv_big tv_big_mul_slow(tv_big a, tv_big b) {
     tv_view(b, &y);
     if (!x.n || !y.n) return tv_big_small(0);
     tv_bigbuf *r = tv_bb_new(x.n + y.n);
-    if (y.n == 1) r->d[x.n] = tv_mag_mul1(r->d, x.d, x.n, y.d[0]);
+    if (x.n <= 4 && y.n <= 4) tv_mag_mul_small(r->d, x.d, x.n, y.d, y.n);
+    else if (y.n == 1) r->d[x.n] = tv_mag_mul1(r->d, x.d, x.n, y.d[0]);
     else if (x.n == 1) r->d[y.n] = tv_mag_mul1(r->d, y.d, y.n, x.d[0]);
     else tv_mag_mul(r->d, x.d, x.n, y.d, y.n);
     r->len = x.n + y.n;
