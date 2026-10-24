@@ -2836,6 +2836,10 @@ impl<'c, 'a> Gen<'c, 'a> {
             let (d, ect) = (self.desc(et), self.ctype(et));
             let zero = self.default_value(et);
             let loc = self.loc(span);
+            // (zeros: `null`, `0`, `false`, an empty array or string slot)
+            if matches!(zero.as_str(), "0" | "NULL" | "false" | "((tv_arr){NULL})" | "((tv_str){NULL})") {
+                return self.tmp(ty, &format!("tv_arr_zeros(sizeof({ect}), {n}, {loc})"), true);
+            }
             // (the fill value in a variable: a compound literal can't hold a compound literal)
             let z = self.fresh("z");
             self.line(format!("{ect} {z} = {zero};"));

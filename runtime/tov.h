@@ -467,6 +467,14 @@ static inline tv_arr tv_arr_new_len(size_t es, tv_int n) {
     b->ext = NULL;
     return (tv_arr){b};
 }
+/* `new Array(n)` of zeros (0, false, null): made and cleared here, the length a constant the
+ * C compiler can see. */
+static inline tv_arr tv_arr_zeros(size_t es, tv_int n, const char *loc) {
+    if (__builtin_expect((uint64_t)n > (uint64_t)INT32_MAX, 0)) tv_trap("Invalid array length", loc);
+    tv_arr a = tv_arr_new_len(es, n);
+    if (n) memset(tv_arrbuf_data(a.p), 0, (size_t)n * es);
+    return a;
+}
 /* A new empty array of its own (what every array a program sees is: TV_EMPTY_ARR, shared,
  * only stands in where no value has been given yet). */
 static inline tv_arr tv_arr_fresh(void) { return tv_arr_new_len(0, 0); }
