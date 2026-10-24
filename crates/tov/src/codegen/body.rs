@@ -6028,7 +6028,21 @@ impl<'c, 'a> Gen<'c, 'a> {
         let ast = self.ast(m);
         let span = ast.expr(e).span;
         match &ast.expr(e).kind {
-            ExprKind::Paren(x) | ExprKind::NonNull(x) => self.place(*x),
+            ExprKind::Paren(x) => self.place(*x),
+            // `xs![i] = v`: xs checked to be there, as a read of it is
+            ExprKind::NonNull(x) => {
+                let p = self.place(*x);
+                let to = self.ty(e);
+                if p.ty != to
+                    && matches!(self.tget(p.ty), Ty::Union(_))
+                    && let Some(k) = self.tag_of(p.ty, to)
+                {
+                    let (is, loc) = (self.u_is(&p.lv, p.ty, k), self.loc(span));
+                    self.line(format!("if (__builtin_expect(!{is}, 0)) tv_trap(\"value is undefined (`!` assertion failed)\", {loc});"));
+                    return Place { lv: self.u_payload(&p.lv, p.ty, k), ty: to, weak: false };
+                }
+                p
+            }
             ExprKind::Ident(_) => match self.ident_fact(m, e) {
                 Some(IdentFact::Local(k)) => match self.b().locals.get(&k).cloned() {
                     Some(l) => Place { lv: l.access, ty: l.ty, weak: false },
