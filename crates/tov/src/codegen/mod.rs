@@ -2130,7 +2130,7 @@ enum { TVG_CLASSES = TV_SMALL_CLASSES };
 #endif
 static inline void *tvg_alloc_small(size_t size) {
 #ifdef TVG_PLAIN_ALLOC
-    return tv_alloc(size);
+    return tv_alloc((size + 7) & ~(size_t)7);
 #endif
     size_t c = (size + 7) >> 3;
     if (__builtin_expect(c >= TVG_CLASSES, 0)) return tv_alloc(size);

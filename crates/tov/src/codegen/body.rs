@@ -2598,7 +2598,14 @@ impl<'c, 'a> Gen<'c, 'a> {
             let fixed = self.fixed_lens();
             // (from where each holds: an array a loop fills, after that loop)
             let at = self.ast(m).stmt(s).span.start;
-            let mut facts: Vec<(String, u64)> = fixed.iter().filter(|(_, (_, from))| at >= *from).filter_map(|(k, (n, _))| self.b().locals.get(k).map(|l| (l.access.clone(), *n))).collect();
+            // (of the arrays the loop uses: one released before it, after its last use, is gone)
+            let mut used = Vec::new();
+            collect_exprs_stmt(self.ast(m), s, &mut used);
+            let used: FxSet<u32> = used.iter().filter_map(|&x| match self.ident_fact(m, x) {
+                Some(IdentFact::Local(k)) => Some(k),
+                _ => None,
+            }).collect();
+            let mut facts: Vec<(String, u64)> = fixed.iter().filter(|(k, (_, from))| at >= *from && used.contains(*k)).filter_map(|(k, (n, _))| self.b().locals.get(k).map(|l| (l.access.clone(), *n))).collect();
             facts.sort();
             for (access, n) in facts {
                 self.line(format!("__builtin_assume(({access}).p->len == {n});"));

@@ -609,7 +609,8 @@ __attribute__((noinline)) void *tv_small_refill(size_t c) {
 }
 static inline void *tv_small_alloc(size_t size) {
 #ifdef TV_PLAIN_ALLOC
-    return tv_alloc(size);
+    /* (the size class it would come from: code may use the whole block, see tv_str_append_bytes) */
+    return tv_alloc((size + 7) & ~(size_t)7);
 #endif
     size_t c = (size + 7) >> 3;
     void **f = tv_small_bins[c];
