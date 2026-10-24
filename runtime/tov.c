@@ -741,6 +741,9 @@ tv_str tv_str_from_sb(tv_sb *sb) {
     return (tv_str){b};
 }
 
+#if defined(__GLIBC__)
+#include <malloc.h>
+#endif
 /* What a string's malloc'd block can hold, header and NUL included (0: unknown, or the block
  * isn't malloc's: a mapped one). */
 static size_t tv_strbuf_block(const tv_strbuf *p) {
