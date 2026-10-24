@@ -2489,6 +2489,22 @@ static int64_t tv_grow_cap(int64_t cur, int64_t min_cap) {
 
 tv_arrbuf tv_empty_arrbuf = {-1, 0, 0, NULL};
 
+/* An elements' block of its own (`ext`): 16 bytes, then room left free at the front for
+ * `unshift` (none at first; `shift` leaves its slot there), then the elements. Its size in
+ * bytes, front included, is the word before the elements: what `ext` points to after the
+ * front is all the block knows of where it starts. */
+enum { TV_EXT_PRE = 16 };
+static inline size_t tv_ext_front(const unsigned char *ext) { size_t f; memcpy(&f, ext - sizeof f, sizeof f); return f; }
+static inline void tv_ext_set_front(unsigned char *ext, size_t f) { memcpy(ext - sizeof f, &f, sizeof f); }
+static inline unsigned char *tv_ext_base(unsigned char *ext) { return ext - TV_EXT_PRE - tv_ext_front(ext); }
+/* A block for `bytes` of elements after `front` free bytes: where the elements start. */
+static unsigned char *tv_ext_new(size_t front, size_t bytes) {
+    unsigned char *b = (unsigned char *)tv_alloc(TV_EXT_PRE + front + (bytes ? bytes : 1));
+    unsigned char *ext = b + TV_EXT_PRE + front;
+    tv_ext_set_front(ext, front);
+    return ext;
+}
+
 /* A header with room for cap elements right after it (len 0). */
 static tv_arrbuf *tv_arrbuf_new(size_t esize, int64_t cap) {
     tv_arrbuf *b = (tv_arrbuf *)tv_arrbuf_alloc(tv_size_mul_add((size_t)cap, esize, 0));
@@ -2524,7 +2540,7 @@ void tv_arrbuf_release_slow(tv_arrbuf *TV_NOESCAPE p, const tv_type *t) {
     int64_t inl = p->cap;
     if (p->ext) {
         memcpy(&inl, p + 1, sizeof inl);
-        free(p->ext);
+        free(tv_ext_base(p->ext));
     }
     size_t s = tv_arrbuf_block((size_t)inl * (t ? t->size : 0));
 #ifndef TV_ARRBUF_PLAIN
@@ -2553,15 +2569,22 @@ void tv_arr_make_unique(tv_arr *a, const tv_type *t, tv_int min_cap) {
         int64_t nc = tv_grow_cap(p->cap, min_cap);
         size_t bytes = tv_size_mul_add((size_t)nc, es, 0);
         if (!p->ext) {
-            unsigned char *d = (unsigned char *)tv_alloc(bytes ? bytes : 1);
+            unsigned char *d = tv_ext_new(0, bytes);
             if (es && p->len) memcpy(d, tv_arrbuf_data(p), (size_t)p->len * es);
             /* (the count the header's block was made for, where the elements were: see
              * tv_arrbuf_release_slow) */
             int64_t inl = p->cap;
             memcpy(p + 1, &inl, sizeof inl);
             p->ext = d;
+        } else if (tv_ext_front(p->ext) == 0) {
+            unsigned char *b = (unsigned char *)tv_realloc(p->ext - TV_EXT_PRE, TV_EXT_PRE + (bytes ? bytes : 1));
+            p->ext = b + TV_EXT_PRE;
         } else {
-            p->ext = (unsigned char *)tv_realloc(p->ext, bytes ? bytes : 1);
+            /* (room left at the front: the elements move to the start of a new block) */
+            unsigned char *d = tv_ext_new(0, bytes);
+            if (es && p->len) memcpy(d, p->ext, (size_t)p->len * es);
+            free(tv_ext_base(p->ext));
+            p->ext = d;
         }
         p->cap = nc;
         return;
@@ -2657,31 +2680,78 @@ void tv_arr_set_length_fill(tv_arr *a, const tv_type *t, tv_int n, const void *f
     }
 }
 
+/* (a queue taken from the front: once it's longer than this, its elements get a block of their
+ * own, where taking the first one moves the start along instead of every other element down) */
+enum { TV_SHIFT_INLINE = 32 };
+
 bool tv_arr_shift(tv_arr *a, const tv_type *t, void *out) {
     int64_t len = tv_arr_len(*a);
     if (len == 0) return false;
     tv_arr_make_unique(a, t, 0);
     size_t es = t->size;
+    tv_arrbuf *p = a->p;
+    if (es && !p->ext && len > TV_SHIFT_INLINE) {
+        tv_arr_make_unique(a, t, p->cap + 1);
+        p = a->p;
+    }
     if (es) {
-        unsigned char *d = tv_arrbuf_data(a->p);
+        unsigned char *d = tv_arrbuf_data(p);
         if (out) memcpy(out, d, es);
         else if (t->release) t->release(d);
-        memmove(d, d + es, (size_t)(len - 1) * es);
+        if (p->ext) {
+            p->ext = d + es;
+            tv_ext_set_front(p->ext, tv_ext_front(d) + es);
+            p->cap--;
+        } else {
+            memmove(d, d + es, (size_t)(len - 1) * es);
+        }
     }
-    a->p->len = len - 1;
+    p->len = len - 1;
     return true;
 }
 
 void tv_arr_unshift(tv_arr *a, const tv_type *t, void *elem) {
     int64_t len = tv_arr_len(*a);
-    tv_arr_make_unique(a, t, len + 1);
     size_t es = t->size;
+    tv_arr_make_unique(a, t, 0);
+    tv_arrbuf *p = a->p;
+    if (es && p->ext && tv_ext_front(p->ext) >= es) {
+        /* room at the front */
+        unsigned char *d = p->ext - es;
+        tv_ext_set_front(d, tv_ext_front(p->ext) - es);
+        p->ext = d;
+        p->cap++;
+        memcpy(d, elem, es);
+        p->len = len + 1;
+        return;
+    }
+    if (es && len >= TV_SHIFT_INLINE) {
+        /* a block with as much room at the front as there are elements (and the room after them
+         * there was): adding to the front again and again moves each element a few times, not
+         * once an addition */
+        size_t front = (size_t)len * es, back = (size_t)(p->cap - len) * es;
+        unsigned char *d = tv_ext_new(front, (size_t)(len + 1) * es + back);
+        memcpy(d + es, tv_arrbuf_data(p), (size_t)len * es);
+        if (p->ext) {
+            free(tv_ext_base(p->ext));
+        } else {
+            int64_t inl = p->cap;
+            memcpy(p + 1, &inl, sizeof inl);
+        }
+        p->ext = d;
+        p->cap = len + 1 + (int64_t)(back / es);
+        memcpy(d, elem, es);
+        p->len = len + 1;
+        return;
+    }
+    tv_arr_make_unique(a, t, len + 1);
+    p = a->p;
     if (es) {
-        unsigned char *d = tv_arrbuf_data(a->p);
+        unsigned char *d = tv_arrbuf_data(p);
         memmove(d + es, d, (size_t)len * es);
         memcpy(d, elem, es);
     }
-    a->p->len = len + 1;
+    p->len = len + 1;
 }
 
 tv_arr tv_arr_splice(tv_arr *a, const tv_type *t, tv_int start, tv_int del, bool has_del, tv_arr items) {
