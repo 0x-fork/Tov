@@ -712,7 +712,8 @@ impl<'c, 'a> Gen<'c, 'a> {
             return Val { code: res, ty, owned };
         }
         let v = self.project(v, recv);
-        let v = if self.heap_rooted(*obj) { self.own(v) } else { v };
+        let quiet = self.quiet_calls.last().is_some_and(|&(k, q)| q && k == args.as_ptr() as usize);
+        let v = if self.heap_rooted(*obj) && !quiet { self.own(v) } else { v };
         let argv = self.args_rest(e, args, params);
         let code = self.method_call_code_with(&v.code, recv, name, false, argv, &msubst);
         self.finish_call_pub(&code, ret, ty)

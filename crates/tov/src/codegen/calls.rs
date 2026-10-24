@@ -22,8 +22,16 @@ pub(crate) struct Callback {
 
 impl<'c, 'a> Gen<'c, 'a> {
     pub(crate) fn call(&mut self, e: ExprId) -> Val {
-        let v = self.call_inner(e);
         let m = self.cur_m();
+        // (a quiet callee: what's reached through fields stays alive for the call, unretained)
+        let key = match &self.ast(m).expr(e).kind {
+            ExprKind::Call { args, .. } => args.as_ptr() as usize,
+            _ => 0,
+        };
+        let q = key != 0 && self.quiet_call(m, e);
+        self.quiet_calls.push((key, q));
+        let v = self.call_inner(e);
+        self.quiet_calls.pop();
         if self.facts(m).throwing.contains(&e) {
             self.error_check();
         }
@@ -256,6 +264,7 @@ impl<'c, 'a> Gen<'c, 'a> {
     fn args(&mut self, args: &[Arg], params: &[FnParam], callee: Option<(u32, u32)>) -> Vec<String> {
         let mut out = Vec::new();
         let has_inout = params.iter().any(|p| p.inout);
+        let quiet = !args.is_empty() && self.quiet_calls.last().is_some_and(|&(k, q)| q && k == args.as_ptr() as usize);
         for (i, a) in args.iter().enumerate() {
             let p = params.get(i).copied().unwrap_or(FnParam { ty: ERROR, inout: false, optional: false });
             if p.inout && a.by_ref.is_none() && !self.is_place_expr(a.expr) {
@@ -288,7 +297,7 @@ impl<'c, 'a> Gen<'c, 'a> {
                 let v = if args[i + 1..].iter().any(|later| self.changes_in(later.expr)) { self.snapshot(v) } else { v };
                 // A value reached through a class instance (or a closure's cell) could be released by
                 // the callee through another reference: keep it alive for the call.
-                let v = if !v.owned && self.is_rc(v.ty) && (self.heap_rooted(a.expr) || (has_inout && self.is_place_expr(a.expr))) { self.own(v) } else { v };
+                let v = if !v.owned && self.is_rc(v.ty) && (self.heap_rooted(a.expr) && !quiet || (has_inout && self.is_place_expr(a.expr))) { self.own(v) } else { v };
                 let v = self.coerce(v, p.ty);
                 out.push(v.code);
             }

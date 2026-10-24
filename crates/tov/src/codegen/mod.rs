@@ -23,6 +23,7 @@ pub(crate) mod class;
 mod iface;
 mod js;
 mod json;
+mod quiet;
 mod range;
 mod resize;
 
@@ -270,9 +271,15 @@ pub(crate) struct Gen<'c, 'a> {
     /// Conversions under way (see `coerce`), and the functions made for those met again inside
     /// themselves (between recursive types).
     pub(crate) coerce_stack: Vec<(TyId, TyId)>,
+    /// Bodies found quiet or not (see `quiet`), those being looked at, whether a result relied on
+    /// one of those, and the calls being made (their arguments' address, quiet).
+    pub(crate) quiet_memo: FxMap<(u32, crate::ast::StmtId, bool), bool>,
+    pub(crate) quiet_stack: Vec<(u32, crate::ast::StmtId, bool)>,
+    pub(crate) quiet_tainted: bool,
+    pub(crate) quiet_calls: Vec<(usize, bool)>,
     pub(crate) rec_cvs: FxMap<(TyId, TyId), String>,
     /// Emit `tvg_uncaught` (main can throw, or tests).
-    needs_uncaught: bool,
+    pub(crate) needs_uncaught: bool,
     /// `tvg_test_fn` (running a test closure, see `__test`) is emitted.
     pub(crate) test_call_done: bool,
     /// The async function whose body `function_body` emits next (see `asyncfn.rs`).
@@ -377,6 +384,10 @@ impl<'c, 'a> Gen<'c, 'a> {
             itabs: FxMap::default(),
             fn_adapters: FxMap::default(),
             coerce_stack: Vec::new(),
+            quiet_memo: FxMap::default(),
+            quiet_stack: Vec::new(),
+            quiet_tainted: false,
+            quiet_calls: Vec::new(),
             rec_cvs: FxMap::default(),
             needs_uncaught: false,
             test_call_done: false,

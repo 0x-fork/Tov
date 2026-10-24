@@ -115,6 +115,8 @@ pub(crate) struct Body {
     pub nowrap_locals: Vec<u32>,
     /// The function's body statement (for facts about the whole function).
     pub root: Option<StmtId>,
+    /// Locals that borrow what they point to (see `cursor_local`): never retained or released.
+    pub cursors: FxSet<u32>,
     /// `const` array locals whose length never changes in the function (see `fixed_lens`).
     /// Arrays of a fixed length: (length, where in the source it holds from).
     pub fixed: Option<FxMap<u32, (u64, u32)>>,
@@ -296,6 +298,7 @@ impl<'c, 'a> Gen<'c, 'a> {
             versioned: Vec::new(),
             nowrap_locals: Vec::new(),
             root: None,
+            cursors: FxSet::default(),
             fixed: None,
         });
     }
@@ -497,6 +500,7 @@ impl<'c, 'a> Gen<'c, 'a> {
             versioned: Vec::new(),
             nowrap_locals: Vec::new(),
             root: None,
+            cursors: FxSet::default(),
             fixed: None,
         };
         for (i, &(key, ty, inout)) in params.iter().enumerate() {
@@ -2561,6 +2565,19 @@ impl<'c, 'a> Gen<'c, 'a> {
                     self.coerce(v, ty)
                 });
                 self.self_closure = None;
+                // `let x = list` walked only by `x = x.next` in a function that stores no
+                // reference anywhere: x borrows each node (see `cursor_local`)
+                if let (true, Some(i), Some(v)) = (*mutable, init, &value)
+                    && !v.owned
+                    && self.is_rc(ty)
+                    && self.cursor_local(key, ty, *i)
+                {
+                    self.line(format!("{ct} {cname} = {};", v.code));
+                    self.pop_temps();
+                    self.b().locals.insert(key, Local { access: cname, ty });
+                    self.b().cursors.insert(key);
+                    return;
+                }
                 // `const x = <field path of a read-only parameter or unchanging local>` that is never
                 // changed itself: x is a borrowed view — no retain now, no release at scope end.
                 if let (false, Some(i), Some(v)) = (*mutable, init, &value)
@@ -6561,6 +6578,18 @@ impl<'c, 'a> Gen<'c, 'a> {
                 if p.weak {
                     return self.weak_store(&p.lv, p.ty, v);
                 }
+                // (a cursor: points at the next node, borrowed)
+                if let Some(IdentFact::Local(k)) = self.ident_fact(m, target)
+                    && self.b().cursors.contains(&k)
+                {
+                    let v = self.coerce(v, p.ty);
+                    if v.owned {
+                        self.internal.push("a cursor given an owned value".into());
+                    }
+                    let lv = self.place_lvalue(&p);
+                    self.line(format!("{lv} = {};", v.code));
+                    return Val::plain(lv, p.ty);
+                }
                 let v = self.coerce(v, p.ty);
                 let code = self.consume(v);
                 let ct = self.ctype(p.ty);
@@ -6954,6 +6983,7 @@ impl<'c, 'a> Gen<'c, 'a> {
             versioned: Vec::new(),
             nowrap_locals: Vec::new(),
             root: None,
+            cursors: FxSet::default(),
             fixed: None,
         };
         for (i, &(key, ty, inout)) in params.iter().enumerate() {
