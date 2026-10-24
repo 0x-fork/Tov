@@ -944,8 +944,8 @@ impl<'a> Checker<'a> {
                 let (tl, tr) = self.numeric_pair(l, r, None);
                 let (tl, tr) = self.primitive_pair(l, r, tl, tr);
                 if tl == BIGINT || tr == BIGINT {
-                    // bigint with bigint, or with an integer (compared exactly, as in JavaScript)
-                    let ok = |t: TyId| t == BIGINT || t == ERROR || self.types.is_int(t);
+                    // bigint with bigint, or with a number (compared exactly, as in JavaScript)
+                    let ok = |t: TyId| t == BIGINT || t == ERROR || self.types.is_int(t) || self.types.is_float(t);
                     if !ok(tl) || !ok(tr) {
                         self.bigint_mix(op, l, r, tl, tr, span);
                     }

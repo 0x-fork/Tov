@@ -622,6 +622,7 @@ static inline int tv_big_cmp(tv_big a, tv_big b) {
 }
 static inline bool tv_big_eq(tv_big a, tv_big b) { return a.v == b.v || (!((a.v | b.v) & 1) && tv_big_eq_slow(a, b)); }
 int tv_big_cmp_int(tv_big a, int64_t b);
+int tv_big_cmp_f64(tv_big a, double b);
 uint64_t tv_big_hash(tv_big a);
 
 tv_big tv_big_lit(const char *text);                       /* a literal's value (immortal) */

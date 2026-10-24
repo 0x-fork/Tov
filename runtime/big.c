@@ -1034,6 +1034,26 @@ int tv_big_cmp_int(tv_big a, int64_t b) {
     return tv_bb(a)->neg ? -1 : 1;
 }
 
+/* a against a number, exactly (JavaScript's 5n < 5.5): -1, 0 or 1, or 2 when b is NaN (every
+ * comparison is false). */
+int tv_big_cmp_f64(tv_big a, double b) {
+    if (b != b) return 2;
+    if (b == __builtin_inf()) return -1;
+    if (b == -__builtin_inf()) return 1;
+    double fb = __builtin_floor(b);
+    if (tv_big_is_small(a) && fb >= -0x1p62 && fb < 0x1p62) {
+        int64_t x = a.v >> 1, y = (int64_t)fb;
+        if (x != y) return (x > y) - (x < y);
+    } else {
+        tv_big f;
+        tv_big_from_f64(fb, &f);
+        int c = tv_big_cmp(a, f);
+        tv_big_release(f);
+        if (c != 0) return c;
+    }
+    return b > fb ? -1 : 0;
+}
+
 /* ---------------------------------------------------------------- conversions */
 
 tv_big tv_big_from_u64_(uint64_t m) { return tv_big_from_u64(m, false); }

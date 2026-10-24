@@ -4698,6 +4698,15 @@ impl<'c, 'a> Gen<'c, 'a> {
                     // (an integer side is compared exactly, as in JavaScript)
                     return Val::plain(match (lv.ty == BIGINT, rv.ty == BIGINT) {
                         (true, true) => format!("(tv_big_cmp({}, {}) {o} 0)", lv.code, rv.code),
+                        // (a number: exactly, and every comparison with NaN false)
+                        (true, false) if self.c.types.is_float(rv.ty) => {
+                            let b = self.coerce(rv, F64);
+                            format!("({{ int c_ = tv_big_cmp_f64({}, {}); c_ != 2 && c_ {o} 0; }})", lv.code, b.code)
+                        }
+                        (false, true) if self.c.types.is_float(lv.ty) => {
+                            let a = self.coerce(lv, F64);
+                            format!("({{ int c_ = tv_big_cmp_f64({}, {}); c_ != 2 && 0 {o} c_; }})", rv.code, a.code)
+                        }
                         (true, false) => {
                             let b = self.int_code(rv);
                             format!("(tv_big_cmp_int({}, {b}) {o} 0)", lv.code)
