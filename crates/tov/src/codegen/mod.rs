@@ -285,6 +285,10 @@ pub(crate) struct Gen<'c, 'a> {
     pub(crate) quiet_calls: Vec<(usize, bool)>,
     /// Callback parameters found only called (see `arg_called_only`), and those being looked at.
     pub(crate) called_memo: FxMap<(u32, crate::ast::StmtId, u32), bool>,
+    /// Where parameters get their values (see `param_quiet`), and its findings.
+    pub(crate) bind_index: Option<std::rc::Rc<quiet::BindIndex>>,
+    pub(crate) pquiet_memo: FxMap<(u32, crate::ast::StmtId, u32), bool>,
+    pub(crate) pquiet_stack: Vec<(u32, crate::ast::StmtId, u32)>,
     pub(crate) called_stack: Vec<(u32, crate::ast::StmtId, u32)>,
     pub(crate) rec_cvs: FxMap<(TyId, TyId), String>,
     /// Emit `tvg_uncaught` (main can throw, or tests).
@@ -400,6 +404,9 @@ impl<'c, 'a> Gen<'c, 'a> {
             quiet_tainted: false,
             quiet_calls: Vec::new(),
             called_memo: FxMap::default(),
+            bind_index: None,
+            pquiet_memo: FxMap::default(),
+            pquiet_stack: Vec::new(),
             called_stack: Vec::new(),
             rec_cvs: FxMap::default(),
             needs_uncaught: false,

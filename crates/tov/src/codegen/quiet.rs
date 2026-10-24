@@ -6,6 +6,7 @@ use super::Gen;
 use crate::ast::{ArrowBody, ExprId, ExprKind, ItemKind, MemberKind, StmtId, StmtKind};
 use crate::check::{Callee, IdentFact};
 use crate::types::*;
+use crate::hash::{FxMap, FxSet};
 
 impl Gen<'_, '_> {
     /// Call (or `new`) `e` in module `m` is quiet.
@@ -65,6 +66,20 @@ impl Gen<'_, '_> {
                         _ => !matches!(self.c.types.get(t), Ty::Func(..)),
                     }
                 })
+            }
+            // (a callback parameter whose every closure is quiet)
+            Callee::Value => {
+                let ExprKind::Call { callee, .. } = &self.ast(m).expr(e).kind else { return false };
+                let mut c = *callee;
+                while let ExprKind::Paren(x) = self.ast(m).expr(c).kind {
+                    c = x;
+                }
+                let Some(IdentFact::Local(k)) = self.ident_fact(m, c) else { return false };
+                let owner = match self.quiet_stack.last() {
+                    Some(&(om, ob, _)) => Some((om, ob)),
+                    None => self.bodies.last().and_then(|b| b.root).map(|r| (self.cur_m(), r)),
+                };
+                owner.is_some_and(|(om, ob)| om == m && self.param_quiet(om, ob, k))
             }
             _ => false,
         }
@@ -492,5 +507,161 @@ impl Gen<'_, '_> {
             ok_uses += 1;
         }
         uses == ok_uses
+    }
+}
+
+/// Where each function's and method's parameters get their values: the arguments every call
+/// gives them (see `param_quiet`).
+#[derive(Default)]
+pub(crate) struct BindIndex {
+    /// (module, body, parameter key) → (module, enclosing body, argument) of each call.
+    binds: FxMap<(u32, StmtId, u32), Vec<(u32, StmtId, ExprId)>>,
+    /// Bodies whose every call is in `binds` (functions and methods, not async or generators).
+    indexed: FxSet<(u32, StmtId)>,
+    /// Bodies that are also used as values (called from wherever those go).
+    escaped: FxSet<(u32, StmtId)>,
+    /// Method names used as values (`obj.m` not called): every method of that name escapes.
+    escaped_names: FxSet<crate::intern::Sym>,
+    /// Each body's parameter keys.
+    params: FxMap<(u32, StmtId), Vec<u32>>,
+    /// Method bodies by name (for `escaped_names`).
+    method_names: FxMap<(u32, StmtId), crate::intern::Sym>,
+}
+
+impl Gen<'_, '_> {
+    fn build_binds(&mut self) -> BindIndex {
+        let mut ix = BindIndex::default();
+        let mut bodies: Vec<(u32, StmtId)> = Vec::new();
+        for m in 0..self.c.modules.len() as u32 {
+            for item in &self.c.modules[m as usize].ast.items {
+                if let ItemKind::Function(f) = &item.kind {
+                    ix.params.insert((m, f.body), f.params.iter().map(|p| p.span.start).collect());
+                    if !f.is_async && !f.is_gen {
+                        ix.indexed.insert((m, f.body));
+                    }
+                    bodies.push((m, f.body));
+                }
+            }
+        }
+        for c in 0..self.c.classes.len() as u32 {
+            let m = self.c.classes[c as usize].module;
+            for mem in &self.c.class_decl(c).members {
+                if let MemberKind::Method(f) | MemberKind::Getter(f) | MemberKind::Constructor(f) = &mem.kind {
+                    ix.params.insert((m, f.body), f.params.iter().map(|p| p.span.start).collect());
+                    if matches!(mem.kind, MemberKind::Method(_)) && !f.is_async && !f.is_gen {
+                        ix.indexed.insert((m, f.body));
+                        ix.method_names.insert((m, f.body), mem.name);
+                    }
+                    bodies.push((m, f.body));
+                }
+            }
+        }
+        for (m, body) in bodies {
+            let ast = self.ast(m);
+            let mut exprs = Vec::new();
+            super::body::collect_exprs_stmt_pub(ast, body, &mut exprs);
+            let callees: FxSet<ExprId> = exprs.iter().filter_map(|&e| match &ast.expr(e).kind {
+                ExprKind::Call { callee, .. } => Some(*callee),
+                _ => None,
+            }).collect();
+            for &e in &exprs {
+                match &ast.expr(e).kind {
+                    ExprKind::Call { args, .. } => {
+                        let args: Vec<ExprId> = args.iter().map(|a| a.expr).collect();
+                        if let Some(cbs) = self.callee_bodies(m, e) {
+                            for (bm, bb, bk) in cbs {
+                                for (j, &a) in args.iter().enumerate() {
+                                    if let Some(&k) = bk.get(j) {
+                                        ix.binds.entry((bm, bb, k)).or_default().push((m, body, a));
+                                    }
+                                }
+                            }
+                        } else if let ExprKind::Call { callee, .. } = &ast.expr(e).kind
+                            && let ExprKind::Member { name, .. } = &ast.expr(*callee).kind
+                        {
+                            // (a method called some other way, through an interface: any of
+                            // that name may be what runs)
+                            ix.escaped_names.insert(*name);
+                        }
+                    }
+                    ExprKind::Ident(_) if !callees.contains(&e) => {
+                        if let Some(IdentFact::Fn(fm, fi)) = self.ident_fact(m, e)
+                            && let ItemKind::Function(f) = &self.c.modules[fm as usize].ast.items[fi as usize].kind
+                        {
+                            ix.escaped.insert((fm, f.body));
+                        }
+                    }
+                    ExprKind::Member { obj, name, .. } if !callees.contains(&e) => {
+                        let ot = self.facts(m).expr_ty[*obj as usize];
+                        let ot = self.c.types.without_nullish(ot);
+                        if self.c.class_of(ot).is_some() && matches!(self.c.class_member(ot, *name), Some(crate::check::class::ClassMemberRef::Method(_))) {
+                            ix.escaped_names.insert(*name);
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+        ix
+    }
+
+    /// Every value parameter `key` of body `(m, body)` is given is a closure that's quiet (or
+    /// another such parameter): calls through it are quiet.
+    pub(crate) fn param_quiet(&mut self, m: u32, body: StmtId, key: u32) -> bool {
+        if self.bind_index.is_none() {
+            let ix = self.build_binds();
+            self.bind_index = Some(std::rc::Rc::new(ix));
+        }
+        let ix = self.bind_index.clone().unwrap();
+        if !ix.indexed.contains(&(m, body)) || ix.escaped.contains(&(m, body)) || ix.method_names.get(&(m, body)).is_some_and(|n| ix.escaped_names.contains(n)) {
+            return false;
+        }
+        let mk = (m, body, key);
+        if let Some(&q) = self.pquiet_memo.get(&mk) {
+            return q;
+        }
+        if self.pquiet_stack.contains(&mk) {
+            self.quiet_tainted = true;
+            return true;
+        }
+        if self.pquiet_stack.len() > 32 {
+            return false;
+        }
+        self.pquiet_stack.push(mk);
+        let saved = std::mem::replace(&mut self.quiet_tainted, false);
+        let binds = ix.binds.get(&mk).cloned().unwrap_or_default();
+        let mut q = true;
+        for (am, ab, arg) in binds {
+            let mut a = arg;
+            while let ExprKind::Paren(x) = self.ast(am).expr(a).kind {
+                a = x;
+            }
+            q = match &self.ast(am).expr(a).kind {
+                ExprKind::Arrow(f) if !f.is_async => {
+                    self.quiet_stack.push((am, ab, false));
+                    let r = match f.body {
+                        ArrowBody::Expr(x) => self.quiet_expr(am, x, false),
+                        ArrowBody::Block(s) => self.quiet_stmt(am, s, false),
+                    };
+                    self.quiet_stack.pop();
+                    r
+                }
+                ExprKind::Ident(_) => match self.ident_fact(am, a) {
+                    Some(IdentFact::Local(k2)) if ix.params.get(&(am, ab)).is_some_and(|ps| ps.contains(&k2)) => self.param_quiet(am, ab, k2),
+                    _ => false,
+                },
+                _ => false,
+            };
+            if !q {
+                break;
+            }
+        }
+        let tainted = self.quiet_tainted;
+        self.pquiet_stack.pop();
+        if !q || !tainted || self.pquiet_stack.is_empty() {
+            self.pquiet_memo.insert(mk, q);
+        }
+        self.quiet_tainted = saved || (tainted && q);
+        q
     }
 }

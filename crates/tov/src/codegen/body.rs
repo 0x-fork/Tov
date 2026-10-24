@@ -5854,7 +5854,10 @@ impl<'c, 'a> Gen<'c, 'a> {
         self.push_temps();
         let ev = Val::plain(format!("(({ect} *)tv_arr_data({}))[{iv}]", a.code), et);
         let cv = self.coerce(ev, ty);
-        let code = self.consume(cv);
+        // (the element as it's held, `C` read as `C | undefined`: borrowed from the array, as a
+        // read of an element in bounds is)
+        let borrowed = !cv.owned && ct == ect && self.niche(ty).is_some();
+        let code = if borrowed { cv.code } else { self.consume(cv) };
         self.line(format!("{res} = {code};"));
         self.pop_temps();
         self.close("} else {");
@@ -5863,7 +5866,7 @@ impl<'c, 'a> Gen<'c, 'a> {
         let code = self.consume(u);
         self.line(format!("{res} = {code};"));
         self.close("}");
-        let owned = self.is_rc(ty);
+        let owned = self.is_rc(ty) && !borrowed;
         if owned {
             self.b().temps.last_mut().unwrap().push((res.clone(), ty));
         }
