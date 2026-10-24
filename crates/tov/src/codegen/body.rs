@@ -3425,6 +3425,16 @@ impl<'c, 'a> Gen<'c, 'a> {
                 let vals: Vec<Val> = self.exprs_in_order(exprs);
                 let sbv = self.fresh("sb");
                 self.line(format!("tv_sb {sbv} = {{0}};"));
+                // (room for it all at once: the literal text, the strings' bytes, a number's worth
+                // for anything else; the builder never grows and copies on the way)
+                let lit: usize = parts.iter().map(|p| p.len()).sum();
+                let mut size = format!("{}", lit + 24 * vals.iter().filter(|v| !matches!(self.tget(v.ty), Ty::Str)).count());
+                for v in vals.iter().filter(|v| matches!(self.tget(v.ty), Ty::Str)) {
+                    size.push_str(&format!(" + (size_t)tv_str_byte_len({})", v.code));
+                }
+                if !vals.is_empty() {
+                    self.line(format!("tv_sb_grow(&{sbv}, {size});"));
+                }
                 self.open("{");
                 self.line(format!("tv_sb *sb = &{sbv};"));
                 self.template_into(parts, &vals);
