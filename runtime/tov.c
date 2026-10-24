@@ -4440,6 +4440,87 @@ static long tv_date_gmtoff(double s) {
 static double tv_floor_div(double a, double b) { return floor(a / b); }
 
 /* getTimezoneOffset(): minutes from local time to UTC (west of UTC positive), at time t (ms). */
+/* Days since 1970-01-01 to (year, month 1-12, day 1-31) (Hinnant's civil_from_days). */
+static void tv_civil_from_days(int64_t z, int64_t *y, int *m, int *d) {
+    z += 719468;
+    int64_t era = (z >= 0 ? z : z - 146096) / 146097;
+    int64_t doe = z - era * 146097;
+    int64_t yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
+    int64_t doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    int64_t mp = (5 * doy + 2) / 153;
+    *d = (int)(doy - (153 * mp + 2) / 5 + 1);
+    *m = (int)(mp < 10 ? mp + 3 : mp - 9);
+    *y = yoe + era * 400 + (*m <= 2);
+}
+
+static int64_t tv_days_from_civil(int64_t y, int m, int d) {
+    y -= m <= 2;
+    int64_t era = (y >= 0 ? y : y - 399) / 400;
+    int64_t yoe = y - era * 400;
+    int64_t doy = (153 * (m > 2 ? m - 3 : m + 9) + 2) / 5 + d - 1;
+    int64_t doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    return era * 146097 + doe - 719468;
+}
+
+static char *tv_put_digits(char *w, int64_t v, int width) {
+    for (int i = width - 1; i >= 0; i--) {
+        w[i] = (char)('0' + v % 10);
+        v /= 10;
+    }
+    return w + width;
+}
+
+/* Date's toISOString of a valid time t (ms since the epoch). */
+tv_str tv_native_dateIso(double t) {
+    int64_t ms = (int64_t)t;
+    int64_t day = ms >= 0 ? ms / 86400000 : -((-ms + 86399999) / 86400000);
+    int64_t in_day = ms - day * 86400000;
+    int64_t y;
+    int m, d;
+    tv_civil_from_days(day, &y, &m, &d);
+    char buf[40], *w = buf;
+    if (y >= 0 && y <= 9999) {
+        w = tv_put_digits(w, y, 4);
+    } else {
+        *w++ = y < 0 ? '-' : '+';
+        w = tv_put_digits(w, y < 0 ? -y : y, 6);
+    }
+    *w++ = '-';
+    w = tv_put_digits(w, m, 2);
+    *w++ = '-';
+    w = tv_put_digits(w, d, 2);
+    *w++ = 'T';
+    w = tv_put_digits(w, in_day / 3600000, 2);
+    *w++ = ':';
+    w = tv_put_digits(w, in_day / 60000 % 60, 2);
+    *w++ = ':';
+    w = tv_put_digits(w, in_day / 1000 % 60, 2);
+    *w++ = '.';
+    w = tv_put_digits(w, in_day % 1000, 3);
+    *w++ = 'Z';
+    return tv_str_from(buf, (size_t)(w - buf));
+}
+
+/* `YYYY-MM-DDTHH:MM:SS.sssZ` exactly (what toISOString makes) as a time, else NaN (for the
+ * full parser to read). */
+double tv_native_dateParseIso(tv_str s) {
+    const char *p = s.p->data;
+    if (s.p->len != 24 || p[4] != '-' || p[7] != '-' || p[10] != 'T' || p[13] != ':' || p[16] != ':' || p[19] != '.' || p[23] != 'Z') return NAN;
+    static const int at[] = {0, 1, 2, 3, 5, 6, 8, 9, 11, 12, 14, 15, 17, 18, 20, 21, 22};
+    for (size_t i = 0; i < sizeof at / sizeof at[0]; i++) if (p[at[i]] < '0' || p[at[i]] > '9') return NAN;
+#define TV_D2(i) ((p[i] - '0') * 10 + (p[(i) + 1] - '0'))
+    int64_t y = TV_D2(0) * 100 + TV_D2(2);
+    int mo = TV_D2(5), d = TV_D2(8), h = TV_D2(11), mi = TV_D2(14), sec = TV_D2(17);
+    int ms = (p[20] - '0') * 100 + TV_D2(21);
+#undef TV_D2
+    static const int mdays[] = {31, 29, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31};
+    if (mo < 1 || mo > 12 || d < 1 || d > mdays[mo - 1] || h > 24 || mi > 59 || sec > 59) return NAN;
+    if (h == 24 && (mi || sec || ms)) return NAN;
+    bool leap = (y % 4 == 0 && y % 100 != 0) || y % 400 == 0;
+    if (mo == 2 && d == 29 && !leap) return NAN;
+    return (double)(tv_days_from_civil(y, mo, d) * 86400000 + (int64_t)h * 3600000 + mi * 60000 + sec * 1000 + ms);
+}
+
 double tv_native_dateOffset(double t) {
     if (t != t) return t;
     return (double)(-tv_date_gmtoff(tv_floor_div(t, 1000.0))) / 60.0;

@@ -565,10 +565,7 @@ export class Date {
   }
   /** (the ISO text of a valid time) */
   private iso(): string {
-    const t = this.t
-    const y = __dateField(t, 0)
-    const year = y >= 0 && y <= 9999 ? __datePad(y, 4) : (y < 0 ? "-" : "+") + __datePad(Math.abs(y), 6)
-    return `${year}-${__datePad(__dateField(t, 1) + 1, 2)}-${__datePad(__dateField(t, 2), 2)}T${__datePad(__dateField(t, 4), 2)}:${__datePad(__dateField(t, 5), 2)}:${__datePad(__dateField(t, 6), 2)}.${__datePad(__dateField(t, 7), 3)}Z`
+    return __native.dateIso(this.t)
   }
   toJSON(): string | null { return this.t !== this.t ? null : this.iso() }
   toString(): string {
@@ -713,6 +710,9 @@ function __dateField(t: f64, which: int): f64 {
 /** (`Date.parse`: the ISO format, `2019-01-16`, `2019-01-16T08:30:00.000Z`, `+002019-01`, with
  * a time in local time unless a zone is given; a space for the `T` too. Otherwise `NaN`.) */
 function __dateParse(s: string): f64 {
+  // (toISOString's own form: read in the runtime)
+  const iso = __native.dateParseIso(s)
+  if (iso === iso) return __dateClip(iso)
   let i = 0
   const n = s.length
   const digits = (count: int): f64 => {

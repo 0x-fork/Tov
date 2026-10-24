@@ -36,6 +36,8 @@ pub(super) fn native_sig(types: &mut Types, name: &str) -> Option<(Vec<TyId>, Ty
         "takeError" | "cwd" => (vec![], STR),
         "dateNow" => (vec![], F64),
         "dateOffset" | "dateLocalToUtc" => (vec![F64], F64),
+        "dateIso" => (vec![F64], STR),
+        "dateParseIso" => (vec![STR], F64),
         "dateZoneName" => (vec![F64], STR),
         "reCompile" => (vec![STR, STR], INT),
         "trap" => (vec![STR], NEVER),

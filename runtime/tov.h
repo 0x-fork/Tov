@@ -939,6 +939,8 @@ void tv_native_rm(tv_str path, bool recursive, bool force);
 tv_str tv_native_cwd(void);
 double tv_native_dateNow(void);
 double tv_native_dateOffset(double t);
+tv_str tv_native_dateIso(double t);              /* toISOString of a valid time */
+double tv_native_dateParseIso(tv_str s);         /* exactly toISOString's form, else NaN */
 double tv_native_dateLocalToUtc(double local);
 tv_str tv_native_dateZoneName(double t);
 struct tv_arr tv_process_argv(void);                   /* ["tov-binary-path", "program", args...] like Node's */
