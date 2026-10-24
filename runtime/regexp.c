@@ -514,6 +514,19 @@ tv_arr tv_native_reExec(tv_int h, tv_str s, tv_int from) {
  * question, answered with nothing allocated (for ASCII text and up to 8 groups). */
 tv_int tv_native_reTest(tv_int h, tv_str s, tv_int from) {
     tv_re *r = &tv_res[h];
+    /* (a single character set, `/[0-9.]/`, `/\s+/`, on ASCII text: a scan, nothing to set up) */
+    if (r->simple && tv_str_is_ascii(s)) {
+        const uint8_t *buf = (const uint8_t *)s.p->data;
+        tv_int n = tv_str_byte_len(s);
+        if (from < 0 || from > n) return -1;
+        for (tv_int i = from; i < n; i++) {
+            if (!r->set[buf[i]]) continue;
+            tv_int j = i + 1;
+            if (r->plus) while (j < n && r->set[buf[j]]) j++;
+            return j;
+        }
+        return -1;
+    }
     int ncap = r->ncap;
     uint8_t *on_stack[16];
     uint8_t **cap = 2 * ncap <= 16 ? on_stack : tv_alloc((size_t)(2 * ncap) * sizeof(uint8_t *) + 1);
