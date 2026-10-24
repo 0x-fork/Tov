@@ -287,7 +287,7 @@ impl Gen<'_, '_> {
 }
 
 /// The expressions and statements directly inside statement `s`.
-fn stmt_parts(ast: &crate::ast::Ast, s: StmtId) -> (Vec<ExprId>, Vec<StmtId>) {
+pub(crate) fn stmt_parts(ast: &crate::ast::Ast, s: StmtId) -> (Vec<ExprId>, Vec<StmtId>) {
     match &ast.stmt(s).kind {
         StmtKind::Let { init, .. } => (init.iter().copied().collect(), Vec::new()),
         StmtKind::Expr(e) | StmtKind::Throw(e) => (vec![*e], Vec::new()),

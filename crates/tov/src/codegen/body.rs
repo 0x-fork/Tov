@@ -121,6 +121,10 @@ pub(crate) struct Body {
     /// store that then doesn't release it.
     pub take: Option<ExprId>,
     pub no_release: Option<ExprId>,
+    /// `const x = P; ...; P = v` being emitted (see `take_plan`): the store's statement, and
+    /// where x is declared.
+    pub take_slot: Option<(StmtId, usize)>,
+    pub take_let: bool,
     /// Locals holding a reference of their own, and the uses that hand it over (see `moves`;
     /// found when first needed).
     pub owned_locals: FxSet<u32>,
@@ -308,6 +312,8 @@ impl<'c, 'a> Gen<'c, 'a> {
             root: None,
             cursors: FxSet::default(),
             take: None,
+            take_slot: None,
+            take_let: false,
             no_release: None,
             owned_locals: FxSet::default(),
             moves: None,
@@ -514,6 +520,8 @@ impl<'c, 'a> Gen<'c, 'a> {
             root: None,
             cursors: FxSet::default(),
             take: None,
+            take_slot: None,
+            take_let: false,
             no_release: None,
             owned_locals: FxSet::default(),
             moves: None,
@@ -700,6 +708,36 @@ impl<'c, 'a> Gen<'c, 'a> {
                 skip = n == 2;
             } else if let Some(n) = self.permutation(ss, i) {
                 in_group = n - 1;
+            } else if let Some(j) = self.take_plan(ss, i) {
+                // `const x = P; ...; P = v`: x takes P's reference (see `take_plan`)
+                self.b().take_slot = Some((ss[j], i));
+                self.b().take_let = true;
+                self.stmt(x);
+                self.b().take_let = false;
+            } else if self.b().take_slot.is_some_and(|(sj, _)| sj == x) {
+                let (_, di) = self.b().take_slot.take().unwrap();
+                let StmtKind::Expr(e) = &self.ast(m).stmt(x).kind else { unreachable!() };
+                let ExprKind::Assign(_, t, _) = &self.ast(m).expr(*e).kind else { unreachable!() };
+                // (and `P = x.f; x.f = null` after it: see `unlink_pair`)
+                let unlink = self.unlink_pair(ss, i);
+                self.b().no_release = Some(*t);
+                self.b().take = unlink.map(|u| u.0);
+                self.stmt(x);
+                self.b().take = None;
+                self.b().no_release = None;
+                if let Some((_, t2)) = unlink {
+                    self.b().no_release = Some(t2);
+                    self.stmt(ss[i + 1]);
+                    self.b().no_release = None;
+                    skip = true;
+                }
+                // (from here x holds the reference P held)
+                if let StmtKind::Let { name_span, .. } = &self.ast(m).stmt(ss[di]).kind
+                    && let Some(local) = self.b().locals.get(&name_span.start).cloned()
+                {
+                    let rel = format!("{};", self.release_code(local.ty, &local.access));
+                    self.b().scopes.last_mut().unwrap().releases.push(rel);
+                }
             } else if let Some((v, t2)) = self.unlink_pair(ss, i) {
                 // `p = a.f; a.f = null`: the reference moves from a.f to p (see `unlink_pair`)
                 self.b().take = Some(v);
@@ -717,6 +755,149 @@ impl<'c, 'a> Gen<'c, 'a> {
                     self.release_local_now(k);
                 }
             }
+        }
+    }
+
+    /// `const x = P; ...; P = v` (statement `i`, and `j` returned): P a field or element path from
+    /// `this` or locals nothing in between changes, of a class type; between them no call (but a
+    /// quiet one) and no other store of that field or array, x's last use in the statement just
+    /// before `j` or later. Then x takes P's reference instead of retaining one: until `j` the
+    /// slot still holds it (an exit leaves x unreleased), and `j` doesn't release the old value,
+    /// which x now holds.
+    fn take_plan(&mut self, ss: &[StmtId], i: usize) -> Option<usize> {
+        let m = self.cur_m();
+        let ast = self.ast(m);
+        let StmtKind::Let { mutable: false, name_span, init: Some(p), .. } = &ast.stmt(ss[i]).kind else { return None };
+        let (key, p) = (name_span.start, *p);
+        let ty = self.ty(p);
+        if !(matches!(self.tget(ty), Ty::Class(..)) || self.niche(ty).is_some() && !self.niche_str(ty) && !self.niche_arr(ty)) {
+            return None;
+        }
+        if self.b().boxed.contains(&key) || self.b().async_fn.is_some() || self.b().gen_elem.is_some() {
+            return None;
+        }
+        // (the place: fields and elements of `this`, a parameter or a local)
+        let mut roots: Vec<u32> = Vec::new();
+        let mut fields: Vec<crate::intern::Sym> = Vec::new();
+        if !self.simple_place(m, p, &mut roots, &mut fields, true) {
+            return None;
+        }
+        let j = (i + 1..ss.len()).find(|&j| match &ast.stmt(ss[j]).kind {
+            StmtKind::Expr(e) => matches!(&ast.expr(*e).kind, ExprKind::Assign(crate::ast::AssignOp::Assign, t, _) if self.same_place(m, *t, p)),
+            _ => false,
+        })?;
+        // (nothing between, nor the store's value, calls out, stores into those fields or
+        // arrays, changes the roots or x)
+        let StmtKind::Expr(je) = &ast.stmt(ss[j]).kind else { return None };
+        let ExprKind::Assign(_, _, jv) = &ast.expr(*je).kind else { return None };
+        // (what a `throw` evaluates runs on the way out only, before x is handed on)
+        fn outside_throws(ast: &ast::Ast, st: StmtId, out: &mut Vec<ExprId>) {
+            if matches!(ast.stmt(st).kind, StmtKind::Throw(_)) {
+                return;
+            }
+            let (es, ss) = super::quiet::stmt_parts(ast, st);
+            for e in es {
+                collect_exprs_expr(ast, e, out);
+            }
+            for s in ss {
+                outside_throws(ast, s, out);
+            }
+        }
+        let mut exprs = Vec::new();
+        for &st in &ss[i + 1..j] {
+            outside_throws(ast, st, &mut exprs);
+        }
+        collect_exprs_expr(ast, *jv, &mut exprs);
+        let mut last_use = None;
+        for &x in &exprs {
+            match &ast.expr(x).kind {
+                ExprKind::Call { .. } | ExprKind::New { .. } => return None,
+                ExprKind::Await(_) | ExprKind::Yield(..) | ExprKind::Arrow(_) => return None,
+                ExprKind::Assign(_, t, _) | ExprKind::Update { target: t, .. } => {
+                    let mut tt = *t;
+                    while let ExprKind::Paren(y) | ExprKind::NonNull(y) = ast.expr(tt).kind {
+                        tt = y;
+                    }
+                    match &ast.expr(tt).kind {
+                        ExprKind::Ident(_) => match self.ident_fact(m, tt) {
+                            Some(IdentFact::Local(k)) if k == key || roots.contains(&k) => return None,
+                            _ => {}
+                        },
+                        ExprKind::Member { name, .. } if fields.contains(name) => return None,
+                        ExprKind::Index { .. } => return None,
+                        _ => {}
+                    }
+                }
+                _ => {}
+            }
+        }
+        // (x's last use: the statement before `j` or later)
+        for (k, &st) in ss.iter().enumerate().skip(i + 1) {
+            let mut es = Vec::new();
+            collect_exprs_stmt(ast, st, &mut es);
+            if es.iter().any(|&x| matches!(self.ident_fact(m, x), Some(IdentFact::Local(kk)) if kk == key)) {
+                last_use = Some(k);
+            }
+        }
+        if last_use.is_some_and(|k| k + 1 < j) {
+            return None;
+        }
+        Some(j)
+    }
+
+    /// `e` is a field or element path from `this` or a local (its roots and field names
+    /// collected); `top`: the path itself (an element's index too: a local or a number).
+    fn simple_place(&self, m: u32, e: ExprId, roots: &mut Vec<u32>, fields: &mut Vec<crate::intern::Sym>, top: bool) -> bool {
+        let ast = self.ast(m);
+        match &ast.expr(e).kind {
+            ExprKind::Paren(x) | ExprKind::NonNull(x) => self.simple_place(m, *x, roots, fields, top),
+            ExprKind::This => !top,
+            ExprKind::Ident(_) => !top && match self.ident_fact(m, e) {
+                Some(IdentFact::Local(k)) => {
+                    roots.push(k);
+                    true
+                }
+                _ => false,
+            },
+            ExprKind::Member { obj, name, optional: false, .. } => {
+                fields.push(*name);
+                self.simple_place(m, *obj, roots, fields, false)
+            }
+            ExprKind::Index { obj, index, optional: false } => {
+                let idx_ok = match &ast.expr(*index).kind {
+                    ExprKind::Int(_) => true,
+                    ExprKind::Ident(_) => match self.ident_fact(m, *index) {
+                        Some(IdentFact::Local(k)) => {
+                            roots.push(k);
+                            true
+                        }
+                        _ => false,
+                    },
+                    _ => false,
+                };
+                idx_ok && self.simple_place(m, *obj, roots, fields, false)
+            }
+            _ => false,
+        }
+    }
+
+    /// `a` and `b` are the same path (see `simple_place`).
+    fn same_place(&self, m: u32, a: ExprId, b: ExprId) -> bool {
+        let ast = self.ast(m);
+        let strip = |mut e: ExprId| {
+            while let ExprKind::Paren(x) | ExprKind::NonNull(x) = ast.expr(e).kind {
+                e = x;
+            }
+            e
+        };
+        let (a, b) = (strip(a), strip(b));
+        match (&ast.expr(a).kind, &ast.expr(b).kind) {
+            (ExprKind::This, ExprKind::This) => true,
+            (ExprKind::Ident(_), ExprKind::Ident(_)) => matches!((self.ident_fact(m, a), self.ident_fact(m, b)), (Some(IdentFact::Local(x)), Some(IdentFact::Local(y))) if x == y),
+            (ExprKind::Int(x), ExprKind::Int(y)) => x == y,
+            (ExprKind::Member { obj: o1, name: n1, optional: false, .. }, ExprKind::Member { obj: o2, name: n2, optional: false, .. }) => n1 == n2 && self.same_place(m, *o1, *o2),
+            (ExprKind::Index { obj: o1, index: i1, optional: false }, ExprKind::Index { obj: o2, index: i2, optional: false }) => self.same_place(m, *i1, *i2) && self.same_place(m, *o1, *o2),
+            _ => false,
         }
     }
 
@@ -2687,6 +2868,21 @@ impl<'c, 'a> Gen<'c, 'a> {
                     self.coerce(v, ty)
                 });
                 self.self_closure = None;
+                // `const x = P` taking P's reference (see `take_plan`): no retain, and no release
+                // until P is stored to
+                if self.b().take_let {
+                    self.b().take_let = false;
+                    if let Some(v) = &value
+                        && !v.owned
+                    {
+                        self.line(format!("{ct} {cname} = {};", v.code));
+                        self.pop_temps();
+                        self.b().locals.insert(key, Local { access: cname, ty });
+                        self.b().owned_locals.insert(key);
+                        return;
+                    }
+                    self.b().take_slot = None;
+                }
                 // `let x = list` walked only by `x = x.next` in a function that stores no
                 // reference anywhere: x borrows each node (see `cursor_local`)
                 if let (true, Some(i), Some(v)) = (*mutable, init, &value)
@@ -6745,7 +6941,9 @@ impl<'c, 'a> Gen<'c, 'a> {
                 let own = if unique { String::new() } else { format!(" && {pa}->p->rc > 0") };
                 self.open(&format!("if (__builtin_expect((uint64_t){i} < (uint64_t)tv_arr_len(*{pa}){own}, 1)) {{"));
                 self.line(format!("{ect} *{ep0} = ({ect} *)tv_arr_data(*{pa}) + {i};"));
-                if self.is_rc(et) {
+                // (its old value taken already: see `take_plan`)
+                let taken = self.b().no_release == Some(target);
+                if self.is_rc(et) && !taken {
                     let r = self.release_code(et, &format!("(*{ep0})"));
                     self.line(format!("{r};"));
                 }
@@ -6766,7 +6964,7 @@ impl<'c, 'a> Gen<'c, 'a> {
                 } else {
                     self.line(format!("{ect} *{ep} = ({ect} *)tvg_at_mut({pa}, {d}, sizeof({ect}), {i}, {loc});"));
                 }
-                if self.is_rc(et) {
+                if self.is_rc(et) && !taken {
                     let r = self.release_code(et, &format!("(*{ep})"));
                     self.line(format!("{r};"));
                 }
@@ -7191,6 +7389,8 @@ impl<'c, 'a> Gen<'c, 'a> {
             root: None,
             cursors: FxSet::default(),
             take: None,
+            take_slot: None,
+            take_let: false,
             no_release: None,
             owned_locals: FxSet::default(),
             moves: None,
