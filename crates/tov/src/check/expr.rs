@@ -2059,7 +2059,8 @@ impl<'a> Checker<'a> {
                 // `xs.length = n`: drops the elements from n on, as in JavaScript
                 if n == "length" && matches!(self.types.get(t), Ty::Array(_)) {
                     let root = self.check_mutable_root(*obj, span);
-                    return Some(Place { ty: INT, local: None, root, sites: Vec::new(), global: None, int_field: None });
+                    // (any number: a whole one, as JavaScript requires)
+                    return Some(Place { ty: F64, local: None, root, sites: Vec::new(), global: None, int_field: None });
                 }
                 if let Some(cls) = self.class_of(self.types_without_undef(t)) {
                     if self.types.has_undefined(t) {

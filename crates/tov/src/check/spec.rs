@@ -20,7 +20,7 @@ pub(crate) type Site = (u32, ast::TypeId);
 pub(crate) const LIT_SITE: u32 = 0x8000_0000;
 
 /// Rounds of checking with more floats before giving up on speculation.
-const MAX_ROUNDS: u32 = 8;
+const MAX_ROUNDS: u32 = 12;
 
 /// After a round checked with speculation: `Some(true)` to check again with the floats it
 /// found, `Some(false)` to check again without speculation (it failed), `None` when done.

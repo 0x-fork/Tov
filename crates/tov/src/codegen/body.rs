@@ -6394,7 +6394,9 @@ impl<'c, 'a> Gen<'c, 'a> {
                 AssignOp::Op(b) => {
                     let cur = Val::plain(format!("tv_arr_len({})", ap.lv), INT);
                     let rv = self.expr(value);
-                    let r = self.arith(b, cur, rv, INT, span);
+                    // (a float operand: computed as one, then made whole)
+                    let rt = if self.c.types.is_float(rv.ty) { F64 } else { INT };
+                    let r = self.arith(b, cur, rv, rt, span);
                     self.int_code(r)
                 }
             };
