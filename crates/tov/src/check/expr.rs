@@ -630,6 +630,21 @@ impl<'a> Checker<'a> {
         self.apply(&pos);
         let ta = self.expr(*a, exp);
         self.pop_scope();
+        // (`c ? { left: l, right: r } : { left: null, right: null }`: one record, each field
+        // either branch's)
+        if exp.is_none()
+            && let Some(m) = self.merged_literals(*a, *b, ta, &neg)
+        {
+            self.push_scope();
+            self.apply(&pos);
+            self.expr(*a, Some(m));
+            self.pop_scope();
+            self.push_scope();
+            self.apply(&neg);
+            self.expr(*b, Some(m));
+            self.pop_scope();
+            return m;
+        }
         self.push_scope();
         self.apply(&neg);
         let tb = self.expr(*b, exp.or(Some(ta)));
@@ -643,6 +658,54 @@ impl<'a> Checker<'a> {
                 return self.types.union(&[ta, tb]);
             }
         self.types.union(&[ta, tb])
+    }
+
+    /// Two object literals with the same keys whose fields don't all agree (`ta` the first's
+    /// type): the record of both, each field the union of the two (checked quietly).
+    fn merged_literals(&mut self, a: ExprId, b: ExprId, ta: TyId, neg: &[Narrowing]) -> Option<TyId> {
+        let lit = |c: &Self, e: ExprId| {
+            let mut e = e;
+            while let ExprKind::Paren(x) = c.ast().expr(e).kind {
+                e = x;
+            }
+            matches!(&c.ast().expr(e).kind, ExprKind::Object(fs) if !fs.is_empty())
+        };
+        if !lit(self, a) || !lit(self, b) || self.tuple_of(ta).is_some() {
+            return None;
+        }
+        let Ty::Record(fa) = *self.types.get(ta) else { return None };
+        let saved = std::mem::take(&mut self.diags);
+        self.push_scope();
+        self.apply(neg);
+        let tb = self.expr(b, None);
+        self.pop_scope();
+        let failed = !self.diags.is_empty();
+        self.diags = saved;
+        let Ty::Record(fb) = *self.types.get(tb) else { return None };
+        if failed || ta == tb {
+            return None;
+        }
+        let (fa, fb) = (self.types.fields(fa).to_vec(), self.types.fields(fb).to_vec());
+        if fa.len() != fb.len() || fa.iter().zip(&fb).any(|(x, y)| x.name != y.name || x.optional != y.optional) {
+            return None;
+        }
+        let order = self.types.fields_in_order(ta).iter().map(|f| f.name).collect::<Vec<_>>();
+        let mut fields = Vec::new();
+        for (x, y) in fa.iter().zip(&fb) {
+            let ty = match (x.ty, y.ty) {
+                (s, t) if s == t => s,
+                (NEVER, t) | (t, NEVER) => t,
+                (s, t) if self.types.is_int(s) && self.types.is_float(t) || self.types.is_float(s) && self.types.is_int(t) => F64,
+                (s, t) => {
+                    let (s, t) = (self.types.widen(s), self.types.widen(t));
+                    self.types.union(&[s, t])
+                }
+            };
+            fields.push(Field { name: x.name, ty, optional: x.optional });
+        }
+        let t = self.types.record(fields);
+        self.types.note_field_order(t, order);
+        Some(t)
     }
 
     /// A call of function `(m, i)` with overload signatures: the result type of the first that
