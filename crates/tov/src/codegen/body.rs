@@ -2669,7 +2669,15 @@ impl<'c, 'a> Gen<'c, 'a> {
                 let cv = self.fresh("c");
                 self.line(format!("bool {cv} = {cond};"));
                 self.pop_temps();
-                self.open(&format!("if ({cv}) {{"));
+                // (a branch that throws is the unlikely one: laid out away from the rest)
+                let ast = self.ast(m);
+                if throws_out(ast, *t) && e.is_none_or(|e| !throws_out(ast, e)) {
+                    self.open(&format!("if (__builtin_expect({cv}, 0)) {{"));
+                } else if e.is_some_and(|e| throws_out(ast, e)) && !throws_out(ast, *t) {
+                    self.open(&format!("if (__builtin_expect({cv}, 1)) {{"));
+                } else {
+                    self.open(&format!("if ({cv}) {{"));
+                }
                 self.scoped_stmt(*t);
                 if let Some(e) = e {
                     self.close("} else {");
@@ -6633,7 +6641,19 @@ impl<'c, 'a> Gen<'c, 'a> {
                 }
                 let (i, pa) = (self.fresh("i"), self.fresh("pa"));
                 self.line(format!("tv_int {i} = {iv}; tv_arr *{pa} = &{};", ap.lv));
-                self.open(&format!("if ({i} == tv_arr_len(*{pa})) {{"));
+                // (in bounds, of an array of its own: the common case, first)
+                let ep0 = self.fresh("ep");
+                let own = if unique { String::new() } else { format!(" && {pa}->p->rc > 0") };
+                self.open(&format!("if (__builtin_expect((uint64_t){i} < (uint64_t)tv_arr_len(*{pa}){own}, 1)) {{"));
+                self.line(format!("{ect} *{ep0} = ({ect} *)tv_arr_data(*{pa}) + {i};"));
+                if self.is_rc(et) {
+                    let r = self.release_code(et, &format!("(*{ep0})"));
+                    self.line(format!("{r};"));
+                }
+                let store = self.store(target, et, &format!("(*{ep0})"), &nv);
+                self.line(store);
+                self.close(&format!("}} else if ({i} == tv_arr_len(*{pa})) {{"));
+                self.b().indent += 1;
                 self.line(format!("TVG_PUSH({ect}, {pa}, {d}, {nv});"));
                 if let Some(c) = &cap {
                     self.line(format!("{c} = {pa}->p->cap;"));
@@ -7311,6 +7331,16 @@ pub(crate) fn has_mul(ast: &ast::Ast, e: ExprId) -> bool {
         ExprKind::Binary(_, a, b) => has_mul(ast, *a) || has_mul(ast, *b),
         ExprKind::Paren(x) | ExprKind::Unary(_, x) | ExprKind::NonNull(x) | ExprKind::As(x, _) => has_mul(ast, *x),
         ExprKind::Cond(_, a, b) => has_mul(ast, *a) || has_mul(ast, *b),
+        _ => false,
+    }
+}
+
+/// `s` always ends by throwing (a `throw`, or a block that ends in one).
+fn throws_out(ast: &ast::Ast, s: StmtId) -> bool {
+    match &ast.stmt(s).kind {
+        StmtKind::Throw(_) => true,
+        StmtKind::Block(ss) => ss.last().is_some_and(|&l| throws_out(ast, l)),
+        StmtKind::If(_, t, Some(e)) => throws_out(ast, *t) && throws_out(ast, *e),
         _ => false,
     }
 }
