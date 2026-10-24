@@ -4130,7 +4130,21 @@ impl<'a> Parser<'a> {
                         return e;
                     };
                     let span = start.to(name_span);
-                    e = self.mk_expr(ExprKind::Member { obj: e, name, name_span, optional: chain }, span);
+                    // `Float64Array.BYTES_PER_ELEMENT`: the element's size, a constant
+                    let size = match &self.ast.exprs[e as usize].kind {
+                        ExprKind::Ident(t) if self.interner.get(name) == "BYTES_PER_ELEMENT" => match self.interner.get(*t) {
+                            "Int8Array" | "Uint8Array" | "Uint8ClampedArray" => Some(1),
+                            "Int16Array" | "Uint16Array" => Some(2),
+                            "Int32Array" | "Uint32Array" | "Float32Array" => Some(4),
+                            "Float64Array" | "BigInt64Array" | "BigUint64Array" => Some(8),
+                            _ => None,
+                        },
+                        _ => None,
+                    };
+                    e = match size {
+                        Some(n) => self.mk_expr(ExprKind::Int(n), span),
+                        None => self.mk_expr(ExprKind::Member { obj: e, name, name_span, optional: chain }, span),
+                    };
                 }
                 Tok::QuestionDot => {
                     self.bump();
