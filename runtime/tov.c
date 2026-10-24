@@ -2536,15 +2536,25 @@ void tv_arrbuf_release_slow(tv_arrbuf *TV_NOESCAPE p, const tv_type *t) {
             for (int64_t i = 0; i < p->len; i++) t->release(d + (size_t)i * es);
         }
     }
+    if (t) {
+        tv_arrbuf_free_block(p, t->size);
+        return;
+    }
+    if (p->ext) free(tv_ext_base(p->ext));
+    free(p);
+}
+
+/* Frees an array's header and elements' blocks (its elements released already). */
+void tv_arrbuf_free_block(tv_arrbuf *TV_NOESCAPE p, size_t es) {
     /* (the header's block: the size it was made with, from the count of elements it held) */
     int64_t inl = p->cap;
     if (p->ext) {
         memcpy(&inl, p + 1, sizeof inl);
         free(tv_ext_base(p->ext));
     }
-    size_t s = tv_arrbuf_block((size_t)inl * (t ? t->size : 0));
+    size_t s = tv_arrbuf_block((size_t)inl * es);
 #ifndef TV_ARRBUF_PLAIN
-    if (t && s <= TV_ARRBUF_SMALL) {
+    if (s <= TV_ARRBUF_SMALL) {
         size_t c = s >> 3;
         *(void **)(void *)p = tv_small_bins[c];
         tv_small_bins[c] = p;

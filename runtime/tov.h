@@ -488,6 +488,25 @@ void tv_arr_release_slow(tv_arr a, const tv_type *t);
 #define TV_NOESCAPE
 #endif
 void tv_arrbuf_release_slow(tv_arrbuf *TV_NOESCAPE p, const tv_type *t);
+void tv_arrbuf_free_block(tv_arrbuf *TV_NOESCAPE p, size_t es);
+/* Frees an array's blocks, its elements released: inline when they follow the header and the
+ * block goes back on a small-object list. */
+static inline void tv_arrbuf_free(tv_arrbuf *p, size_t es) {
+#ifndef TV_ARRBUF_PLAIN
+    if (!p->ext) {
+        size_t s = tv_arrbuf_block((size_t)p->cap * es);
+        if (s <= TV_ARRBUF_SMALL) {
+            size_t c = s >> 3;
+            *(void **)(void *)p = tv_small_bins[c];
+            tv_small_bins[c] = p;
+            return;
+        }
+    }
+#endif
+    tv_arrbuf_free_block(p, es);
+}
+/* Release with the array type's own free function (generated code: see arr_free_fn). */
+static inline void tv_arr_release_with(tv_arr a, void (*fr)(tv_arrbuf *)) { if (a.p && a.p->rc > 0 && --a.p->rc == 0) fr(a.p); }
 static inline void tv_arr_release(tv_arr a, const tv_type *t) { if (a.p && a.p->rc > 0 && --a.p->rc == 0) tv_arrbuf_release_slow(a.p, t); }
 
 /* Ensures *a can be changed (an array of its own in place of the immortal empty one) with

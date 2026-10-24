@@ -311,6 +311,8 @@ pub(crate) struct Gen<'c, 'a> {
     pub(crate) arrow_fns: FxMap<(u32, crate::ast::ExprId), Vec<(String, String)>>,
     pub(crate) devirt: Vec<(String, Vec<(u32, crate::ast::ExprId)>, String, String, Vec<String>)>,
     pub(crate) arrow_protos: FxMap<String, String>,
+    /// Array types given a free function of their own (see `arr_free_fn`).
+    pub(crate) arr_frees: FxSet<TyId>,
     pub(crate) quiet_inst_memo: FxMap<((u32, crate::ast::StmtId, bool), Vec<(u32, TyId)>), bool>,
     /// The call being made, for its arguments (see `call_spares`).
     pub(crate) cur_calls: Vec<(usize, u32, crate::ast::ExprId)>,
@@ -443,6 +445,7 @@ impl<'c, 'a> Gen<'c, 'a> {
             arrow_fns: FxMap::default(),
             devirt: Vec::new(),
             arrow_protos: FxMap::default(),
+            arr_frees: FxSet::default(),
             quiet_inst_memo: FxMap::default(),
             cur_calls: Vec::new(),
             pquiet_stack: Vec::new(),
@@ -1520,10 +1523,30 @@ impl<'c, 'a> Gen<'c, 'a> {
         }
     }
 
+    /// The function freeing an array of type `t` (elements of type `e`, which hold references)
+    /// once its count is 0: each element released by code of its own type, not through the
+    /// descriptor's function pointer, so a nest of arrays is freed by direct calls.
+    fn arr_free_fn(&mut self, t: TyId, e: TyId) -> String {
+        let name = format!("fa{}", t.0);
+        if self.arr_frees.insert(t) {
+            let ect = self.ctype(e);
+            let _ = writeln!(self.protos, "static void {name}(tv_arrbuf *p);");
+            let rel = self.release_code(e, "d[i]");
+            // (a word of zeros, a hole: nothing to release, as the runtime's release does)
+            let rel = format!("if (sizeof({ect}) != sizeof(void *) || *(void **)(void *)&d[i]) {rel};");
+            let _ = writeln!(self.helpers, "static void {name}(tv_arrbuf *p) {{\n    {ect} *d = ({ect} *)(void *)tv_arrbuf_data(p);\n    for (int64_t i = 0, n = p->len; i < n; i++) {{ {rel} }}\n    tv_arrbuf_free(p, sizeof({ect}));\n}}");
+        }
+        name
+    }
+
     pub(crate) fn release_code(&mut self, t: TyId, place: &str) -> String {
         match self.tget(t) {
             Ty::Str => format!("tv_str_release({place})"),
             Ty::BigInt => format!("tv_big_release({place})"),
+            Ty::Array(e) if self.is_rc(e) => {
+                let f = self.arr_free_fn(t, e);
+                format!("tv_arr_release_with({place}, {f})")
+            }
             Ty::Array(e) => {
                 let d = self.desc(e);
                 format!("tv_arr_release({place}, {d})")
