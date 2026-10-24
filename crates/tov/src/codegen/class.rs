@@ -228,14 +228,24 @@ impl<'c, 'a> Gen<'c, 'a> {
             ExprKind::Ident(_) => match self.ident_fact(m, o) {
                 Some(crate::check::IdentFact::Local(k)) => {
                     let b = self.bodies.last().unwrap();
-                    let ok = !b.boxed.contains(&k) && b.locals.get(&k).is_some_and(|l| l.access == v.code);
+                    // (the local itself, or it seen as a narrower class: `((T*)((p0)))`)
+                    let cast_of = |code: &str, acc: &str| {
+                        let suffix = format!("*)(({acc})))");
+                        code.len() > suffix.len() + 2
+                            && code.starts_with("((")
+                            && code.ends_with(&suffix)
+                            && code[2..code.len() - suffix.len()].chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+                    };
+                    let ok = !b.boxed.contains(&k) && b.locals.get(&k).is_some_and(|l| l.access == v.code || cast_of(&v.code, &l.access));
                     ok && !self.reassigned(k)
                 }
                 _ => false,
             },
             _ => false,
         };
-        if stable && !v.owned {
+        // (or a temporary holding the object: assigned once, it's the same object at the store)
+        let temp = v.code.len() > 1 && v.code.starts_with('t') && v.code[1..].chars().all(|c| c.is_ascii_digit());
+        if stable && !v.owned || temp {
             self.stable_places.insert(lv.clone());
         }
         super::body::Place { lv, ty: f.ty, weak: f.weak }
@@ -245,7 +255,7 @@ impl<'c, 'a> Gen<'c, 'a> {
     /// by `++`, or passed by reference): not just its fields.
     fn reassigned(&mut self, k: u32) -> bool {
         let m = self.cur_m();
-        let Some(root) = self.bodies.last().and_then(|b| b.root) else { return true };
+        let Some(root) = self.bodies.last().and_then(|b| b.root.or(b.arrow_root)) else { return true };
         if !self.reassigned_memo.contains_key(&(m, root)) {
             let ast = self.ast(m);
             let mut exprs = Vec::new();
