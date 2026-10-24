@@ -2612,6 +2612,27 @@ void tv_arr_set_length(tv_arr *a, const tv_type *t, tv_int n, const char *loc) {
     a->p->len = n;
 }
 
+/* `xs.length = n` past the end of an array whose elements may be `undefined`: the holes are
+   `fill` (that `undefined`, which holds nothing to retain). */
+void tv_arr_set_length_fill(tv_arr *a, const tv_type *t, tv_int n, const void *fill, const char *loc) {
+    int64_t len = tv_arr_len(*a);
+    if (n <= len) {
+        tv_arr_set_length(a, t, n, loc);
+        return;
+    }
+    if (n > INT32_MAX) tv_trap("invalid array length", loc);
+    size_t es = t->size;
+    unsigned char tmp[64];
+    for (int64_t i = len; i < n; i++) {
+        if (es <= sizeof tmp) {
+            memcpy(tmp, fill, es);
+            tv_arr_push(a, t, tmp);
+        } else {
+            tv_arr_push(a, t, (void *)fill);
+        }
+    }
+}
+
 bool tv_arr_shift(tv_arr *a, const tv_type *t, void *out) {
     int64_t len = tv_arr_len(*a);
     if (len == 0) return false;

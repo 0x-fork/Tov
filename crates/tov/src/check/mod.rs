@@ -3142,6 +3142,11 @@ impl<'a> Checker<'a> {
                 rb == VOID || self.assignable_in(ra, rb, true, assuming)
             }
             (Ty::Class(..), Ty::Class(..)) => self.class_assignable(src, dst),
+            // (a type parameter fits what its bound fits)
+            (Ty::Param(p), _) if self.gparam(p).bound.is_some() => {
+                let b = self.gparam(p).bound.unwrap();
+                self.assignable_in(b, dst, top, assuming)
+            }
             (_, Ty::Interface(i, args)) => {
                 let args = self.types.tys(args).to_vec();
                 let fields = self.iface_fields_inst(i, &args);

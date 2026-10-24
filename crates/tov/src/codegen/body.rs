@@ -6343,7 +6343,14 @@ impl<'c, 'a> Gen<'c, 'a> {
                 }
             };
             let (n, loc) = (self.fresh("n"), self.loc(span));
-            self.line(format!("tv_int {n} = {v}; tv_arr_set_length(&{}, {d}, {n}, {loc});", ap.lv));
+            if self.c.types.has_undefined(et) {
+                // (grown with `undefined`s, the holes JavaScript would leave)
+                let (ect, u) = (self.ctype(et), self.default_value(et));
+                let z = self.fresh("z");
+                self.line(format!("tv_int {n} = {v}; {ect} {z} = {u}; tv_arr_set_length_fill(&{}, {d}, {n}, &{z}, {loc});", ap.lv));
+            } else {
+                self.line(format!("tv_int {n} = {v}; tv_arr_set_length(&{}, {d}, {n}, {loc});", ap.lv));
+            }
             return Val::plain(n, INT);
         }
         // `counts[w] = n` / `counts[w] += 1` on a map: set (after reading, for `+=`)

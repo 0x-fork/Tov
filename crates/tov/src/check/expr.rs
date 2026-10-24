@@ -3848,6 +3848,8 @@ impl<'a> Checker<'a> {
                 }
                 match elem {
                     Some(el) if typed.is_some() || self.has_default(el) => self.types.array(el),
+                    // (its holes are the `undefined` its elements may be)
+                    Some(el) if n == "Array" && (el == UNKNOWN || self.types.without_undefined(el) != el) => self.types.array(el),
                     // (filled as it's made, `Array(n).fill(null)`: no hole is seen)
                     Some(el) if n == "Array" && args.len() == 1 && self.filled_at_once(e) => self.types.array(el),
                     Some(el) if n == "Array" && args.len() == 1 && super::stmt::filled_by_next_loop(self.ast(), e) => {

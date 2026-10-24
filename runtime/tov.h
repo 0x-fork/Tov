@@ -478,6 +478,7 @@ typedef int8_t TV_I8S;
 void *tv_arr_at_mut(tv_arr *a, const tv_type *t, tv_int i, const char *loc);
 
 void tv_arr_push(tv_arr *a, const tv_type *t, void *elem);         /* moves elem */
+void tv_arr_set_length_fill(tv_arr *a, const tv_type *t, tv_int n, const void *fill, const char *loc);
 tv_arr tv_gen_collect(tv_gen *g, const tv_type *t);   /* every value it yields (retained), in an array */
 tv_gen *tv_gen_of_arr(tv_arr a, const tv_type *t);    /* a generator over an array's elements (takes a)  */
 static inline void tv_arr_push_fast(tv_arr *a, const tv_type *t, void *elem) {

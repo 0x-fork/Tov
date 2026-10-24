@@ -431,6 +431,7 @@ impl<'a> Checker<'a> {
             StmtKind::Block(stmts) => {
                 let fx = if self.always_jumps(s) { Effects::default() } else { effects_of_stmts(ast, stmts) };
                 let entry = self.fcx().locals.len();
+                let ptab = self.fcx().path_table.len();
                 self.push_scope();
                 let mut reported_unreachable = false;
                 let groups = closure_groups(ast, stmts);
@@ -488,8 +489,13 @@ impl<'a> Checker<'a> {
                     }
                 }
                 let ends = self.end_types(&fx.assigned, entry);
+                let paths = self.end_paths(ptab, entry);
                 self.pop_scope();
                 self.apply_effects(&fx, entry, &ends);
+                // (what the block's statements narrowed last, in order, still holds after it)
+                for (l, p, t, heap) in paths {
+                    self.apply(&[super::expr::Narrowing::Path(l, p, t, heap)]);
+                }
             }
             StmtKind::If(c, then, els) => {
                 self.cond(*c);
@@ -508,12 +514,15 @@ impl<'a> Checker<'a> {
                     fx.extend(effects_of_stmt(ast, *e));
                 }
                 let entry = self.fcx().locals.len();
+                let ptab = self.fcx().path_table.len();
                 let mut branch_ends: Vec<Vec<(LocalId, TyId)>> = Vec::new();
+                let mut path_ends: Vec<Vec<(LocalId, Vec<Sym>, TyId, bool)>> = Vec::new();
                 self.push_scope();
                 self.apply(&pos);
                 self.stmt(*then);
                 if !then_jumps {
                     branch_ends.push(self.end_types(&fx.assigned, entry));
+                    path_ends.push(self.end_paths(ptab, entry));
                 }
                 self.pop_scope();
                 self.push_scope();
@@ -523,6 +532,7 @@ impl<'a> Checker<'a> {
                 }
                 if !else_jumps {
                     branch_ends.push(self.end_types(&fx.assigned, entry));
+                    path_ends.push(self.end_paths(ptab, entry));
                 }
                 self.pop_scope();
                 // Early exits narrow the rest of the enclosing block.
@@ -542,6 +552,24 @@ impl<'a> Checker<'a> {
                     }
                 }
                 self.apply_effects(&fx, entry, &joined);
+                // (`if (this.items === null) { this.items = [] }`: then `this.items` is an array
+                // after it, narrowed at the end of every branch that falls through)
+                if let Some((first, rest)) = path_ends.split_first() {
+                    for (l, p, t, heap) in first {
+                        let (mut u, mut heap) = (*t, *heap);
+                        let everywhere = rest.iter().all(|ends| match ends.iter().find(|(l2, p2, ..)| l2 == l && p2 == p) {
+                            Some((_, _, t2, h2)) => {
+                                u = self.types.union(&[u, *t2]);
+                                heap |= *h2;
+                                true
+                            }
+                            None => false,
+                        });
+                        if everywhere {
+                            self.apply(&[super::expr::Narrowing::Path(*l, p.clone(), u, heap)]);
+                        }
+                    }
+                }
             }
             StmtKind::While(c, body) => {
                 let fx = effects_of_stmt(ast, *body).with(effects_of_expr(ast, *c));
@@ -776,6 +804,22 @@ impl<'a> Checker<'a> {
                 && !out.iter().any(|(x, _)| *x == id)
             {
                 out.push((id, t));
+            }
+        }
+        out
+    }
+
+    /// The field paths of outer locals narrowed since `ptab` (in this branch), as narrowed here.
+    fn end_paths(&self, ptab: usize, entry: usize) -> Vec<(LocalId, Vec<Sym>, TyId, bool)> {
+        let fcx = self.fcx.last().unwrap();
+        let mut out: Vec<(LocalId, Vec<Sym>, TyId, bool)> = Vec::new();
+        for (l, p, t) in &fcx.path_table[ptab.min(fcx.path_table.len())..] {
+            if t.is_none() || p.is_empty() || *l >= entry || out.iter().any(|(l2, p2, ..)| l2 == l && p2 == p) {
+                continue;
+            }
+            if let Some(t) = self.lookup_path(*l, p) {
+                let heap = fcx.heap_paths.iter().any(|(l2, p2)| l2 == l && p2 == p);
+                out.push((*l, p.clone(), t, heap));
             }
         }
         out
