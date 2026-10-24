@@ -7077,7 +7077,17 @@ impl<'c, 'a> Gen<'c, 'a> {
                         self.internal.push("a cursor given an owned value".into());
                     }
                     let lv = self.place_lvalue(&p);
-                    self.line(format!("{lv} = {};", v.code));
+                    // (the value made opaque, by an asm no other matches: `if (c) x = x.left; else
+                    // x = x.right` stays two branches, which the processor runs ahead on as it
+                    // predicts them; merged into a load whose address waits on `c`, a walk down a
+                    // tree out of cache takes each node's miss after the last)
+                    let ct = self.ctype(p.ty);
+                    if ct.ends_with('*') {
+                        let tag = self.fresh("cur");
+                        self.line(format!("{lv} = {}; __asm__(\"\" \"/* {tag} */\" : \"+r\"({lv}));", v.code));
+                    } else {
+                        self.line(format!("{lv} = {};", v.code));
+                    }
                     return Val::plain(lv, p.ty);
                 }
                 let v = self.coerce(v, p.ty);
