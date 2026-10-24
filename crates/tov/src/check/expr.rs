@@ -4113,8 +4113,11 @@ impl<'a> Checker<'a> {
                         let global_lit = matches!(&self.ast().expr(a0.expr).kind, ExprKind::Call { callee, args: ra, .. }
                             if matches!(self.ast().expr(*callee).kind, ExprKind::Ident(f) if self.name(f) == "__reLiteral")
                             && matches!(ra.get(1).map(|a| &self.ast().expr(a.expr).kind), Some(ExprKind::Str(fl)) if self.name(*fl).contains('g')));
+                        // (a callback of the match alone: no groups made for it)
+                        let one_param = args.get(1).is_some_and(|a| matches!(&self.ast().expr(a.expr).kind, ExprKind::Arrow(f) if f.params.len() <= 1 && !f.params.iter().any(|p| p.rest)));
                         let target = match mtext.as_str() {
                             "match" if global_lit => "__reMatchGlobal",
+                            "replace" | "replaceAll" if is_fn && one_param => "__reReplaceFn1",
                             "replace" | "replaceAll" if is_fn => "__reReplaceFn",
                             "replace" | "replaceAll" => "__reReplace",
                             "split" => "__reSplit",

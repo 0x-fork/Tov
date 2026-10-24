@@ -283,12 +283,14 @@ tv_int tv_native_reCompile(tv_str source, tv_str flags);
 tv_str tv_native_reFlags(tv_int h);
 struct tv_arr tv_native_reExec(tv_int h, tv_str s, tv_int from);
 tv_int tv_native_reTest(tv_int h, tv_str s, tv_int from);
+struct tv_arr tv_native_reExecInto(tv_int h, tv_str s, tv_int from, struct tv_arr p);
 struct tv_arr tv_native_reNames(tv_int h);
 struct tv_arr tv_native_reSplit(tv_int h, tv_str s, tv_int max);   /* s.split(re, max) */
 tv_str tv_native_reReplace(tv_int h, tv_str s, tv_str rep);        /* s.replace(re, rep): rep without `$`, re not sticky */
 void tv_native_error(const char *msg);         /* the message __native.takeError() returns next */
 double tv_js_number(tv_str s);                  /* Number(s): NaN when it isn't one; "" is 0; 0x/0o/0b */
 double tv_js_parse_float(tv_str s);             /* parseFloat(s): the longest decimal prefix, else NaN */
+double tv_js_parse_float_slice(tv_str s, tv_int start, tv_int end, bool has_end);   /* parseFloat(s.slice(start, end)) */
 
 /* String methods (JavaScript semantics: indexes count UTF-16 code units). Negative indices
  * count from the end, as in JS slice. */

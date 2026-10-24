@@ -74,6 +74,13 @@ export class RegExp {
   readonly flags: string
   lastIndex: int = 0
   private h: int
+  readonly global: bool
+  readonly ignoreCase: bool
+  readonly multiline: bool
+  readonly sticky: bool
+  readonly unicode: bool
+  readonly dotAll: bool
+  readonly hasIndices: bool
   constructor(pattern: string, flags?: string) {
     this.h = __native.reCompile(pattern, flags ?? "")
     if (this.h < 0) {
@@ -81,14 +88,15 @@ export class RegExp {
     }
     this.source = pattern
     this.flags = __native.reFlags(this.h)
+    // (read on every match: found once)
+    this.global = this.flags.includes("g")
+    this.ignoreCase = this.flags.includes("i")
+    this.multiline = this.flags.includes("m")
+    this.sticky = this.flags.includes("y")
+    this.unicode = this.flags.includes("u")
+    this.dotAll = this.flags.includes("s")
+    this.hasIndices = this.flags.includes("d")
   }
-  get global(): bool { return this.flags.includes("g") }
-  get ignoreCase(): bool { return this.flags.includes("i") }
-  get multiline(): bool { return this.flags.includes("m") }
-  get sticky(): bool { return this.flags.includes("y") }
-  get unicode(): bool { return this.flags.includes("u") }
-  get dotAll(): bool { return this.flags.includes("s") }
-  get hasIndices(): bool { return this.flags.includes("d") }
   /** (the compiled expression, for the prelude's string functions) */
   __id(): int { return this.h }
   test(s: string): bool {
@@ -160,11 +168,9 @@ export function __reInvalid(message: string): never {
 
 /** (the match `p` of expression `h` in `s` as a RegExpExecArray) */
 export function __reMatchOf(h: int, s: string, p: int[]): RegExpExecArray {
-  const items: (string | undefined)[] = []
-  for (let i = 0; i + 1 < p.length; i += 2) {
-    if (p[i]! < 0) items.push(undefined)
-    else items.push(s.slice(p[i]!, p[i + 1]!))
-  }
+  const n = p.length >> 1
+  const items: (string | undefined)[] = new Array(n)
+  for (let k = 0; k < n; k++) items[k] = p[2 * k]! < 0 ? undefined : s.slice(p[2 * k]!, p[2 * k + 1]!)
   const names = __native.reNames(h)
   let groups: Record<string, string> | undefined = undefined
   for (let i = 1; i < names.length; i++) {
@@ -251,6 +257,35 @@ export function __reReplace(s: string, re: RegExp, rep: string): string {
   return __reReplaceWith(s, re, rep, undefined)
 }
 
+/** `s.replace(re, (match) => text)`: no groups to make for it. */
+export function __reReplaceFn1(s: string, re: RegExp, f: (m: string) => string): string {
+  const h = re.__id()
+  const global = re.global
+  const sticky = re.sticky
+  const unicode = re.unicode
+  let from = global ? 0 : sticky ? re.lastIndex : 0
+  let out = ""
+  let last = 0
+  let p: int[] = [0, 0, 0, 0, 0, 0, 0, 0]
+  while (from <= s.length) {
+    p = __native.reExecInto(h, s, from, p)
+    if (p.length === 0) {
+      if (global || sticky) re.lastIndex = 0
+      break
+    }
+    out += s.slice(last, p[0]!)
+    out += f(s.slice(p[0]!, p[1]!))
+    last = p[1]!
+    if (!global) {
+      if (sticky) re.lastIndex = p[1]!
+      break
+    }
+    from = __reNext(s, p, unicode)
+  }
+  out += s.slice(last)
+  return out
+}
+
 /** `s.replace(re, (match, ...groups) => text)`. */
 export function __reReplaceFn(s: string, re: RegExp, f: (m: string, p1: string, p2: string, p3: string, p4: string, p5: string, p6: string, p7: string, p8: string, p9: string) => string): string {
   return __reReplaceWith(s, re, "", f)
@@ -259,37 +294,46 @@ export function __reReplaceFn(s: string, re: RegExp, f: (m: string, p1: string, 
 function __reReplaceWith(s: string, re: RegExp, rep: string, f: ((m: string, p1: string, p2: string, p3: string, p4: string, p5: string, p6: string, p7: string, p8: string, p9: string) => string) | undefined): string {
   const h = re.__id()
   const global = re.global
-  // (a plain replacement: the runtime's loop)
-  if (f === undefined && !re.sticky && !rep.includes("$")) {
+  const sticky = re.sticky
+  // (a replacement string, `$1`s and all but `$<name>`: the runtime's loop)
+  if (f === undefined && !sticky && !rep.includes("$<")) {
     const out = __native.reReplace(h, s, rep)
     if (global) re.lastIndex = 0
     return out
   }
-  let from = global ? 0 : re.sticky ? re.lastIndex : 0
+  const unicode = re.unicode
+  let from = global ? 0 : sticky ? re.lastIndex : 0
   let out = ""
   let last = 0
+  // (one array for every match's positions: reExecInto fills it again while only this holds it)
+  let p: int[] = [0, 0, 0, 0, 0, 0, 0, 0]
   while (from <= s.length) {
-    const p = __native.reExec(h, s, from)
+    p = __native.reExecInto(h, s, from, p)
     if (p.length === 0) {
-      if (global || re.sticky) re.lastIndex = 0
+      if (global || sticky) re.lastIndex = 0
       break
     }
     out += s.slice(last, p[0]!)
     if (f !== undefined) {
-      const g: string[] = []
-      for (let k = 1; k < 10; k++) g.push(2 * k < p.length && p[2 * k]! >= 0 ? s.slice(p[2 * k]!, p[2 * k + 1]!) : "")
-      out += f(s.slice(p[0]!, p[1]!), g[0]!, g[1]!, g[2]!, g[3]!, g[4]!, g[5]!, g[6]!, g[7]!, g[8]!)
+      const n = p.length
+      out += f(s.slice(p[0]!, p[1]!), __reGroup(s, p, n, 1), __reGroup(s, p, n, 2), __reGroup(s, p, n, 3), __reGroup(s, p, n, 4), __reGroup(s, p, n, 5), __reGroup(s, p, n, 6), __reGroup(s, p, n, 7), __reGroup(s, p, n, 8), __reGroup(s, p, n, 9))
     } else {
       out += __reSubst(h, s, p, rep)
     }
     last = p[1]!
     if (!global) {
-      if (re.sticky) re.lastIndex = p[1]!
+      if (sticky) re.lastIndex = p[1]!
       break
     }
-    from = __reNext(s, p, re.unicode)
+    from = __reNext(s, p, unicode)
   }
-  return out + s.slice(last)
+  out += s.slice(last)
+  return out
+}
+
+/** (group k of a match, or "" when it has none or it didn't take part) */
+function __reGroup(s: string, p: int[], n: int, k: int): string {
+  return 2 * k < n && p[2 * k]! >= 0 ? s.slice(p[2 * k]!, p[2 * k + 1]!) : ""
 }
 
 /** `s.split(re)`: the parts between matches, with the groups of each match between them. */

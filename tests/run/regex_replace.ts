@@ -1,0 +1,10 @@
+const s = "John Smith, Jane Doe; Ünïcode Name, 🥟 Bao";
+console.log(s.replace(/(\w+) (\w+)/g, "$2 $1"));
+console.log(s.replace(/(\w+) (\w+)/, "[$&|$`|$'|$$|$3|$0|$10]"));
+console.log(s.replace(/o/g, "$$"), "x".replace(/x/, "$"), "ab".replace(/(a)(b)?/, "<$2>"));
+console.log(s.replace(/(?<first>\w+) (?<last>\w+)/g, "$<last>,$<first>"));
+console.log("aaa".replace(/a*?/g, "-"), "🥟🥟".replace(/(?:)/gu, "|"));
+console.log(s.replace(/(\w)(\w*)/g, (m, a, b) => a.toUpperCase() + b.toLowerCase()));
+console.log("x-1 y-22".replace(/(\w)-(\d+)/g, "$1=$2$1"));
+console.log("abcabc".replace(/b/g, (m) => m.toUpperCase()), "x".replace(/y/, (m) => "!"));
+const parts: (string | undefined)[] = ["a", undefined, "b"]; console.log(parts.join("|"), [null, 1].join("."));

@@ -1903,7 +1903,7 @@ impl<'c, 'a> Gen<'c, 'a> {
                 Val::plain("0", VOID)
             }
             (Some("__native"), _) => {
-                if name.starts_with("re") && matches!(name, "reCompile" | "reFlags" | "reExec" | "reTest" | "reNames" | "reSplit" | "reReplace") {
+                if name.starts_with("re") && matches!(name, "reCompile" | "reFlags" | "reExec" | "reExecInto" | "reTest" | "reNames" | "reSplit" | "reReplace") {
                     self.uses_regexp = true;
                 }
                 let (ps, ret) = crate::check::native_sig_pub(&mut self.c.types, name).unwrap_or((Vec::new(), VOID));

@@ -2734,7 +2734,7 @@ typedef struct {
 
     StackElem *stack_buf;
     size_t stack_size;
-    StackElem static_stack_buf[32]; /* static stack to avoid allocation in most cases */
+    StackElem static_stack_buf[512]; /* static stack to avoid allocation in most cases (Tov: 512, not 32: a pattern of a few groups and quantifiers outgrew 32 on every match) */
 } REExecContext;
 
 static int lre_poll_timeout(REExecContext *s)

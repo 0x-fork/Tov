@@ -39,6 +39,14 @@ typedef struct tv_re {
      * a table instead of the engine. */
     bool simple, plus;
     bool set[128];
+    /* On ASCII text, where a match can start: one of the bytes in `first` (`lead`: or with
+     * `anchored`, only at the start, or a line's with the m flag), tried there alone by `bc1`,
+     * the expression compiled sticky; NULL when it can start with anything. */
+    uint8_t *bc1;
+    bool anchored;
+    int lead;            /* the one byte `first` holds, or -1 */
+    tv_arr names;        /* reNames' answer, made once (p NULL until then) */
+    bool first[128];
 } tv_re;
 
 /* The set of one escape (`\s`, `\d`, `\w` and their negations), or false when `c` isn't one. */
@@ -66,6 +74,52 @@ static int tv_re_escaped_char(char c) {
     return -1;
 }
 
+/* The class at src[*i] (`[...]`, *i past it after) as its ASCII characters; false when it has
+ * anything else (non-ASCII, a `v`-flag set operation) or doesn't parse. */
+static bool tv_re_class_at(const tv_re *r, const char *src, size_t n, size_t *ip, bool set[128]) {
+    if (r->flags & LRE_FLAG_UNICODE_SETS) return false; /* (`v`: classes have set operations) */
+    size_t i = *ip + 1;
+    bool neg = i < n && src[i] == '^';
+    if (neg) i++;
+    bool pos[128] = {0}, any = false;
+    while (i < n && src[i] != ']') {
+        int lo;
+        if ((unsigned char)src[i] >= 128) return false;
+        if (src[i] == '\\') {
+            if (i + 1 >= n) return false;
+            if (tv_re_class_escape(src[i + 1], pos)) { i += 2; any = true; continue; }
+            lo = src[i + 1] == 'b' ? '\b' : tv_re_escaped_char(src[i + 1]);
+            if (lo < 0) return false;
+            i += 2;
+        } else {
+            lo = (unsigned char)src[i++];
+        }
+        int hi = lo;
+        if (i + 1 < n && src[i] == '-' && src[i + 1] != ']') {
+            i++;
+            if ((unsigned char)src[i] >= 128) return false;
+            if (src[i] == '\\') {
+                if (i + 1 >= n) return false;
+                hi = tv_re_escaped_char(src[i + 1]);
+                if (hi < 0) return false;
+                i += 2;
+            } else {
+                hi = (unsigned char)src[i++];
+            }
+            if (hi < lo) return false;
+        }
+        for (int c = lo; c <= hi; c++) pos[c] = true;
+        any = true;
+    }
+    if (i >= n || !any) return false;
+    i++; /* ] */
+    if (r->flags & LRE_FLAG_IGNORECASE)
+        for (int c = 'a'; c <= 'z'; c++) if (pos[c] || pos[c - 32]) pos[c] = pos[c - 32] = true;
+    for (int c = 0; c < 128; c++) set[c] = pos[c] != neg;
+    *ip = i;
+    return true;
+}
+
 /* Is the expression one atom (a class, an escape, `.` or a character), maybe with `+`? Then its
  * ASCII characters into r->set. Anything else (groups, anchors, alternatives, other quantifiers,
  * sticky matching, non-ASCII source) is the engine's. */
@@ -84,43 +138,8 @@ static bool tv_re_simple_parse(tv_re *r, const char *src, size_t n) {
         }
         i = 2;
     } else if (src[0] == '[') {
-        if (r->flags & LRE_FLAG_UNICODE_SETS) return false; /* (`v`: classes have set operations) */
-        i = 1;
-        bool neg = i < n && src[i] == '^';
-        if (neg) i++;
-        bool pos[128] = {0}, any = false;
-        while (i < n && src[i] != ']') {
-            int lo;
-            if (src[i] == '\\') {
-                if (i + 1 >= n) return false;
-                if (tv_re_class_escape(src[i + 1], pos)) { i += 2; any = true; continue; }
-                lo = src[i + 1] == 'b' ? '\b' : tv_re_escaped_char(src[i + 1]);
-                if (lo < 0) return false;
-                i += 2;
-            } else {
-                lo = (unsigned char)src[i++];
-            }
-            int hi = lo;
-            if (i + 1 < n && src[i] == '-' && src[i + 1] != ']') {
-                i++;
-                if (src[i] == '\\') {
-                    if (i + 1 >= n) return false;
-                    hi = tv_re_escaped_char(src[i + 1]);
-                    if (hi < 0) return false;
-                    i += 2;
-                } else {
-                    hi = (unsigned char)src[i++];
-                }
-                if (hi < lo) return false;
-            }
-            for (int c = lo; c <= hi; c++) pos[c] = true;
-            any = true;
-        }
-        if (i >= n || !any) return false;
-        i++; /* ] */
-        if (r->flags & LRE_FLAG_IGNORECASE)
-            for (int c = 'a'; c <= 'z'; c++) if (pos[c] || pos[c - 32]) pos[c] = pos[c - 32] = true;
-        for (int c = 0; c < 128; c++) set[c] = pos[c] != neg;
+        i = 0;
+        if (!tv_re_class_at(r, src, n, &i, set)) return false;
     } else if (src[0] == '.') {
         for (int c = 0; c < 128; c++) set[c] = (r->flags & LRE_FLAG_DOTALL) || (c != '\n' && c != '\r');
         i = 1;
@@ -140,6 +159,109 @@ static bool tv_re_simple_parse(tv_re *r, const char *src, size_t n) {
     return true;
 }
 
+/* Past the rest of a branch: to the `|` or `)` that ends it (not taken), or the end. */
+static void tv_re_skip_branch(const char *src, size_t n, size_t *ip) {
+    size_t i = *ip;
+    int depth = 0;
+    while (i < n) {
+        char c = src[i];
+        if (c == '\\') { i += 2; continue; }
+        if (c == '[') {
+            i++;
+            if (i < n && src[i] == '^') i++;
+            if (i < n && src[i] == ']') i++;
+            while (i < n && src[i] != ']') i += src[i] == '\\' ? 2 : 1;
+            i++;
+            continue;
+        }
+        if (c == '(') depth++;
+        else if (c == ')') { if (depth == 0) break; depth--; }
+        else if (c == '|' && depth == 0) break;
+        i++;
+    }
+    *ip = i > n ? n : i;
+}
+
+/* The bytes the alternatives at src[*i] can start with, into set (*i past them: at the `)` that
+ * ends them, or the end); false when one can be empty or start with something not known here. */
+static bool tv_re_first_alts(const tv_re *r, const char *src, size_t n, size_t *ip, bool set[128], int depth) {
+    if (depth > 8) return false;
+    size_t i = *ip;
+    for (;;) {
+        bool atom[128] = {0};
+        if (i >= n || src[i] == '|' || src[i] == ')') return false; /* (an empty branch) */
+        unsigned char c = (unsigned char)src[i];
+        if (c >= 128) return false;
+        if (c == '(') {
+            if (i + 2 < n && src[i + 1] == '?') {
+                if (src[i + 2] == ':') i += 3;
+                else if (src[i + 2] == '<' && i + 3 < n && src[i + 3] != '=' && src[i + 3] != '!') {
+                    const char *e = memchr(src + i, '>', n - i);
+                    if (!e) return false;
+                    i = (size_t)(e - src) + 1;
+                } else {
+                    return false; /* (lookarounds) */
+                }
+            } else {
+                i++;
+            }
+            if (!tv_re_first_alts(r, src, n, &i, atom, depth + 1)) return false;
+            if (i >= n || src[i] != ')') return false;
+            i++;
+        } else if (c == '[') {
+            if (!tv_re_class_at(r, src, n, &i, atom)) return false;
+        } else if (c == '\\') {
+            if (i + 1 >= n) return false;
+            if (!tv_re_class_escape(src[i + 1], atom)) {
+                int e = tv_re_escaped_char(src[i + 1]);
+                if (e < 0) return false; /* (\b, back references, \u, \x, \p, ...) */
+                atom[e] = true;
+            }
+            i += 2;
+        } else if (strchr(".^$*+?{}|)]", (char)c)) {
+            return false;
+        } else {
+            atom[c] = true;
+            i++;
+        }
+        /* (a quantifier that lets the atom match nothing: the next atom could start the match) */
+        if (i < n && (src[i] == '?' || src[i] == '*' || (src[i] == '{' && i + 1 < n && src[i + 1] == '0'))) return false;
+        if (r->flags & LRE_FLAG_IGNORECASE)
+            for (int k = 'a'; k <= 'z'; k++) if (atom[k] || atom[k - 32]) atom[k] = atom[k - 32] = true;
+        for (int k = 0; k < 128; k++) set[k] |= atom[k];
+        tv_re_skip_branch(src, n, &i);
+        if (i < n && src[i] == '|') {
+            i++;
+            continue;
+        }
+        *ip = i;
+        return true;
+    }
+}
+
+/* Where a match of the expression can start (see tv_re's bc1), set into r; false when it can
+ * start anywhere, as far as this can tell. */
+static bool tv_re_first_parse(tv_re *r, const char *src, size_t n) {
+    if (r->flags & LRE_FLAG_STICKY) return false;
+    for (size_t k = 0; k < n; k++) if ((unsigned char)src[k] >= 128) return false;
+    if (n > 0 && src[0] == '^') {
+        size_t i = 1;
+        tv_re_skip_branch(src, n, &i);
+        if (i < n) return false; /* (`^a|b`) */
+        r->anchored = true;
+        return true;
+    }
+    bool set[128] = {0};
+    size_t i = 0;
+    if (!tv_re_first_alts(r, src, n, &i, set, 0) || i != n) return false;
+    int count = 0, one = -1;
+    for (int k = 0; k < 128; k++) if (set[k]) { count++; one = k; }
+    if (count == 0 || count > 64) return false;
+    memcpy(r->first, set, sizeof set);
+    r->lead = count == 1 ? one : -1;
+    return true;
+}
+
 /* The next match at or after `from` (UTF-16 units of the text in buf: bytes when ASCII), into
  * cap (2 * ncap pointers); false when there's none. */
 static bool tv_re_find(const tv_re *r, uint8_t **cap, const uint8_t *buf, tv_int n, tv_int from, bool ascii, int type) {
@@ -152,6 +274,32 @@ static bool tv_re_find(const tv_re *r, uint8_t **cap, const uint8_t *buf, tv_int
             cap[0] = (uint8_t *)buf + i;
             cap[1] = (uint8_t *)buf + j;
             return true;
+        }
+        return false;
+    }
+    if (r->bc1 && ascii) {
+        /* only where a match can start, each tried alone */
+        bool ml = r->flags & LRE_FLAG_MULTILINE;
+        for (tv_int i = from; i <= n; i++) {
+            if (r->anchored) {
+                if (i > 0 && !(ml && (buf[i - 1] == '\n' || buf[i - 1] == '\r'))) {
+                    if (!ml) return false;
+                    const uint8_t *nl = memchr(buf + i, '\n', (size_t)(n - i)), *cr = memchr(buf + i, '\r', (size_t)(n - i));
+                    if (!nl || (cr && cr < nl)) nl = cr;
+                    if (!nl) return false;
+                    i = (tv_int)(nl - buf) + 1;
+                }
+            } else if (r->lead >= 0) {
+                const uint8_t *q = i < n ? memchr(buf + i, r->lead, (size_t)(n - i)) : NULL;
+                if (!q) return false;
+                i = (tv_int)(q - buf);
+            } else {
+                while (i < n && (buf[i] >= 128 || !r->first[buf[i]])) i++;
+                if (i >= n) return false;
+            }
+            int ret = lre_exec(cap, r->bc1, buf, (int)i, (int)n, type, NULL);
+            if (ret == LRE_RET_MEMORY_ERROR) tv_trap("out of memory in a regular expression", NULL);
+            if (ret == 1) return true;
         }
         return false;
     }
@@ -275,6 +423,15 @@ tv_int tv_native_reCompile(tv_str source, tv_str flags) {
     r->flags = re_flags;
     memcpy(r->flag_text, flag_text, (size_t)nf + 1);
     r->simple = r->ncap == 1 && tv_re_simple_parse(r, source.p->data, (size_t)tv_str_byte_len(source));
+    r->bc1 = NULL;
+    r->names = (tv_arr){NULL};
+    r->anchored = false;
+    r->lead = -1;
+    if (!r->simple && tv_re_first_parse(r, source.p->data, (size_t)tv_str_byte_len(source))) {
+        int len1;
+        char err1[64];
+        r->bc1 = lre_compile(&len1, err1, sizeof err1, src, src_len, re_flags | LRE_FLAG_STICKY, NULL);
+    }
     if (tv_nres * 2 > tv_re_index_cap) {
         tv_int cap = tv_re_index_cap ? tv_re_index_cap * 2 : 64;
         tv_free(tv_re_index);
@@ -321,7 +478,8 @@ static uint16_t *tv_utf16_of(tv_str s, tv_int *n) {
 tv_arr tv_native_reExec(tv_int h, tv_str s, tv_int from) {
     tv_re *r = &tv_res[h];
     int ncap = r->ncap;
-    uint8_t **cap = tv_alloc((size_t)(2 * ncap) * sizeof(uint8_t *) + 1);
+    uint8_t *on_stack[16];
+    uint8_t **cap = 2 * ncap <= 16 ? on_stack : tv_alloc((size_t)(2 * ncap) * sizeof(uint8_t *) + 1);
     bool ascii = tv_str_is_ascii(s);
     tv_int n;
     uint16_t *units = NULL;
@@ -340,12 +498,13 @@ tv_arr tv_native_reExec(tv_int h, tv_str s, tv_int from) {
     }
     tv_arr out = tv_arr_fresh();
     if (tv_re_find(r, cap, buf, n, from, ascii, type)) {
-        tv_int *w = (tv_int *)tv_arr_reserve_tail(&out, &tv_type_int, 2 * ncap);
+        out = tv_arr_with_capacity(&tv_type_int, 2 * ncap);
+        tv_int *w = (tv_int *)tv_arr_data(out);
         for (int i = 0; i < 2 * ncap; i++) w[i] = cap[i] ? (tv_int)((cap[i] - buf) >> shift) : -1;
         out.p->len = 2 * ncap;
     }
     tv_free(units);
-    tv_free(cap);
+    if (cap != on_stack) tv_free(cap);
     return out;
 }
 
@@ -444,10 +603,95 @@ done:
 
 /* s.replace(re, rep) for a replacement without `$` patterns and an expression that isn't sticky:
  * every match with the `g` flag, else the first. */
+/* reExec, into `p` when nothing else holds it and it has room (a loop over the matches, its
+ * array given back each time, makes one array for them all); else a new array. */
+tv_arr tv_native_reExecInto(tv_int h, tv_str s, tv_int from, tv_arr p) {
+    tv_re *r = &tv_res[h];
+    int ncap = r->ncap;
+    if (!(p.p->rc == 1 && !p.p->ext && p.p->cap >= 2 * ncap)) return tv_native_reExec(h, s, from);
+    uint8_t *on_stack[16];
+    uint8_t **cap = 2 * ncap <= 16 ? on_stack : tv_alloc((size_t)(2 * ncap) * sizeof(uint8_t *) + 1);
+    tv_re_text t = tv_re_text_of(s);
+    tv_arr out;
+    if (tv_re_find(r, cap, t.buf, t.n, from, t.ascii, t.type)) {
+        tv_int *w = (tv_int *)tv_arr_data(p);
+        for (int i = 0; i < 2 * ncap; i++) w[i] = tv_re_pos(&t, cap[i]);
+        p.p->len = 2 * ncap;
+        tv_arr_retain(p);
+        out = p;
+    } else {
+        out = tv_arr_fresh();
+    }
+    tv_free(t.units);
+    if (cap != on_stack) tv_free(cap);
+    return out;
+}
+
+/* Units a..b of s (UTF-16 positions) onto sb. */
+static void tv_re_push_units(tv_sb *sb, tv_str s, const tv_re_text *t, tv_int a, tv_int b) {
+    if (b <= a) return;
+    if (t->ascii) {
+        tv_sb_push(sb, s.p->data + a, (size_t)(b - a));
+        return;
+    }
+    tv_str piece = tv_str_slice(s, a, b, true, NULL);
+    tv_sb_push_str(sb, piece);
+    tv_str_release(piece);
+}
+
+/* A replacement's `$` patterns for one match ($$, $&, $`, $', $1..$99; `$<name>` is the
+ * prelude's), as String.prototype.replace expands them. */
+static void tv_re_subst(tv_sb *sb, tv_str s, const tv_re_text *t, uint8_t **cap, int ncap, tv_str rep) {
+    const char *d = rep.p->data;
+    size_t n = (size_t)tv_str_byte_len(rep), i = 0, run = 0;
+    while (i < n) {
+        if (d[i] != '$' || i + 1 >= n) {
+            i++;
+            continue;
+        }
+        char c = d[i + 1];
+        tv_int p0 = tv_re_pos(t, cap[0]), p1 = tv_re_pos(t, cap[1]);
+        size_t used = 2;
+        if (c == '$') {
+            tv_sb_push(sb, d + run, i - run);
+            tv_sb_push(sb, "$", 1);
+        } else if (c == '&') {
+            tv_sb_push(sb, d + run, i - run);
+            tv_re_push_units(sb, s, t, p0, p1);
+        } else if (c == '`') {
+            tv_sb_push(sb, d + run, i - run);
+            tv_re_push_units(sb, s, t, 0, p0);
+        } else if (c == '\'') {
+            tv_sb_push(sb, d + run, i - run);
+            tv_re_push_units(sb, s, t, p1, t->n);
+        } else if (c >= '0' && c <= '9') {
+            int k = c - '0';
+            if (i + 2 < n && d[i + 2] >= '0' && d[i + 2] <= '9' && k * 10 + (d[i + 2] - '0') < ncap && k * 10 + (d[i + 2] - '0') >= 1) {
+                k = k * 10 + (d[i + 2] - '0');
+                used = 3;
+            }
+            if (k < 1 || k >= ncap) {
+                i++;
+                continue;
+            }
+            tv_sb_push(sb, d + run, i - run);
+            if (cap[2 * k]) tv_re_push_units(sb, s, t, tv_re_pos(t, cap[2 * k]), tv_re_pos(t, cap[2 * k + 1]));
+        } else {
+            i++;
+            continue;
+        }
+        i += used;
+        run = i;
+    }
+    tv_sb_push(sb, d + run, n - run);
+}
+
 tv_str tv_native_reReplace(tv_int h, tv_str s, tv_str rep) {
     tv_re *r = &tv_res[h];
     bool global = r->flags & LRE_FLAG_GLOBAL;
-    uint8_t **cap = tv_alloc((size_t)(2 * r->ncap) * sizeof(uint8_t *) + 1);
+    bool dollar = memchr(rep.p->data, '$', (size_t)tv_str_byte_len(rep)) != NULL;
+    uint8_t *on_stack[16];
+    uint8_t **cap = 2 * r->ncap <= 16 ? on_stack : tv_alloc((size_t)(2 * r->ncap) * sizeof(uint8_t *) + 1);
     tv_re_text t = tv_re_text_of(s);
     tv_sb sb = {0};
     tv_int last = 0, from = 0;
@@ -455,9 +699,9 @@ tv_str tv_native_reReplace(tv_int h, tv_str s, tv_str rep) {
     while (from <= t.n && tv_re_find(r, cap, t.buf, t.n, from, t.ascii, t.type)) {
         tv_int p0 = tv_re_pos(&t, cap[0]), p1 = tv_re_pos(&t, cap[1]);
         any = true;
-        if (t.ascii) tv_sb_push(&sb, s.p->data + last, (size_t)(p0 - last));
-        else { tv_str piece = tv_str_slice(s, last, p0, true, NULL); tv_sb_push_str(&sb, piece); tv_str_release(piece); }
-        tv_sb_push_str(&sb, rep);
+        tv_re_push_units(&sb, s, &t, last, p0);
+        if (dollar) tv_re_subst(&sb, s, &t, cap, r->ncap, rep);
+        else tv_sb_push_str(&sb, rep);
         last = p1;
         if (!global) break;
         from = tv_re_next(r, &t, p0, p1);
@@ -468,18 +712,20 @@ tv_str tv_native_reReplace(tv_int h, tv_str s, tv_str rep) {
         out = s;
         tv_sb_free(&sb);
     } else {
-        if (t.ascii) tv_sb_push(&sb, s.p->data + last, (size_t)(t.n - last));
-        else { tv_str piece = tv_str_slice(s, last, t.n, true, NULL); tv_sb_push_str(&sb, piece); tv_str_release(piece); }
+        tv_re_push_units(&sb, s, &t, last, t.n);
         out = tv_str_from_sb(&sb);
     }
     tv_free(t.units);
-    tv_free(cap);
+    if (cap != on_stack) tv_free(cap);
     return out;
 }
 
-/* Each group's name ("" for the whole match and unnamed groups). */
 tv_arr tv_native_reNames(tv_int h) {
     tv_re *r = &tv_res[h];
+    if (r->names.p) {
+        tv_arr_retain(r->names);
+        return r->names;
+    }
     tv_arr out = tv_arr_fresh();
     const char *names = (r->flags & LRE_FLAG_NAMED_GROUPS) || lre_get_flags(r->bc) & LRE_FLAG_NAMED_GROUPS ? lre_get_groupnames(r->bc) : NULL;
     for (int i = 0; i < r->ncap; i++) {
@@ -491,5 +737,7 @@ tv_arr tv_native_reNames(tv_int h) {
         }
         tv_arr_push(&out, &tv_type_str, &name);
     }
+    r->names = out;
+    tv_arr_retain(out);
     return out;
 }

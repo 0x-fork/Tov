@@ -1,0 +1,672 @@
+`([^`]+)`/g "" =>  ||  || false
+`([^`]+)`/g "abc" =>  || abc || false
+`([^`]+)`/g "ab cd abcd e cde abcde" =>  || ab cd abcd e cde abcde || false
+`([^`]+)`/g "**bold** and *em* and `code` [link](url)" => 22:`code`:code || **bold** and *em* and <`code`> [link](url) || true
+`([^`]+)`/g "# Title\n## Sub\n- item\n * x" =>  || # Title
+## Sub
+- item
+ * x || false
+`([^`]+)`/g "Hello hello HELLO" =>  || Hello hello HELLO || false
+`([^`]+)`/g "a1b22c333" =>  || a1b22c333 || false
+`([^`]+)`/g "foo bar food xfoo" =>  || foo bar food xfoo || false
+`([^`]+)`/g "555-1234 and 666-9876" =>  || 555-1234 and 666-9876 || false
+`([^`]+)`/g "AEIOU aeiou xy" =>  || AEIOU aeiou xy || false
+`([^`]+)`/g "user@host x@y" =>  || user@host x@y || false
+`([^`]+)`/g "q quv QU qv" =>  || q quv QU qv || false
+`([^`]+)`/g "\n\nab\nab\r\nab" =>  || 
+
+ab
+ab
+ab || false
+`([^`]+)`/g "aab bab cab" =>  || aab bab cab || false
+`([^`]+)`/g "xxy xy y" =>  || xxy xy y || false
+\*\*([^*]+)\*\*/g "" =>  ||  || false
+\*\*([^*]+)\*\*/g "abc" =>  || abc || false
+\*\*([^*]+)\*\*/g "ab cd abcd e cde abcde" =>  || ab cd abcd e cde abcde || false
+\*\*([^*]+)\*\*/g "**bold** and *em* and `code` [link](url)" => 0:**bold**:bold || <**bold**> and *em* and `code` [link](url) || true
+\*\*([^*]+)\*\*/g "# Title\n## Sub\n- item\n * x" =>  || # Title
+## Sub
+- item
+ * x || false
+\*\*([^*]+)\*\*/g "Hello hello HELLO" =>  || Hello hello HELLO || false
+\*\*([^*]+)\*\*/g "a1b22c333" =>  || a1b22c333 || false
+\*\*([^*]+)\*\*/g "foo bar food xfoo" =>  || foo bar food xfoo || false
+\*\*([^*]+)\*\*/g "555-1234 and 666-9876" =>  || 555-1234 and 666-9876 || false
+\*\*([^*]+)\*\*/g "AEIOU aeiou xy" =>  || AEIOU aeiou xy || false
+\*\*([^*]+)\*\*/g "user@host x@y" =>  || user@host x@y || false
+\*\*([^*]+)\*\*/g "q quv QU qv" =>  || q quv QU qv || false
+\*\*([^*]+)\*\*/g "\n\nab\nab\r\nab" =>  || 
+
+ab
+ab
+ab || false
+\*\*([^*]+)\*\*/g "aab bab cab" =>  || aab bab cab || false
+\*\*([^*]+)\*\*/g "xxy xy y" =>  || xxy xy y || false
+\*([^*]+)\*/g "" =>  ||  || false
+\*([^*]+)\*/g "abc" =>  || abc || false
+\*([^*]+)\*/g "ab cd abcd e cde abcde" =>  || ab cd abcd e cde abcde || false
+\*([^*]+)\*/g "**bold** and *em* and `code` [link](url)" => 1:*bold*:bold | 7:* and *: and  || *<*bold*><* and *>em* and `code` [link](url) || true
+\*([^*]+)\*/g "# Title\n## Sub\n- item\n * x" =>  || # Title
+## Sub
+- item
+ * x || false
+\*([^*]+)\*/g "Hello hello HELLO" =>  || Hello hello HELLO || false
+\*([^*]+)\*/g "a1b22c333" =>  || a1b22c333 || false
+\*([^*]+)\*/g "foo bar food xfoo" =>  || foo bar food xfoo || false
+\*([^*]+)\*/g "555-1234 and 666-9876" =>  || 555-1234 and 666-9876 || false
+\*([^*]+)\*/g "AEIOU aeiou xy" =>  || AEIOU aeiou xy || false
+\*([^*]+)\*/g "user@host x@y" =>  || user@host x@y || false
+\*([^*]+)\*/g "q quv QU qv" =>  || q quv QU qv || false
+\*([^*]+)\*/g "\n\nab\nab\r\nab" =>  || 
+
+ab
+ab
+ab || false
+\*([^*]+)\*/g "aab bab cab" =>  || aab bab cab || false
+\*([^*]+)\*/g "xxy xy y" =>  || xxy xy y || false
+\[([^\]]+)\]\(([^)]+)\)/g "" =>  ||  || false
+\[([^\]]+)\]\(([^)]+)\)/g "abc" =>  || abc || false
+\[([^\]]+)\]\(([^)]+)\)/g "ab cd abcd e cde abcde" =>  || ab cd abcd e cde abcde || false
+\[([^\]]+)\]\(([^)]+)\)/g "**bold** and *em* and `code` [link](url)" => 29:[link](url):link,url || **bold** and *em* and `code` <[link](url)> || true
+\[([^\]]+)\]\(([^)]+)\)/g "# Title\n## Sub\n- item\n * x" =>  || # Title
+## Sub
+- item
+ * x || false
+\[([^\]]+)\]\(([^)]+)\)/g "Hello hello HELLO" =>  || Hello hello HELLO || false
+\[([^\]]+)\]\(([^)]+)\)/g "a1b22c333" =>  || a1b22c333 || false
+\[([^\]]+)\]\(([^)]+)\)/g "foo bar food xfoo" =>  || foo bar food xfoo || false
+\[([^\]]+)\]\(([^)]+)\)/g "555-1234 and 666-9876" =>  || 555-1234 and 666-9876 || false
+\[([^\]]+)\]\(([^)]+)\)/g "AEIOU aeiou xy" =>  || AEIOU aeiou xy || false
+\[([^\]]+)\]\(([^)]+)\)/g "user@host x@y" =>  || user@host x@y || false
+\[([^\]]+)\]\(([^)]+)\)/g "q quv QU qv" =>  || q quv QU qv || false
+\[([^\]]+)\]\(([^)]+)\)/g "\n\nab\nab\r\nab" =>  || 
+
+ab
+ab
+ab || false
+\[([^\]]+)\]\(([^)]+)\)/g "aab bab cab" =>  || aab bab cab || false
+\[([^\]]+)\]\(([^)]+)\)/g "xxy xy y" =>  || xxy xy y || false
+^(#{1,6})\s+(.*)$/ "" =>  ||  || false
+^(#{1,6})\s+(.*)$/ "abc" =>  || abc || false
+^(#{1,6})\s+(.*)$/ "ab cd abcd e cde abcde" =>  || ab cd abcd e cde abcde || false
+^(#{1,6})\s+(.*)$/ "**bold** and *em* and `code` [link](url)" =>  || **bold** and *em* and `code` [link](url) || false
+^(#{1,6})\s+(.*)$/ "# Title\n## Sub\n- item\n * x" =>  || # Title
+## Sub
+- item
+ * x || false
+^(#{1,6})\s+(.*)$/ "Hello hello HELLO" =>  || Hello hello HELLO || false
+^(#{1,6})\s+(.*)$/ "a1b22c333" =>  || a1b22c333 || false
+^(#{1,6})\s+(.*)$/ "foo bar food xfoo" =>  || foo bar food xfoo || false
+^(#{1,6})\s+(.*)$/ "555-1234 and 666-9876" =>  || 555-1234 and 666-9876 || false
+^(#{1,6})\s+(.*)$/ "AEIOU aeiou xy" =>  || AEIOU aeiou xy || false
+^(#{1,6})\s+(.*)$/ "user@host x@y" =>  || user@host x@y || false
+^(#{1,6})\s+(.*)$/ "q quv QU qv" =>  || q quv QU qv || false
+^(#{1,6})\s+(.*)$/ "\n\nab\nab\r\nab" =>  || 
+
+ab
+ab
+ab || false
+^(#{1,6})\s+(.*)$/ "aab bab cab" =>  || aab bab cab || false
+^(#{1,6})\s+(.*)$/ "xxy xy y" =>  || xxy xy y || false
+^\s*[-*]\s+(.*)$/ "" =>  ||  || false
+^\s*[-*]\s+(.*)$/ "abc" =>  || abc || false
+^\s*[-*]\s+(.*)$/ "ab cd abcd e cde abcde" =>  || ab cd abcd e cde abcde || false
+^\s*[-*]\s+(.*)$/ "**bold** and *em* and `code` [link](url)" =>  || **bold** and *em* and `code` [link](url) || false
+^\s*[-*]\s+(.*)$/ "# Title\n## Sub\n- item\n * x" =>  || # Title
+## Sub
+- item
+ * x || false
+^\s*[-*]\s+(.*)$/ "Hello hello HELLO" =>  || Hello hello HELLO || false
+^\s*[-*]\s+(.*)$/ "a1b22c333" =>  || a1b22c333 || false
+^\s*[-*]\s+(.*)$/ "foo bar food xfoo" =>  || foo bar food xfoo || false
+^\s*[-*]\s+(.*)$/ "555-1234 and 666-9876" =>  || 555-1234 and 666-9876 || false
+^\s*[-*]\s+(.*)$/ "AEIOU aeiou xy" =>  || AEIOU aeiou xy || false
+^\s*[-*]\s+(.*)$/ "user@host x@y" =>  || user@host x@y || false
+^\s*[-*]\s+(.*)$/ "q quv QU qv" =>  || q quv QU qv || false
+^\s*[-*]\s+(.*)$/ "\n\nab\nab\r\nab" =>  || 
+
+ab
+ab
+ab || false
+^\s*[-*]\s+(.*)$/ "aab bab cab" =>  || aab bab cab || false
+^\s*[-*]\s+(.*)$/ "xxy xy y" =>  || xxy xy y || false
+^ab/gm "" =>  ||  || false
+^ab/gm "abc" => 0:ab: || <ab>c || true
+^ab/gm "ab cd abcd e cde abcde" => 0:ab: || <ab> cd abcd e cde abcde || true
+^ab/gm "**bold** and *em* and `code` [link](url)" =>  || **bold** and *em* and `code` [link](url) || false
+^ab/gm "# Title\n## Sub\n- item\n * x" =>  || # Title
+## Sub
+- item
+ * x || false
+^ab/gm "Hello hello HELLO" =>  || Hello hello HELLO || false
+^ab/gm "a1b22c333" =>  || a1b22c333 || false
+^ab/gm "foo bar food xfoo" =>  || foo bar food xfoo || false
+^ab/gm "555-1234 and 666-9876" =>  || 555-1234 and 666-9876 || false
+^ab/gm "AEIOU aeiou xy" =>  || AEIOU aeiou xy || false
+^ab/gm "user@host x@y" =>  || user@host x@y || false
+^ab/gm "q quv QU qv" =>  || q quv QU qv || false
+^ab/gm "\n\nab\nab\r\nab" => 2:ab: | 5:ab: | 9:ab: || 
+
+<ab>
+<ab>
+<ab> || true
+^ab/gm "aab bab cab" =>  || aab bab cab || false
+^ab/gm "xxy xy y" =>  || xxy xy y || false
+^/gm "" => 0:: || <> || true
+^/gm "abc" => 0:: || <>abc || true
+^/gm "ab cd abcd e cde abcde" => 0:: || <>ab cd abcd e cde abcde || true
+^/gm "**bold** and *em* and `code` [link](url)" => 0:: || <>**bold** and *em* and `code` [link](url) || true
+^/gm "# Title\n## Sub\n- item\n * x" => 0:: | 8:: | 15:: | 22:: || <># Title
+<>## Sub
+<>- item
+<> * x || true
+^/gm "Hello hello HELLO" => 0:: || <>Hello hello HELLO || true
+^/gm "a1b22c333" => 0:: || <>a1b22c333 || true
+^/gm "foo bar food xfoo" => 0:: || <>foo bar food xfoo || true
+^/gm "555-1234 and 666-9876" => 0:: || <>555-1234 and 666-9876 || true
+^/gm "AEIOU aeiou xy" => 0:: || <>AEIOU aeiou xy || true
+^/gm "user@host x@y" => 0:: || <>user@host x@y || true
+^/gm "q quv QU qv" => 0:: || <>q quv QU qv || true
+^/gm "\n\nab\nab\r\nab" => 0:: | 1:: | 2:: | 5:: | 8:: | 9:: || <>
+<>
+<>ab
+<>ab<>
+<>ab || true
+^/gm "aab bab cab" => 0:: || <>aab bab cab || true
+^/gm "xxy xy y" => 0:: || <>xxy xy y || true
+^x|y/g "" =>  ||  || false
+^x|y/g "abc" =>  || abc || false
+^x|y/g "ab cd abcd e cde abcde" =>  || ab cd abcd e cde abcde || false
+^x|y/g "**bold** and *em* and `code` [link](url)" =>  || **bold** and *em* and `code` [link](url) || false
+^x|y/g "# Title\n## Sub\n- item\n * x" =>  || # Title
+## Sub
+- item
+ * x || false
+^x|y/g "Hello hello HELLO" =>  || Hello hello HELLO || false
+^x|y/g "a1b22c333" =>  || a1b22c333 || false
+^x|y/g "foo bar food xfoo" =>  || foo bar food xfoo || false
+^x|y/g "555-1234 and 666-9876" =>  || 555-1234 and 666-9876 || false
+^x|y/g "AEIOU aeiou xy" => 13:y: || AEIOU aeiou x<y> || true
+^x|y/g "user@host x@y" => 12:y: || user@host x@<y> || true
+^x|y/g "q quv QU qv" =>  || q quv QU qv || false
+^x|y/g "\n\nab\nab\r\nab" =>  || 
+
+ab
+ab
+ab || false
+^x|y/g "aab bab cab" =>  || aab bab cab || false
+^x|y/g "xxy xy y" => 0:x: | 2:y: | 5:y: | 7:y: || <x>x<y> x<y> <y> || true
+(a|b)c/g "" =>  ||  || false
+(a|b)c/g "abc" => 1:bc:b || a<bc> || true
+(a|b)c/g "ab cd abcd e cde abcde" => 7:bc:b | 18:bc:b || ab cd a<bc>d e cde a<bc>de || true
+(a|b)c/g "**bold** and *em* and `code` [link](url)" =>  || **bold** and *em* and `code` [link](url) || false
+(a|b)c/g "# Title\n## Sub\n- item\n * x" =>  || # Title
+## Sub
+- item
+ * x || false
+(a|b)c/g "Hello hello HELLO" =>  || Hello hello HELLO || false
+(a|b)c/g "a1b22c333" =>  || a1b22c333 || false
+(a|b)c/g "foo bar food xfoo" =>  || foo bar food xfoo || false
+(a|b)c/g "555-1234 and 666-9876" =>  || 555-1234 and 666-9876 || false
+(a|b)c/g "AEIOU aeiou xy" =>  || AEIOU aeiou xy || false
+(a|b)c/g "user@host x@y" =>  || user@host x@y || false
+(a|b)c/g "q quv QU qv" =>  || q quv QU qv || false
+(a|b)c/g "\n\nab\nab\r\nab" =>  || 
+
+ab
+ab
+ab || false
+(a|b)c/g "aab bab cab" =>  || aab bab cab || false
+(a|b)c/g "xxy xy y" =>  || xxy xy y || false
+(?:ab|cd)+e/g "" =>  ||  || false
+(?:ab|cd)+e/g "abc" =>  || abc || false
+(?:ab|cd)+e/g "ab cd abcd e cde abcde" => 13:cde: | 17:abcde: || ab cd abcd e <cde> <abcde> || true
+(?:ab|cd)+e/g "**bold** and *em* and `code` [link](url)" =>  || **bold** and *em* and `code` [link](url) || false
+(?:ab|cd)+e/g "# Title\n## Sub\n- item\n * x" =>  || # Title
+## Sub
+- item
+ * x || false
+(?:ab|cd)+e/g "Hello hello HELLO" =>  || Hello hello HELLO || false
+(?:ab|cd)+e/g "a1b22c333" =>  || a1b22c333 || false
+(?:ab|cd)+e/g "foo bar food xfoo" =>  || foo bar food xfoo || false
+(?:ab|cd)+e/g "555-1234 and 666-9876" =>  || 555-1234 and 666-9876 || false
+(?:ab|cd)+e/g "AEIOU aeiou xy" =>  || AEIOU aeiou xy || false
+(?:ab|cd)+e/g "user@host x@y" =>  || user@host x@y || false
+(?:ab|cd)+e/g "q quv QU qv" =>  || q quv QU qv || false
+(?:ab|cd)+e/g "\n\nab\nab\r\nab" =>  || 
+
+ab
+ab
+ab || false
+(?:ab|cd)+e/g "aab bab cab" =>  || aab bab cab || false
+(?:ab|cd)+e/g "xxy xy y" =>  || xxy xy y || false
+(?<w>\w+)@(\w+)/g "" =>  ||  || false
+(?<w>\w+)@(\w+)/g "abc" =>  || abc || false
+(?<w>\w+)@(\w+)/g "ab cd abcd e cde abcde" =>  || ab cd abcd e cde abcde || false
+(?<w>\w+)@(\w+)/g "**bold** and *em* and `code` [link](url)" =>  || **bold** and *em* and `code` [link](url) || false
+(?<w>\w+)@(\w+)/g "# Title\n## Sub\n- item\n * x" =>  || # Title
+## Sub
+- item
+ * x || false
+(?<w>\w+)@(\w+)/g "Hello hello HELLO" =>  || Hello hello HELLO || false
+(?<w>\w+)@(\w+)/g "a1b22c333" =>  || a1b22c333 || false
+(?<w>\w+)@(\w+)/g "foo bar food xfoo" =>  || foo bar food xfoo || false
+(?<w>\w+)@(\w+)/g "555-1234 and 666-9876" =>  || 555-1234 and 666-9876 || false
+(?<w>\w+)@(\w+)/g "AEIOU aeiou xy" =>  || AEIOU aeiou xy || false
+(?<w>\w+)@(\w+)/g "user@host x@y" => 0:user@host:user,host | 10:x@y:x,y || <user@host> <x@y> || true
+(?<w>\w+)@(\w+)/g "q quv QU qv" =>  || q quv QU qv || false
+(?<w>\w+)@(\w+)/g "\n\nab\nab\r\nab" =>  || 
+
+ab
+ab
+ab || false
+(?<w>\w+)@(\w+)/g "aab bab cab" =>  || aab bab cab || false
+(?<w>\w+)@(\w+)/g "xxy xy y" =>  || xxy xy y || false
+[aeiou]{2}/gi "" =>  ||  || false
+[aeiou]{2}/gi "abc" =>  || abc || false
+[aeiou]{2}/gi "ab cd abcd e cde abcde" =>  || ab cd abcd e cde abcde || false
+[aeiou]{2}/gi "**bold** and *em* and `code` [link](url)" =>  || **bold** and *em* and `code` [link](url) || false
+[aeiou]{2}/gi "# Title\n## Sub\n- item\n * x" =>  || # Title
+## Sub
+- item
+ * x || false
+[aeiou]{2}/gi "Hello hello HELLO" =>  || Hello hello HELLO || false
+[aeiou]{2}/gi "a1b22c333" =>  || a1b22c333 || false
+[aeiou]{2}/gi "foo bar food xfoo" => 1:oo: | 9:oo: | 15:oo: || f<oo> bar f<oo>d xf<oo> || true
+[aeiou]{2}/gi "555-1234 and 666-9876" =>  || 555-1234 and 666-9876 || false
+[aeiou]{2}/gi "AEIOU aeiou xy" => 0:AE: | 2:IO: | 6:ae: | 8:io: || <AE><IO>U <ae><io>u xy || true
+[aeiou]{2}/gi "user@host x@y" =>  || user@host x@y || false
+[aeiou]{2}/gi "q quv QU qv" =>  || q quv QU qv || false
+[aeiou]{2}/gi "\n\nab\nab\r\nab" =>  || 
+
+ab
+ab
+ab || false
+[aeiou]{2}/gi "aab bab cab" => 0:aa: || <aa>b bab cab || true
+[aeiou]{2}/gi "xxy xy y" =>  || xxy xy y || false
+Hello/gi "" =>  ||  || false
+Hello/gi "abc" =>  || abc || false
+Hello/gi "ab cd abcd e cde abcde" =>  || ab cd abcd e cde abcde || false
+Hello/gi "**bold** and *em* and `code` [link](url)" =>  || **bold** and *em* and `code` [link](url) || false
+Hello/gi "# Title\n## Sub\n- item\n * x" =>  || # Title
+## Sub
+- item
+ * x || false
+Hello/gi "Hello hello HELLO" => 0:Hello: | 6:hello: | 12:HELLO: || <Hello> <hello> <HELLO> || true
+Hello/gi "a1b22c333" =>  || a1b22c333 || false
+Hello/gi "foo bar food xfoo" =>  || foo bar food xfoo || false
+Hello/gi "555-1234 and 666-9876" =>  || 555-1234 and 666-9876 || false
+Hello/gi "AEIOU aeiou xy" =>  || AEIOU aeiou xy || false
+Hello/gi "user@host x@y" =>  || user@host x@y || false
+Hello/gi "q quv QU qv" =>  || q quv QU qv || false
+Hello/gi "\n\nab\nab\r\nab" =>  || 
+
+ab
+ab
+ab || false
+Hello/gi "aab bab cab" =>  || aab bab cab || false
+Hello/gi "xxy xy y" =>  || xxy xy y || false
+\d+/g "" =>  ||  || false
+\d+/g "abc" =>  || abc || false
+\d+/g "ab cd abcd e cde abcde" =>  || ab cd abcd e cde abcde || false
+\d+/g "**bold** and *em* and `code` [link](url)" =>  || **bold** and *em* and `code` [link](url) || false
+\d+/g "# Title\n## Sub\n- item\n * x" =>  || # Title
+## Sub
+- item
+ * x || false
+\d+/g "Hello hello HELLO" =>  || Hello hello HELLO || false
+\d+/g "a1b22c333" => 1:1: | 3:22: | 6:333: || a<1>b<22>c<333> || true
+\d+/g "foo bar food xfoo" =>  || foo bar food xfoo || false
+\d+/g "555-1234 and 666-9876" => 0:555: | 4:1234: | 13:666: | 17:9876: || <555>-<1234> and <666>-<9876> || true
+\d+/g "AEIOU aeiou xy" =>  || AEIOU aeiou xy || false
+\d+/g "user@host x@y" =>  || user@host x@y || false
+\d+/g "q quv QU qv" =>  || q quv QU qv || false
+\d+/g "\n\nab\nab\r\nab" =>  || 
+
+ab
+ab
+ab || false
+\d+/g "aab bab cab" =>  || aab bab cab || false
+\d+/g "xxy xy y" =>  || xxy xy y || false
+\d*x/g "" =>  ||  || false
+\d*x/g "abc" =>  || abc || false
+\d*x/g "ab cd abcd e cde abcde" =>  || ab cd abcd e cde abcde || false
+\d*x/g "**bold** and *em* and `code` [link](url)" =>  || **bold** and *em* and `code` [link](url) || false
+\d*x/g "# Title\n## Sub\n- item\n * x" => 25:x: || # Title
+## Sub
+- item
+ * <x> || true
+\d*x/g "Hello hello HELLO" =>  || Hello hello HELLO || false
+\d*x/g "a1b22c333" =>  || a1b22c333 || false
+\d*x/g "foo bar food xfoo" => 13:x: || foo bar food <x>foo || true
+\d*x/g "555-1234 and 666-9876" =>  || 555-1234 and 666-9876 || false
+\d*x/g "AEIOU aeiou xy" => 12:x: || AEIOU aeiou <x>y || true
+\d*x/g "user@host x@y" => 10:x: || user@host <x>@y || true
+\d*x/g "q quv QU qv" =>  || q quv QU qv || false
+\d*x/g "\n\nab\nab\r\nab" =>  || 
+
+ab
+ab
+ab || false
+\d*x/g "aab bab cab" =>  || aab bab cab || false
+\d*x/g "xxy xy y" => 0:x: | 1:x: | 4:x: || <x><x>y <x>y y || true
+a?b/g "" =>  ||  || false
+a?b/g "abc" => 0:ab: || <ab>c || true
+a?b/g "ab cd abcd e cde abcde" => 0:ab: | 6:ab: | 17:ab: || <ab> cd <ab>cd e cde <ab>cde || true
+a?b/g "**bold** and *em* and `code` [link](url)" => 2:b: || **<b>old** and *em* and `code` [link](url) || true
+a?b/g "# Title\n## Sub\n- item\n * x" => 13:b: || # Title
+## Su<b>
+- item
+ * x || true
+a?b/g "Hello hello HELLO" =>  || Hello hello HELLO || false
+a?b/g "a1b22c333" => 2:b: || a1<b>22c333 || true
+a?b/g "foo bar food xfoo" => 4:b: || foo <b>ar food xfoo || true
+a?b/g "555-1234 and 666-9876" =>  || 555-1234 and 666-9876 || false
+a?b/g "AEIOU aeiou xy" =>  || AEIOU aeiou xy || false
+a?b/g "user@host x@y" =>  || user@host x@y || false
+a?b/g "q quv QU qv" =>  || q quv QU qv || false
+a?b/g "\n\nab\nab\r\nab" => 2:ab: | 5:ab: | 9:ab: || 
+
+<ab>
+<ab>
+<ab> || true
+a?b/g "aab bab cab" => 1:ab: | 4:b: | 5:ab: | 9:ab: || a<ab> <b><ab> c<ab> || true
+a?b/g "xxy xy y" =>  || xxy xy y || false
+(a)|(b)/g "" =>  ||  || false
+(a)|(b)/g "abc" => 0:a:a, | 1:b:,b || <a><b>c || true
+(a)|(b)/g "ab cd abcd e cde abcde" => 0:a:a, | 1:b:,b | 6:a:a, | 7:b:,b | 17:a:a, | 18:b:,b || <a><b> cd <a><b>cd e cde <a><b>cde || true
+(a)|(b)/g "**bold** and *em* and `code` [link](url)" => 2:b:,b | 9:a:a, | 18:a:a, || **<b>old** <a>nd *em* <a>nd `code` [link](url) || true
+(a)|(b)/g "# Title\n## Sub\n- item\n * x" => 13:b:,b || # Title
+## Su<b>
+- item
+ * x || true
+(a)|(b)/g "Hello hello HELLO" =>  || Hello hello HELLO || false
+(a)|(b)/g "a1b22c333" => 0:a:a, | 2:b:,b || <a>1<b>22c333 || true
+(a)|(b)/g "foo bar food xfoo" => 4:b:,b | 5:a:a, || foo <b><a>r food xfoo || true
+(a)|(b)/g "555-1234 and 666-9876" => 9:a:a, || 555-1234 <a>nd 666-9876 || true
+(a)|(b)/g "AEIOU aeiou xy" => 6:a:a, || AEIOU <a>eiou xy || true
+(a)|(b)/g "user@host x@y" =>  || user@host x@y || false
+(a)|(b)/g "q quv QU qv" =>  || q quv QU qv || false
+(a)|(b)/g "\n\nab\nab\r\nab" => 2:a:a, | 3:b:,b | 5:a:a, | 6:b:,b | 9:a:a, | 10:b:,b || 
+
+<a><b>
+<a><b>
+<a><b> || true
+(a)|(b)/g "aab bab cab" => 0:a:a, | 1:a:a, | 2:b:,b | 4:b:,b | 5:a:a, | 6:b:,b | 9:a:a, | 10:b:,b || <a><a><b> <b><a><b> c<a><b> || true
+(a)|(b)/g "xxy xy y" =>  || xxy xy y || false
+\bfoo/g "" =>  ||  || false
+\bfoo/g "abc" =>  || abc || false
+\bfoo/g "ab cd abcd e cde abcde" =>  || ab cd abcd e cde abcde || false
+\bfoo/g "**bold** and *em* and `code` [link](url)" =>  || **bold** and *em* and `code` [link](url) || false
+\bfoo/g "# Title\n## Sub\n- item\n * x" =>  || # Title
+## Sub
+- item
+ * x || false
+\bfoo/g "Hello hello HELLO" =>  || Hello hello HELLO || false
+\bfoo/g "a1b22c333" =>  || a1b22c333 || false
+\bfoo/g "foo bar food xfoo" => 0:foo: | 8:foo: || <foo> bar <foo>d xfoo || true
+\bfoo/g "555-1234 and 666-9876" =>  || 555-1234 and 666-9876 || false
+\bfoo/g "AEIOU aeiou xy" =>  || AEIOU aeiou xy || false
+\bfoo/g "user@host x@y" =>  || user@host x@y || false
+\bfoo/g "q quv QU qv" =>  || q quv QU qv || false
+\bfoo/g "\n\nab\nab\r\nab" =>  || 
+
+ab
+ab
+ab || false
+\bfoo/g "aab bab cab" =>  || aab bab cab || false
+\bfoo/g "xxy xy y" =>  || xxy xy y || false
+(?=a)a/g "" =>  ||  || false
+(?=a)a/g "abc" => 0:a: || <a>bc || true
+(?=a)a/g "ab cd abcd e cde abcde" => 0:a: | 6:a: | 17:a: || <a>b cd <a>bcd e cde <a>bcde || true
+(?=a)a/g "**bold** and *em* and `code` [link](url)" => 9:a: | 18:a: || **bold** <a>nd *em* <a>nd `code` [link](url) || true
+(?=a)a/g "# Title\n## Sub\n- item\n * x" =>  || # Title
+## Sub
+- item
+ * x || false
+(?=a)a/g "Hello hello HELLO" =>  || Hello hello HELLO || false
+(?=a)a/g "a1b22c333" => 0:a: || <a>1b22c333 || true
+(?=a)a/g "foo bar food xfoo" => 5:a: || foo b<a>r food xfoo || true
+(?=a)a/g "555-1234 and 666-9876" => 9:a: || 555-1234 <a>nd 666-9876 || true
+(?=a)a/g "AEIOU aeiou xy" => 6:a: || AEIOU <a>eiou xy || true
+(?=a)a/g "user@host x@y" =>  || user@host x@y || false
+(?=a)a/g "q quv QU qv" =>  || q quv QU qv || false
+(?=a)a/g "\n\nab\nab\r\nab" => 2:a: | 5:a: | 9:a: || 
+
+<a>b
+<a>b
+<a>b || true
+(?=a)a/g "aab bab cab" => 0:a: | 1:a: | 5:a: | 9:a: || <a><a>b b<a>b c<a>b || true
+(?=a)a/g "xxy xy y" =>  || xxy xy y || false
+x{0,2}y/g "" =>  ||  || false
+x{0,2}y/g "abc" =>  || abc || false
+x{0,2}y/g "ab cd abcd e cde abcde" =>  || ab cd abcd e cde abcde || false
+x{0,2}y/g "**bold** and *em* and `code` [link](url)" =>  || **bold** and *em* and `code` [link](url) || false
+x{0,2}y/g "# Title\n## Sub\n- item\n * x" =>  || # Title
+## Sub
+- item
+ * x || false
+x{0,2}y/g "Hello hello HELLO" =>  || Hello hello HELLO || false
+x{0,2}y/g "a1b22c333" =>  || a1b22c333 || false
+x{0,2}y/g "foo bar food xfoo" =>  || foo bar food xfoo || false
+x{0,2}y/g "555-1234 and 666-9876" =>  || 555-1234 and 666-9876 || false
+x{0,2}y/g "AEIOU aeiou xy" => 12:xy: || AEIOU aeiou <xy> || true
+x{0,2}y/g "user@host x@y" => 12:y: || user@host x@<y> || true
+x{0,2}y/g "q quv QU qv" =>  || q quv QU qv || false
+x{0,2}y/g "\n\nab\nab\r\nab" =>  || 
+
+ab
+ab
+ab || false
+x{0,2}y/g "aab bab cab" =>  || aab bab cab || false
+x{0,2}y/g "xxy xy y" => 0:xxy: | 4:xy: | 7:y: || <xxy> <xy> <y> || true
+[^a-z]+/g "" =>  ||  || false
+[^a-z]+/g "abc" =>  || abc || false
+[^a-z]+/g "ab cd abcd e cde abcde" => 2: : | 5: : | 10: : | 12: : | 16: : || ab< >cd< >abcd< >e< >cde< >abcde || true
+[^a-z]+/g "**bold** and *em* and `code` [link](url)" => 0:**: | 6:** : | 12: *: | 16:* : | 21: `: | 27:` [: | 34:](: | 39:): || <**>bold<** >and< *>em<* >and< `>code<` [>link<](>url<)> || true
+[^a-z]+/g "# Title\n## Sub\n- item\n * x" => 0:# T: | 7:
+## S: | 14:
+- : | 21:
+ * : || <# T>itle<
+## S>ub<
+- >item<
+ * >x || true
+[^a-z]+/g "Hello hello HELLO" => 0:H: | 5: : | 11: HELLO: || <H>ello< >hello< HELLO> || true
+[^a-z]+/g "a1b22c333" => 1:1: | 3:22: | 6:333: || a<1>b<22>c<333> || true
+[^a-z]+/g "foo bar food xfoo" => 3: : | 7: : | 12: : || foo< >bar< >food< >xfoo || true
+[^a-z]+/g "555-1234 and 666-9876" => 0:555-1234 : | 12: 666-9876: || <555-1234 >and< 666-9876> || true
+[^a-z]+/g "AEIOU aeiou xy" => 0:AEIOU : | 11: : || <AEIOU >aeiou< >xy || true
+[^a-z]+/g "user@host x@y" => 4:@: | 9: : | 11:@: || user<@>host< >x<@>y || true
+[^a-z]+/g "q quv QU qv" => 1: : | 5: QU : || q< >quv< QU >qv || true
+[^a-z]+/g "\n\nab\nab\r\nab" => 0:
+
+: | 4:
+: | 7:
+: || <
+
+>ab<
+>ab<
+>ab || true
+[^a-z]+/g "aab bab cab" => 3: : | 7: : || aab< >bab< >cab || true
+[^a-z]+/g "xxy xy y" => 3: : | 6: : || xxy< >xy< >y || true
+\./g "" =>  ||  || false
+\./g "abc" =>  || abc || false
+\./g "ab cd abcd e cde abcde" =>  || ab cd abcd e cde abcde || false
+\./g "**bold** and *em* and `code` [link](url)" =>  || **bold** and *em* and `code` [link](url) || false
+\./g "# Title\n## Sub\n- item\n * x" =>  || # Title
+## Sub
+- item
+ * x || false
+\./g "Hello hello HELLO" =>  || Hello hello HELLO || false
+\./g "a1b22c333" =>  || a1b22c333 || false
+\./g "foo bar food xfoo" =>  || foo bar food xfoo || false
+\./g "555-1234 and 666-9876" =>  || 555-1234 and 666-9876 || false
+\./g "AEIOU aeiou xy" =>  || AEIOU aeiou xy || false
+\./g "user@host x@y" =>  || user@host x@y || false
+\./g "q quv QU qv" =>  || q quv QU qv || false
+\./g "\n\nab\nab\r\nab" =>  || 
+
+ab
+ab
+ab || false
+\./g "aab bab cab" =>  || aab bab cab || false
+\./g "xxy xy y" =>  || xxy xy y || false
+(\d{3})-(\d{4})/g "" =>  ||  || false
+(\d{3})-(\d{4})/g "abc" =>  || abc || false
+(\d{3})-(\d{4})/g "ab cd abcd e cde abcde" =>  || ab cd abcd e cde abcde || false
+(\d{3})-(\d{4})/g "**bold** and *em* and `code` [link](url)" =>  || **bold** and *em* and `code` [link](url) || false
+(\d{3})-(\d{4})/g "# Title\n## Sub\n- item\n * x" =>  || # Title
+## Sub
+- item
+ * x || false
+(\d{3})-(\d{4})/g "Hello hello HELLO" =>  || Hello hello HELLO || false
+(\d{3})-(\d{4})/g "a1b22c333" =>  || a1b22c333 || false
+(\d{3})-(\d{4})/g "foo bar food xfoo" =>  || foo bar food xfoo || false
+(\d{3})-(\d{4})/g "555-1234 and 666-9876" => 0:555-1234:555,1234 | 13:666-9876:666,9876 || <555-1234> and <666-9876> || true
+(\d{3})-(\d{4})/g "AEIOU aeiou xy" =>  || AEIOU aeiou xy || false
+(\d{3})-(\d{4})/g "user@host x@y" =>  || user@host x@y || false
+(\d{3})-(\d{4})/g "q quv QU qv" =>  || q quv QU qv || false
+(\d{3})-(\d{4})/g "\n\nab\nab\r\nab" =>  || 
+
+ab
+ab
+ab || false
+(\d{3})-(\d{4})/g "aab bab cab" =>  || aab bab cab || false
+(\d{3})-(\d{4})/g "xxy xy y" =>  || xxy xy y || false
+((a))/g "" =>  ||  || false
+((a))/g "abc" => 0:a:a,a || <a>bc || true
+((a))/g "ab cd abcd e cde abcde" => 0:a:a,a | 6:a:a,a | 17:a:a,a || <a>b cd <a>bcd e cde <a>bcde || true
+((a))/g "**bold** and *em* and `code` [link](url)" => 9:a:a,a | 18:a:a,a || **bold** <a>nd *em* <a>nd `code` [link](url) || true
+((a))/g "# Title\n## Sub\n- item\n * x" =>  || # Title
+## Sub
+- item
+ * x || false
+((a))/g "Hello hello HELLO" =>  || Hello hello HELLO || false
+((a))/g "a1b22c333" => 0:a:a,a || <a>1b22c333 || true
+((a))/g "foo bar food xfoo" => 5:a:a,a || foo b<a>r food xfoo || true
+((a))/g "555-1234 and 666-9876" => 9:a:a,a || 555-1234 <a>nd 666-9876 || true
+((a))/g "AEIOU aeiou xy" => 6:a:a,a || AEIOU <a>eiou xy || true
+((a))/g "user@host x@y" =>  || user@host x@y || false
+((a))/g "q quv QU qv" =>  || q quv QU qv || false
+((a))/g "\n\nab\nab\r\nab" => 2:a:a,a | 5:a:a,a | 9:a:a,a || 
+
+<a>b
+<a>b
+<a>b || true
+((a))/g "aab bab cab" => 0:a:a,a | 1:a:a,a | 5:a:a,a | 9:a:a,a || <a><a>b b<a>b c<a>b || true
+((a))/g "xxy xy y" =>  || xxy xy y || false
+[\]a]+/g "" =>  ||  || false
+[\]a]+/g "abc" => 0:a: || <a>bc || true
+[\]a]+/g "ab cd abcd e cde abcde" => 0:a: | 6:a: | 17:a: || <a>b cd <a>bcd e cde <a>bcde || true
+[\]a]+/g "**bold** and *em* and `code` [link](url)" => 9:a: | 18:a: | 34:]: || **bold** <a>nd *em* <a>nd `code` [link<]>(url) || true
+[\]a]+/g "# Title\n## Sub\n- item\n * x" =>  || # Title
+## Sub
+- item
+ * x || false
+[\]a]+/g "Hello hello HELLO" =>  || Hello hello HELLO || false
+[\]a]+/g "a1b22c333" => 0:a: || <a>1b22c333 || true
+[\]a]+/g "foo bar food xfoo" => 5:a: || foo b<a>r food xfoo || true
+[\]a]+/g "555-1234 and 666-9876" => 9:a: || 555-1234 <a>nd 666-9876 || true
+[\]a]+/g "AEIOU aeiou xy" => 6:a: || AEIOU <a>eiou xy || true
+[\]a]+/g "user@host x@y" =>  || user@host x@y || false
+[\]a]+/g "q quv QU qv" =>  || q quv QU qv || false
+[\]a]+/g "\n\nab\nab\r\nab" => 2:a: | 5:a: | 9:a: || 
+
+<a>b
+<a>b
+<a>b || true
+[\]a]+/g "aab bab cab" => 0:aa: | 5:a: | 9:a: || <aa>b b<a>b c<a>b || true
+[\]a]+/g "xxy xy y" =>  || xxy xy y || false
+\s\S/g "" =>  ||  || false
+\s\S/g "abc" =>  || abc || false
+\s\S/g "ab cd abcd e cde abcde" => 2: c: | 5: a: | 10: e: | 12: c: | 16: a: || ab< c>d< a>bcd< e>< c>de< a>bcde || true
+\s\S/g "**bold** and *em* and `code` [link](url)" => 8: a: | 12: *: | 17: a: | 21: `: | 28: [: || **bold**< a>nd< *>em*< a>nd< `>code`< [>link](url) || true
+\s\S/g "# Title\n## Sub\n- item\n * x" => 1: T: | 7:
+#: | 10: S: | 14:
+-: | 16: i: | 22: *: | 24: x: || #< T>itle<
+#>#< S>ub<
+->< i>tem
+< *>< x> || true
+\s\S/g "Hello hello HELLO" => 5: h: | 11: H: || Hello< h>ello< H>ELLO || true
+\s\S/g "a1b22c333" =>  || a1b22c333 || false
+\s\S/g "foo bar food xfoo" => 3: b: | 7: f: | 12: x: || foo< b>ar< f>ood< x>foo || true
+\s\S/g "555-1234 and 666-9876" => 8: a: | 12: 6: || 555-1234< a>nd< 6>66-9876 || true
+\s\S/g "AEIOU aeiou xy" => 5: a: | 11: x: || AEIOU< a>eiou< x>y || true
+\s\S/g "user@host x@y" => 9: x: || user@host< x>@y || true
+\s\S/g "q quv QU qv" => 1: q: | 5: Q: | 8: q: || q< q>uv< Q>U< q>v || true
+\s\S/g "\n\nab\nab\r\nab" => 1:
+a: | 4:
+a: | 8:
+a: || 
+<
+a>b<
+a>b<
+a>b || true
+\s\S/g "aab bab cab" => 3: b: | 7: c: || aab< b>ab< c>ab || true
+\s\S/g "xxy xy y" => 3: x: | 6: y: || xxy< x>y< y> || true
+$/g "" => 0:: || <> || true
+$/g "abc" => 3:: || abc<> || true
+$/g "ab cd abcd e cde abcde" => 22:: || ab cd abcd e cde abcde<> || true
+$/g "**bold** and *em* and `code` [link](url)" => 40:: || **bold** and *em* and `code` [link](url)<> || true
+$/g "# Title\n## Sub\n- item\n * x" => 26:: || # Title
+## Sub
+- item
+ * x<> || true
+$/g "Hello hello HELLO" => 17:: || Hello hello HELLO<> || true
+$/g "a1b22c333" => 9:: || a1b22c333<> || true
+$/g "foo bar food xfoo" => 17:: || foo bar food xfoo<> || true
+$/g "555-1234 and 666-9876" => 21:: || 555-1234 and 666-9876<> || true
+$/g "AEIOU aeiou xy" => 14:: || AEIOU aeiou xy<> || true
+$/g "user@host x@y" => 13:: || user@host x@y<> || true
+$/g "q quv QU qv" => 11:: || q quv QU qv<> || true
+$/g "\n\nab\nab\r\nab" => 11:: || 
+
+ab
+ab
+ab<> || true
+$/g "aab bab cab" => 11:: || aab bab cab<> || true
+$/g "xxy xy y" => 8:: || xxy xy y<> || true
+q(?:u|v)/gi "" =>  ||  || false
+q(?:u|v)/gi "abc" =>  || abc || false
+q(?:u|v)/gi "ab cd abcd e cde abcde" =>  || ab cd abcd e cde abcde || false
+q(?:u|v)/gi "**bold** and *em* and `code` [link](url)" =>  || **bold** and *em* and `code` [link](url) || false
+q(?:u|v)/gi "# Title\n## Sub\n- item\n * x" =>  || # Title
+## Sub
+- item
+ * x || false
+q(?:u|v)/gi "Hello hello HELLO" =>  || Hello hello HELLO || false
+q(?:u|v)/gi "a1b22c333" =>  || a1b22c333 || false
+q(?:u|v)/gi "foo bar food xfoo" =>  || foo bar food xfoo || false
+q(?:u|v)/gi "555-1234 and 666-9876" =>  || 555-1234 and 666-9876 || false
+q(?:u|v)/gi "AEIOU aeiou xy" =>  || AEIOU aeiou xy || false
+q(?:u|v)/gi "user@host x@y" =>  || user@host x@y || false
+q(?:u|v)/gi "q quv QU qv" => 2:qu: | 6:QU: | 9:qv: || q <qu>v <QU> <qv> || true
+q(?:u|v)/gi "\n\nab\nab\r\nab" =>  || 
+
+ab
+ab
+ab || false
+q(?:u|v)/gi "aab bab cab" =>  || aab bab cab || false
+q(?:u|v)/gi "xxy xy y" =>  || xxy xy y || false
+^\d/m "" =>  ||  || false
+^\d/m "abc" =>  || abc || false
+^\d/m "ab cd abcd e cde abcde" =>  || ab cd abcd e cde abcde || false
+^\d/m "**bold** and *em* and `code` [link](url)" =>  || **bold** and *em* and `code` [link](url) || false
+^\d/m "# Title\n## Sub\n- item\n * x" =>  || # Title
+## Sub
+- item
+ * x || false
+^\d/m "Hello hello HELLO" =>  || Hello hello HELLO || false
+^\d/m "a1b22c333" =>  || a1b22c333 || false
+^\d/m "foo bar food xfoo" =>  || foo bar food xfoo || false
+^\d/m "555-1234 and 666-9876" => 0:5: || <5>55-1234 and 666-9876 || true
+^\d/m "AEIOU aeiou xy" =>  || AEIOU aeiou xy || false
+^\d/m "user@host x@y" =>  || user@host x@y || false
+^\d/m "q quv QU qv" =>  || q quv QU qv || false
+^\d/m "\n\nab\nab\r\nab" =>  || 
+
+ab
+ab
+ab || false
+^\d/m "aab bab cab" =>  || aab bab cab || false
+^\d/m "xxy xy y" =>  || xxy xy y || false
