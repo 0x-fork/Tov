@@ -20,6 +20,12 @@ pub fn base_flags(opt: &str, unchecked: bool, symbols: bool, sanitize: bool, sys
     if opt != "-Os" {
         flags.push("-falign-loops=16".into());
     }
+    // Apple's clang outlines repeated instruction sequences into shared functions by default on
+    // arm64: smaller code, but a hot loop then calls out for pieces of itself (JSON parsing ran
+    // a third slower). Xcode's clang is the only compiler there, so the flag is known.
+    if cfg!(target_vendor = "apple") && cfg!(target_arch = "aarch64") && opt != "-Os" {
+        flags.push("-mno-outline".into());
+    }
     if unchecked {
         flags.push("-DTOV_UNCHECKED=1".into());
     }
