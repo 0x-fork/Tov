@@ -1894,7 +1894,8 @@ impl<'c, 'a> Gen<'c, 'a> {
             self.pending_tre = Some(body::Tre { entry: Some(looper), ..t });
         }
         let code = self.function_body(inst.m, inst.subst.clone(), &params, ret, body::FnBodyKind::Block(f.body), Some(entry_unique), None, None);
-        let _ = writeln!(self.funcs, "static {proto} {{\n{code}}}\n");
+        let attr = self.callback_inline(&params.iter().map(|p| crate::types::FnParam { ty: p.1, inout: p.2, optional: false }).collect::<Vec<_>>(), &code, &inst.cname);
+        let _ = writeln!(self.funcs, "static {attr}{proto} {{\n{code}}}\n");
     }
 
     /// Accumulator recursion elimination for checked integer `+`: a function like
