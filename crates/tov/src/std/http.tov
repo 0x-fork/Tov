@@ -117,6 +117,8 @@ export class Headers {
 export class URLSearchParams {
   private names: string[]
   private vals: string[]
+  /** (counts changes: a URL whose searchParams these are writes them into its href when read) */
+  changes: int = 0
 
   constructor(init?: string) {
     this.names = []
@@ -187,11 +189,13 @@ export class URLSearchParams {
     }
     this.names = names
     this.vals = vals
+    this.changes++
   }
 
   append(name: string, value: string): void {
     this.names.push(name)
     this.vals.push(value)
+    this.changes++
   }
 
   delete(name: string): void {
@@ -205,6 +209,7 @@ export class URLSearchParams {
     }
     this.names = names
     this.vals = vals
+    this.changes++
   }
 
   get size(): int {
@@ -241,6 +246,8 @@ export class URL {
   private h: string
   // parsed on first use
   private params: URLSearchParams | undefined
+  // (the params' changes already in h)
+  private seen: int = 0
 
   constructor(input: string, base?: string) throws TypeError {
     const href = __native.urlNormalize(input, base ?? "")
@@ -268,7 +275,24 @@ export class URL {
   }
 
   get search(): string {
+    this.sync()
     return __native.urlPart(this.h, 4)
+  }
+
+  // (searchParams changed since h was made: their text becomes its query, as in the URL standard)
+  private sync(): void {
+    const p = this.params
+    if (p === undefined || p.changes === this.seen) {
+      return
+    }
+    this.seen = p.changes
+    const h = this.h
+    const hashAt = h.indexOf("#")
+    const end = hashAt < 0 ? h.length : hashAt
+    const q = h.indexOf("?")
+    const before = q >= 0 && q < end ? h.slice(0, q) : h.slice(0, end)
+    const text = p.toString()
+    this.h = before + (text === "" ? "" : "?" + text) + h.slice(end)
   }
 
   get hash(): string {
@@ -299,6 +323,7 @@ export class URL {
   }
 
   get href(): string {
+    this.sync()
     return this.h
   }
 

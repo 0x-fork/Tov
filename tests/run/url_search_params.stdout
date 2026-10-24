@@ -1,0 +1,12 @@
+/ localhost:8080 ?q=term5&page=3&tag=a&tag=b #frag
+https://localhost:8080/?q=term5&page=4#frag 43 ?q=term5&page=4
+/users/42 localhost:8080 ?q=term5&page=3&tag=a&tag=b #frag
+https://localhost:8080/users/42?q=term5&page=4#frag 51 ?q=term5&page=4
+/search localhost:8080 ?q=term5&page=3&tag=a&tag=b #frag
+https://localhost:8080/search?q=term5&page=4#frag 49 ?q=term5&page=4
+/a/c/d localhost:8080 ?q=term5&page=3&tag=a&tag=b #frag
+https://localhost:8080/a/c/d?q=term5&page=4#frag 48 ?q=term5&page=4
+/files/report%202026.pdf localhost:8080 ?q=term5&page=3&tag=a&tag=b #frag
+https://localhost:8080/files/report%202026.pdf?q=term5&page=4#frag 66 ?q=term5&page=4
+https://a.b/p#h ""
+https://a.b/p?y=a+b%26c#h ?y=a+b%26c
