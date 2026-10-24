@@ -6495,6 +6495,32 @@ impl<'c, 'a> Gen<'c, 'a> {
                     self.line(format!("tv_big_muladd_to(&{lv}, {}, {}, {sign});", av.code, bv.code));
                     return cur;
                 }
+                // `out += s.slice(a, b)`: the units appended, the slice never made
+                if p.ty == STR
+                    && bop == BinOp::Add
+                    && let ExprKind::Call { callee, args, optional: false, .. } = &self.ast(m).expr(value).kind
+                    && let ExprKind::Member { obj: so, name: sl, optional: false, .. } = self.ast(m).expr(*callee).kind
+                    && self.sym(sl) == "slice"
+                    && (1..=2).contains(&args.len())
+                    && !args.iter().any(|a| matches!(self.ast(m).expr(a.expr).kind, ExprKind::Spread(_)))
+                    && {
+                        let st = self.ty(so);
+                        matches!(self.tget(st), Ty::Str)
+                    }
+                {
+                    let sv = self.expr_before(so, &args.iter().map(|a| a.expr).collect::<Vec<_>>());
+                    let a0 = self.expr(args[0].expr);
+                    let a0 = self.coerce(a0, INT);
+                    let (a1, has_end) = match args.get(1) {
+                        Some(a) => {
+                            let v = self.expr(a.expr);
+                            (self.coerce(v, INT).code, "true")
+                        }
+                        None => ("0".to_string(), "false"),
+                    };
+                    self.line(format!("tv_str_append_slice(&({lv}), {}, {}, {a1}, {has_end});", sv.code, a0.code));
+                    return cur;
+                }
                 let rhs = self.expr(value);
                 if p.ty == BIGINT {
                     // in place: the variable's buffer is reused when it's the only reference

@@ -186,6 +186,7 @@ tv_str tv_str_from_sb(tv_sb *sb);               /* takes the builder's contents;
 tv_str tv_str_concat(tv_str a, tv_str b);
 void tv_str_append(tv_str *s, tv_str t);                     /* s += t (in place when s is the only holder) */
 void tv_str_append_bytes(tv_str *s, const char *bytes, size_t n, int32_t kind);
+void tv_str_append_slice(tv_str *s, tv_str t, tv_int start, tv_int end, bool has_end);   /* s += t.slice(start, end) */
 tv_str tv_str_concatn(const tv_str *parts, int n);   /* a + b + c ...: one new string */
 /* A generator: its frame, resumed by `next` until it finishes (resume returns true). `yv` points
  * at the frame's last yielded value; drop releases what the frame holds and frees it. */

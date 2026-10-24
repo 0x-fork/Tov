@@ -1853,6 +1853,19 @@ static inline int64_t tv_clamp_index(int64_t i, int64_t len) {
 
 static inline int64_t tv_clamp0(int64_t i, int64_t len) { return i < 0 ? 0 : i > len ? len : i; }
 
+/* s += t.slice(start, end): the units appended without making the slice. */
+void tv_str_append_slice(tv_str *s, tv_str t, tv_int start, tv_int end, bool has_end) {
+    if (tv_str_is_ascii(t)) {
+        int64_t len = tv_str_byte_len(t);
+        int64_t a = tv_clamp_index(start, len), b = has_end ? tv_clamp_index(end, len) : len;
+        if (b > a) tv_str_append_bytes(s, t.p->data + a, (size_t)(b - a), TV_STR_ASCII);
+        return;
+    }
+    tv_str piece = tv_str_slice(t, start, end, has_end, NULL);
+    tv_str_append(s, piece);
+    tv_str_release(piece);
+}
+
 tv_str tv_str_slice(tv_str s, tv_int start, tv_int end, bool has_end, const char *loc) {
     (void)loc;
     int64_t len = tv_str_length(s);
