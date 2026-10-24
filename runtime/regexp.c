@@ -627,6 +627,37 @@ tv_arr tv_native_reExecInto(tv_int h, tv_str s, tv_int from, tv_arr p) {
     return out;
 }
 
+/* The matches of h in s one by one (`s.replace(re, m => ...)` compiled to a loop): the text made
+ * once (UTF-16 for a non-ASCII string), each next match's start and end into pos. */
+void tv_re_iter_init(tv_re_iter *it, tv_int h, tv_str s) {
+    tv_re *r = &tv_res[h];
+    tv_re_text t = tv_re_text_of(s);
+    it->h = h;
+    it->buf = t.buf;
+    it->units = t.units;
+    it->n = t.n;
+    it->ascii = t.ascii;
+    it->type = t.type;
+    it->shift = t.shift;
+    it->from = 0;
+    it->cap = 2 * r->ncap <= 16 ? it->on_stack : tv_alloc((size_t)(2 * r->ncap) * sizeof(uint8_t *) + 1);
+}
+
+bool tv_re_iter_next(tv_re_iter *it, tv_int pos[2]) {
+    tv_re *r = &tv_res[it->h];
+    if (it->from > it->n || !tv_re_find(r, it->cap, it->buf, it->n, it->from, it->ascii, it->type)) return false;
+    tv_re_text t = {.buf = it->buf, .units = it->units, .n = it->n, .ascii = it->ascii, .type = it->type, .shift = it->shift};
+    pos[0] = tv_re_pos(&t, it->cap[0]);
+    pos[1] = tv_re_pos(&t, it->cap[1]);
+    it->from = tv_re_next(r, &t, pos[0], pos[1]);
+    return true;
+}
+
+void tv_re_iter_done(tv_re_iter *it) {
+    tv_free(it->units);
+    if (it->cap != it->on_stack) tv_free(it->cap);
+}
+
 /* Units a..b of s (UTF-16 positions) onto sb. */
 static void tv_re_push_units(tv_sb *sb, tv_str s, const tv_re_text *t, tv_int a, tv_int b) {
     if (b <= a) return;

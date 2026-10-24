@@ -266,13 +266,17 @@ export function __reReplaceFn1(s: string, re: RegExp, f: (m: string) => string):
   let from = global ? 0 : sticky ? re.lastIndex : 0
   let out = ""
   let last = 0
-  let p: int[] = [0, 0, 0, 0, 0, 0, 0, 0]
+  // (made by the first match: none, and the string is given back as it is)
+  let p: int[] = []
+  let any = false
   while (from <= s.length) {
     p = __native.reExecInto(h, s, from, p)
     if (p.length === 0) {
       if (global || sticky) re.lastIndex = 0
+      if (!any) return s
       break
     }
+    any = true
     out += s.slice(last, p[0]!)
     out += f(s.slice(p[0]!, p[1]!))
     last = p[1]!
@@ -306,13 +310,16 @@ function __reReplaceWith(s: string, re: RegExp, rep: string, f: ((m: string, p1:
   let out = ""
   let last = 0
   // (one array for every match's positions: reExecInto fills it again while only this holds it)
-  let p: int[] = [0, 0, 0, 0, 0, 0, 0, 0]
+  let p: int[] = []
+  let any = false
   while (from <= s.length) {
     p = __native.reExecInto(h, s, from, p)
     if (p.length === 0) {
       if (global || sticky) re.lastIndex = 0
+      if (!any) return s
       break
     }
+    any = true
     out += s.slice(last, p[0]!)
     if (f !== undefined) {
       const n = p.length

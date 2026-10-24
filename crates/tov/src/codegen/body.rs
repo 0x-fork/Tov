@@ -246,7 +246,7 @@ impl<'c, 'a> Gen<'c, 'a> {
         Val { code, ty, owned: true }
     }
 
-    fn push_temps(&mut self) {
+    pub(crate) fn push_temps(&mut self) {
         self.b().temps.push(Vec::new());
     }
 
@@ -367,7 +367,7 @@ impl<'c, 'a> Gen<'c, 'a> {
         }
     }
 
-    fn pop_temps(&mut self) {
+    pub(crate) fn pop_temps(&mut self) {
         let temps = self.b().temps.pop().unwrap();
         for (name, ty) in temps.into_iter().rev() {
             let r = self.release_code(ty, &name);
@@ -375,11 +375,11 @@ impl<'c, 'a> Gen<'c, 'a> {
         }
     }
 
-    fn push_scope(&mut self) {
+    pub(crate) fn push_scope(&mut self) {
         self.b().scopes.push(Scope { releases: Vec::new() });
     }
 
-    fn pop_scope(&mut self) {
+    pub(crate) fn pop_scope(&mut self) {
         let s = self.b().scopes.pop().unwrap();
         for r in s.releases.into_iter().rev() {
             self.line(r);
@@ -5444,6 +5444,52 @@ impl<'c, 'a> Gen<'c, 'a> {
         let ot = self.ty(obj);
         // (`({ "&": "&amp;", "<": "&lt;" })[c]`: a dictionary of constants, only read: made once)
         if let Some(lit) = self.const_dict(obj) {
+            // (a few string keys: compared one by one, no map at all)
+            let lt = self.ty(lit);
+            let fields_n = match &self.ast(self.cur_m()).expr(lit).kind {
+                ExprKind::Object(fs) => fs.len(),
+                _ => usize::MAX,
+            };
+            if let Ty::Map(k, v) = self.tget(lt)
+                && k == STR
+                && fields_n <= 8
+            {
+                let m = self.cur_m();
+                let ExprKind::Object(fields) = &self.ast(m).expr(lit).kind else { unreachable!() };
+                let ov = self.c.types.optional(v);
+                let kv = self.expr(index);
+                let kv = self.coerce(kv, STR);
+                let kn = self.fresh("k");
+                self.line(format!("tv_str {kn} = {};", kv.code));
+                let res = self.fresh("t");
+                let oct = self.ctype(ov);
+                self.line(format!("{oct} {res};"));
+                for (i, f) in fields.iter().enumerate() {
+                    let key = self.lit(self.sym(f.name).to_string().as_bytes());
+                    self.open(&format!("{}if (tv_str_eq({kn}, {key})) {{", if i == 0 { "" } else { "} else " }));
+                    self.b().indent -= 1;
+                    self.b().indent += 1;
+                    self.push_temps();
+                    let fv = self.expr(f.value);
+                    let fv = self.coerce(fv, ov);
+                    let code = self.consume(fv);
+                    self.line(format!("{res} = {code};"));
+                    self.pop_temps();
+                    self.b().indent -= 1;
+                }
+                self.line("} else {");
+                self.b().indent += 1;
+                let u = self.coerce(Val::plain("0", UNDEFINED), ov);
+                let code = self.consume(u);
+                self.line(format!("{res} = {code};"));
+                self.close("}");
+                let owned = self.is_rc(ov);
+                if owned {
+                    self.b().temps.last_mut().unwrap().push((res.clone(), ov));
+                }
+                let got = Val { code: res, ty: ov, owned };
+                return if self.c.types.has_undefined(ty) { self.coerce(got, ty) } else { self.downcast(got, ty, span) };
+            }
             let cm = self.fresh("cmap");
             self.line(format!("static tv_map {cm};"));
             self.open(&format!("if (!{cm}.p) {{"));

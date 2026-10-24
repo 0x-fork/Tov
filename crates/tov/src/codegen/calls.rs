@@ -31,6 +31,9 @@ impl<'c, 'a> Gen<'c, 'a> {
     }
 
     fn call_inner(&mut self, e: ExprId) -> Val {
+        if let Some(v) = self.inline_replace(e) {
+            return v;
+        }
         let m = self.cur_m();
         let ast = self.ast(m);
         let ExprKind::Call { callee, args, optional, .. } = &ast.expr(e).kind else { unreachable!() };
@@ -1624,6 +1627,81 @@ impl<'c, 'a> Gen<'c, 'a> {
             Some(k) => format!("(!{})", self.u_is(&v.code, v.ty, k)),
             None => "true".into(),
         }
+    }
+
+    /// `s.replace(/re/g, (m) => text)` (rewritten as `__reReplaceFn1(s, re, f)`) with a callback
+    /// that can't throw: a loop over the matches here, the callback's body inline, the text built
+    /// in one builder (no closure call, no array of positions, no string per piece).
+    fn inline_replace(&mut self, e: ExprId) -> Option<Val> {
+        let m = self.cur_m();
+        let ast = self.ast(m);
+        let ExprKind::Call { callee, args, optional: false, .. } = &ast.expr(e).kind else { return None };
+        let ExprKind::Ident(f) = ast.expr(*callee).kind else { return None };
+        if self.sym(f) != "__reReplaceFn1" || args.len() != 3 {
+            return None;
+        }
+        // (the expression a literal, its flags known: global or not, never sticky)
+        let ExprKind::Call { callee: lc, args: la, .. } = &ast.expr(args[1].expr).kind else { return None };
+        let ExprKind::Ident(ln) = ast.expr(*lc).kind else { return None };
+        if self.sym(ln) != "__reLiteral" || la.len() != 2 {
+            return None;
+        }
+        let ExprKind::Str(flags) = ast.expr(la[1].expr).kind else { return None };
+        let flags = self.sym(flags).to_string();
+        if flags.contains('y') {
+            return None;
+        }
+        let global = flags.contains('g');
+        let ExprKind::Arrow(arrow) = &ast.expr(args[2].expr).kind else { return None };
+        let crate::ast::ArrowBody::Expr(body) = arrow.body else { return None };
+        if arrow.params.len() > 1 || arrow.params.iter().any(|p| p.rest || p.optional) {
+            return None;
+        }
+        let ft = self.ty(args[2].expr);
+        let Ty::Func(_, _, throws) = self.tget(ft) else { return None };
+        if throws != NEVER {
+            return None;
+        }
+        let param = arrow.params.first().map(|p| p.span.start);
+        let sv = self.expr(args[0].expr);
+        let sv = self.coerce(sv, STR);
+        let rv = self.expr(args[1].expr);
+        let (sn, rn, it, sb, last, any, pos) = (self.fresh("rs"), self.fresh("re"), self.fresh("it"), self.fresh("sb"), self.fresh("last"), self.fresh("any"), self.fresh("pos"));
+        let rct = self.ctype(rv.ty);
+        self.line(format!("tv_str {sn} = {}; {rct} {rn} = {};", sv.code, rv.code));
+        self.line(format!("tv_re_iter {it}; tv_re_iter_init(&{it}, ({rn})->f_h, {sn});"));
+        self.line(format!("tv_sb {sb} = {{0}}; tv_int {last} = 0, {pos}[2]; bool {any} = false;"));
+        self.open(&format!("while (tv_re_iter_next(&{it}, {pos})) {{"));
+        self.line(format!("{any} = true;"));
+        self.line(format!("tv_sb_push_units(&{sb}, {sn}, {last}, {pos}[0]);"));
+        let mv = self.fresh("m");
+        self.line(format!("tv_str {mv} = tv_str_slice({sn}, {pos}[0], {pos}[1], true, NULL);"));
+        self.push_scope();
+        self.b().scopes.last_mut().unwrap().releases.push(format!("tv_str_release({mv});"));
+        if let Some(k) = param {
+            self.b().locals.insert(k, crate::codegen::body::Local { access: mv.clone(), ty: STR });
+        }
+        self.push_temps();
+        let r = self.expr(body);
+        let r = self.coerce(r, STR);
+        self.line(format!("tv_sb_push_str(&{sb}, {});", r.code));
+        self.pop_temps();
+        self.pop_scope();
+        self.line(format!("{last} = {pos}[1];"));
+        if !global {
+            self.line("break;");
+        }
+        self.close("}");
+        self.line(format!("tv_re_iter_done(&{it});"));
+        let res = self.fresh("t");
+        self.line(format!("tv_str {res};"));
+        self.line(format!("if ({any}) {{ tv_sb_push_units(&{sb}, {sn}, {last}, tv_str_length({sn})); {res} = tv_str_from_sb(&{sb}); }} else {{ tv_sb_free(&{sb}); {res} = {sn}; tv_str_retain({res}); }}"));
+        if global {
+            self.line(format!("({rn})->f_lastIndex = 0;"));
+        }
+        let ty = self.ty(e);
+        let v = self.tmp(STR, &res, true);
+        Some(self.coerce(v, ty))
     }
 
     pub(crate) fn map_method_pub(&mut self, mv: Val, k: TyId, v: TyId, name: &str, args: &[Arg], ty: TyId) -> Val {

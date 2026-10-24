@@ -277,32 +277,6 @@ static inline char *tv_sb_reserve(tv_sb *sb, size_t extra) {
     return sb->data + sb->len;
 }
 
-/* memcpy for the short pieces strings are mostly built from: two overlapping word copies
- * instead of a call. */
-static inline void tv_copy(char *d, const char *s, size_t n) {
-    if (n <= 16) {
-        if (n >= 8) {
-            uint64_t a, b;
-            memcpy(&a, s, 8);
-            memcpy(&b, s + n - 8, 8);
-            memcpy(d, &a, 8);
-            memcpy(d + n - 8, &b, 8);
-        } else if (n >= 4) {
-            uint32_t a, b;
-            memcpy(&a, s, 4);
-            memcpy(&b, s + n - 4, 4);
-            memcpy(d, &a, 4);
-            memcpy(d + n - 4, &b, 4);
-        } else if (n) {
-            d[0] = s[0];
-            d[n / 2] = s[n / 2];
-            d[n - 1] = s[n - 1];
-        }
-        return;
-    }
-    memcpy(d, s, n);
-}
-
 void tv_sb_push(tv_sb *sb, const char *s, size_t n) {
     if (!n) return;
     tv_copy(tv_sb_reserve(sb, n), s, n);
@@ -784,7 +758,7 @@ void tv_str_append_bytes(tv_str *s, const char *bytes, size_t n, int32_t kind) {
             else if (block) q = (tv_strbuf *)tv_realloc(p, nsize > 2 * block ? nsize : 2 * block);
         }
         if (q) {
-            memcpy(q->data + len, bytes, n);
+            tv_copy(q->data + len, bytes, n);
             q->data[nl] = 0;
             q->len = (int32_t)nl;
             q->rc = 1 | flags;
@@ -794,8 +768,8 @@ void tv_str_append_bytes(tv_str *s, const char *bytes, size_t n, int32_t kind) {
     }
     /* (shared, immortal or mapped: a copy, with room for more) */
     q = (tv_strbuf *)(nsize <= TV_SMALL_MAX ? tv_small_alloc(nsize) : tv_alloc(nsize + nsize / 2));
-    memcpy(q->data, p->data, len);
-    memcpy(q->data + len, bytes, n);
+    tv_copy(q->data, p->data, len);
+    tv_copy(q->data + len, bytes, n);
     q->data[nl] = 0;
     q->len = (int32_t)nl;
     q->rc = 1 | flags;
@@ -1472,10 +1446,21 @@ static int tv_collate_weight(unsigned char c) {
 tv_int tv_str_locale_compare(tv_str a, tv_str b) {
     /* (an approximation of ICU's root collation: ASCII by its order, ignoring case first, then a
      * lowercase letter before its uppercase; anything else by code point) */
+    /* (the same string: equal, as sorting by a field of few values asks again and again) */
+    if (a.p == b.p) return 0;
     const unsigned char *x = (const unsigned char *)a.p->data, *y = (const unsigned char *)b.p->data;
     size_t na = (size_t)a.p->len, nb = (size_t)b.p->len, n = na < nb ? na : nb;
     int tert = 0;
-    for (size_t i = 0; i < n; i++) {
+    /* (past the common prefix eight bytes at a time) */
+    size_t i0 = 0;
+    while (i0 + 8 <= n) {
+        uint64_t u, v;
+        memcpy(&u, x + i0, 8);
+        memcpy(&v, y + i0, 8);
+        if (u != v) break;
+        i0 += 8;
+    }
+    for (size_t i = i0; i < n; i++) {
         unsigned char c = x[i], d = y[i];
         if (c == d) continue;
         int wc = tv_collate_weight(c), wd = tv_collate_weight(d);
@@ -1852,6 +1837,18 @@ static inline int64_t tv_clamp_index(int64_t i, int64_t len) {
 }
 
 static inline int64_t tv_clamp0(int64_t i, int64_t len) { return i < 0 ? 0 : i > len ? len : i; }
+
+/* UTF-16 units a..b of s onto sb (its bytes when it's ASCII). */
+void tv_sb_push_units(tv_sb *sb, tv_str s, tv_int a, tv_int b) {
+    if (b <= a) return;
+    if (tv_str_is_ascii(s)) {
+        tv_sb_push(sb, s.p->data + a, (size_t)(b - a));
+        return;
+    }
+    tv_str piece = tv_str_units(s, a, b);
+    tv_sb_push_str(sb, piece);
+    tv_str_release(piece);
+}
 
 /* s += t.slice(start, end): the units appended without making the slice. */
 void tv_str_append_slice(tv_str *s, tv_str t, tv_int start, tv_int end, bool has_end) {

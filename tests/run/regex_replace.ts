@@ -8,3 +8,4 @@ console.log(s.replace(/(\w)(\w*)/g, (m, a, b) => a.toUpperCase() + b.toLowerCase
 console.log("x-1 y-22".replace(/(\w)-(\d+)/g, "$1=$2$1"));
 console.log("abcabc".replace(/b/g, (m) => m.toUpperCase()), "x".replace(/y/, (m) => "!"));
 const parts: (string | undefined)[] = ["a", undefined, "b"]; console.log(parts.join("|"), [null, 1].join("."));
+console.log("abc".replace(/x*/g, (m) => "[" + m + "]"), "abc".replace(/(x)*/g, (m, a) => "<" + m + ">"), "abc".replace(/z/g, (m) => "!"));

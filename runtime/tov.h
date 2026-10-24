@@ -94,10 +94,45 @@ typedef struct tv_sb {
 
 void tv_sb_push(tv_sb *sb, const char *s, size_t n);
 void tv_sb_grow(tv_sb *sb, size_t need);          /* capacity >= need bytes */
+/* memcpy for the short pieces strings are mostly built from: overlapping word copies instead
+ * of a call into the C library (which costs more than copying a few bytes). */
+static inline void tv_copy(char *d, const char *s, size_t n) {
+    if (n <= 32) {
+        if (n >= 16) {
+            uint64_t a, b, c, e;
+            memcpy(&a, s, 8);
+            memcpy(&b, s + 8, 8);
+            memcpy(&c, s + n - 16, 8);
+            memcpy(&e, s + n - 8, 8);
+            memcpy(d, &a, 8);
+            memcpy(d + 8, &b, 8);
+            memcpy(d + n - 16, &c, 8);
+            memcpy(d + n - 8, &e, 8);
+        } else if (n >= 8) {
+            uint64_t a, b;
+            memcpy(&a, s, 8);
+            memcpy(&b, s + n - 8, 8);
+            memcpy(d, &a, 8);
+            memcpy(d + n - 8, &b, 8);
+        } else if (n >= 4) {
+            uint32_t a, b;
+            memcpy(&a, s, 4);
+            memcpy(&b, s + n - 4, 4);
+            memcpy(d, &a, 4);
+            memcpy(d + n - 4, &b, 4);
+        } else if (n) {
+            d[0] = s[0];
+            d[n / 2] = s[n / 2];
+            d[n - 1] = s[n - 1];
+        }
+        return;
+    }
+    memcpy(d, s, n);
+}
 /* Inline fast paths for generated code. */
 static inline void tv_sb_add(tv_sb *sb, const char *s, size_t n) {
     if (__builtin_expect(sb->cap - sb->len < n, 0)) tv_sb_grow(sb, sb->len + n);
-    memcpy(sb->data + sb->len, s, n);
+    tv_copy(sb->data + sb->len, s, n);
     sb->len += n;
 }
 static inline void tv_sb_add_char(tv_sb *sb, char c) {
@@ -284,6 +319,20 @@ tv_int tv_native_reCompile(tv_str source, tv_str flags);
 tv_str tv_native_reFlags(tv_int h);
 struct tv_arr tv_native_reExec(tv_int h, tv_str s, tv_int from);
 tv_int tv_native_reTest(tv_int h, tv_str s, tv_int from);
+/* A regex's matches in a string one by one (runtime/regexp.c; see tv_re_iter_init). */
+typedef struct tv_re_iter {
+    tv_int h, n, from;
+    const uint8_t *buf;
+    uint16_t *units;
+    bool ascii;
+    int type, shift;
+    uint8_t **cap;
+    uint8_t *on_stack[16];
+} tv_re_iter;
+void tv_re_iter_init(tv_re_iter *it, tv_int h, tv_str s);
+bool tv_re_iter_next(tv_re_iter *it, tv_int pos[2]);
+void tv_re_iter_done(tv_re_iter *it);
+void tv_sb_push_units(tv_sb *sb, tv_str s, tv_int a, tv_int b);   /* units a..b of s */
 struct tv_arr tv_native_reExecInto(tv_int h, tv_str s, tv_int from, struct tv_arr p);
 struct tv_arr tv_native_reNames(tv_int h);
 struct tv_arr tv_native_reSplit(tv_int h, tv_str s, tv_int max);   /* s.split(re, max) */
