@@ -7003,10 +7003,10 @@ impl<'c, 'a> Gen<'c, 'a> {
                 }
                 let (i, pa) = (self.fresh("i"), self.fresh("pa"));
                 self.line(format!("tv_int {i} = {iv}; tv_arr *{pa} = &{};", ap.lv));
-                // (in bounds, of an array of its own: the common case, first)
+                // (in bounds: the common case, first; an index in bounds is of an array of its
+                // own, the one array that isn't, the immortal empty one, having no elements)
                 let ep0 = self.fresh("ep");
-                let own = if unique { String::new() } else { format!(" && {pa}->p->rc > 0") };
-                self.open(&format!("if (__builtin_expect((uint64_t){i} < (uint64_t)tv_arr_len(*{pa}){own}, 1)) {{"));
+                self.open(&format!("if (__builtin_expect((uint64_t){i} < (uint64_t)tv_arr_len(*{pa}), 1)) {{"));
                 self.line(format!("{ect} *{ep0} = ({ect} *)tv_arr_data(*{pa}) + {i};"));
                 // (its old value taken already: see `take_plan`)
                 let taken = self.b().no_release == Some(target);
