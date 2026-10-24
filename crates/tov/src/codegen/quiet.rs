@@ -41,6 +41,8 @@ impl Gen<'_, '_> {
             // (not `Object.assign`, or `delete`)
             Callee::Builtin { ns, name } => match ns.map(|n| self.sym(n).to_string()) {
                 None => !self.sym(name).starts_with("__"),
+                // (`process.stdout.write(text)`: given no callback)
+                Some(n) if matches!(n.as_str(), "stdout" | "stderr") => self.sym(name) == "write" && self.no_fn_args(m, e),
                 Some(n) => matches!(n.as_str(), "Math" | "console" | "JSON" | "Number" | "String"),
             },
             Callee::Method(recv) => {
@@ -74,6 +76,9 @@ impl Gen<'_, '_> {
                 while let ExprKind::Paren(x) = self.ast(m).expr(c).kind {
                     c = x;
                 }
+                if let ExprKind::Member { obj, name, .. } = self.ast(m).expr(c).kind {
+                    return self.quiet_through_field(m, obj, name);
+                }
                 let Some(IdentFact::Local(k)) = self.ident_fact(m, c) else { return false };
                 let owner = match self.quiet_stack.last() {
                     Some(&(om, ob, _)) => Some((om, ob)),
@@ -83,6 +88,35 @@ impl Gen<'_, '_> {
             }
             _ => false,
         }
+    }
+
+    /// `obj.f(...)` with `f` a class field of a function type: every closure it can hold is
+    /// quiet (see `field_closures`).
+    fn quiet_through_field(&mut self, m: u32, obj: ExprId, name: crate::intern::Sym) -> bool {
+        let ot = self.facts(m).expr_ty[obj as usize];
+        let ot = self.c.types.without_nullish(ot);
+        if self.c.class_of(ot).is_none() || self.class_field(ot, name).is_none() {
+            return false;
+        }
+        let Some(arrows) = self.field_closures(name) else { return false };
+        arrows.into_iter().all(|(am, a)| {
+            if self.field_arrows.contains(&(am, a)) {
+                self.quiet_tainted = true;
+                return true;
+            }
+            self.field_arrows.push((am, a));
+            self.quiet_stack.push((am, StmtId::MAX, false));
+            let ok = match &self.ast(am).expr(a).kind {
+                ExprKind::Arrow(f) if !f.is_async => match f.body {
+                    ArrowBody::Expr(x) => self.quiet_expr(am, x, false),
+                    ArrowBody::Block(s) => self.quiet_stmt(am, s, false),
+                },
+                _ => false,
+            };
+            self.quiet_stack.pop();
+            self.field_arrows.pop();
+            ok
+        })
     }
 
     fn quiet_overridden(&mut self, decl: u32, name: crate::intern::Sym) -> bool {
@@ -527,6 +561,10 @@ pub(crate) struct BindIndex {
     /// Method bodies by name (for `escaped_names`), and their class.
     method_names: FxMap<(u32, StmtId), crate::intern::Sym>,
     method_class: FxMap<(u32, StmtId), u32>,
+    /// Constructor bodies, with every `new` and `super(...)` of them in `binds` unless their
+    /// class (or a subclass that inherits the constructor) is used as a value (`ctor_escaped`).
+    ctors: FxSet<(u32, StmtId)>,
+    ctor_escaped: FxSet<(u32, StmtId)>,
 }
 
 impl Gen<'_, '_> {
@@ -554,20 +592,80 @@ impl Gen<'_, '_> {
                         ix.method_names.insert((m, f.body), mem.name);
                         ix.method_class.insert((m, f.body), c);
                     }
+                    if matches!(mem.kind, MemberKind::Constructor(_)) {
+                        ix.ctors.insert((m, f.body));
+                    }
                     bodies.push((m, f.body));
                 }
             }
         }
-        for (m, body) in bodies {
+        // (code outside any function body: module constants, field initializers and tests,
+        // under a body of no parameters)
+        let mut roots: Vec<(u32, StmtId, Vec<ExprId>)> = bodies.into_iter().map(|(m, body)| {
+            let mut exprs = Vec::new();
+            super::body::collect_exprs_stmt_pub(self.ast(m), body, &mut exprs);
+            (m, body, exprs)
+        }).collect();
+        for m in 0..self.c.modules.len() as u32 {
             let ast = self.ast(m);
             let mut exprs = Vec::new();
-            super::body::collect_exprs_stmt_pub(ast, body, &mut exprs);
+            for item in &ast.items {
+                match &item.kind {
+                    ItemKind::Const { init, .. } => super::body::collect_exprs_expr(ast, *init, &mut exprs),
+                    ItemKind::Test { body, .. } => super::body::collect_exprs_expr(ast, *body, &mut exprs),
+                    ItemKind::Class(cd) => {
+                        for mem in &cd.members {
+                            if let MemberKind::Field { init: Some(i), .. } = &mem.kind {
+                                super::body::collect_exprs_expr(ast, *i, &mut exprs);
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            roots.push((m, StmtId::MAX, exprs));
+        }
+        for (m, body, exprs) in roots {
+            let ast = self.ast(m);
             let callees: FxSet<ExprId> = exprs.iter().filter_map(|&e| match &ast.expr(e).kind {
-                ExprKind::Call { callee, .. } => Some(*callee),
+                ExprKind::Call { callee, .. } | ExprKind::New { callee, .. } => Some(*callee),
+                ExprKind::Binary(crate::ast::BinOp::Instanceof, _, r) => Some(*r),
+                // (`C.staticMember`)
+                ExprKind::Member { obj, .. } => Some(*obj),
                 _ => None,
             }).collect();
             for &e in &exprs {
+                // (`new C(...)` and `super(...)`: the constructor that runs)
+                let ctor = match &ast.expr(e).kind {
+                    ExprKind::New { .. } | ExprKind::Call { .. } => match self.facts(m).calls.get(&e).map(|f| f.callee.clone()) {
+                        Some(Callee::New(c)) => Some(self.ctor_body(c)),
+                        Some(Callee::SuperCtor(t)) => self.c.class_of(t).map(|(c, _)| self.ctor_body(c)),
+                        _ => None,
+                    },
+                    _ => None,
+                };
+                if let Some(cb) = ctor {
+                    let args: Vec<ExprId> = match &ast.expr(e).kind {
+                        ExprKind::New { args, .. } | ExprKind::Call { args, .. } => args.iter().map(|a| a.expr).collect(),
+                        _ => Vec::new(),
+                    };
+                    if let Some((bm, bb, bk)) = cb {
+                        for (j, &a) in args.iter().enumerate() {
+                            if let Some(&k) = bk.get(j) {
+                                ix.binds.entry((bm, bb, k)).or_default().push((m, body, a));
+                            }
+                        }
+                    }
+                    continue;
+                }
                 match &ast.expr(e).kind {
+                    ExprKind::Ident(_) if !callees.contains(&e) && matches!(self.ident_fact(m, e), Some(IdentFact::Class(_))) => {
+                        if let Some(IdentFact::Class(c)) = self.ident_fact(m, e)
+                            && let Some((bm, bb, _)) = self.ctor_body(c)
+                        {
+                            ix.ctor_escaped.insert((bm, bb));
+                        }
+                    }
                     ExprKind::Call { args, .. } => {
                         let args: Vec<ExprId> = args.iter().map(|a| a.expr).collect();
                         if let Some(cbs) = self.callee_bodies(m, e) {
@@ -607,6 +705,27 @@ impl Gen<'_, '_> {
         ix
     }
 
+    /// The constructor that `new C(...)` runs (C's own, or the nearest base's): its module,
+    /// body and parameter keys; `None` when there's none.
+    fn ctor_body(&mut self, c: u32) -> Option<(u32, StmtId, Vec<u32>)> {
+        let mut k = Some(c);
+        let mut depth = 0;
+        while let Some(cls) = k {
+            depth += 1;
+            if depth > 32 {
+                return None;
+            }
+            let m = self.c.classes[cls as usize].module;
+            for mem in &self.c.class_decl(cls).members {
+                if let MemberKind::Constructor(f) = &mem.kind {
+                    return Some((m, f.body, f.params.iter().map(|p| p.span.start).collect()));
+                }
+            }
+            k = self.c.classes[cls as usize].base.and_then(|b| self.c.class_of(b)).map(|(b, _)| b);
+        }
+        None
+    }
+
     /// Every value parameter `key` of body `(m, body)` is given is a closure that's quiet (or
     /// another such parameter): calls through it are quiet.
     pub(crate) fn param_quiet(&mut self, m: u32, body: StmtId, key: u32) -> bool {
@@ -616,6 +735,10 @@ impl Gen<'_, '_> {
         }
         let ix = self.bind_index.clone().unwrap();
         if !ix.indexed.contains(&(m, body)) || ix.escaped.contains(&(m, body)) || ix.method_names.get(&(m, body)).is_some_and(|n| ix.escaped_names.contains(n)) {
+            return false;
+        }
+        // (a closure's own parameter isn't one of the body's)
+        if !ix.params.get(&(m, body)).is_some_and(|ps| ps.contains(&key)) {
             return false;
         }
         let mk = (m, body, key);
@@ -764,6 +887,107 @@ impl Gen<'_, '_> {
 }
 
 impl Gen<'_, '_> {
+    /// The arrow literals (module, expression) a class field named `name` can hold: every value
+    /// stored to a field of that name, anywhere, is one (or a parameter that can only be one,
+    /// see `param_closures`); `None` when one is something else.
+    pub(crate) fn field_closures(&mut self, name: crate::intern::Sym) -> Option<Vec<(u32, ExprId)>> {
+        if let Some(r) = self.field_cl_memo.get(&name) {
+            return r.clone();
+        }
+        let r = self.field_closures_in(name);
+        self.field_cl_memo.insert(name, r.clone());
+        r
+    }
+
+    fn field_closures_in(&mut self, name: crate::intern::Sym) -> Option<Vec<(u32, ExprId)>> {
+        if self.bind_index.is_none() {
+            let ix = self.build_binds();
+            self.bind_index = Some(std::rc::Rc::new(ix));
+        }
+        let ix = self.bind_index.clone().unwrap();
+        let mut values: Vec<(u32, ExprId)> = Vec::new();
+        let mut params: Vec<(u32, StmtId, u32)> = Vec::new();
+        for m in 0..self.c.modules.len() as u32 {
+            let ast = self.ast(m);
+            for e in 0..ast.exprs.len() as ExprId {
+                match &ast.expr(e).kind {
+                    ExprKind::Assign(op, t, v) => {
+                        let mut t = *t;
+                        while let ExprKind::Paren(x) = ast.expr(t).kind {
+                            t = x;
+                        }
+                        match &ast.expr(t).kind {
+                            ExprKind::Member { name: n, .. } if *n == name => {
+                                if !matches!(op, crate::ast::AssignOp::Assign) {
+                                    return None;
+                                }
+                                values.push((m, *v));
+                            }
+                            ExprKind::Ident(_) | ExprKind::Member { .. } | ExprKind::Index { .. } => {}
+                            // (a destructuring assignment that may store to one)
+                            _ => {
+                                let mut xs = Vec::new();
+                                super::body::collect_exprs_expr(ast, t, &mut xs);
+                                if xs.iter().any(|&x| matches!(ast.expr(x).kind, ExprKind::Member { name: n, .. } if n == name)) {
+                                    return None;
+                                }
+                            }
+                        }
+                    }
+                    // (`Object.assign(obj, ...)` stores to fields by name)
+                    ExprKind::Call { .. } => {
+                        if let Some(Callee::Builtin { ns: Some(n), name: f }) = self.facts(m).calls.get(&e).map(|f| f.callee.clone())
+                            && self.sym(n) == "Object"
+                            && self.sym(f) == "assign"
+                        {
+                            return None;
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            for item in &ast.items {
+                if let ItemKind::Class(cd) = &item.kind {
+                    for mem in &cd.members {
+                        match &mem.kind {
+                            MemberKind::Field { init: Some(i), .. } if mem.name == name => values.push((m, *i)),
+                            // (`constructor(public f: F)`: the parameter's value)
+                            MemberKind::Constructor(f) => {
+                                for p in f.params.iter().filter(|p| p.prop.is_some() && p.name == name) {
+                                    if p.optional || p.rest {
+                                        return None;
+                                    }
+                                    params.push((m, f.body, p.span.start));
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+            }
+        }
+        let mut out = Vec::new();
+        for (m, body, k) in params {
+            out.extend(self.param_closures(m, body, k)?);
+        }
+        for (m, v) in values {
+            let mut a = v;
+            while let ExprKind::Paren(x) | ExprKind::As(x, _) = self.ast(m).expr(a).kind {
+                a = x;
+            }
+            match &self.ast(m).expr(a).kind {
+                ExprKind::Arrow(f) if !f.is_async => out.push((m, a)),
+                ExprKind::Ident(_) => {
+                    let Some(IdentFact::Local(k)) = self.ident_fact(m, a) else { return None };
+                    let body = ix.params.iter().find(|((pm, _), ks)| *pm == m && ks.contains(&k)).map(|((_, b), _)| *b)?;
+                    out.extend(self.param_closures(m, body, k)?);
+                }
+                _ => return None,
+            }
+        }
+        Some(out)
+    }
+
     pub(crate) fn quiet_overridden_pub(&mut self, decl: u32, name: crate::intern::Sym) -> bool {
         self.quiet_overridden(decl, name)
     }
@@ -784,7 +1008,22 @@ impl Gen<'_, '_> {
             if !seen.insert((bm, bb, k)) {
                 continue;
             }
-            if seen.len() > 64 || !ix.indexed.contains(&(bm, bb)) || ix.escaped.contains(&(bm, bb)) || ix.method_names.get(&(bm, bb)).is_some_and(|n| ix.escaped_names.contains(n)) {
+            let ctor = ix.ctors.contains(&(bm, bb)) && !ix.ctor_escaped.contains(&(bm, bb));
+            if seen.len() > 64 || !ctor && (!ix.indexed.contains(&(bm, bb)) || ix.escaped.contains(&(bm, bb)) || ix.method_names.get(&(bm, bb)).is_some_and(|n| ix.escaped_names.contains(n))) {
+                return None;
+            }
+            // (a closure's own parameter isn't one of the body's)
+            if !ix.params.get(&(bm, bb)).is_some_and(|ps| ps.contains(&k)) {
+                return None;
+            }
+            // (a parameter assigned in its body may hold something else)
+            let mut xs = Vec::new();
+            super::body::collect_exprs_stmt_pub(self.ast(bm), bb, &mut xs);
+            if xs.iter().any(|&x| match &self.ast(bm).expr(x).kind {
+                ExprKind::Assign(_, t, _) | ExprKind::Update { target: t, .. } => matches!(self.ident_fact(bm, *t), Some(IdentFact::Local(j)) if j == k),
+                ExprKind::Call { args, .. } => args.iter().any(|a| a.by_ref.is_some() && matches!(self.ident_fact(bm, a.expr), Some(IdentFact::Local(j)) if j == k)),
+                _ => false,
+            }) {
                 return None;
             }
             for &(am, ab, arg) in ix.binds.get(&(bm, bb, k)).map(|v| v.as_slice()).unwrap_or(&[]) {

@@ -297,6 +297,10 @@ pub(crate) struct Gen<'c, 'a> {
     pub(crate) writes_memo: FxMap<(u32, crate::ast::StmtId, bool), writes::Writes>,
     pub(crate) writes_stack: Vec<(u32, crate::ast::StmtId, bool)>,
     pub(crate) reach_memo: FxMap<TyId, Option<FxSet<u32>>>,
+    /// The closures a function-typed class field can hold (see `field_closures`), and the
+    /// arrows whose bodies are being looked at through such a field.
+    pub(crate) field_cl_memo: FxMap<crate::intern::Sym, Option<Vec<(u32, crate::ast::ExprId)>>>,
+    pub(crate) field_arrows: Vec<(u32, crate::ast::ExprId)>,
     /// The call being made, for its arguments (see `call_spares`).
     pub(crate) cur_calls: Vec<(usize, u32, crate::ast::ExprId)>,
     pub(crate) pquiet_stack: Vec<(u32, crate::ast::StmtId, u32)>,
@@ -422,6 +426,8 @@ impl<'c, 'a> Gen<'c, 'a> {
             writes_memo: FxMap::default(),
             writes_stack: Vec::new(),
             reach_memo: FxMap::default(),
+            field_cl_memo: FxMap::default(),
+            field_arrows: Vec::new(),
             cur_calls: Vec::new(),
             pquiet_stack: Vec::new(),
             called_stack: Vec::new(),

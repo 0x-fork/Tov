@@ -127,6 +127,8 @@ impl Gen<'_, '_> {
             Callee::SuperCtor(t) => self.c.class_of(t).and_then(|(c, _)| self.writes_ctor(c)).map(|w| acc.extend(w)).is_some(),
             Callee::Builtin { ns, name } => match ns.map(|n| self.sym(n).to_string()) {
                 None => !self.sym(name).starts_with("__"),
+                // (`process.stdout.write(text)`: given no callback)
+                Some(n) if matches!(n.as_str(), "stdout" | "stderr") => self.sym(name) == "write" && self.no_fn_args(m, e),
                 Some(n) => matches!(n.as_str(), "Math" | "console" | "JSON" | "Number" | "String"),
             },
             Callee::Method(recv) => {
@@ -310,7 +312,7 @@ impl Gen<'_, '_> {
                 }
                 let called = match self.facts(m).calls.get(&e).map(|f| f.callee.clone()) {
                     // (through a callback parameter: what its closures write)
-                    Some(Callee::Value) => self.writes_through_param(m, callee, acc),
+                    Some(Callee::Value) => self.writes_through_param(m, callee, acc) || self.writes_through_field(m, callee, acc),
                     _ => match self.writes_of_call(m, e) {
                         Some(w) => {
                             acc.extend(w);
@@ -357,6 +359,49 @@ impl Gen<'_, '_> {
                 parts.into_iter().all(|x| self.writes_expr(m, x, ctor, acc))
             }
         }
+    }
+
+    /// Call `e` is given no functions (a callback that could run later).
+    pub(crate) fn no_fn_args(&mut self, m: u32, e: ExprId) -> bool {
+        let ExprKind::Call { args, .. } = &self.ast(m).expr(e).kind else { return false };
+        let args: Vec<ExprId> = args.iter().map(|a| a.expr).collect();
+        args.into_iter().all(|a| {
+            let t = self.facts(m).expr_ty[a as usize];
+            !matches!(self.c.types.get(t), Ty::Func(..)) && !matches!(self.ast(m).expr(a).kind, ExprKind::Arrow(_))
+        })
+    }
+
+    /// `obj.f(...)` with `f` a class field of a function type: what the closures it can hold
+    /// write (see `field_closures`).
+    fn writes_through_field(&mut self, m: u32, callee: ExprId, acc: &mut FxSet<TyId>) -> bool {
+        let mut c = callee;
+        while let ExprKind::Paren(x) = self.ast(m).expr(c).kind {
+            c = x;
+        }
+        let ExprKind::Member { obj, name, .. } = self.ast(m).expr(c).kind else { return false };
+        let ot = self.facts(m).expr_ty[obj as usize];
+        let ot = self.c.types.without_nullish(ot);
+        if self.c.class_of(ot).is_none() || self.class_field(ot, name).is_none() {
+            return false;
+        }
+        let Some(arrows) = self.field_closures(name) else { return false };
+        arrows.into_iter().all(|(am, a)| {
+            if self.field_arrows.contains(&(am, a)) {
+                // (a closure calling itself through the field: what the rest adds)
+                self.quiet_tainted = true;
+                return true;
+            }
+            self.field_arrows.push((am, a));
+            let ok = match &self.ast(am).expr(a).kind {
+                ExprKind::Arrow(f) if !f.is_async => match f.body {
+                    ArrowBody::Expr(x) => self.writes_expr(am, x, false, acc),
+                    ArrowBody::Block(s) => self.writes_stmt(am, s, false, acc),
+                },
+                _ => false,
+            };
+            self.field_arrows.pop();
+            ok
+        })
     }
 
     /// `fn(...)` with `fn` a parameter of the body being looked at: what the closures every
