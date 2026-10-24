@@ -54,7 +54,7 @@ index 26e825ac..db9b9aa3 100644
      static std::once_flag onceFlag;
      std::call_once(onceFlag, [] {
 diff --git a/Source/JavaScriptCore/runtime/JSLock.cpp b/Source/JavaScriptCore/runtime/JSLock.cpp
-index 0fa9323d..705df868 100644
+index 0fa9323d..0a82401a 100644
 --- a/Source/JavaScriptCore/runtime/JSLock.cpp
 +++ b/Source/JavaScriptCore/runtime/JSLock.cpp
 @@ -91,6 +91,11 @@ void JSLock::lock()
@@ -142,6 +142,20 @@ index 0fa9323d..705df868 100644
      ++m_lockDropDepth;
  
      dropper->setDropDepth(m_lockDropDepth);
+@@ -394,6 +437,13 @@ JSLock::DropAllLocks::DropAllLocks(VM* vm)
+     if (!m_vm)
+         return;
+ 
++    // (Tov: a sticky lock is its thread's for the program's life. An API callback keeps it
++    // rather than releasing it, and taking it again for each call it makes into the engine.)
++    if (m_vm->apiLock().stickyHeldByCurrentThread()) {
++        m_vm = nullptr;
++        return;
++    }
++
+     // Contrary to intuition, DropAllLocks does not require that we are actually holding
+     // the JSLock before getting here. Its goal is to release the lock if it is held. So,
+     // if the lock isn't already held, there's nothing to do, and that's fine.
 diff --git a/Source/JavaScriptCore/runtime/JSLock.h b/Source/JavaScriptCore/runtime/JSLock.h
 index d4da3311..855c9dc0 100644
 --- a/Source/JavaScriptCore/runtime/JSLock.h
