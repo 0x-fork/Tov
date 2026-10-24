@@ -4455,10 +4455,12 @@ impl<'c, 'a> Gen<'c, 'a> {
                 let array = matches!(self.tget(ty), Ty::Array(_)) || self.niche_arr(ty);
                 // (narrowed, `C | null` read as `C`: the same pointer)
                 let same = local.ty == ty || self.niche(local.ty).is_some() && !self.niche_str(local.ty) && self.ctype(local.ty) == self.ctype(ty);
-                if same && self.b().owned_locals.contains(&k) && self.is_last_use(e) && (matches!(self.tget(ty), Ty::Class(..)) || self.niche(ty).is_some() && !self.niche_str(ty) || array) {
-                    // (an array's release passes over a NULL header, as a class's over NULL)
+                let big = ty == BIGINT && local.ty == BIGINT;
+                if same && self.b().owned_locals.contains(&k) && self.is_last_use(e) && (matches!(self.tget(ty), Ty::Class(..)) || self.niche(ty).is_some() && !self.niche_str(ty) || array || big) {
+                    // (an array's release passes over a NULL header, as a class's over NULL, and
+                    // a bigint's over a small integer)
                     let (ct, t) = (self.ctype(ty), self.fresh("mv"));
-                    let none = if array { "(tv_arr){NULL}" } else { "NULL" };
+                    let none = if array { "(tv_arr){NULL}" } else if big { "((tv_big){1})" } else { "NULL" };
                     self.line(format!("{ct} {t} = {0}; {0} = {none};", local.access));
                     return Val { code: t, ty, owned: true };
                 }

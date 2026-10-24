@@ -54,6 +54,22 @@ impl Gen<'_, '_> {
         out
     }
 
+    /// `return e`: a local `e` is (`c ? x : y`: each branch's, the last use on its path).
+    fn mv_returned(&self, m: u32, e: ExprId, w: &mut Walk) {
+        let mut x = e;
+        while let ExprKind::Paren(y) | ExprKind::NonNull(y) | ExprKind::As(y, _) = self.ast(m).expr(x).kind {
+            x = y;
+        }
+        if let ExprKind::Cond(_, a, b) = self.ast(m).expr(x).kind {
+            self.mv_returned(m, a, w);
+            self.mv_returned(m, b, w);
+            return;
+        }
+        if let Some(IdentFact::Local(k)) = self.mv_local(m, e) {
+            w.returned.push((k, x));
+        }
+    }
+
     fn mv_stmt(&self, m: u32, s: StmtId, w: &mut Walk) {
         let ast: &Ast = self.ast(m);
         match &ast.stmt(s).kind {
@@ -67,14 +83,8 @@ impl Gen<'_, '_> {
             StmtKind::Return(e) => {
                 if let Some(e) = e {
                     self.mv_expr(m, *e, w, true);
-                    if w.in_try == 0
-                        && let Some(IdentFact::Local(k)) = self.mv_local(m, *e)
-                    {
-                        let mut x = *e;
-                        while let ExprKind::Paren(y) | ExprKind::NonNull(y) | ExprKind::As(y, _) = self.ast(m).expr(x).kind {
-                            x = y;
-                        }
-                        w.returned.push((k, x));
+                    if w.in_try == 0 {
+                        self.mv_returned(m, *e, w);
                     }
                 }
             }
