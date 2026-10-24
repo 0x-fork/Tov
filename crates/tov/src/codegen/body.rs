@@ -117,6 +117,10 @@ pub(crate) struct Body {
     pub root: Option<StmtId>,
     /// Locals that borrow what they point to (see `cursor_local`): never retained or released.
     pub cursors: FxSet<u32>,
+    /// `p = a.f; a.f = null` (see `unlink_pair`): the read that takes a.f's reference, and the
+    /// store that then doesn't release it.
+    pub take: Option<ExprId>,
+    pub no_release: Option<ExprId>,
     /// Locals holding a reference of their own, and the uses that hand it over (see `moves`;
     /// found when first needed).
     pub owned_locals: FxSet<u32>,
@@ -303,6 +307,8 @@ impl<'c, 'a> Gen<'c, 'a> {
             nowrap_locals: Vec::new(),
             root: None,
             cursors: FxSet::default(),
+            take: None,
+            no_release: None,
             owned_locals: FxSet::default(),
             moves: None,
             fixed: None,
@@ -507,6 +513,8 @@ impl<'c, 'a> Gen<'c, 'a> {
             nowrap_locals: Vec::new(),
             root: None,
             cursors: FxSet::default(),
+            take: None,
+            no_release: None,
             owned_locals: FxSet::default(),
             moves: None,
             fixed: None,
@@ -680,6 +688,15 @@ impl<'c, 'a> Gen<'c, 'a> {
                 skip = n == 2;
             } else if let Some(n) = self.permutation(ss, i) {
                 in_group = n - 1;
+            } else if let Some((v, t2)) = self.unlink_pair(ss, i) {
+                // `p = a.f; a.f = null`: the reference moves from a.f to p (see `unlink_pair`)
+                self.b().take = Some(v);
+                self.stmt(x);
+                self.b().take = None;
+                self.b().no_release = Some(t2);
+                self.stmt(ss[i + 1]);
+                self.b().no_release = None;
+                skip = true;
             } else {
                 self.stmt(x);
             }
@@ -689,6 +706,58 @@ impl<'c, 'a> Gen<'c, 'a> {
                 }
             }
         }
+    }
+
+    /// `p = a.f; a.f = null` (statements `i`, `i + 1`; `a` a local or `this`, `f` a field of a
+    /// class pointer type, `p` some other place): the value read and the place it's stored for
+    /// the second. Nothing runs between, so the first store can take the reference a.f holds and
+    /// the second skip releasing it.
+    fn unlink_pair(&mut self, ss: &[StmtId], i: usize) -> Option<(ExprId, ExprId)> {
+        let m = self.cur_m();
+        let ast = self.ast(m);
+        let (&s1, &s2) = (ss.get(i)?, ss.get(i + 1)?);
+        let (StmtKind::Expr(e1), StmtKind::Expr(e2)) = (&ast.stmt(s1).kind, &ast.stmt(s2).kind) else { return None };
+        let ExprKind::Assign(crate::ast::AssignOp::Assign, t1, v1) = &ast.expr(*e1).kind else { return None };
+        let ExprKind::Assign(crate::ast::AssignOp::Assign, t2, v2) = &ast.expr(*e2).kind else { return None };
+        if !matches!(ast.expr(*v2).kind, ExprKind::Null | ExprKind::Undefined) {
+            return None;
+        }
+        // (the field read, `a.f` with `a` a local or `this`, and the same field written)
+        let field = |e: ExprId| -> Option<(Option<IdentFact>, bool, crate::intern::Sym)> {
+            let mut e = e;
+            while let ExprKind::Paren(x) | ExprKind::NonNull(x) = ast.expr(e).kind {
+                e = x;
+            }
+            let ExprKind::Member { obj, name, optional: false, .. } = &ast.expr(e).kind else { return None };
+            let mut o = *obj;
+            while let ExprKind::Paren(x) | ExprKind::NonNull(x) = ast.expr(o).kind {
+                o = x;
+            }
+            match ast.expr(o).kind {
+                ExprKind::This => Some((None, true, *name)),
+                ExprKind::Ident(_) => match self.ident_fact(m, o) {
+                    Some(f @ IdentFact::Local(_)) => Some((Some(f), false, *name)),
+                    _ => None,
+                },
+                _ => None,
+            }
+        };
+        let (a, b) = (field(*v1)?, field(*t2)?);
+        if a != b || field(*t1) == Some(a) {
+            return None;
+        }
+        let vt = self.ty(*v1);
+        let ptr = |g: &Self, t: TyId| matches!(g.tget(t), Ty::Class(..)) || g.niche(t).is_some() && !g.niche_str(t) && !g.niche_arr(t);
+        if !ptr(self, vt) {
+            return None;
+        }
+        // (the local holding `a` isn't a borrowed view or a cursor: it keeps `a` alive)
+        if let Some(IdentFact::Local(k)) = a.0
+            && !(self.b().owned_locals.contains(&k) || self.b().params.contains(&k))
+        {
+            return None;
+        }
+        Some((*v1, *t2))
     }
 
     /// `const t = a; a = b; b = t`, `[a, b] = [b, a]` (desugared to hidden constants), and other
@@ -3424,6 +3493,12 @@ impl<'c, 'a> Gen<'c, 'a> {
     }
 
     pub(crate) fn expr(&mut self, e: ExprId) -> Val {
+        // (the read in `p = a.f; a.f = null`: it takes the reference, see `unlink_pair`)
+        if self.b().take == Some(e) {
+            self.b().take = None;
+            let v = self.expr(e);
+            return Val { owned: true, ..v };
+        }
         let m = self.cur_m();
         let ast = self.ast(m);
         let node = ast.expr(e);
@@ -6700,7 +6775,10 @@ impl<'c, 'a> Gen<'c, 'a> {
                 let code = self.consume(v);
                 let ct = self.ctype(p.ty);
                 let lv = self.place_lvalue(&p);
-                if self.is_rc(p.ty) {
+                if self.is_rc(p.ty) && self.b().no_release == Some(target) {
+                    // (its value was taken by the store before: see `unlink_pair`)
+                    self.line(format!("{lv} = {code};"));
+                } else if self.is_rc(p.ty) {
                     let nv = self.fresh("n");
                     self.line(format!("{ct} {nv} = {code};"));
                     let r = self.release_code(p.ty, &lv);
@@ -7090,6 +7168,8 @@ impl<'c, 'a> Gen<'c, 'a> {
             nowrap_locals: Vec::new(),
             root: None,
             cursors: FxSet::default(),
+            take: None,
+            no_release: None,
             owned_locals: FxSet::default(),
             moves: None,
             fixed: None,
