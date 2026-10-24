@@ -1,0 +1,5 @@
+push,pop/7,pop/7,neg,next,other,other
+10 20 -1 4 3
+high is 10
+6 3
+g

@@ -990,6 +990,21 @@ impl<'a> Checker<'a> {
         SwitchMode::General
     }
 
+    /// `E.name` of a module constant that's an object literal (an enum), whose field is a
+    /// string literal: the string.
+    pub(crate) fn enum_str_member(&self, e: ExprId) -> Option<Sym> {
+        let ExprKind::Member { obj, name, optional: false, .. } = self.ast().expr(e).kind else { return None };
+        let cur = self.cur as usize;
+        let fact = self.facts.as_ref()?.get(cur)?.idents.get(&obj).copied()?;
+        let (mast, init) = enum_object(self.modules, cur as u32, fact)?;
+        let ExprKind::Object(fs) = &mast.expr(init).kind else { return None };
+        let v = fs.iter().find(|f| f.name == name)?.value;
+        match mast.expr(v).kind {
+            ExprKind::Str(s) => Some(s),
+            _ => None,
+        }
+    }
+
     fn switch(&mut self, sid: StmtId, disc: ExprId, cases: &[Case], span: Span) {
         let dt = self.expr(disc, None);
         let mode = self.switch_mode(disc, dt);
@@ -1011,8 +1026,15 @@ impl<'a> Checker<'a> {
             };
             let tspan = self.ast().expr(test).span;
             if literal_mode {
-                let ExprKind::Str(lit) = self.ast().expr(test).kind else {
-                    self.expr(test, None);
+                let lit = match self.ast().expr(test).kind {
+                    ExprKind::Str(lit) => Some(lit),
+                    // (a string enum's member: its value)
+                    _ => {
+                        self.expr(test, None);
+                        self.enum_str_member(test)
+                    }
+                };
+                let Some(lit) = lit else {
                     self.report(Diagnostic::new("T0104", tspan, "case labels here must be string literals"));
                     labels.push(None);
                     continue;
@@ -1829,4 +1851,27 @@ pub(super) fn filled_by_next_loop(ast: &Ast, ne: ExprId) -> bool {
             && !body_ss[..j].iter().any(|&s| jumps(ast, s));
     }
     false
+}
+
+/// The object an enum's name refers to (`fact`, an identifier in module `m`): the module's AST
+/// and the object literal. An enum is a constant object with a type alias of the same name.
+pub(crate) fn enum_object(modules: &[Module], m: u32, fact: IdentFact) -> Option<(&Ast, ExprId)> {
+    match fact {
+        IdentFact::Const(cm, ci) => {
+            let mast = &modules[cm as usize].ast;
+            let ItemKind::Const { name, init, mutable: false, .. } = &mast.items[ci as usize].kind else { return None };
+            mast.items.iter().any(|it| matches!(&it.kind, ItemKind::TypeAlias { name: n, .. } if n == name)).then_some((mast, *init))
+        }
+        // (a script's: a local of the function running its statements)
+        IdentFact::Local(k) => {
+            let mast = &modules[m as usize].ast;
+            let (name, init) = mast.stmts.iter().find_map(|st| match &st.kind {
+                StmtKind::Let { name, name_span, init: Some(i), mutable: false, .. } if name_span.start == k => Some((*name, *i)),
+                _ => None,
+            })?;
+            let is_obj = matches!(mast.expr(init).kind, ExprKind::Object(_));
+            (is_obj && mast.items.iter().any(|it| matches!(&it.kind, ItemKind::TypeAlias { name: n, .. } if *n == name))).then_some((mast, init))
+        }
+        _ => None,
+    }
 }

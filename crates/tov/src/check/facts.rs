@@ -6,7 +6,7 @@ use crate::hash::FxMap;
 use crate::intern::Sym;
 use crate::types::{FnParam, TyId, ERROR};
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum IdentFact {
     /// A local variable or parameter, identified by the source offset of its declaring name.
     Local(u32),

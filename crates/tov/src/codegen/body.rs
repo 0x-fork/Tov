@@ -3801,6 +3801,46 @@ impl<'c, 'a> Gen<'c, 'a> {
                         result = (Some(self.u_tag(&v.code, v.ty)), Box::new(move |_, l| lits.iter().find(|(s, _)| *s == l).map(|(_, i)| *i)));
                     }
                 }
+                // Every case an integer constant (a literal, an enum's member): a C switch
+                if result.0.is_none() && self.ctype(v.ty) == "tv_int" && !cases.is_empty() {
+                    let vals: Vec<Option<Option<i64>>> = cases.iter().map(|c| c.test.map(|t| self.case_int(t))).collect();
+                    if vals.iter().all(|x| !matches!(x, Some(None))) {
+                        let code = v.code.clone();
+                        let dv = self.fresh("d");
+                        self.line(format!("tv_int {dv} = {code};"));
+                        self.pop_temps();
+                        let end = self.fresh("swend");
+                        let depth = self.b().scopes.len();
+                        self.b().breaks.push((BreakTarget::Goto(end.clone()), depth));
+                        self.open(&format!("switch ({dv}) {{"));
+                        let mut seen: Vec<i64> = Vec::new();
+                        for (case, val) in cases.iter().zip(&vals) {
+                            match val {
+                                Some(Some(x)) => {
+                                    if !seen.contains(x) {
+                                        seen.push(*x);
+                                        self.line(format!("case INT64_C({x}):"));
+                                    }
+                                }
+                                _ => self.line("default:"),
+                            }
+                            if !case.body.is_empty() {
+                                self.open("{");
+                                self.push_scope();
+                                for &x in &case.body {
+                                    self.stmt(x);
+                                }
+                                self.pop_scope();
+                                self.close("}");
+                                self.line(format!("goto {end};"));
+                            }
+                        }
+                        self.close("}");
+                        self.b().breaks.pop();
+                        self.line(format!("{end}:;"));
+                        return;
+                    }
+                }
                 // Every case a string literal: matched first, the value borrowed (nothing in
                 // the matching can release it, and no case looks at it again)
                 if result.0.is_none()
@@ -3842,13 +3882,17 @@ impl<'c, 'a> Gen<'c, 'a> {
         self.b().breaks.push((BreakTarget::Native, depth));
         for case in cases {
             match case.test {
-                Some(t) => match &ast.expr(t).kind {
-                    ExprKind::Str(l) => match label_tag(self, *l) {
+                Some(t) => {
+                    // (a string enum's member: its value, as the checker took it)
+                    let lit = match &ast.expr(t).kind {
+                        ExprKind::Str(l) => Some(*l),
+                        _ => self.enum_str_member(m, t),
+                    };
+                    match lit.and_then(|l| label_tag(self, l)) {
                         Some(i) => self.line(format!("case {i}:")),
                         None => self.line("case 0xFFFFFFFF:"),
-                    },
-                    _ => self.line("case 0xFFFFFFFF:"),
-                },
+                    }
+                }
                 None => self.line("default:"),
             }
             if !case.body.is_empty() {
@@ -3864,6 +3908,28 @@ impl<'c, 'a> Gen<'c, 'a> {
         }
         self.b().breaks.pop();
         self.close("}");
+    }
+
+    /// A `case` test that's an integer constant: a literal, its negation, an enum's member.
+    fn case_int(&mut self, t: ExprId) -> Option<i64> {
+        let m = self.cur_m();
+        let (cm, e) = match self.const_member(m, t) {
+            Some(x) => x,
+            None => (m, t),
+        };
+        let ast = self.ast(cm);
+        let mut e = e;
+        while let ExprKind::Paren(x) = ast.expr(e).kind {
+            e = x;
+        }
+        match &ast.expr(e).kind {
+            ExprKind::Int(v) if *v <= i64::MAX as u64 => Some(*v as i64),
+            ExprKind::Unary(crate::ast::UnOp::Neg, x) => match ast.expr(*x).kind {
+                ExprKind::Int(v) if v <= i64::MAX as u64 => Some(-(v as i64)),
+                _ => None,
+            },
+            _ => None,
+        }
     }
 
     /// The index of the case string `v` matches (or the default's, else -1), every case's
@@ -4244,7 +4310,17 @@ impl<'c, 'a> Gen<'c, 'a> {
                 }
                 Val::plain("TV_EMPTY_MAP", ty)
             }
-            ExprKind::Member { obj, name, optional, .. } => self.member(e, *obj, *name, *optional, ty, span),
+            ExprKind::Member { obj, name, optional, .. } => {
+                // (an enum's member: its value, a constant the C compiler can see)
+                if let Some((cm, v)) = self.const_member(m, e)
+                    && cm == m
+                    && !self.is_rc(ty)
+                {
+                    let lv = self.expr(v);
+                    return self.coerce(lv, ty);
+                }
+                self.member(e, *obj, *name, *optional, ty, span)
+            }
             // `xs[i]` read as the element type (TypeScript's): as `xs[i]!`
             ExprKind::Index { obj, index, optional: false } if !self.c.types.has_undefined(ty) && let Some(v) = self.element(*obj, *index, ty, span) => v,
             ExprKind::Index { obj, index, optional } => {

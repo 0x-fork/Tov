@@ -13,7 +13,7 @@ pub mod facts;
 mod objects;
 pub mod rewrite;
 mod spec;
-mod stmt;
+pub(crate) mod stmt;
 
 pub use facts::{CallFact, Callee, IdentFact, MemberFact, ModuleFacts, NpmName};
 

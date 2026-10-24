@@ -313,6 +313,8 @@ pub(crate) struct Gen<'c, 'a> {
     pub(crate) arrow_protos: FxMap<String, String>,
     /// Array types given a free function of their own (see `arr_free_fn`).
     pub(crate) arr_frees: FxSet<TyId>,
+    /// Module constants found only read as `E.field` (see `const_member`).
+    pub(crate) ro_consts: FxMap<IdentFact, bool>,
     /// Field places of objects that can't change before the store (see `class_field_place`).
     pub(crate) stable_places: FxSet<String>,
     pub(crate) reassigned_memo: FxMap<(u32, crate::ast::StmtId), FxSet<u32>>,
@@ -449,6 +451,7 @@ impl<'c, 'a> Gen<'c, 'a> {
             devirt: Vec::new(),
             arrow_protos: FxMap::default(),
             arr_frees: FxSet::default(),
+            ro_consts: FxMap::default(),
             stable_places: FxSet::default(),
             reassigned_memo: FxMap::default(),
             quiet_inst_memo: FxMap::default(),
@@ -2147,6 +2150,91 @@ impl<'c, 'a> Gen<'c, 'a> {
             (ast::ExprKind::Bool(b), Ty::Bool) if neg.is_empty() => Some(b.to_string()),
             _ => None,
         }
+    }
+
+    /// `E.name` of a module constant `E` that's an object literal of literals (an enum) and only
+    /// ever read as `E.field`, nowhere stored to or passed on: the field's literal expression.
+    pub(crate) fn const_member(&mut self, m: u32, e: ExprId) -> Option<(u32, ExprId)> {
+        let ast::ExprKind::Member { obj, name, optional: false, .. } = self.ast(m).expr(e).kind else { return None };
+        let fact = self.ident_fact(m, obj)?;
+        let (cm, init) = match fact {
+            IdentFact::Const(cm, ci) => {
+                let ItemKind::Const { init, mutable: false, .. } = &self.ast(cm).items[ci as usize].kind else { return None };
+                (cm, *init)
+            }
+            // (a script's enum: a local of the function running its statements)
+            IdentFact::Local(_) => (m, crate::check::stmt::enum_object(&self.c.modules, m, fact)?.1),
+            _ => return None,
+        };
+        let ast::ExprKind::Object(fs) = &self.ast(cm).expr(init).kind else { return None };
+        let v = fs.iter().find(|f| f.name == name)?.value;
+        let lit = |x: ExprId| match &self.ast(cm).expr(x).kind {
+            ast::ExprKind::Int(_) | ast::ExprKind::Float(_) | ast::ExprKind::Bool(_) | ast::ExprKind::Str(_) => true,
+            ast::ExprKind::Unary(ast::UnOp::Neg, y) => matches!(self.ast(cm).expr(*y).kind, ast::ExprKind::Int(_) | ast::ExprKind::Float(_)),
+            _ => false,
+        };
+        if !lit(v) || !self.read_only_const(fact) {
+            return None;
+        }
+        Some((cm, v))
+    }
+
+    /// `E.name` of an enum (a module constant object with a type of the same name) whose
+    /// member is a string literal: the string (see the checker's `enum_str_member`).
+    pub(crate) fn enum_str_member(&self, m: u32, e: ExprId) -> Option<crate::intern::Sym> {
+        let ast::ExprKind::Member { obj, name, optional: false, .. } = self.ast(m).expr(e).kind else { return None };
+        let fact = self.ident_fact(m, obj)?;
+        let (mast, init) = crate::check::stmt::enum_object(&self.c.modules, m, fact)?;
+        let ast::ExprKind::Object(fs) = &mast.expr(init).kind else { return None };
+        let v = fs.iter().find(|f| f.name == name)?.value;
+        match mast.expr(v).kind {
+            ast::ExprKind::Str(s) => Some(s),
+            _ => None,
+        }
+    }
+
+    /// Constant `which` (a module's, or a script's local) appears only as the object of
+    /// `E.field` reads.
+    fn read_only_const(&mut self, which: IdentFact) -> bool {
+        if let Some(&r) = self.ro_consts.get(&which) {
+            return r;
+        }
+        let mut ok = true;
+        'mods: for m in 0..self.c.modules.len() as u32 {
+            let ast = self.ast(m);
+            let facts = self.facts(m);
+            // (each use, and what it's the object of)
+            let mut parent: FxMap<ExprId, ExprId> = FxMap::default();
+            for (i, x) in ast.exprs.iter().enumerate() {
+                if let ast::ExprKind::Member { obj, .. } = x.kind {
+                    parent.insert(obj, i as ExprId);
+                }
+            }
+            let mut targets: FxSet<ExprId> = FxSet::default();
+            for x in ast.exprs.iter() {
+                match &x.kind {
+                    ast::ExprKind::Assign(_, t, _) | ast::ExprKind::Update { target: t, .. } => {
+                        targets.insert(*t);
+                    }
+                    ast::ExprKind::Call { args, .. } => targets.extend(args.iter().filter(|a| a.by_ref.is_some()).map(|a| a.expr)),
+                    _ => {}
+                }
+            }
+            for (&e, f) in facts.idents.iter() {
+                if *f != which {
+                    continue;
+                }
+                match parent.get(&e) {
+                    Some(p) if !targets.contains(p) => {}
+                    _ => {
+                        ok = false;
+                        break 'mods;
+                    }
+                }
+            }
+        }
+        self.ro_consts.insert(which, ok);
+        ok
     }
 
     pub(crate) fn ident_fact(&self, m: u32, e: ExprId) -> Option<IdentFact> {
