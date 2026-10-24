@@ -15,8 +15,27 @@ const PRELUDE: &str = include_str!("prelude.tov");
 
 /// Standard library modules (Node's names), written in Tov on top of `__native` runtime calls.
 /// Standard modules: (name, source, also importable as `"node:name"`/`"name"`).
-const STD_MODULES: &[(&str, &str, bool)] =
-    &[("fs", include_str!("std/fs.tov"), true), ("path", include_str!("std/path.tov"), true), ("http", include_str!("std/http.tov"), false)];
+const STD_MODULES: &[(&str, &str, bool)] = &[
+    ("fs", include_str!("std/fs.tov"), true),
+    ("path", include_str!("std/path.tov"), true),
+    ("http", include_str!("std/http.tov"), false),
+    ("crypto", include_str!("std/crypto.tov"), false),
+];
+
+/// What std/crypto has of node:crypto: an import naming only these gets it (see `std_crypto`).
+const STD_CRYPTO_NAMES: &[&str] = &["createHash", "createHmac", "hash", "randomUUID", "getHashes", "Hash", "Hmac", "BinaryToTextEncoding"];
+
+/// `import { createHash } from "node:crypto"`: std/crypto, when it has every name imported
+/// (a default or namespace import, or another name, gets node:crypto's JavaScript).
+fn std_crypto(imp: &crate::ast::Import, interner: &crate::intern::Interner) -> bool {
+    matches!(imp.path.strip_prefix("node:").unwrap_or(&imp.path), "crypto")
+        && imp.namespace.is_none()
+        && imp.default.is_none()
+        && !imp.reexport
+        && !imp.names.is_empty()
+        && imp.names.iter().all(|(n, _)| STD_CRYPTO_NAMES.contains(&interner.get(*n)))
+        && std::env::var_os("TOV_NODE_JS").is_none()
+}
 
 /// npm packages Tov has natively: (the import specifier, the Tov module standing in for the
 /// package's JavaScript, the export a default import names). `TOV_NPM_JS=1` runs the package's
@@ -182,6 +201,10 @@ pub fn load_with(paths: &[PathBuf], base: &Path, tests: bool) -> Result<Loaded, 
         let mut targets = Vec::new();
         for (ii, item) in modules[mi].ast.items.iter().enumerate() {
             if let ItemKind::Import(imp) = &item.kind {
+                if std_crypto(imp, &interner) {
+                    targets.push((ii as u32, PathBuf::from("<std>/crypto")));
+                    continue;
+                }
                 match resolve_import(&modules[mi].path, &imp.path, imp.path_span, &npm) {
                     Ok(target) => targets.push((ii as u32, if target.starts_with("<std>") || target.starts_with("<npm>") { target } else { normalize(&target) })),
                     Err(d) => diags.push(d),

@@ -614,6 +614,11 @@ impl<'c, 'a> Gen<'c, 'a> {
             init.insert_str(0, "    tv_tls_install();\n");
             self.uses_tls = true;
         }
+        // (std/crypto's hashes and random bytes: the same library's BoringSSL)
+        if self.funcs.contains("tv_native_crypto") {
+            init.insert_str(0, "    tv_crypto_install();\n");
+            self.uses_tls = true;
+        }
         // (Math.random's seed, read from TOV_SEED once, before the first draw: tv_random has no
         // check of its own)
         if self.funcs.contains("tv_random()") || main_body.contains("tv_random()") {

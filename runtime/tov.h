@@ -939,6 +939,15 @@ void tv_native_rm(tv_str path, bool recursive, bool force);
 tv_str tv_native_cwd(void);
 double tv_native_dateNow(void);
 double tv_native_dateOffset(double t);
+tv_int tv_native_cryptoNew(tv_str alg, tv_arr key, bool hmac);     /* std/crypto: a hash or HMAC handle, -1: unknown */
+void tv_native_cryptoUpdate(tv_int h, tv_str data);
+void tv_native_cryptoUpdateBytes(tv_int h, tv_arr data);
+tv_str tv_native_cryptoDigest(tv_int h, tv_str encoding);          /* frees the handle */
+tv_arr tv_native_cryptoDigestBytes(tv_int h);
+tv_str tv_native_bytesEncode(tv_arr bytes, tv_str encoding);       /* hex, base64, base64url, latin1 */
+tv_arr tv_native_cryptoRandomBytes(tv_int n);
+tv_str tv_native_cryptoRandomUUID(void);
+bool tv_native_cryptoEqual(tv_arr a, tv_arr b);
 tv_str tv_native_dateIso(double t);              /* toISOString of a valid time */
 double tv_native_dateParseIso(tv_str s);         /* exactly toISOString's form, else NaN */
 double tv_native_dateLocalToUtc(double local);

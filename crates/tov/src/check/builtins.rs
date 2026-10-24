@@ -94,6 +94,27 @@ pub(super) fn native_sig(types: &mut Types, name: &str) -> Option<(Vec<TyId>, Ty
             let bytes = types.array(U8);
             (vec![bytes], STR)
         }
+        "cryptoNew" => {
+            let bytes = types.array(U8);
+            (vec![STR, bytes, BOOL], INT)
+        }
+        "cryptoUpdate" => (vec![INT, STR], VOID),
+        "cryptoUpdateBytes" => {
+            let bytes = types.array(U8);
+            (vec![INT, bytes], VOID)
+        }
+        "cryptoDigest" => (vec![INT, STR], STR),
+        "cryptoDigestBytes" => (vec![INT], types.array(U8)),
+        "bytesEncode" => {
+            let bytes = types.array(U8);
+            (vec![bytes, STR], STR)
+        }
+        "cryptoRandomBytes" => (vec![INT], types.array(U8)),
+        "cryptoRandomUUID" => (vec![], STR),
+        "cryptoEqual" => {
+            let bytes = types.array(U8);
+            (vec![bytes.clone(), bytes], BOOL)
+        }
         "stringToBytes" => {
             let bytes = types.array(U8);
             (vec![STR], bytes)

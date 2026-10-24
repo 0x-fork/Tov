@@ -4440,6 +4440,160 @@ static long tv_date_gmtoff(double s) {
 static double tv_floor_div(double a, double b) { return floor(a / b); }
 
 /* getTimezoneOffset(): minutes from local time to UTC (west of UTC positive), at time t (ms). */
+/* ---- node:crypto's hashes, HMACs and random bytes for Tov code (std/crypto.tov), on the
+ * TLS library's BoringSSL (runtime/crypto.c, installed before main when a program uses them) */
+typedef struct { void *ctx; bool hmac; } tv_cry_slot;
+static tv_cry_slot *tv_cry_slots;
+static tv_int tv_cry_n, tv_cry_cap, tv_cry_free = -1;
+
+static tv_int tv_cry_put(void *ctx, bool hmac) {
+    tv_int i;
+    if (tv_cry_free >= 0) {
+        i = tv_cry_free;
+        tv_cry_free = (tv_int)(intptr_t)tv_cry_slots[i].ctx;
+    } else {
+        if (tv_cry_n == tv_cry_cap) {
+            tv_cry_cap = tv_cry_cap ? tv_cry_cap * 2 : 16;
+            tv_cry_slots = tv_realloc(tv_cry_slots, (size_t)tv_cry_cap * sizeof *tv_cry_slots);
+        }
+        i = tv_cry_n++;
+    }
+    tv_cry_slots[i] = (tv_cry_slot){ctx, hmac};
+    return i;
+}
+
+/* A hash (or, with `hmac`, an HMAC keyed by key's bytes) of the algorithm: a handle, or -1 when
+ * BoringSSL doesn't have it. */
+tv_int tv_native_cryptoNew(tv_str alg, tv_arr key, bool hmac) {
+    if (!tv_crypto) return -1;
+    char name[64];
+    size_t n = (size_t)tv_str_byte_len(alg) < sizeof name - 1 ? (size_t)tv_str_byte_len(alg) : sizeof name - 1;
+    memcpy(name, alg.p->data, n);
+    name[n] = 0;
+    void *c = hmac ? tv_crypto->hmac_new(name, tv_arr_len(key) ? (const uint8_t *)tv_arr_data(key) : (const uint8_t *)"", (size_t)tv_arr_len(key)) : tv_crypto->hash_new(name);
+    return c ? tv_cry_put(c, hmac) : -1;
+}
+
+static void tv_cry_update(tv_int h, const uint8_t *p, size_t n) {
+    tv_cry_slot *s = &tv_cry_slots[h];
+    if (!s->ctx || !n) return;
+    (s->hmac ? tv_crypto->hmac_update : tv_crypto->hash_update)(s->ctx, p, n);
+}
+void tv_native_cryptoUpdate(tv_int h, tv_str data) { tv_cry_update(h, (const uint8_t *)data.p->data, (size_t)tv_str_byte_len(data)); }
+void tv_native_cryptoUpdateBytes(tv_int h, tv_arr data) { tv_cry_update(h, (const uint8_t *)tv_arr_data(data), (size_t)tv_arr_len(data)); }
+
+/* The digest, and the handle freed: its length. */
+static size_t tv_cry_final(tv_int h, uint8_t out[64]) {
+    tv_cry_slot *s = &tv_cry_slots[h];
+    if (!s->ctx) return 0;
+    size_t len = (s->hmac ? tv_crypto->hmac_final : tv_crypto->hash_final)(s->ctx, out);
+    (s->hmac ? tv_crypto->hmac_free : tv_crypto->hash_free)(s->ctx);
+    s->ctx = (void *)(intptr_t)tv_cry_free;
+    tv_cry_free = h;
+    return len;
+}
+
+/* Bytes as Node's Buffer.toString(encoding) writes them: hex, base64, base64url, latin1. */
+static tv_str tv_bytes_encode(const uint8_t *p, size_t n, tv_str enc) {
+    const char *e = enc.p->data;
+    size_t el = (size_t)tv_str_byte_len(enc);
+    char buf[200];
+    char *w = n * 2 + 4 <= sizeof buf ? buf : tv_alloc(n * 2 + 4);
+    size_t k = 0;
+    if (el == 3 && !memcmp(e, "hex", 3)) {
+        static const char digits[] = "0123456789abcdef";
+        for (size_t i = 0; i < n; i++) {
+            w[k++] = digits[p[i] >> 4];
+            w[k++] = digits[p[i] & 15];
+        }
+    } else if ((el == 6 && !memcmp(e, "base64", 6)) || (el == 9 && !memcmp(e, "base64url", 9))) {
+        bool url = el == 9;
+        const char *tab = url ? "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_" : "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+        size_t i = 0;
+        for (; i + 2 < n; i += 3) {
+            uint32_t v = (uint32_t)p[i] << 16 | (uint32_t)p[i + 1] << 8 | p[i + 2];
+            w[k++] = tab[v >> 18];
+            w[k++] = tab[(v >> 12) & 63];
+            w[k++] = tab[(v >> 6) & 63];
+            w[k++] = tab[v & 63];
+        }
+        if (i < n) {
+            uint32_t v = (uint32_t)p[i] << 16 | (i + 1 < n ? (uint32_t)p[i + 1] << 8 : 0);
+            w[k++] = tab[v >> 18];
+            w[k++] = tab[(v >> 12) & 63];
+            if (i + 1 < n) w[k++] = tab[(v >> 6) & 63];
+            else if (!url) w[k++] = '=';
+            if (!url) w[k++] = '=';
+        }
+    } else {
+        /* latin1 / binary: each byte a character */
+        tv_sb sb = {0};
+        for (size_t i = 0; i < n; i++) {
+            if (p[i] < 128) tv_sb_push(&sb, (const char *)p + i, 1);
+            else {
+                char two[2] = {(char)(0xC0 | (p[i] >> 6)), (char)(0x80 | (p[i] & 63))};
+                tv_sb_push(&sb, two, 2);
+            }
+        }
+        if (w != buf) tv_free(w);
+        return tv_str_from_sb(&sb);
+    }
+    tv_str out = tv_str_from(w, k);
+    if (w != buf) tv_free(w);
+    return out;
+}
+
+tv_str tv_native_cryptoDigest(tv_int h, tv_str enc) {
+    uint8_t out[64];
+    size_t len = tv_cry_final(h, out);
+    return tv_bytes_encode(out, len, enc);
+}
+
+tv_arr tv_native_cryptoDigestBytes(tv_int h) {
+    uint8_t out[64];
+    size_t len = tv_cry_final(h, out);
+    tv_arr a = tv_arr_with_capacity(&tv_type_u8, (tv_int)len);
+    memcpy(tv_arr_data(a), out, len);
+    a.p->len = (tv_int)len;
+    return a;
+}
+
+tv_str tv_native_bytesEncode(tv_arr bytes, tv_str enc) { return tv_bytes_encode((const uint8_t *)tv_arr_data(bytes), (size_t)tv_arr_len(bytes), enc); }
+
+tv_arr tv_native_cryptoRandomBytes(tv_int n) {
+    if (n < 0) n = 0;
+    tv_arr a = tv_arr_with_capacity(&tv_type_u8, n);
+    if (tv_crypto) tv_crypto->random((uint8_t *)tv_arr_data(a), (size_t)n);
+    else arc4random_buf(tv_arr_data(a), (size_t)n);
+    a.p->len = n;
+    return a;
+}
+
+tv_str tv_native_cryptoRandomUUID(void) {
+    uint8_t b[16];
+    if (tv_crypto) tv_crypto->random(b, 16);
+    else arc4random_buf(b, 16);
+    b[6] = (uint8_t)((b[6] & 0x0f) | 0x40);
+    b[8] = (uint8_t)((b[8] & 0x3f) | 0x80);
+    static const char digits[] = "0123456789abcdef";
+    char out[36];
+    size_t k = 0;
+    for (int i = 0; i < 16; i++) {
+        if (i == 4 || i == 6 || i == 8 || i == 10) out[k++] = '-';
+        out[k++] = digits[b[i] >> 4];
+        out[k++] = digits[b[i] & 15];
+    }
+    return tv_str_from(out, 36);
+}
+
+bool tv_native_cryptoEqual(tv_arr a, tv_arr b) {
+    size_t n = (size_t)tv_arr_len(a);
+    if (tv_crypto) return tv_crypto->equal((const uint8_t *)tv_arr_data(a), (const uint8_t *)tv_arr_data(b), n);
+    uint8_t d = 0;
+    for (size_t i = 0; i < n; i++) d |= ((const uint8_t *)tv_arr_data(a))[i] ^ ((const uint8_t *)tv_arr_data(b))[i];
+    return d == 0;
+}
+
 /* Days since 1970-01-01 to (year, month 1-12, day 1-31) (Hinnant's civil_from_days). */
 static void tv_civil_from_days(int64_t z, int64_t *y, int *m, int *d) {
     z += 719468;

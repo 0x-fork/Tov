@@ -1,0 +1,76 @@
+// node:crypto's hashes, HMACs and UUIDs on the TLS library's BoringSSL, called directly. A
+// program whose `import { ... } from "node:crypto"` names only what's here gets this module;
+// one that names anything else (or imports the whole module) gets node:crypto's JavaScript.
+
+export type BinaryToTextEncoding = "hex" | "base64" | "base64url" | "latin1" | "binary"
+
+/** A running digest: `update` it, then `digest` it once. */
+export class Hash {
+  private h: int
+  private done: bool = false
+  private hmac: bool
+  constructor(h: int, hmac: bool) {
+    this.h = h
+    this.hmac = hmac
+  }
+
+  /** Adds `data` (a string's UTF-8 bytes) to what's hashed. */
+  update(data: string | u8[]): Hash throws Error {
+    if (this.done) {
+      throw new Error("Digest already called")
+    }
+    if (typeof data === "string") {
+      __native.cryptoUpdate(this.h, data)
+    } else {
+      __native.cryptoUpdateBytes(this.h, data)
+    }
+    return this
+  }
+
+  /** The digest, written in `encoding` (hex by default). An HMAC's second digest is empty, as
+   * in Node.js; a hash's throws. */
+  digest(encoding?: BinaryToTextEncoding): string throws Error {
+    if (this.done) {
+      if (this.hmac) return ""
+      throw new Error("Digest already called")
+    }
+    this.done = true
+    return __native.cryptoDigest(this.h, encoding ?? "hex")
+  }
+}
+
+export type Hmac = Hash
+
+/** A hash of the algorithm (`"sha256"`, `"sha1"`, `"md5"`, `"sha512"`, ...). */
+export function createHash(algorithm: string): Hash throws Error {
+  const h = __native.cryptoNew(algorithm, [], false)
+  if (h < 0) {
+    throw new Error("Digest method not supported")
+  }
+  return new Hash(h, false)
+}
+
+/** An HMAC of the algorithm, keyed by `key` (a string's UTF-8 bytes). */
+export function createHmac(algorithm: string, key: string | u8[]): Hash throws Error {
+  const k = typeof key === "string" ? __native.stringToBytes(key) : key
+  const h = __native.cryptoNew(algorithm, k, true)
+  if (h < 0) {
+    throw new Error(`Invalid digest: ${algorithm}`)
+  }
+  return new Hash(h, true)
+}
+
+/** `crypto.hash(algorithm, data, outputEncoding)`: a digest in one call. */
+export function hash(algorithm: string, data: string | u8[], outputEncoding?: BinaryToTextEncoding): string throws Error {
+  return createHash(algorithm).update(data).digest(outputEncoding ?? "hex")
+}
+
+/** A random version 4 UUID. */
+export function randomUUID(): string {
+  return __native.cryptoRandomUUID()
+}
+
+/** The digests `createHash` knows. */
+export function getHashes(): string[] {
+  return ["md4", "md5", "sha1", "sha224", "sha256", "sha384", "sha512", "sha512-224", "sha512-256"]
+}
