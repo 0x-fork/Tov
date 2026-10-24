@@ -351,7 +351,19 @@ tv_str tv_str_slice(tv_str s, tv_int start, tv_int end, bool has_end, const char
 bool tv_str_includes(tv_str s, tv_str needle);
 bool tv_str_starts_with(tv_str s, tv_str prefix);
 bool tv_str_ends_with(tv_str s, tv_str suffix);
-tv_str tv_str_substring(tv_str s, tv_int start, tv_int end, bool has_end);
+tv_str tv_str_substring_slow(tv_str s, tv_int start, tv_int end, bool has_end);
+/* Immortal one-character strings for printable ASCII (32..127). */
+typedef struct { int32_t rc; int32_t len; char data[4]; } tv_small_strbuf;
+extern const tv_small_strbuf tv_ascii_strs[96];
+static inline tv_str tv_ascii_str(unsigned char c) { return (tv_str){(tv_strbuf *)(void *)&tv_ascii_strs[c - 32]}; }
+static inline tv_str tv_str_substring(tv_str s, tv_int start, tv_int end, bool has_end) {
+    /* (one ASCII character, `s.substring(i, i + 1)`: the shared one-character string) */
+    if (has_end && end == start + 1 && (uint64_t)start < (uint64_t)s.p->len && tv_str_is_ascii(s)) {
+        unsigned char c = (unsigned char)s.p->data[start];
+        if (c - 32u < 96u) return tv_ascii_str(c);
+    }
+    return tv_str_substring_slow(s, start, end, has_end);
+}
 tv_str tv_str_substr(tv_str s, tv_int start, tv_int count, bool has_count);
 tv_int tv_str_index_of(tv_str s, tv_str needle);            /* unit index or -1 */
 tv_int tv_str_index_of_from(tv_str s, tv_str needle, tv_int from);

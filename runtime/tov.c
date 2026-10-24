@@ -539,12 +539,11 @@ int32_t tv_f64_to_i32_slow(double d) {
 
 const tv_strbuf tv_empty_strbuf = {TV_STR_IMMORTAL | TV_STR_ASCII, 0, {0}}; /* flexible-array initializer: GNU C (gcc, clang) */
 
-typedef struct { int32_t rc; int32_t len; char data[4]; } tv_small_strbuf;
 #define TV_A1(c) {TV_STR_IMMORTAL | TV_STR_ASCII, 1, {(char)(c), 0}}
 #define TV_A4(c) TV_A1(c), TV_A1((c) + 1), TV_A1((c) + 2), TV_A1((c) + 3)
 #define TV_A16(c) TV_A4(c), TV_A4((c) + 4), TV_A4((c) + 8), TV_A4((c) + 12)
 /* Immortal one-character strings for printable ASCII: chars()/split("") and friends don't allocate for them. */
-static const tv_small_strbuf tv_ascii_strs[96] = { /* printable ASCII, 32..127 */
+const tv_small_strbuf tv_ascii_strs[96] = { /* printable ASCII, 32..127 */
     TV_A16(32), TV_A16(48), TV_A16(64), TV_A16(80), TV_A16(96), TV_A16(112),
 };
 #undef TV_A1
@@ -554,7 +553,6 @@ static const tv_small_strbuf tv_ascii_strs[96] = { /* printable ASCII, 32..127 *
 TV_STR_LIT(tv_lit_true, "true");
 TV_STR_LIT(tv_lit_false, "false");
 
-static inline tv_str tv_ascii_str(unsigned char c) { return (tv_str){(tv_strbuf *)&tv_ascii_strs[c - 32]}; }
 
 /* Small strings (header + bytes + NUL <= TV_SMALL_MAX) come from the small-object free lists;
  * larger ones from malloc. The class follows from the length alone, so freeing needs no flag.
@@ -1871,7 +1869,7 @@ tv_str tv_str_slice(tv_str s, tv_int start, tv_int end, bool has_end, const char
     return tv_str_units(s, a, b);
 }
 
-tv_str tv_str_substring(tv_str s, tv_int start, tv_int end, bool has_end) {
+tv_str tv_str_substring_slow(tv_str s, tv_int start, tv_int end, bool has_end) {
     int64_t len = tv_str_length(s);
     int64_t a = tv_clamp0(start, len), b = has_end ? tv_clamp0(end, len) : len;
     return a <= b ? tv_str_units(s, a, b) : tv_str_units(s, b, a);
