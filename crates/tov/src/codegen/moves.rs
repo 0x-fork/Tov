@@ -20,6 +20,9 @@ struct Walk {
     /// Locals used inside a closure.
     captured: FxSet<u32>,
     loops: Vec<StmtId>,
+    /// `return x` outside any `try`: a last use whatever comes after it in the source.
+    returned: Vec<(u32, ExprId)>,
+    in_try: u32,
 }
 
 impl Gen<'_, '_> {
@@ -43,6 +46,11 @@ impl Gen<'_, '_> {
                 out.insert(e);
             }
         }
+        for (k, e) in w.returned {
+            if !w.captured.contains(&k) && w.decl.contains_key(&k) {
+                out.insert(e);
+            }
+        }
         out
     }
 
@@ -59,6 +67,15 @@ impl Gen<'_, '_> {
             StmtKind::Return(e) => {
                 if let Some(e) = e {
                     self.mv_expr(m, *e, w, true);
+                    if w.in_try == 0
+                        && let Some(IdentFact::Local(k)) = self.mv_local(m, *e)
+                    {
+                        let mut x = *e;
+                        while let ExprKind::Paren(y) | ExprKind::NonNull(y) | ExprKind::As(y, _) = self.ast(m).expr(x).kind {
+                            x = y;
+                        }
+                        w.returned.push((k, x));
+                    }
                 }
             }
             StmtKind::If(c, t, e) => {
@@ -110,6 +127,7 @@ impl Gen<'_, '_> {
             StmtKind::Try { body, catch, finally } => {
                 // (a `catch` or `finally` may run after anything in the body: no moves around one)
                 w.loops.push(s);
+                w.in_try += 1;
                 self.mv_stmt(m, *body, w);
                 if let Some(c) = catch {
                     self.mv_stmt(m, c.body, w);
@@ -117,6 +135,7 @@ impl Gen<'_, '_> {
                 if let Some(f) = finally {
                     self.mv_stmt(m, *f, w);
                 }
+                w.in_try -= 1;
                 w.loops.pop();
             }
             _ => {}
