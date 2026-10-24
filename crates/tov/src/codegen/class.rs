@@ -725,6 +725,14 @@ impl<'c, 'a> Gen<'c, 'a> {
         let Some(f) = info.static_fields.iter().find(|f| f.member == Some(member)).cloned() else { return Val::plain("0", ERROR) };
         let cls: String = self.c.class_names[decl as usize].chars().map(|c| if c.is_ascii_alphanumeric() { c } else { '_' }).collect();
         let gname = format!("gs{decl}_{cls}_{}", self.sym(f.name));
+        if !self.statics_done.contains(&(decl, member)) {
+            // (initialized in the order they're declared, as JavaScript runs a class's static
+            // initializers: an earlier one first, whatever code reaches first)
+            let earlier: Vec<u32> = info.static_fields.iter().filter_map(|g| g.member).filter(|&mi| mi < member).collect();
+            for mi in earlier {
+                self.static_field_ref(decl, mi);
+            }
+        }
         if self.statics_done.insert((decl, member)) {
             let ct = self.ctype(f.ty);
             let _ = writeln!(self.protos, "static {ct} {gname};");
@@ -734,6 +742,11 @@ impl<'c, 'a> Gen<'c, 'a> {
             let fname = format!("init_{gname}");
             let _ = writeln!(self.funcs, "static {ct} {fname}(void) {{\n{code}}}\n");
             let _ = writeln!(self.const_init, "    {gname} = {fname}();");
+            // (an error it throws is uncaught: the program ends with it)
+            if code.contains("tvg_err") {
+                let _ = writeln!(self.const_init, "    if (tvg_err) {{ tvg_uncaught(); return 1; }}");
+                self.needs_uncaught = true;
+            }
         }
         Val::plain(gname, f.ty)
     }

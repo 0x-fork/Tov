@@ -906,7 +906,8 @@ impl<'a> Checker<'a> {
             };
             let mut fcx = FnCtx { tscope: if is_static { Vec::new() } else { tscope.clone() }, ..Default::default() };
             fcx.scopes.push(Vec::new());
-            fcx.frames.push(Frame::new(None, None, false, None));
+            // (a static initializer's error is the program's: uncaught, as in JavaScript)
+            fcx.frames.push(Frame::new(None, None, is_static, None));
             fcx.class = Some(c);
             if !is_static {
                 fcx.locals.push(Local { name: THIS_SYM, ty: info.this_ty, kind: LocalKind::Param, span: mem.name_span, kw_span: None, promotable: false, frame: 0, global: None, sites: Vec::new() });
