@@ -453,7 +453,16 @@ impl<'a> Checker<'a> {
     }
 
     fn inherit_method(&mut self, mm: &CMethod, map: &HashMap<u32, TyId>) -> CMethod {
-        let params = mm.params.iter().map(|p| FnParam { ty: self.types.subst(p.ty, map), ..*p }).collect();
+        let params: Vec<FnParam> = mm.params.iter().map(|p| FnParam { ty: self.types.subst(p.ty, map), ..*p }).collect();
+        // (`forEach(fn: (e: E) => void)` on a `Vector<C>`: a closure that throws through it
+        // blames the parameter's type as written)
+        if self.spec.on {
+            for (p, q) in mm.params.iter().zip(&params) {
+                if p.ty != q.ty {
+                    self.inherit_fn_sites(p.ty, q.ty);
+                }
+            }
+        }
         let ret = mm.ret.map(|r| self.types.subst(r, map));
         let throws = mm.throws.map(|r| self.types.subst(r, map));
         let composed = mm.map.iter().map(|&(p, t)| (p, self.types.subst(t, map))).collect();

@@ -4900,6 +4900,11 @@ impl<'a> Checker<'a> {
                 } else {
                     self.types.subst(p.ty, &map)
                 };
+                // (`fn: (e: E) => void` as `(e: number) => void` here: a closure that throws
+                // through it blames the parameter's type as written)
+                if self.spec.on && pty != p.ty {
+                    self.inherit_fn_sites(p.ty, pty);
+                }
                 let still_free: Vec<u32> = self.infer_free.iter().copied().filter(|x| !map.contains_key(x)).collect();
                 let unhinted: Vec<u32> = still_free.iter().copied().filter(|x| !(pass == 0 && soft.contains_key(x))).collect();
                 // (a constructor type's parameter: a class given for it is checked against it)

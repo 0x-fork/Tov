@@ -270,6 +270,22 @@ impl<'a> Checker<'a> {
         }
     }
 
+    /// `inst` (a generic function type, instantiated) reaches the sites `generic` does.
+    pub(super) fn inherit_fn_sites(&mut self, generic: TyId, inst: TyId) {
+        let (g, i) = (self.types.without_undefined(generic), self.types.without_undefined(inst));
+        if !matches!(self.types.get(g), Ty::Func(..)) {
+            return;
+        }
+        if let Some(ks) = self.fn_sites.get(&g).or_else(|| self.fn_sites_base.get(&g)).cloned() {
+            let e = self.fn_sites.entry(i).or_default();
+            for k in ks {
+                if !e.contains(&k) {
+                    e.push(k);
+                }
+            }
+        }
+    }
+
     /// The integer literals that gave `record` its `int` field `name` (`{ n: 0 }`): floats.
     fn blame_lits(&mut self, record: TyId, name: Sym) {
         if let Some(ks) = self.lit_fields.get(&(record, name)) {
