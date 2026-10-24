@@ -281,6 +281,7 @@ bool tv_parse_int(tv_str s, tv_int radix, tv_int *out);  /* radix 0 = 10 (or 16 
 tv_int tv_native_reCompile(tv_str source, tv_str flags);
 tv_str tv_native_reFlags(tv_int h);
 struct tv_arr tv_native_reExec(tv_int h, tv_str s, tv_int from);
+tv_int tv_native_reTest(tv_int h, tv_str s, tv_int from);
 struct tv_arr tv_native_reNames(tv_int h);
 struct tv_arr tv_native_reSplit(tv_int h, tv_str s, tv_int max);   /* s.split(re, max) */
 tv_str tv_native_reReplace(tv_int h, tv_str s, tv_str rep);        /* s.replace(re, rep): rep without `$`, re not sticky */

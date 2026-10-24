@@ -349,6 +349,33 @@ tv_arr tv_native_reExec(tv_int h, tv_str s, tv_int from) {
     return out;
 }
 
+/* Where the match at or after `from` ends (UTF-16 units), or -1 when there's none: RegExp.test's
+ * question, answered with nothing allocated (for ASCII text and up to 8 groups). */
+tv_int tv_native_reTest(tv_int h, tv_str s, tv_int from) {
+    tv_re *r = &tv_res[h];
+    int ncap = r->ncap;
+    uint8_t *on_stack[16];
+    uint8_t **cap = 2 * ncap <= 16 ? on_stack : tv_alloc((size_t)(2 * ncap) * sizeof(uint8_t *) + 1);
+    bool ascii = tv_str_is_ascii(s);
+    tv_int n, end = -1;
+    uint16_t *units = NULL;
+    const uint8_t *buf;
+    int type = 0, shift = 0;
+    if (ascii) {
+        buf = (const uint8_t *)s.p->data;
+        n = tv_str_byte_len(s);
+    } else {
+        units = tv_utf16_of(s, &n);
+        buf = (const uint8_t *)units;
+        type = 1;
+        shift = 1;
+    }
+    if (tv_re_find(r, cap, buf, n, from, ascii, type)) end = (tv_int)((cap[1] - buf) >> shift);
+    tv_free(units);
+    if (cap != on_stack) tv_free(cap);
+    return end;
+}
+
 /* A string's text for matching: its bytes when ASCII, else its UTF-16 units (to free). */
 typedef struct { const uint8_t *buf; uint16_t *units; tv_int n; bool ascii; int type, shift; } tv_re_text;
 static tv_re_text tv_re_text_of(tv_str s) {

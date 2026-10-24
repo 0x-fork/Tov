@@ -94,12 +94,12 @@ export class RegExp {
   test(s: string): bool {
     // (as exec, without making the match)
     const keep = this.global || this.sticky
-    const p = __native.reExec(this.h, s, keep ? this.lastIndex : 0)
-    if (p.length === 0) {
+    const end = __native.reTest(this.h, s, keep ? this.lastIndex : 0)
+    if (end < 0) {
       if (keep) this.lastIndex = 0
       return false
     }
-    if (keep) this.lastIndex = p[1]!
+    if (keep) this.lastIndex = end
     return true
   }
   exec(s: string): RegExpExecArray | null {
