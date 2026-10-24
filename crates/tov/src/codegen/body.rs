@@ -7361,6 +7361,11 @@ impl<'c, 'a> Gen<'c, 'a> {
         let params: Vec<(u32, TyId, bool)> = f.params.iter().zip(&ps).map(|(p, fp)| (p.span.start, fp.ty, fp.inout)).collect();
         let proto = self.fn_proto(cname, &ps, ret, &FxMap::default(), true);
         let _ = writeln!(self.protos, "static {proto};");
+        if !stack {
+            let cast = self.fn_ptr_type_pub(&ps, ret);
+            self.arrow_fns.entry((m, e)).or_default().push((cname.to_string(), cast));
+            self.arrow_protos.insert(cname.to_string(), proto.clone());
+        }
         let kind = match &f.body {
             ArrowBody::Block(b) => FnBodyKind::Block(*b),
             ArrowBody::Expr(x) => FnBodyKind::Expr(*x),

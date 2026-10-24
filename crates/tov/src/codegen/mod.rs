@@ -138,6 +138,7 @@ pub fn generate(c: &mut Checker, mode: Mode) -> Result<Program, Vec<Diagnostic>>
     g.flatten_recs();
     g.program(mode);
     g.dyn_dispatch();
+    g.devirt_helpers();
     for msg in std::mem::take(&mut g.internal) {
         let file = g.c.modules[0].file;
         g.errors.push(Diagnostic::new("C0003", Span::new(file, 0, 0), format!("internal compiler error: {msg}")).note("note", "this is a bug in tov; please report it with the program"));
@@ -304,6 +305,12 @@ pub(crate) struct Gen<'c, 'a> {
     /// A finding looked at a type parameter's value in the body being written out (see
     /// `root_inst_ty`): it holds for that instance only, memoized by its type arguments.
     pub(crate) subst_used: bool,
+    /// Each arrow's C functions (one an instance of the body it's in) and their pointer types;
+    /// the calls through class fields that test for them (see `devirt_helpers`): the helper's
+    /// name, the arrows, its pointer type, result and parameter C types.
+    pub(crate) arrow_fns: FxMap<(u32, crate::ast::ExprId), Vec<(String, String)>>,
+    pub(crate) devirt: Vec<(String, Vec<(u32, crate::ast::ExprId)>, String, String, Vec<String>)>,
+    pub(crate) arrow_protos: FxMap<String, String>,
     pub(crate) quiet_inst_memo: FxMap<((u32, crate::ast::StmtId, bool), Vec<(u32, TyId)>), bool>,
     /// The call being made, for its arguments (see `call_spares`).
     pub(crate) cur_calls: Vec<(usize, u32, crate::ast::ExprId)>,
@@ -433,6 +440,9 @@ impl<'c, 'a> Gen<'c, 'a> {
             field_cl_memo: FxMap::default(),
             field_arrows: Vec::new(),
             subst_used: false,
+            arrow_fns: FxMap::default(),
+            devirt: Vec::new(),
+            arrow_protos: FxMap::default(),
             quiet_inst_memo: FxMap::default(),
             cur_calls: Vec::new(),
             pquiet_stack: Vec::new(),

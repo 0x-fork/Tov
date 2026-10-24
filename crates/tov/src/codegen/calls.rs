@@ -157,7 +157,21 @@ impl<'c, 'a> Gen<'c, 'a> {
                     return Val { code: res, ty, owned };
                 }
                 let fv = if fty != fv.ty { self.project(fv, fty) } else { fv };
-                self.call_fn_value(fv, fty, args, ty, span)
+                // (a class field's function: the closures stored there, tested for and called
+                // directly, where the C compiler can inline them)
+                let known = match &ast.expr(*callee).kind {
+                    ExprKind::Member { obj, name, optional: false, .. } => {
+                        let ot = self.ty(*obj);
+                        let ot = self.c.types.without_nullish(ot);
+                        if self.c.class_of(ot).is_some() && self.class_field(ot, *name).is_some() {
+                            self.field_closures(*name).filter(|a| !a.is_empty() && a.len() <= 6)
+                        } else {
+                            None
+                        }
+                    }
+                    _ => None,
+                };
+                self.call_fn_value_known(fv, fty, args, ty, span, known)
             }            Callee::Method(recv) => {
                 let recv = self.inst(recv);
                 let ExprKind::Member { obj, name, optional: mopt, .. } = &ast.expr(*callee).kind else {
@@ -450,6 +464,11 @@ impl<'c, 'a> Gen<'c, 'a> {
     /// Calls a prepared callback with (borrowed) arguments; extra arguments are dropped.
     /// A call of the function value `fv` (of function type `fty`).
     fn call_fn_value(&mut self, fv: Val, fty: TyId, args: &[Arg], ty: TyId, span: Span) -> Val {
+        self.call_fn_value_known(fv, fty, args, ty, span, None)
+    }
+
+    /// A call of function value `fv`; `known`: the arrows it can be (see `devirt_helpers`).
+    fn call_fn_value_known(&mut self, fv: Val, fty: TyId, args: &[Arg], ty: TyId, span: Span, known: Option<Vec<(u32, ExprId)>>) -> Val {
         let Ty::Func(ps, ret, _) = self.tget(fty) else {
             self.unsupported(span, "calling this value");
             return Val::plain("0", ty);
@@ -459,9 +478,64 @@ impl<'c, 'a> Gen<'c, 'a> {
         let fvn = self.fresh("fn");
         self.line(format!("tv_fn {fvn} = {};", fv.code));
         let cast = self.fn_ptr_type(&ps, ret);
+        if let Some(arrows) = known {
+            let name = self.fresh("dv");
+            let rct = if ret == VOID { "void".to_string() } else { self.ctype(ret) };
+            let pts: Vec<String> = ps.iter().map(|p| {
+                let ct = self.ctype(p.ty);
+                if p.inout { format!("{ct} *") } else { ct }
+            }).collect();
+            self.devirt.push((name.clone(), arrows, cast, rct, pts));
+            let mut all = vec![fvn];
+            all.extend(argv);
+            return self.finish_call(&format!("{name}({})", all.join(", ")), ret, ty);
+        }
         let mut all = vec![format!("{fvn}.env")];
         all.extend(argv);
         self.finish_call(&format!("(({cast}){fvn}.fn)({})", all.join(", ")), ret, ty)
+    }
+
+    /// The helpers of calls through class fields of a function type (see `field_closures`):
+    /// each tests the function for the closures that can be stored there, in each of their C
+    /// functions of the call's type, and calls the one it is directly; anything else (a closure
+    /// adapted to the field's type, say) is called through its pointer.
+    pub(crate) fn devirt_helpers(&mut self) {
+        let sites = std::mem::take(&mut self.devirt);
+        // (a closure called directly from one or two of these is inlined into them: it's
+        // declared again, always inline, before them; its own function stays, for other calls)
+        let mut uses: FxMap<String, usize> = FxMap::default();
+        for (_, arrows, cast, _, _) in &sites {
+            for a in arrows {
+                for (fname, fcast) in self.arrow_fns.get(a).cloned().unwrap_or_default() {
+                    if &fcast == cast {
+                        *uses.entry(fname).or_default() += 1;
+                    }
+                }
+            }
+        }
+        let mut inlined: Vec<String> = uses.iter().filter(|(_, n)| **n <= 2).map(|(f, _)| f.clone()).collect();
+        inlined.sort();
+        for fname in inlined {
+            if let Some(proto) = self.arrow_protos.get(&fname) {
+                let _ = std::fmt::Write::write_fmt(&mut self.helpers, format_args!("static inline __attribute__((always_inline)) {proto};\n"));
+            }
+        }
+        for (name, arrows, cast, rct, pts) in sites {
+            let params: Vec<String> = pts.iter().enumerate().map(|(i, t)| format!("{t} a{i}")).collect();
+            let args: Vec<String> = std::iter::once("f.env".to_string()).chain((0..pts.len()).map(|i| format!("a{i}"))).collect();
+            let call_args = args.join(", ");
+            let ret = if rct == "void" { "" } else { "return " };
+            let done = if rct == "void" { " return;" } else { "" };
+            let mut body = String::new();
+            for a in &arrows {
+                for (fname, fcast) in self.arrow_fns.get(a).cloned().unwrap_or_default() {
+                    if fcast == cast {
+                        let _ = std::fmt::Write::write_fmt(&mut body, format_args!("    if (f.fn == (void *){fname}) {{ {ret}{fname}({call_args});{done} }}\n"));
+                    }
+                }
+            }
+            let _ = std::fmt::Write::write_fmt(&mut self.helpers, format_args!("static inline __attribute__((always_inline)) {rct} {name}(tv_fn f{}{}) {{\n{body}    {ret}(({cast})f.fn)({call_args});\n}}\n", if params.is_empty() { "" } else { ", " }, params.join(", ")));
+        }
     }
 
     pub(crate) fn invoke(&mut self, cb: &Callback, args: Vec<Val>) -> Val {

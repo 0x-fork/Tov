@@ -56,3 +56,15 @@ function make(K: new (f: () => string) => Cb): Cb {
   return new K(() => "made");
 }
 console.log(make(Cb).f(), new Cb(() => "direct").f());
+
+// A closure made in a generic function: one C function an instance, each tested for where its
+// type is the call's.
+class Cell<T> {
+  constructor(public get: () => T) {}
+}
+function cellOf<T>(v: T): Cell<T> {
+  return new Cell(() => v);
+}
+const cells = [cellOf(3), cellOf(4)];
+const names = [cellOf("a"), cellOf("b")];
+console.log(cells.map((c) => c.get()).join(","), names.map((c) => c.get()).join(""));
