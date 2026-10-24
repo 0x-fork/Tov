@@ -3909,7 +3909,41 @@ impl<'c, 'a> Gen<'c, 'a> {
 
     /// Converts `v` to type `to` (widening, union injection, sub-union retagging, boxing).
     pub(crate) fn coerce(&mut self, v: Val, to: TyId) -> Val {
-        self.coerce_inner(v, to)
+        let from = v.ty;
+        if from == to || !(matches!(self.tget(from), Ty::Rec(..)) || matches!(self.tget(to), Ty::Rec(..))) {
+            return self.coerce_inner(v, to);
+        }
+        // (a recursive type into another, `Tree` into `TreeNode`: met again inside itself, a
+        // function of its own, which calls itself for the parts)
+        if self.coerce_stack.contains(&(from, to)) {
+            let name = self.rec_converter(from, to);
+            let arg = if v.owned { self.tmp(from, &v.code, true).code } else { v.code };
+            return self.tmp(to, &format!("{name}({arg})"), true);
+        }
+        self.coerce_stack.push((from, to));
+        let r = self.coerce_inner(v, to);
+        self.coerce_stack.pop();
+        r
+    }
+
+    /// The function converting a (borrowed) `from` into an owned `to` (see `coerce`).
+    fn rec_converter(&mut self, from: TyId, to: TyId) -> String {
+        if let Some(n) = self.rec_cvs.get(&(from, to)) {
+            return n.clone();
+        }
+        let name = format!("tvg_cv_{}", self.rec_cvs.len());
+        self.rec_cvs.insert((from, to), name.clone());
+        let proto = format!("{} {name}({} p0)", self.ctype(to), self.ctype(from));
+        let _ = writeln!(self.protos, "static {proto};");
+        let m = self.cur_m();
+        let saved = std::mem::replace(&mut self.coerce_stack, vec![(from, to)]);
+        self.begin_scratch(m);
+        let r = self.coerce_inner(Val::plain("p0", from), to);
+        self.scratch_return(r, to);
+        let body = self.end_scratch();
+        self.coerce_stack = saved;
+        let _ = writeln!(self.helpers_after_decl, "static {proto} {{\n{body}}}\n");
+        name
     }
 
     fn coerce_inner(&mut self, v: Val, to: TyId) -> Val {

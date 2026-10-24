@@ -267,6 +267,10 @@ pub(crate) struct Gen<'c, 'a> {
     pub(crate) itabs: FxMap<(TyId, TyId), String>,
     /// (source function type, target function type) → adapter function (see `fn_adapter`).
     pub(crate) fn_adapters: FxMap<(TyId, TyId), String>,
+    /// Conversions under way (see `coerce`), and the functions made for those met again inside
+    /// themselves (between recursive types).
+    pub(crate) coerce_stack: Vec<(TyId, TyId)>,
+    pub(crate) rec_cvs: FxMap<(TyId, TyId), String>,
     /// Emit `tvg_uncaught` (main can throw, or tests).
     needs_uncaught: bool,
     /// `tvg_test_fn` (running a test closure, see `__test`) is emitted.
@@ -372,6 +376,8 @@ impl<'c, 'a> Gen<'c, 'a> {
             pending_boxes: Vec::new(),
             itabs: FxMap::default(),
             fn_adapters: FxMap::default(),
+            coerce_stack: Vec::new(),
+            rec_cvs: FxMap::default(),
             needs_uncaught: false,
             test_call_done: false,
             pending_async: None,

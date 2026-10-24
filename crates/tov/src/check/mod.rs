@@ -1965,6 +1965,7 @@ impl<'a> Checker<'a> {
         let mark = self.done.len();
         let mut guess = NEVER;
         let mut result = ERROR;
+        let mut settled = false;
         for round in 0..4 {
             self.sig_provisional.insert((m, ii), Sig { tparams: tparams.to_vec(), params: params.to_vec(), param_names: param_names.to_vec(), ret: guess, throws: guessed, rest });
             self.sig_recursed.remove(&(m, ii));
@@ -1977,7 +1978,11 @@ impl<'a> Checker<'a> {
                 *throws = errs;
             }
             result = inferred;
-            if !self.sig_recursed.contains(&(m, ii)) || (round > 0 && inferred == guess && self.done.len() == mark) || round == 3 {
+            if !self.sig_recursed.contains(&(m, ii)) || (round > 0 && inferred == guess && self.done.len() == mark) {
+                settled = true;
+                break;
+            }
+            if round == 3 {
                 break;
             }
             if inferred == ERROR || inferred == NEVER || inferred == VOID {
@@ -1990,8 +1995,64 @@ impl<'a> Checker<'a> {
             self.done.truncate(mark);
             guess = inferred;
         }
+        // (`createTree(d)` returning `{ left: createTree(d - 1), ... }`: each guess nests the
+        // last one, so the result is a recursive type of its own, as TypeScript's would be)
+        if !settled
+            && result != ERROR
+            && let Some(r) = self.infer_rec_result(m, ii, f, &partial, tparams, params, param_names, tscope, guessed, rest, mark, throws)
+        {
+            result = r;
+        }
         self.sig_provisional.remove(&(m, ii));
         result
+    }
+
+    /// `infer_recursive`'s result as a recursive type `R` (a hidden alias): the body checked
+    /// with its calls to itself giving `R`, `R` then what the body returns; checked again with it.
+    #[allow(clippy::too_many_arguments)]
+    fn infer_rec_result(&mut self, m: u32, ii: u32, f: &ast::FnDecl, partial: &Sig, tparams: &[u32], params: &[FnParam], param_names: &[Sym], tscope: &[(Sym, TyId)], guessed: TyId, rest: bool, mark: usize, throws: &mut TyId) -> Option<TyId> {
+        let saved_done = self.done.split_off(mark.min(self.done.len()));
+        let a = self.aliases.len() as u32;
+        Arc::make_mut(&mut self.aliases).push(AliasInfo { module: m, item: u32::MAX, params: Vec::new(), recursive: true, body: Some(ERROR), resolving: false });
+        let n = format!("ReturnType<typeof {}>", self.name(f.name));
+        Arc::make_mut(&mut self.alias_names).push(n);
+        let r = self.types.rec(a, &[]);
+        for round in 0..2 {
+            self.sig_provisional.insert((m, ii), Sig { tparams: tparams.to_vec(), params: params.to_vec(), param_names: param_names.to_vec(), ret: r, throws: guessed, rest });
+            self.sig_stack.push((m, ii));
+            let saved = self.ret_probe.replace((m, f.body));
+            let (inferred, errs) = self.check_body_of(m, ii, partial, tscope, None);
+            self.ret_probe = saved;
+            self.sig_stack.pop();
+            let failed = self.done.len() != mark || inferred == ERROR || (round == 0 && !self.contains_ty(inferred, r, 0));
+            if failed {
+                self.done.truncate(mark);
+                self.done.extend(saved_done);
+                return None;
+            }
+            *throws = errs;
+            if round == 0 {
+                Arc::make_mut(&mut self.aliases)[a as usize].body = Some(inferred);
+            }
+        }
+        Some(r)
+    }
+
+    /// `t` appears in `ty` (through records, unions, arrays, maps and sets).
+    fn contains_ty(&self, ty: TyId, t: TyId, depth: u32) -> bool {
+        if ty == t {
+            return true;
+        }
+        if depth > 16 {
+            return false;
+        }
+        match *self.types.get(ty) {
+            Ty::Array(e) | Ty::Set(e) => self.contains_ty(e, t, depth + 1),
+            Ty::Map(k, v) => self.contains_ty(k, t, depth + 1) || self.contains_ty(v, t, depth + 1),
+            Ty::Union(ms) => self.types.tys(ms).iter().any(|&x| self.contains_ty(x, t, depth + 1)),
+            Ty::Record(fs) => self.types.fields(fs).iter().any(|fl| self.contains_ty(fl.ty, t, depth + 1)),
+            _ => false,
+        }
     }
 
     fn check_fn_body(&mut self, m: u32, ii: u32) {
