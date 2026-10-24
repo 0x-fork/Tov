@@ -301,6 +301,10 @@ pub(crate) struct Gen<'c, 'a> {
     /// arrows whose bodies are being looked at through such a field.
     pub(crate) field_cl_memo: FxMap<crate::intern::Sym, Option<Vec<(u32, crate::ast::ExprId)>>>,
     pub(crate) field_arrows: Vec<(u32, crate::ast::ExprId)>,
+    /// A finding looked at a type parameter's value in the body being written out (see
+    /// `root_inst_ty`): it holds for that instance only, memoized by its type arguments.
+    pub(crate) subst_used: bool,
+    pub(crate) quiet_inst_memo: FxMap<((u32, crate::ast::StmtId, bool), Vec<(u32, TyId)>), bool>,
     /// The call being made, for its arguments (see `call_spares`).
     pub(crate) cur_calls: Vec<(usize, u32, crate::ast::ExprId)>,
     pub(crate) pquiet_stack: Vec<(u32, crate::ast::StmtId, u32)>,
@@ -428,6 +432,8 @@ impl<'c, 'a> Gen<'c, 'a> {
             reach_memo: FxMap::default(),
             field_cl_memo: FxMap::default(),
             field_arrows: Vec::new(),
+            subst_used: false,
+            quiet_inst_memo: FxMap::default(),
             cur_calls: Vec::new(),
             pquiet_stack: Vec::new(),
             called_stack: Vec::new(),

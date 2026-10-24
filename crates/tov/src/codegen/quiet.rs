@@ -17,24 +17,7 @@ impl Gen<'_, '_> {
                 ItemKind::Function(f) if !f.is_async && !f.is_gen => self.quiet_body(fm, f.body, false),
                 _ => false,
             },
-            Callee::ClassMethod { recv, name, sup } => {
-                let Some((decl, _)) = self.c.class_of(recv) else { return false };
-                let mut impls: Vec<(u32, u32)> = Vec::new();
-                let direct = sup || !self.quiet_overridden(decl, name);
-                for d in 0..self.c.classes.len() as u32 {
-                    if d != decl && (direct || !self.c.class_descends(d, decl)) {
-                        continue;
-                    }
-                    self.c.resolve_class(d);
-                    if let Some(mm) = self.c.classes[d as usize].methods.iter().find(|mm| mm.name == name) {
-                        let k = (mm.owner, mm.member);
-                        if !impls.contains(&k) {
-                            impls.push(k);
-                        }
-                    }
-                }
-                !impls.is_empty() && impls.into_iter().all(|(o, mi)| self.quiet_member(o, mi))
-            }
+            Callee::ClassMethod { recv, name, sup } => self.quiet_class_method(recv, name, sup),
             Callee::StaticMethod(c, mi) => self.quiet_member(c, mi),
             Callee::New(c) => self.quiet_ctor(c),
             Callee::SuperCtor(t) => self.c.class_of(t).is_some_and(|(c, _)| self.quiet_ctor(c)),
@@ -77,6 +60,13 @@ impl Gen<'_, '_> {
                     c = x;
                 }
                 if let ExprKind::Member { obj, name, .. } = self.ast(m).expr(c).kind {
+                    // (a method of a type parameter's value, in the body being written out:
+                    // its class's, for this instance of the body)
+                    if let Some(ct) = self.root_inst_ty(m, obj) {
+                        return self.c.class_of(ct).is_some()
+                            && matches!(self.c.class_member(ct, name), Some(crate::check::class::ClassMemberRef::Method(_)))
+                            && self.quiet_class_method(ct, name, false);
+                    }
                     return self.quiet_through_field(m, obj, name);
                 }
                 let Some(IdentFact::Local(k)) = self.ident_fact(m, c) else { return false };
@@ -88,6 +78,63 @@ impl Gen<'_, '_> {
             }
             _ => false,
         }
+    }
+
+    fn quiet_class_method(&mut self, recv: TyId, name: crate::intern::Sym, sup: bool) -> bool {
+        let Some((decl, _)) = self.c.class_of(recv) else { return false };
+        let mut impls: Vec<(u32, u32)> = Vec::new();
+        let direct = sup || !self.quiet_overridden(decl, name);
+        for d in 0..self.c.classes.len() as u32 {
+            if d != decl && (direct || !self.c.class_descends(d, decl)) {
+                continue;
+            }
+            self.c.resolve_class(d);
+            if let Some(mm) = self.c.classes[d as usize].methods.iter().find(|mm| mm.name == name) {
+                let k = (mm.owner, mm.member);
+                if !impls.contains(&k) {
+                    impls.push(k);
+                }
+            }
+        }
+        !impls.is_empty() && impls.into_iter().all(|(o, mi)| self.quiet_member(o, mi))
+    }
+
+    /// The type of `obj` (module `m`), a type parameter's, in the instance of the body being
+    /// written out, when that's where `obj` is looked at (not in a body it calls, which may be
+    /// another instance); what's found then holds for this instance only (`subst_used`).
+    pub(crate) fn root_inst_ty(&mut self, m: u32, obj: ExprId) -> Option<TyId> {
+        let t = self.facts(m).expr_ty[obj as usize];
+        if !self.c.types.has_param(t) {
+            return None;
+        }
+        let b = self.bodies.last()?;
+        let root = b.root?;
+        if b.m != m {
+            return None;
+        }
+        let at_root = match self.quiet_stack.as_slice() {
+            [] => self.writes_stack.is_empty() || matches!(self.writes_stack.as_slice(), [(wm, wb, _)] if *wm == m && *wb == root),
+            [(qm, qb, _)] => *qm == m && *qb == root && self.writes_stack.is_empty(),
+            _ => false,
+        };
+        if !at_root {
+            return None;
+        }
+        let subst = b.subst.clone();
+        let ct = self.c.types.subst(t, &subst);
+        let ct = self.c.types.without_nullish(ct);
+        if self.c.types.has_param(ct) {
+            return None;
+        }
+        self.subst_used = true;
+        Some(ct)
+    }
+
+    /// The current body's type arguments, in order (a key for what holds for its instance).
+    pub(crate) fn inst_key(&self) -> Vec<(u32, TyId)> {
+        let mut v: Vec<(u32, TyId)> = self.bodies.last().map(|b| b.subst.iter().map(|(&k, &t)| (k, t)).collect()).unwrap_or_default();
+        v.sort_unstable_by_key(|x| x.0);
+        v
     }
 
     /// `obj.f(...)` with `f` a class field of a function type: every closure it can hold is
@@ -169,8 +216,24 @@ impl Gen<'_, '_> {
 
     fn quiet_body(&mut self, m: u32, body: StmtId, ctor: bool) -> bool {
         let key = (m, body, ctor);
-        if let Some(&q) = self.quiet_memo.get(&key) {
-            return q;
+        // (the body being written out, looked at as itself: what's found for its instance,
+        // which can see more than a look at it from another body did)
+        let root = self.quiet_stack.is_empty() && self.bodies.last().is_some_and(|b| b.m == m && b.root == Some(body));
+        let ik = if root { Some(self.inst_key()) } else { None };
+        match &ik {
+            Some(ik) => {
+                if let Some(&q) = self.quiet_inst_memo.get(&(key, ik.clone())) {
+                    return q;
+                }
+                if self.quiet_memo.get(&key) == Some(&true) {
+                    return true;
+                }
+            }
+            None => {
+                if let Some(&q) = self.quiet_memo.get(&key) {
+                    return q;
+                }
+            }
         }
         // (a call back into a body being looked at: quiet if the rest is)
         if self.quiet_stack.contains(&key) {
@@ -182,13 +245,21 @@ impl Gen<'_, '_> {
         }
         self.quiet_stack.push(key);
         let saved = std::mem::replace(&mut self.quiet_tainted, false);
+        let saved_su = std::mem::replace(&mut self.subst_used, false);
         let q = self.quiet_stmt(m, body, ctor);
         let tainted = self.quiet_tainted;
+        let su = self.subst_used;
         self.quiet_stack.pop();
         if !q || !tainted || self.quiet_stack.is_empty() {
-            self.quiet_memo.insert(key, q);
+            if !su {
+                self.quiet_memo.insert(key, q);
+            }
+            if let Some(ik) = ik {
+                self.quiet_inst_memo.insert((key, ik), q);
+            }
         }
         self.quiet_tainted = saved || (tainted && q);
+        self.subst_used = saved_su || su;
         q
     }
 
