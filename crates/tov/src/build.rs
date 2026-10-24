@@ -168,27 +168,12 @@ fn c_compiler() -> (String, Option<String>) {
     // macOS: the system clang generates code as fast as Homebrew's LLVM (bench/run.py) and
     // starts faster, and it links in the same invocation. Called directly rather than through
     // /usr/bin/cc, an xcrun trampoline that adds 10–15 ms to every build.
-    if cfg!(target_vendor = "apple") {
-        if let Some((clang, sdk)) = apple_toolchain() {
-            return (clang, Some(sdk));
-        }
-        if Path::new("/usr/bin/cc").is_file() {
-            return ("/usr/bin/cc".into(), None);
-        }
-    }
-    for candidate in ["/opt/homebrew/opt/llvm/bin/clang", "/usr/local/opt/llvm/bin/clang", "/usr/lib/llvm-21/bin/clang", "/usr/lib/llvm-20/bin/clang"] {
-        if Path::new(candidate).is_file() {
-            return (candidate.to_string(), None);
-        }
-    }
-    // Any clang before `cc`, which on Linux is usually GCC: Tov's C runs faster from clang
-    // (x86-64, Ubuntu's clang 18 against GCC 13: fib 449 ms against 511, nbody 308 against 382)
-    if let Some(path) = std::env::var_os("PATH")
-        && let Some(clang) = std::env::split_paths(&path).map(|d| d.join("clang")).find(|p| p.is_file())
+    if cfg!(target_vendor = "apple")
+        && let Some((clang, sdk)) = apple_toolchain()
     {
-        return (clang.to_string_lossy().into_owned(), None);
+        return (clang, Some(sdk));
     }
-    ("cc".into(), None)
+    (crate::rt_flags::other_compiler(), None)
 }
 
 /// Xcode's clang and the macOS SDK, found with xcrun once and remembered in the cache.
@@ -358,31 +343,8 @@ pub fn build(paths: &[PathBuf], base: &Path, opts: &Options) -> Result<Built, Bu
     let (cc, sysroot) = c_compiler();
     // TOV_CFLAGS adds C compiler flags (e.g. "-fsanitize=address,undefined -g" to audit memory safety).
     let extra = std::env::var("TOV_CFLAGS").unwrap_or_default();
-    // No FMA contraction: `a * b + c` rounds twice, exactly as in JavaScript (and it's faster on
-    // latency-bound loops, where a fused multiply-add lengthens the dependency chain).
-    let mut flags: Vec<&str> = vec![opts.opt.as_str(), "-std=gnu11", "-w", "-ffp-contract=off"];
-    // Tov code is bounds-checked, so C's stack canaries and fortified memcpy only add checks
-    // (and imports: each costs about 50 bytes of binary).
-    flags.extend(["-fno-stack-protector", "-U_FORTIFY_SOURCE", "-D_FORTIFY_SOURCE=0"]);
-    // Every loop starts on a 16-byte boundary: where one happens to fall otherwise swings a hot
-    // loop's speed by up to 20% (spectral_norm, fannkuch) from one build to the next.
-    if opts.opt != "-Os" {
-        flags.push("-falign-loops=16");
-    }
-    if opts.unchecked {
-        flags.push("-DTOV_UNCHECKED=1");
-    }
-    if opts.symbols {
-        flags.push("-g");
-    }
-    // The program links with a big main stack (below), so main needn't check for one.
-    if cfg!(target_vendor = "apple") && !extra.contains("-fsanitize") {
-        flags.push("-DTVG_MAIN_STACK=1");
-    }
-    if let Some(sdk) = &sysroot {
-        flags.push("-isysroot");
-        flags.push(sdk);
-    }
+    let base = crate::rt_flags::base_flags(&opts.opt, opts.unchecked, opts.symbols, extra.contains("-fsanitize"), sysroot.as_deref());
+    let mut flags: Vec<&str> = base.iter().map(|f| f.as_str()).collect();
     flags.extend(extra.split_whitespace());
     let flag_text = flags.join(" ");
     let rt_key = hash_hex(&[codegen::RUNTIME_H.as_bytes(), codegen::RUNTIME_C.as_bytes(), codegen::RUNTIME_BIG.as_bytes(), codegen::RUNTIME_DEC.as_bytes(), codegen::RUNTIME_NET.as_bytes(), codegen::RUNTIME_WS.as_bytes(), cc.as_bytes(), flag_text.as_bytes(), env!("CARGO_PKG_VERSION").as_bytes()]);
@@ -443,6 +405,12 @@ pub fn build(paths: &[PathBuf], base: &Path, opts: &Options) -> Result<Built, Bu
     let rt_job = || -> Result<(), String> {
         if cached(&rt_obj) {
             return Ok(());
+        }
+        // (compiled when Tov was, for these flags and this compiler: written out as it is)
+        if rt_key == tls_files::PREBUILT_RT_KEY && !tls_files::PREBUILT_RT.is_empty() {
+            let tmp = c_dir.join(format!("rt-{rt_key}.tmp{}.o", tmp_tag()));
+            std::fs::write(&tmp, tls_files::PREBUILT_RT).map_err(|e| format!("can't write the runtime into the cache: {e}"))?;
+            return std::fs::rename(&tmp, &rt_obj).map_err(|e| format!("can't move the runtime into the cache: {e}"));
         }
         let rt_c = c_dir.join(format!("rt-{rt_key}.c"));
         std::fs::write(&rt_c, codegen::runtime_source()).map_err(|e| format!("can't write {}: {e}", rt_c.display()))?;
@@ -588,6 +556,21 @@ fn js_objects(cc: &str, flags: &[String], c_dir: &Path, key: &str) -> Result<Vec
     if objs.iter().all(|o| cached(o)) {
         return Ok(objs);
     }
+    // (compiled once for Tov's engine and kept beside it, as it is part of what programs link
+    // with it: a cache of its own, a fresh TOV_CACHE_DIR say, takes them from there)
+    let kept: Option<Vec<PathBuf>> = own_jsc_dir().map(|d| objs.iter().map(|o| d.join("bridge").join(o.file_name().unwrap())).collect());
+    if let Some(kept) = &kept
+        && kept.iter().all(|k| cached(k))
+    {
+        for (k, o) in kept.iter().zip(&objs) {
+            let tmp = o.with_extension(format!("tmp{}.o", tmp_tag()));
+            if std::fs::copy(k, &tmp).is_err() || std::fs::rename(&tmp, o).is_err() {
+                let _ = std::fs::remove_file(&tmp);
+                return Err(BuildError::Message("can't copy the JavaScript bridge into the cache".into()));
+            }
+        }
+        return Ok(objs);
+    }
     let fail = |what: String| BuildError::Message(format!("can't build the JavaScript bridge: {what}"));
     let dir = c_dir.join(format!("js-{key}.tmp{}", tmp_tag()));
     std::fs::create_dir_all(&dir).map_err(|e| fail(e.to_string()))?;
@@ -619,6 +602,17 @@ fn js_objects(cc: &str, flags: &[String], c_dir: &Path, key: &str) -> Result<Vec
         let _ = std::fs::remove_file(dir.join(name));
     }
     let _ = std::fs::remove_dir(&dir);
+    if let Some(kept) = &kept
+        && let Some(parent) = kept[0].parent()
+        && std::fs::create_dir_all(parent).is_ok()
+    {
+        for (k, o) in kept.iter().zip(&objs) {
+            let tmp = k.with_extension(format!("tmp{}.o", tmp_tag()));
+            if std::fs::copy(o, &tmp).is_ok() {
+                let _ = std::fs::rename(&tmp, k);
+            }
+        }
+    }
     Ok(objs)
 }
 
@@ -885,7 +879,13 @@ impl TlsArchive {
         }
         let runtime = c_dir.join(format!("tls-{}.a", self.key));
         if !cached(&runtime) {
-            self.compile(cc, c_dir, &runtime, |p| p.starts_with("runtime/"))?;
+            if self.key == tls_files::RUNTIME_ARCHIVE_KEY && !tls_files::RUNTIME_ARCHIVE.is_empty() {
+                let tmp = c_dir.join(format!("tls-{}.tmp{}.a", self.key, tmp_tag()));
+                std::fs::write(&tmp, tls_files::RUNTIME_ARCHIVE).map_err(|e| fail(format!("{e}")))?;
+                std::fs::rename(&tmp, &runtime).map_err(|e| fail(format!("can't move it into the cache: {e}")))?;
+            } else {
+                self.compile(cc, c_dir, &runtime, |p| p.starts_with("runtime/"))?;
+            }
         }
         Ok([runtime, vendor])
     }

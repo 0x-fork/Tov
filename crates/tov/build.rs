@@ -13,6 +13,10 @@ use std::process::Command;
 #[path = "src/tls_flags.rs"]
 mod tls_flags;
 
+#[allow(dead_code)]
+#[path = "src/rt_flags.rs"]
+mod rt_flags;
+
 /// The npm bundler's JavaScript tokenizer: shims are minified here, once.
 #[allow(dead_code)]
 #[path = "src/npm/lex.rs"]
@@ -64,6 +68,18 @@ fn main() {
         }
         None => code.push_str("pub const VENDOR_ARCHIVE_KEY: &str = \"\";\npub static VENDOR_ARCHIVE: &[u8] = &[];\n"),
     }
+    match runtime_tls_archive(&root, &list, &out_dir, &hash(&runtime_parts), &vendor_hash) {
+        Some((key, path)) => {
+            let _ = writeln!(code, "/// The runtime's TLS files compiled (TlsArchive's archive), and its key.\npub const RUNTIME_ARCHIVE_KEY: &str = \"{key}\";\npub static RUNTIME_ARCHIVE: &[u8] = include_bytes!({:?});", path.to_string_lossy());
+        }
+        None => code.push_str("pub const RUNTIME_ARCHIVE_KEY: &str = \"\";\npub static RUNTIME_ARCHIVE: &[u8] = &[];\n"),
+    }
+    match prebuilt_runtime(&root, &out_dir) {
+        Some((key, path)) => {
+            let _ = writeln!(code, "/// The runtime compiled with the default flags (rt_flags), and its cache key.\npub const PREBUILT_RT_KEY: &str = \"{key}\";\npub static PREBUILT_RT: &[u8] = include_bytes!({:?});", path.to_string_lossy());
+        }
+        None => code.push_str("pub const PREBUILT_RT_KEY: &str = \"\";\npub static PREBUILT_RT: &[u8] = &[];\n"),
+    }
     let out = out_dir.join("tls_files.rs");
     std::fs::write(out, code).unwrap();
     println!("cargo:rerun-if-changed={}", vendor.display());
@@ -81,13 +97,46 @@ fn main() {
 /// with the plain flags (no sanitizers) and the compiler it picks (Xcode's clang on macOS): its key
 /// and path. None when it can't be (another target, no compiler), and `tov build` compiles them.
 fn vendor_archive(root: &Path, list: &[PathBuf], out_dir: &Path, vendor_hash: &str) -> Option<(String, PathBuf)> {
-    if std::env::var("TARGET").ok() != std::env::var("HOST").ok() || std::env::var_os("TOV_NO_PREBUILT_VENDOR").is_some() {
-        return None;
-    }
+    let (cc, cxx, sdk) = archive_toolchain()?;
     let key = tls_flags::vendor_key(vendor_hash, &[]);
     let archive = out_dir.join(format!("vendor-{key}.a"));
     if archive.is_file() {
         return Some((key, archive));
+    }
+    if !compile_archive(root, list, out_dir, "vendor", &archive, &cc, &cxx, sdk.as_deref()) {
+        println!("cargo:warning=couldn't precompile the vendored TLS libraries; `tov build` will compile them when a program needs them");
+        return None;
+    }
+    Some((key, archive))
+}
+
+/// The runtime's TLS files (runtime/tls.c, codecs.c, crypto.c, compress.c) compiled into the
+/// archive `tov build` makes of them (TlsArchive in src/build.rs, same key): (its key, path).
+fn runtime_tls_archive(root: &Path, list: &[PathBuf], out_dir: &Path, runtime_hash: &str, vendor_hash: &str) -> Option<(String, PathBuf)> {
+    let (cc, cxx, sdk) = archive_toolchain()?;
+    let mut flags: Vec<String> = tls_flags::FLAGS.iter().map(|f| f.to_string()).collect();
+    if let Some(sdk) = &sdk {
+        flags.push("-isysroot".into());
+        flags.push(sdk.clone());
+    }
+    let vendor_key = tls_flags::vendor_key(vendor_hash, &[]);
+    let tov_h = std::fs::read(root.join("runtime/tov.h")).ok()?;
+    let key = tls_flags::hash_hex(&[runtime_hash.as_bytes(), vendor_key.as_bytes(), &tov_h, cc.as_bytes(), flags.join(" ").as_bytes()]);
+    let archive = out_dir.join(format!("tls-{key}.a"));
+    if archive.is_file() {
+        return Some((key, archive));
+    }
+    if !compile_archive(root, list, out_dir, "runtime", &archive, &cc, &cxx, sdk.as_deref()) {
+        return None;
+    }
+    Some((key, archive))
+}
+
+/// The C and C++ compilers `tov build` picks (Xcode's on macOS), and the SDK; None when cross
+/// compiling or asked not to.
+fn archive_toolchain() -> Option<(String, String, Option<String>)> {
+    if std::env::var("TARGET").ok() != std::env::var("HOST").ok() || std::env::var_os("TOV_NO_PREBUILT_VENDOR").is_some() {
+        return None;
     }
     let xcrun = |args: &[&str]| -> Option<String> {
         let out = Command::new("xcrun").args(args).output().ok()?;
@@ -95,19 +144,23 @@ fn vendor_archive(root: &Path, list: &[PathBuf], out_dir: &Path, vendor_hash: &s
         (out.status.success() && !s.is_empty()).then_some(s)
     };
     let apple = std::env::var("CARGO_CFG_TARGET_VENDOR").as_deref() == Ok("apple");
-    let (cc, cxx, sdk) = if apple {
+    Some(if apple {
         (xcrun(&["--find", "clang"])?, xcrun(&["--find", "clang++"])?, xcrun(&["--show-sdk-path"]))
     } else {
         (std::env::var("CC").unwrap_or_else(|_| "cc".into()), std::env::var("CXX").unwrap_or_else(|_| "c++".into()), None)
-    };
-    let objs_dir = out_dir.join("vendor-objs");
+    })
+}
+
+/// The TLS files under `prefix/` (vendor or runtime) compiled with tls_flags into `archive`.
+#[allow(clippy::too_many_arguments)]
+fn compile_archive(root: &Path, list: &[PathBuf], out_dir: &Path, prefix: &str, archive: &Path, cc: &str, cxx: &str, sdk: Option<&str>) -> bool {
+    let objs_dir = out_dir.join(format!("{prefix}-objs"));
     let _ = std::fs::remove_dir_all(&objs_dir);
-    std::fs::create_dir_all(&objs_dir).ok()?;
-    let sources: Vec<(&PathBuf, &'static [&'static str])> = list
-        .iter()
-        .filter(|p| p.starts_with(root.join("vendor")))
-        .filter_map(|p| tls_flags::lang(&p.to_string_lossy()).map(|l| (p, l)))
-        .collect();
+    if std::fs::create_dir_all(&objs_dir).is_err() {
+        return false;
+    }
+    let sources: Vec<(&PathBuf, &'static [&'static str])> =
+        list.iter().filter(|p| p.starts_with(root.join(prefix))).filter_map(|p| tls_flags::lang(&p.to_string_lossy()).map(|l| (p, l))).collect();
     let includes: Vec<String> = tls_flags::INCLUDES.iter().map(|i| format!("-I{}", root.join(i).display())).collect();
     let next = std::sync::atomic::AtomicUsize::new(0);
     let failed = std::sync::atomic::AtomicBool::new(false);
@@ -117,10 +170,10 @@ fn vendor_archive(root: &Path, list: &[PathBuf], out_dir: &Path, vendor_hash: &s
             s.spawn(|| loop {
                 let i = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 let Some((src, lang)) = sources.get(i) else { break };
-                let compiler = if src.extension().is_some_and(|e| e == "cc") { &cxx } else { &cc };
+                let compiler = if src.extension().is_some_and(|e| e == "cc") { cxx } else { cc };
                 let mut cmd = Command::new(compiler);
                 cmd.args(tls_flags::FLAGS).args(*lang).args(&includes);
-                if let Some(sdk) = &sdk {
+                if let Some(sdk) = sdk {
                     cmd.arg("-isysroot").arg(sdk);
                 }
                 let ok = cmd.arg("-c").arg(src).arg("-o").arg(objs_dir.join(format!("{i}.o"))).output().is_ok_and(|o| o.status.success());
@@ -131,18 +184,14 @@ fn vendor_archive(root: &Path, list: &[PathBuf], out_dir: &Path, vendor_hash: &s
         }
     });
     if failed.into_inner() {
-        println!("cargo:warning=couldn't precompile the vendored TLS libraries; `tov build` will compile them when a program needs them");
-        return None;
+        return false;
     }
-    let tmp = out_dir.join("vendor.tmp.a");
+    let tmp = out_dir.join(format!("{prefix}.tmp.a"));
     let _ = std::fs::remove_file(&tmp);
     let objs: Vec<PathBuf> = (0..sources.len()).map(|i| objs_dir.join(format!("{i}.o"))).collect();
     let ok = Command::new("ar").arg("rcs").arg(&tmp).args(&objs).output().is_ok_and(|o| o.status.success());
     let _ = std::fs::remove_dir_all(&objs_dir);
-    if !ok || std::fs::rename(&tmp, &archive).is_err() {
-        return None;
-    }
-    Some((key, archive))
+    ok && std::fs::rename(&tmp, archive).is_ok()
 }
 
 /// runtime/node/**/*.js as a sorted table of (module id, source) for the npm bundler: "path",
@@ -190,4 +239,45 @@ fn node_shims(root: &Path) {
     println!("cargo:rerun-if-changed=src/npm/lex.rs");
     std::fs::write(PathBuf::from(std::env::var("OUT_DIR").unwrap()).join("node_shims.rs"), code).unwrap();
     println!("cargo:rerun-if-changed={}", dir.display());
+}
+
+/// The runtime (runtime/tov.c and its parts, one translation unit) compiled as `tov build`
+/// compiles it with the default flags and this machine's compiler: (its cache key, the object).
+fn prebuilt_runtime(root: &Path, out_dir: &Path) -> Option<(String, PathBuf)> {
+    let read = |f: &str| std::fs::read_to_string(root.join("runtime").join(f)).ok();
+    let h = read("tov.h")?;
+    let parts = [read("tov.c")?, read("big.c")?, read("dec.c")?, read("net.c")?, read("ws.c")?];
+    for f in ["tov.h", "tov.c", "big.c", "dec.c", "net.c", "ws.c"] {
+        println!("cargo:rerun-if-changed={}", root.join("runtime").join(f).display());
+    }
+    if std::env::var_os("CC").is_some() {
+        return None;
+    }
+    let (cc, sysroot) = if cfg!(target_vendor = "apple") {
+        match rt_flags::xcrun_toolchain() {
+            Some((c, s)) => (c, Some(s)),
+            None => (rt_flags::other_compiler(), None),
+        }
+    } else {
+        (rt_flags::other_compiler(), None)
+    };
+    let flags = rt_flags::base_flags("-O3", false, false, false, sysroot.as_deref());
+    let flag_text = flags.join(" ");
+    let version = std::env::var("CARGO_PKG_VERSION").unwrap_or_default();
+    let key = tls_flags::hash_hex(&[h.as_bytes(), parts[0].as_bytes(), parts[1].as_bytes(), parts[2].as_bytes(), parts[3].as_bytes(), parts[4].as_bytes(), cc.as_bytes(), flag_text.as_bytes(), version.as_bytes()]);
+    let obj = out_dir.join(format!("rt-{key}.o"));
+    if obj.is_file() {
+        return Some((key, obj));
+    }
+    let src = out_dir.join(format!("rt-{key}.c"));
+    let refs: Vec<&str> = parts.iter().map(|p| p.as_str()).collect();
+    std::fs::write(&src, rt_flags::runtime_source(&h, &refs)).ok()?;
+    let tmp = out_dir.join(format!("rt-{key}.tmp.o"));
+    let ok = Command::new(&cc).args(&flags).args(["-ffunction-sections", "-fdata-sections", "-c", "-o"]).arg(&tmp).arg(&src).status().map(|s| s.success()).unwrap_or(false);
+    if !ok {
+        println!("cargo:warning=couldn't precompile the runtime; `tov build` will compile it on first use");
+        return None;
+    }
+    std::fs::rename(&tmp, &obj).ok()?;
+    Some((key, obj))
 }
