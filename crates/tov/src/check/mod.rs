@@ -1867,7 +1867,7 @@ impl<'a> Checker<'a> {
                 let ret = f.ret.map(|t| c.resolve_type(t, &tscope));
                 // An async function's body returns the `T` of its `Promise<T>`.
                 let ret = match ret {
-                    Some(r) if f.is_async => Some(c.async_inner(r, f.ret.map(|te| c.ast().ty(te).span).unwrap())),
+                    Some(r) if f.is_async && !f.is_gen => Some(c.async_inner(r, f.ret.map(|te| c.ast().ty(te).span).unwrap())),
                     r => r,
                 };
                 let throws = f.throws.map(|t| c.resolve_type(t, &tscope));
@@ -1922,8 +1922,9 @@ impl<'a> Checker<'a> {
             }
         };
         let rest = f.params.last().map(|p| p.rest).unwrap_or(false);
-        // Callers of an async function get a promise; its errors reject the promise.
-        let (ret, throws) = if f.is_async { (self.types.promise(ret, throws), NEVER) } else { (ret, throws) };
+        // Callers of an async function get a promise; its errors reject the promise. (An async
+        // generator's errors reject the promise its `next()` gives.)
+        let (ret, throws) = if f.is_async && f.is_gen { (ret, NEVER) } else if f.is_async { (self.types.promise(ret, throws), NEVER) } else { (ret, throws) };
         let sig = Sig { tparams, params, param_names, ret, throws, rest };
         self.sig_in_progress.remove(&(m, ii));
         Arc::make_mut(&mut self.sigs).insert((m, ii), sig.clone());
@@ -2058,7 +2059,8 @@ impl<'a> Checker<'a> {
             // A generator yields what its `Generator<T>` says (or what its `yield`s give); its
             // `return` only ends it.
             let generator = f.is_gen.then(|| match ret.map(|r| *self.types.get(r)) {
-                Some(Ty::Gen(t)) => Some(t),
+                Some(Ty::Gen(t)) if !f.is_async => Some(t),
+                Some(Ty::AsyncGen(t)) if f.is_async => Some(t),
                 Some(Ty::Error) => Some(ERROR),
                 Some(_) => {
                     let shown = self.show(ret.unwrap());
@@ -2101,7 +2103,7 @@ impl<'a> Checker<'a> {
                         None => {
                             let t = if yields.is_empty() { UNDEFINED } else { c.types.union(&yields) };
                             let t = c.types.widen(t);
-                            c.types.intern(Ty::Gen(t))
+                            if f.is_async { c.types.intern(Ty::AsyncGen(t)) } else { c.types.intern(Ty::Gen(t)) }
                         }
                     };
                 }
@@ -2821,6 +2823,8 @@ impl<'a> Checker<'a> {
             "Set" | "ReadonlySet" => Some(if arity(self, 1) { self.types.intern(Ty::Set(targs[0])) } else { ERROR }),
             // (a generator's result, its return and `next` types being `void`/`undefined`)
             "Generator" | "IterableIterator" | "Iterator" | "Iterable" if !targs.is_empty() => Some(self.types.intern(Ty::Gen(targs[0]))),
+            // (without its `T`: of anything, as TypeScript's `AsyncGenerator` is of `any`)
+            "AsyncGenerator" | "AsyncIterableIterator" | "AsyncIterator" | "AsyncIterable" => Some(self.types.intern(Ty::AsyncGen(targs.first().copied().unwrap_or(UNKNOWN)))),
             "any" => {
                 self.report(
                     Diagnostic::new("X0001", name_span, "`any` is not supported")

@@ -707,6 +707,16 @@ impl<'c, 'a> Gen<'c, 'a> {
             Ty::Map(k, v) => self.map_method(rv, k, v, name, args, ty),
             Ty::Set(k) => self.set_method(rv, k, name, args, ty),
             Ty::Gen(e) if name == "next" => self.gen_next(rv, e, ty),
+            Ty::AsyncGen(e) if name == "next" || name == "read" => self.agen_next(rv, e, ty),
+            Ty::AsyncGen(_) if name == "cancel" || name == "return" => {
+                self.line(format!("({})->done = true;", rv.code));
+                Val::plain("0", VOID)
+            }
+            Ty::AsyncGen(_) if name == "releaseLock" => Val::plain("0", VOID),
+            Ty::AsyncGen(_) if name == "getReader" => {
+                let r = self.own(rv);
+                Val { ty, ..r }
+            }
             Ty::Str | Ty::StrLit(_) => {
                 let s = self.coerce(rv, STR);
                 self.string_method(s, name, args, ty, span)

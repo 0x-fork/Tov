@@ -272,6 +272,7 @@ fn methods_of(types: &Types, ty: TyId) -> &'static [&'static str] {
         Ty::Map(..) => MAP_METHODS,
         Ty::Set(_) => SET_METHODS,
         Ty::Gen(_) => &["next"],
+        Ty::AsyncGen(_) => &["next", "getReader", "read", "return", "cancel", "releaseLock"],
         _ if types.is_numeric(ty) => NUMBER_METHODS,
         Ty::Bool | Ty::BigInt => &["toString"],
         Ty::Decimal => &["toString", "toFixed", "round", "floor", "ceil", "trunc", "abs"],
@@ -520,6 +521,17 @@ pub(super) fn method(c: &mut Checker, base: TyId, name: &str) -> Option<MethodSi
             let r = c.iter_result(e)?;
             mk(sig(vec![], r), false)
         }
+        // `g.next()` of an async generator: a promise of its result (`read`: the same, as a
+        // stream's reader has it, so `for await` takes either; `getReader()`: the generator)
+        Ty::AsyncGen(e) if name == "next" || name == "read" => {
+            let r = c.iter_result(e)?;
+            let err = c.error_class();
+            let p = c.types.promise(r, err);
+            mk(sig(vec![], p), false)
+        }
+        Ty::AsyncGen(_) if name == "getReader" => mk(sig(vec![], ty), false),
+        // (`for await` ending early: the generator is done)
+        Ty::AsyncGen(_) if name == "cancel" || name == "releaseLock" || name == "return" => mk(sig(vec![], VOID), false),
         Ty::Bool if name == "toString" => mk(sig(vec![], STR), false),
         Ty::Decimal => match name {
             "toString" | "toJSON" => mk(sig(vec![], STR), false),
@@ -1281,7 +1293,7 @@ impl<'a> Checker<'a> {
                 let fs = self.types.fields_in_order(t);
                 fs.into_iter().find_map(|f| self.uncloneable(f.ty, stack))
             }
-            Ty::Class(..) | Ty::Func(..) | Ty::Promise(..) | Ty::Gen(_) | Ty::Js | Ty::Interface(..) | Ty::Rec(..) => Some(t),
+            Ty::Class(..) | Ty::Func(..) | Ty::Promise(..) | Ty::Gen(_) | Ty::AsyncGen(_) | Ty::Js | Ty::Interface(..) | Ty::Rec(..) => Some(t),
             _ => None,
         };
         stack.pop();

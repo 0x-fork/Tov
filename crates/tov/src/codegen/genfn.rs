@@ -23,15 +23,23 @@ impl<'c, 'a> Gen<'c, 'a> {
         let cname = inst.cname.clone();
         let params: Vec<(u32, TyId, bool)> = f.params.iter().zip(&sig.params).map(|(p, fp)| (p.span.start, self.c.types.subst(fp.ty, &inst.subst), false)).collect();
         let ret = self.c.types.subst(sig.ret, &inst.subst);
-        let Ty::Gen(elem) = self.tget(ret) else {
-            self.internal.push(format!("generator `{cname}` without a generator type"));
-            return;
+        let (elem, is_async) = match self.tget(ret) {
+            Ty::Gen(e) => (e, false),
+            Ty::AsyncGen(e) => (e, true),
+            _ => {
+                self.internal.push(format!("generator `{cname}` without a generator type"));
+                return;
+            }
         };
         self.pending_gen = Some(elem);
+        // (an async generator's body awaits as an async function's does)
+        if is_async {
+            self.pending_async = Some((inst.m, inst.item));
+        }
         let code = self.function_body(inst.m, inst.subst.clone(), &params, VOID, super::body::FnBodyKind::Block(f.body), None, None, None);
         let proto = self.fn_proto(&cname, &sig.params, sig.ret, &inst.subst, false);
         let ptys: Vec<TyId> = params.iter().map(|p| p.1).collect();
-        self.gen_parts(&cname, &proto, &code, &ptys, elem, &[], "");
+        self.gen_parts_of(&cname, &proto, &code, &ptys, elem, &[], "", is_async);
     }
 
     /// A generator method (`*items()`, `*[Symbol.iterator]()`): the frame also holds `self_`.
@@ -54,6 +62,15 @@ impl<'c, 'a> Gen<'c, 'a> {
     /// parameters `p0`... and, `extra`, more frame fields: (C type, name, release code)).
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn gen_parts(&mut self, cname: &str, proto: &str, code: &str, params: &[TyId], elem: TyId, extra: &[(String, String, String)], init: &str) {
+        self.gen_parts_of(cname, proto, code, params, elem, extra, init, false);
+    }
+
+    /// As gen_parts; an async generator's frame starts `pc, yielded` (what `next()`'s task reads:
+    /// whether a resume stopped at a `yield` or an `await`) and holds the frames of the async
+    /// calls it awaits.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn gen_parts_of(&mut self, cname: &str, proto: &str, code: &str, params: &[TyId], elem: TyId, extra: &[(String, String, String)], init: &str, is_async: bool) {
+        let children = if is_async { std::mem::take(&mut self.last_children) } else { Vec::new() };
         let frame = format!("AF_{cname}");
         let resume = format!("{cname}_resume");
         let drop = format!("{cname}_drop");
@@ -71,7 +88,7 @@ impl<'c, 'a> Gen<'c, 'a> {
                 return;
             }
         };
-        let mut def = format!("struct {frame} {{\n    void *pc;\n    {ect} yv;\n    bool yset;\n");
+        let mut def = format!("struct {frame} {{\n    void *pc;\n{}    {ect} yv;\n    bool yset;\n", if is_async { "    bool yielded;\n" } else { "" });
         for (ct, name, _) in extra {
             let _ = writeln!(def, "    {ct} {name};");
         }
@@ -82,8 +99,17 @@ impl<'c, 'a> Gen<'c, 'a> {
         for fl in &lowered.fields {
             let _ = writeln!(def, "    {} {};", fl.ty, fl.name);
         }
+        let mut deps = Vec::new();
+        if !children.is_empty() {
+            def.push_str("    union {\n");
+            for (member, ty) in &children {
+                let _ = writeln!(def, "        {ty} {member};");
+                deps.push(ty.clone());
+            }
+            def.push_str("    } u;\n");
+        }
         def.push_str("};\n");
-        self.frame_defs.push(super::asyncfn::FrameDef { name: frame.clone(), deps: Vec::new(), text: def });
+        self.frame_defs.push(super::asyncfn::FrameDef { name: frame.clone(), deps, text: def });
         let dispatch = if lowered.body.contains("&&aw") { "    if (F->pc) goto *F->pc;\n" } else { "    (void)F;\n" };
         let _ = writeln!(self.funcs, "static bool {resume}({frame} *F) {{\n{}{dispatch}{}    return true;\n}}\n", lowered.prologue, lowered.body);
         let mut release = String::new();
@@ -166,10 +192,51 @@ impl<'c, 'a> Gen<'c, 'a> {
         let code = self.consume(v);
         // (`yv`/`yset` by name: the frame fields, kept in locals meanwhile as parameters are)
         let rel = if self.is_rc(elem) { format!("if (yset) {{ {}; }} ", self.release_code(elem, "yv")) } else { String::new() };
-        self.line(format!("{rel}yv = {code}; yset = true;"));
+        let mark = if self.b().async_fn.is_some() { " F->yielded = true;" } else { "" };
+        self.line(format!("{rel}yv = {code}; yset = true;{mark}"));
         let n = self.fresh("");
         self.line(format!("F->pc = &&aw{n}; TV_SUSPEND;"));
         self.line(format!("aw{n}:;"));
+    }
+
+    /// `g.next()` of an async generator of `elem`s: a promise of its result, from a task that
+    /// resumes the generator (and, where it awaits, waits with it) until it yields or ends.
+    pub(crate) fn agen_next(&mut self, g: Val, elem: TyId, ty: TyId) -> Val {
+        let Ty::Promise(res, _) = self.tget(ty) else { return Val::plain("NULL", ty) };
+        let key = res.0;
+        let f = match self.agen_helpers.get(&key) {
+            Some(f) => f.clone(),
+            None => {
+                let f = format!("tvg_agen_next{}", self.agen_helpers.len());
+                self.agen_helpers.insert(key, f.clone());
+                let _ = writeln!(self.protos, "static tv_promise *{f}(tv_gen *g);");
+                // (the result, `{ value, done: false } | { value: undefined, done: true }`)
+                let Ty::Union(ms) = self.tget(res) else { return Val::plain("NULL", ty) };
+                let ms = self.c.types.tys(ms).to_vec();
+                let field = |g2: &Self, m: TyId, n: &str| g2.c.types.fields_in_order(m).into_iter().find(|f| g2.sym(f.name) == n);
+                let (Some(more), Some(end)) = (
+                    ms.iter().position(|&m| field(self, m, "done").is_some_and(|f| matches!(*self.c.types.get(f.ty), Ty::BoolLit(false)))),
+                    ms.iter().position(|&m| field(self, m, "done").is_some_and(|f| matches!(*self.c.types.get(f.ty), Ty::BoolLit(true)))),
+                ) else {
+                    return Val::plain("NULL", ty);
+                };
+                let (mt, et) = (ms[more], ms[end]);
+                let ect = self.ctype(elem);
+                let lit = self.rec_lit(et, ".f_value = 0, .f_done = true");
+                let ended = self.u_make(res, end, Some(&lit));
+                let lit = self.rec_lit(mt, ".f_value = v_, .f_done = false");
+                let given = self.u_make(res, more, Some(&lit));
+                let keep = if self.is_rc(elem) { format!(" {};", self.retain_code(elem, "v_")) } else { String::new() };
+                let rct = self.ctype(res);
+                let desc = self.desc(res);
+                let _ = writeln!(
+                    self.funcs,
+                    "static bool {f}_step(tv_task *t) {{\n    tv_gen *g = *(tv_gen **)tv_task_frame(t);\n    struct {{ void *pc; bool yielded; }} *gf = g->F;\n    if (!g->done) {{\n        gf->yielded = false;\n        if (g->resume(g->F)) g->done = true;\n        else if (!gf->yielded) return false;\n    }}\n    if (tvg_err) {{ g->done = true; tv_promise_reject(t->promise, tvg_err); tvg_err = NULL; tv_gen_release(g); return true; }}\n    {rct} r_;\n    if (g->done) r_ = {ended};\n    else {{ {ect} v_ = *({ect} *)g->yv;{keep} r_ = {given}; }}\n    tv_promise_resolve_move(t->promise, &r_);\n    tv_gen_release(g);\n    return true;\n}}\nstatic tv_promise *{f}(tv_gen *g) {{\n    tv_task *t = tv_task_new(sizeof(tv_gen *), {f}_step, {desc});\n    *(tv_gen **)tv_task_frame(t) = g; tv_gen_retain(g);\n    return tv_task_spawn(t);\n}}\n"
+                );
+                f
+            }
+        };
+        self.tmp(ty, &format!("{f}({})", g.code), true)
     }
 
     /// `g.next()`: `{ value, done }`.

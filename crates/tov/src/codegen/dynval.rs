@@ -189,7 +189,7 @@ impl<'c, 'a> Gen<'c, 'a> {
                 _ => "object",
             };
             let _ = writeln!(kinds, "    if (d.t == {d}) return {};", self.lit(kind.as_bytes()));
-            if !matches!(self.tget(t), Ty::Func(..) | Ty::Promise(..) | Ty::Gen(_)) {
+            if !matches!(self.tget(t), Ty::Func(..) | Ty::Promise(..) | Ty::Gen(_) | Ty::AsyncGen(_)) {
                 let w = self.json_writer(t);
                 let ct = self.ctype(t);
                 let _ = writeln!(json, "    if (v->t == {d}) {{ {w}(sb, (const {ct} *)tv_dyn_data(*v), ind, lvl); return; }}");

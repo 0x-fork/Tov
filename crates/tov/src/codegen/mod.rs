@@ -291,6 +291,8 @@ pub(crate) struct Gen<'c, 'a> {
     box_all: bool,
     /// The awaited calls embedded in the async body just emitted: (union member, frame type).
     pub(crate) last_children: Vec<(String, String)>,
+    /// `next()` of async generators, by the result type: the helper's name.
+    pub(crate) agen_helpers: FxMap<u32, String>,
     /// Frame structs of async functions.
     /// The accumulator loop for the function `function_body` emits next (see `tre_candidate`).
     pub(crate) pending_tre: Option<body::Tre>,
@@ -384,6 +386,7 @@ impl<'c, 'a> Gen<'c, 'a> {
             rec_structs: FxMap::default(),
             box_all: std::env::var("TOV_BOX_ALL").is_ok_and(|v| v == "1"),
             last_children: Vec::new(),
+            agen_helpers: FxMap::default(),
             pending_tre: None,
             uses_tls: false,
             uses_regexp: false,
@@ -762,7 +765,7 @@ impl<'c, 'a> Gen<'c, 'a> {
     /// Does this type own heap memory (needs retain/release)?
     pub(crate) fn is_rc(&mut self, t: TyId) -> bool {
         match self.tget(t) {
-            Ty::Str | Ty::Array(_) | Ty::Map(..) | Ty::Set(_) | Ty::Func(..) | Ty::Rec(..) | Ty::Class(..) | Ty::Interface(..) | Ty::Promise(..) | Ty::Gen(_) | Ty::Js | Ty::BigInt | Ty::Unknown => true,
+            Ty::Str | Ty::Array(_) | Ty::Map(..) | Ty::Set(_) | Ty::Func(..) | Ty::Rec(..) | Ty::Class(..) | Ty::Interface(..) | Ty::Promise(..) | Ty::Gen(_) | Ty::AsyncGen(_) | Ty::Js | Ty::BigInt | Ty::Unknown => true,
             Ty::Record(_) if self.is_obj(t) => true,
             Ty::Record(fs) => {
                 let fs = self.c.types.fields(fs).to_vec();
@@ -850,7 +853,7 @@ impl<'c, 'a> Gen<'c, 'a> {
             Ty::Unknown => "tv_dyn".into(),
             Ty::Array(_) => "tv_arr".into(),
             Ty::Promise(..) => "tv_promise *".into(),
-            Ty::Gen(_) => "tv_gen *".into(),
+            Ty::Gen(_) | Ty::AsyncGen(_) => "tv_gen *".into(),
             Ty::Js => "JSValueRef".into(),
             Ty::Map(..) | Ty::Set(_) => "tv_map".into(),
             Ty::Func(..) => "tv_fn".into(),
@@ -1078,7 +1081,7 @@ impl<'c, 'a> Gen<'c, 'a> {
             Ty::Array(_) => "TV_EMPTY_ARR".into(),
             Ty::Map(..) | Ty::Set(_) => "TV_EMPTY_MAP".into(),
             Ty::Func(..) => "((tv_fn){NULL, NULL})".into(),
-            Ty::Promise(..) | Ty::Gen(_) => "NULL".into(),
+            Ty::Promise(..) | Ty::Gen(_) | Ty::AsyncGen(_) => "NULL".into(),
             Ty::Bool => "false".into(),
             Ty::Unknown => "((tv_dyn){&tv_type_undefined, NULL})".into(),
             Ty::Class(..) => "NULL".into(),
@@ -1366,7 +1369,7 @@ impl<'c, 'a> Gen<'c, 'a> {
             Ty::Map(..) | Ty::Set(_) => format!("tv_map_retain({place})"),
             Ty::Func(..) => format!("tv_env_retain(({place}).env)"),
             Ty::Promise(..) => format!("tv_promise_retain({place})"),
-            Ty::Gen(_) => format!("tv_gen_retain({place})"),
+            Ty::Gen(_) | Ty::AsyncGen(_) => format!("tv_gen_retain({place})"),
             Ty::Js => format!("tv_js_retain({place})"),
             Ty::Unknown => format!("tv_dyn_retain({place})"),
             Ty::Class(..) => format!("tvg_obj_retain({place})"),
@@ -1403,7 +1406,7 @@ impl<'c, 'a> Gen<'c, 'a> {
             }
             Ty::Func(..) => format!("tv_env_release(({place}).env)"),
             Ty::Promise(..) => format!("tv_promise_release({place})"),
-            Ty::Gen(_) => format!("tv_gen_release({place})"),
+            Ty::Gen(_) | Ty::AsyncGen(_) => format!("tv_gen_release({place})"),
             Ty::Js => format!("tv_js_release({place})"),
             Ty::Unknown => format!("tv_dyn_release({place})"),
             Ty::Class(..) => self.class_release_code(t, place),
@@ -1435,7 +1438,7 @@ impl<'c, 'a> Gen<'c, 'a> {
             Ty::Array(_) | Ty::Map(..) | Ty::Set(_) => format!("(({a}).p == ({b}).p)"),
             Ty::Func(..) => format!("tvg_fn_eq({a}, {b})"),
             Ty::Unknown => format!("tv_dyn_eq({a}, {b})"),
-            Ty::Class(..) | Ty::Promise(..) | Ty::Gen(_) => format!("((void *)({a}) == (void *)({b}))"),
+            Ty::Class(..) | Ty::Promise(..) | Ty::Gen(_) | Ty::AsyncGen(_) => format!("((void *)({a}) == (void *)({b}))"),
             Ty::Interface(..) => format!("(({a}).p == ({b}).p)"),
             Ty::Js => format!("tv_type_js.eq(&({a}), &({b}))"),
             Ty::Union(_) if self.niche_rec(t).is_some() => {
@@ -1495,7 +1498,7 @@ impl<'c, 'a> Gen<'c, 'a> {
             Ty::Map(..) => format!("tv_sb_push_cstr(sb, tv_map_is_object({place}) ? \"[object Object]\" : \"[object Map]\")"),
             Ty::Set(_) => "tv_sb_push_cstr(sb, \"[object Set]\")".into(),
             Ty::Promise(..) => "tv_sb_push_cstr(sb, \"[object Promise]\")".into(),
-            Ty::Gen(_) => "tv_sb_push_cstr(sb, \"[object Generator]\")".into(),
+            Ty::Gen(_) | Ty::AsyncGen(_) => "tv_sb_push_cstr(sb, \"[object Generator]\")".into(),
             Ty::Js => format!("tv_type_js.to_str(sb, &({place}))"),
             Ty::Unknown => format!("tv_type_dyn.to_str(sb, &({place}))"),
             _ => {
@@ -1532,7 +1535,7 @@ impl<'c, 'a> Gen<'c, 'a> {
             Ty::BigInt => format!("({{ tv_sb_push_big(sb, {place}); tv_sb_push_char(sb, 'n'); }})"),
             Ty::Decimal => format!("tv_sb_push_dec(sb, {place})"),
             Ty::Promise(..) => format!("tv_inspect_value(sb, &tv_type_promise, &({place}), {depth})"),
-            Ty::Gen(_) => format!("tv_inspect_value(sb, &tv_type_gen, &({place}), {depth})"),
+            Ty::Gen(_) | Ty::AsyncGen(_) => format!("tv_inspect_value(sb, &tv_type_gen, &({place}), {depth})"),
             Ty::Array(e) => {
                 let d = self.desc(e);
                 format!("tv_inspect_arr(sb, {place}, {d}, {depth})")
@@ -1589,7 +1592,7 @@ impl<'c, 'a> Gen<'c, 'a> {
             Ty::Unknown => return "&tv_type_dyn".into(),
             Ty::Null => return "&tv_type_null".into(),
             Ty::Promise(..) => return "&tv_type_promise".into(),
-            Ty::Gen(_) => return "&tv_type_gen".into(),
+            Ty::Gen(_) | Ty::AsyncGen(_) => return "&tv_type_gen".into(),
             Ty::Js => return "&tv_type_js".into(),
             _ => {}
         }

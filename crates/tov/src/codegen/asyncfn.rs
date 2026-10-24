@@ -27,7 +27,7 @@ pub(crate) struct FrameDef {
 impl<'c, 'a> Gen<'c, 'a> {
     /// Is (module, item) an async function?
     pub(crate) fn is_async_fn(&self, m: u32, item: u32) -> bool {
-        matches!(&self.ast(m).items[item as usize].kind, ast::ItemKind::Function(f) if f.is_async)
+        matches!(&self.ast(m).items[item as usize].kind, ast::ItemKind::Function(f) if f.is_async && !f.is_gen)
     }
 
     /// The (instantiated) type an async function's promise resolves to.

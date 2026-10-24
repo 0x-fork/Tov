@@ -76,6 +76,9 @@ pub enum Ty {
     BoolLit(bool),
     /// A generator of `T`s (`function*`'s result; `Generator<T>`, `IterableIterator<T>`).
     Gen(TyId),
+    /// An async generator of `T`s (`async function*`'s result; `AsyncGenerator<T>`): `next()` is a
+    /// promise of the next result. (In C a `tv_gen` as `Gen`'s, its frame resumed by a task.)
+    AsyncGen(TyId),
     Array(TyId),
     Map(TyId, TyId),
     Set(TyId),
@@ -580,6 +583,10 @@ impl Types {
                 let e = self.subst(e, map);
                 self.intern(Ty::Gen(e))
             }
+            Ty::AsyncGen(e) => {
+                let e = self.subst(e, map);
+                self.intern(Ty::AsyncGen(e))
+            }
             Ty::Promise(v, e) => {
                 let v = self.subst(v, map);
                 let e = self.subst(e, map);
@@ -629,7 +636,7 @@ impl Types {
     pub fn has_param(&self, ty: TyId) -> bool {
         match *self.get(ty) {
             Ty::Param(_) => true,
-            Ty::Array(e) | Ty::Set(e) | Ty::Gen(e) | Ty::Expect(e) => self.has_param(e),
+            Ty::Array(e) | Ty::Set(e) | Ty::Gen(e) | Ty::AsyncGen(e) | Ty::Expect(e) => self.has_param(e),
             Ty::Map(k, v) | Ty::Promise(k, v) => self.has_param(k) || self.has_param(v),
             Ty::Record(fs) => self.fields(fs).iter().any(|f| self.has_param(f.ty)),
             Ty::Union(ms) => self.tys(ms).iter().any(|&m| self.has_param(m)),
@@ -658,7 +665,7 @@ impl Types {
         }
         match *self.get(ty) {
             Ty::Param(p) => params.contains(&p),
-            Ty::Array(e) | Ty::Set(e) | Ty::Gen(e) | Ty::Expect(e) => self.mentions(e, params),
+            Ty::Array(e) | Ty::Set(e) | Ty::Gen(e) | Ty::AsyncGen(e) | Ty::Expect(e) => self.mentions(e, params),
             Ty::Map(k, v) | Ty::Promise(k, v) => self.mentions(k, params) || self.mentions(v, params),
             Ty::Record(fs) => self.fields(fs).iter().any(|f| self.mentions(f.ty, params)),
             Ty::Union(ms) => self.tys(ms).iter().any(|&m| self.mentions(m, params)),
@@ -735,6 +742,11 @@ impl Display<'_> {
             Ty::BoolLit(b) => out.push_str(if b { "true" } else { "false" }),
             Ty::Gen(t) => {
                 out.push_str("Generator<");
+                self.write(t, out, false);
+                out.push('>');
+            }
+            Ty::AsyncGen(t) => {
+                out.push_str("AsyncGenerator<");
                 self.write(t, out, false);
                 out.push('>');
             }
