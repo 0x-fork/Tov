@@ -128,6 +128,61 @@ impl<'c, 'a> Gen<'c, 'a> {
                     defs.entry(Var::Global(m, ii as u32)).or_default().push(Def::Expr(m, *init));
                 }
             }
+            // `while (... && z < n) { ...; z += 1 }`: the one step of z in the body, bounded by a
+            // conjunct of the condition
+            for s in ast.stmts.iter() {
+                let StmtKind::While(cond, body) = &s.kind else { continue };
+                let mut conjuncts = vec![*cond];
+                let mut bounds: Vec<(u32, ExprId, bool)> = Vec::new();
+                while let Some(c) = conjuncts.pop() {
+                    match &ast.expr(c).kind {
+                        ExprKind::Binary(BinOp::And, a, b) => {
+                            conjuncts.push(*a);
+                            conjuncts.push(*b);
+                        }
+                        ExprKind::Paren(x) => conjuncts.push(*x),
+                        ExprKind::Binary(op @ (BinOp::Lt | BinOp::Le), l, r) => {
+                            if let (ExprKind::Ident(_), Some(IdentFact::Local(x))) = (&ast.expr(*l).kind, facts.idents.get(l)) {
+                                bounds.push((*x, *r, *op == BinOp::Le));
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+                let mut inner = Vec::new();
+                super::body::collect_exprs_stmt_pub(ast, *body, &mut inner);
+                for (k, hi, incl) in bounds {
+                    let is_i = |e: ExprId| matches!((&ast.expr(e).kind, facts.idents.get(&e)), (ExprKind::Ident(_), Some(IdentFact::Local(x))) if *x == k);
+                    let mut steps = Vec::new();
+                    let mut other = false;
+                    for &e in &inner {
+                        match &ast.expr(e).kind {
+                            ExprKind::Update { target, inc: true, .. } if is_i(*target) => steps.push(e),
+                            ExprKind::Assign(AssignOp::Op(BinOp::Add), t, v) if is_i(*t) && matches!(ast.expr(*v).kind, ExprKind::Int(1)) => steps.push(e),
+                            ExprKind::Assign(_, t, _) | ExprKind::Update { target: t, .. } if is_i(*t) => other = true,
+                            ExprKind::Call { args, .. } if args.iter().any(|a| a.by_ref.is_some() && is_i(a.expr)) => other = true,
+                            ExprKind::Arrow(_) => other = true,
+                            _ => {}
+                        }
+                    }
+                    // (the bound itself unchanged in the body: a local or a literal)
+                    let bound_fixed = match &ast.expr(hi).kind {
+                        ExprKind::Int(_) => true,
+                        ExprKind::Ident(_) => match facts.idents.get(&hi) {
+                            Some(IdentFact::Local(b)) => !inner.iter().any(|&e| match &ast.expr(e).kind {
+                                ExprKind::Assign(_, t, _) | ExprKind::Update { target: t, .. } => matches!(facts.idents.get(t), Some(IdentFact::Local(x)) if x == b),
+                                _ => false,
+                            }),
+                            _ => false,
+                        },
+                        _ => false,
+                    };
+                    if steps.len() == 1 && !other && bound_fixed {
+                        loop_steps.insert((m, steps[0]));
+                        defs.entry(Var::Local(m, k)).or_default().push(Def::UpTo(m, hi, incl));
+                    }
+                }
+            }
             // counted loops: their steps are bounded by their conditions
             for s in ast.stmts.iter() {
                 let StmtKind::For { init: Some(init), cond: Some(cond), step: Some(step), body } = &s.kind else { continue };

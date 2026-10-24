@@ -7115,6 +7115,9 @@ impl<'c, 'a> Gen<'c, 'a> {
                             let r = self.arith(bop, cur.clone(), rhs, INT, span);
                             let ct = self.ctype(p.ty);
                             Val::plain(format!("(({ct})({}))", r.code), p.ty)
+                        } else if arith_ty == INT && matches!(bop, BinOp::Add | BinOp::Sub) && rhs.ty == INT && self.cannot_overflow(bop, target, value) {
+                            // (`z += 1` where z is bounded: see `range`)
+                            Val::plain(format!("({} {} {})", cur.code, if bop == BinOp::Add { "+" } else { "-" }, rhs.code), INT)
                         } else {
                             self.js_mul_operand = has_mul(self.ast(self.cur_m()), value);
                             let r = self.arith(bop, cur.clone(), rhs, arith_ty, span);
