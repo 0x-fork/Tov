@@ -2458,7 +2458,8 @@ impl<'c, 'a> Gen<'c, 'a> {
         let mut cur = e;
         loop {
             match &ast.expr(cur).kind {
-                ExprKind::Paren(x) => cur = *x,
+                // (`const r = word as Record`, `const n = node!`: the same object, seen as one)
+                ExprKind::Paren(x) | ExprKind::As(x, _) | ExprKind::NonNull(x) => cur = *x,
                 ExprKind::This => return true,
                 ExprKind::Member { obj, name, optional: false, .. } => {
                     let ot = self.ty(*obj);
