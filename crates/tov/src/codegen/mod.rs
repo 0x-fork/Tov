@@ -2258,6 +2258,7 @@ typedef void (*tvg_gv_fn)(void *buf, int64_t len);
 typedef struct { void *buf; int64_t internal; int64_t len; tvg_gv_fn fn; int reached; } tvg_gcb;
 static tvg_gcb *tvg_gcb_tab; static size_t tvg_gcb_cap, tvg_gcb_n;
 static void **tvg_gc_stack; static size_t tvg_gc_sn, tvg_gc_scap;
+static struct tvg_cyc **tvg_gc_all; static size_t tvg_gc_allcap;
 /* (the product's high bits, folded down: an address's low bits are its alignment's, the same
  * for every buffer of a size) */
 static inline size_t tvg_gcb_hash(void *buf) { uint64_t z = (uint64_t)(uintptr_t)buf * 0x9E3779B97F4A7C15ull; return (size_t)(z ^ (z >> 32)); }
@@ -2316,12 +2317,31 @@ static void tvg_cyc_collect(void) {
     tvg_gcb_n = 0;
     /* (each object's count less the references from others: its own added as it's reached in
      * the walk, theirs taken off as they're walked, in any order; it's 0 between collections) */
+    /* (the objects are listed in an array as the first pass walks them: the passes after it
+     * read ahead of where they are, not one cache miss after another down the list) */
+    int64_t walked = tvg_cyc_count, found = 0;
+    if ((size_t)walked > tvg_gc_allcap) {
+        free(tvg_gc_all);
+        tvg_gc_allcap = (size_t)walked * 2;
+        tvg_gc_all = malloc(tvg_gc_allcap * sizeof(tvg_cyc *));
+        if (!tvg_gc_all) tv_trap("out of memory", "cycle collector");
+    }
+    tvg_cyc **all = tvg_gc_all;
+    size_t n = 0;
     tvg_gc_phase = 1;
-    for (tvg_cyc *c = tvg_cyc_head.next; c != &tvg_cyc_head; c = c->next) { c->gc += TVG_OBJ(c)->rc; tvg_obj_traverse(TVG_OBJ(c)); }
+    for (tvg_cyc *c = tvg_cyc_head.next; c != &tvg_cyc_head; c = c->next) {
+        __builtin_prefetch(c->next);
+        all[n++] = c;
+        c->gc += TVG_OBJ(c)->rc;
+        tvg_obj_traverse(TVG_OBJ(c));
+    }
     tvg_gc_phase = 2;
     tvg_gc_sn = 0;
-    for (tvg_cyc *c = tvg_cyc_head.next; c != &tvg_cyc_head; c = c->next)
+    for (size_t i = 0; i < n; i++) {
+        if (i + 8 < n) __builtin_prefetch(all[i + 8]);
+        tvg_cyc *c = all[i];
         if (c->gc > 0) { TVG_OBJ(c)->flags |= TVG_REACHED; tvg_gc_push(TVG_OBJ(c)); }
+    }
     for (size_t i = 0; tvg_gcb_n && i < tvg_gcb_cap; i++) {
         tvg_gcb *b = &tvg_gcb_tab[i];
         if (b->buf && !b->reached && *(int64_t *)b->buf > b->internal) { b->reached = 1; b->fn(b->buf, b->len); }
@@ -2331,25 +2351,30 @@ static void tvg_cyc_collect(void) {
         tvg_obj_traverse(p);
     }
     tvg_gc_phase = 0;
-    /* Garbage: not reached. Unlink it, release its fields (freeing what only it referenced; its
-     * own count reaching zero is ignored while it's being collected), then free it. */
-    tvg_cyc *garbage = NULL;
-    int64_t walked = tvg_cyc_count, found = 0;
-    for (tvg_cyc *c = tvg_cyc_head.next, *next; c != &tvg_cyc_head; c = next) {
-        next = c->next;
+    /* Garbage: not reached. Taken out of the list (what's reached is linked again, in order),
+     * pinned while fields are released (freeing what only it referenced; its own count reaching
+     * zero is ignored while it's being collected), then freed. */
+    tvg_cyc *prev = &tvg_cyc_head;
+    size_t g = 0;
+    for (size_t i = 0; i < n; i++) {
+        if (i + 8 < n) __builtin_prefetch(all[i + 8], 1);
+        tvg_cyc *c = all[i];
         tvg_obj *h = TVG_OBJ(c);
-        if (h->flags & TVG_REACHED) { h->flags &= ~TVG_REACHED; c->gc = 0; continue; }
+        if (h->flags & TVG_REACHED) { h->flags &= ~TVG_REACHED; c->gc = 0; prev->next = c; c->prev = prev; prev = c; continue; }
         h->flags |= TVG_COLLECTING;
-        tvg_cyc_unlink(h);
-        c->next = garbage;
-        garbage = c;
-        found++;
+        TVG_WEAK(h)++;
+        all[g++] = c;
     }
-    for (tvg_cyc *c = garbage; c; c = c->next) TVG_WEAK(TVG_OBJ(c))++; /* pinned while fields are released */
-    for (tvg_cyc *c = garbage; c; c = c->next) tvg_obj_dropfields(TVG_OBJ(c));
-    for (tvg_cyc *c = garbage, *next; c; c = next) {
-        next = c->next;
-        tvg_obj *h = TVG_OBJ(c);
+    prev->next = &tvg_cyc_head; tvg_cyc_head.prev = prev;
+    found = (int64_t)g;
+    tvg_cyc_count -= found;
+    for (size_t i = 0; i < g; i++) {
+        if (i + 8 < g) __builtin_prefetch(all[i + 8]);
+        tvg_obj_dropfields(TVG_OBJ(all[i]));
+    }
+    for (size_t i = 0; i < g; i++) {
+        if (i + 8 < g) __builtin_prefetch(all[i + 8], 1);
+        tvg_obj *h = TVG_OBJ(all[i]);
         h->rc = 0;
         h->flags &= ~TVG_COLLECTING;
         if (--TVG_WEAK(h) == 0) tvg_obj_free(h);
