@@ -131,7 +131,8 @@ impl<'c, 'a> Gen<'c, 'a> {
                 let m = self.c.types.tys(ms)[pi];
                 let w = self.json_writer(m);
                 let mct = self.ctype(m);
-                format!("    if (*v == NULL) {{ tv_sb_push_cstr(sb, \"null\"); return; }}\n    {mct} x = *v; {w}(sb, &x, ind, lvl);\n")
+                let there = self.niche_there("*v", t);
+                format!("    if (!{there}) {{ tv_sb_push_cstr(sb, \"null\"); return; }}\n    {mct} x = *v; {w}(sb, &x, ind, lvl);\n")
             }
             Ty::Union(ms) => {
                 let ms = self.c.types.tys(ms).to_vec();

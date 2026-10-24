@@ -3866,9 +3866,12 @@ impl<'c, 'a> Gen<'c, 'a> {
                     return Val { code: local.access, ty, owned: true };
                 }
                 // (its last use, handing it over: moved, the local left empty)
-                if local.ty == ty && self.b().owned_locals.contains(&k) && self.is_last_use(e) && (matches!(self.tget(ty), Ty::Class(..)) || self.niche(ty).is_some()) {
+                let array = matches!(self.tget(ty), Ty::Array(_)) || self.niche_arr(ty);
+                if local.ty == ty && self.b().owned_locals.contains(&k) && self.is_last_use(e) && (matches!(self.tget(ty), Ty::Class(..)) || self.niche(ty).is_some() || array) {
+                    // (an array's release passes over a NULL header, as a class's over NULL)
                     let (ct, t) = (self.ctype(ty), self.fresh("mv"));
-                    self.line(format!("{ct} {t} = {0}; {0} = NULL;", local.access));
+                    let none = if array { "(tv_arr){NULL}" } else { "NULL" };
+                    self.line(format!("{ct} {t} = {0}; {0} = {none};", local.access));
                     return Val { code: t, ty, owned: true };
                 }
                 self.project(Val::plain(local.access, local.ty), ty)
@@ -3910,7 +3913,7 @@ impl<'c, 'a> Gen<'c, 'a> {
     /// Views a value of a declared type as a narrower (flow-narrowed) type.
     pub(crate) fn project(&mut self, v: Val, to: TyId) -> Val {
         // (narrowed to `never`: code that can't run)
-        if v.ty == to || to == ERROR || to == NEVER {
+        if v.ty == to || to == ERROR || to == NEVER || self.held(v.ty) == self.held(to) {
             self.checked_project = None;
             return v;
         }
@@ -3980,6 +3983,9 @@ impl<'c, 'a> Gen<'c, 'a> {
     /// Converts `v` to type `to` (widening, union injection, sub-union retagging, boxing).
     pub(crate) fn coerce(&mut self, v: Val, to: TyId) -> Val {
         let from = v.ty;
+        if from != to && self.held(from) == self.held(to) {
+            return Val { ty: to, ..v };
+        }
         if from == to || !(matches!(self.tget(from), Ty::Rec(..)) || matches!(self.tget(to), Ty::Rec(..))) {
             return self.coerce_inner(v, to);
         }
@@ -6194,6 +6200,9 @@ impl<'c, 'a> Gen<'c, 'a> {
     fn project_place(&mut self, p: Place, to: TyId) -> Place {
         if p.ty == to || to == ERROR {
             return p;
+        }
+        if self.held(p.ty) == self.held(to) {
+            return Place { ty: to, ..p };
         }
         if matches!(self.tget(p.ty), Ty::Rec(..)) {
             // Through the box, which is shared (as JavaScript's objects are).

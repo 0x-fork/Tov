@@ -945,7 +945,8 @@ impl<'c, 'a> Gen<'c, 'a> {
             Ty::Union(ms) => {
                 let ms = self.c.types.tys(ms).to_vec();
                 if let Some((pi, _)) = self.niche(ty) {
-                    return self.gc_visit(ms[pi], place, gv);
+                    let there = self.niche_there(place, ty);
+                    return self.gc_visit(ms[pi], place, gv).map(|c| format!("if ({there}) {{ {c} }}"));
                 }
                 let mut cases = String::new();
                 for (i, &m) in ms.iter().enumerate() {

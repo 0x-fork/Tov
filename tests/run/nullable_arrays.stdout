@@ -1,0 +1,9 @@
+15 2 2 undefined
+null undefined true true
+[ 1, 2 ] [ 'x' ] {"items":[1,2],"names":["x"]} 1,2
+[ 1 ] undefined undefined [ [ 1 ], undefined ]
+[ [ 1 ], null, [ 2, 3 ] ] [ 1, -1, 2 ] true true
+true false
+[ 1 ] [ 1, 9 ]
+1 [ 'd' ]
+-1 2

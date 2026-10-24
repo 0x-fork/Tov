@@ -134,6 +134,7 @@ pub struct Program {
 /// Generates the C program, or diagnostics for constructs the backend doesn't support yet.
 pub fn generate(c: &mut Checker, mode: Mode) -> Result<Program, Vec<Diagnostic>> {
     let mut g = Gen::new(c);
+    g.flatten_recs();
     g.program(mode);
     g.dyn_dispatch();
     for msg in std::mem::take(&mut g.internal) {
@@ -272,6 +273,8 @@ pub(crate) struct Gen<'c, 'a> {
     /// Conversions under way (see `coerce`), and the functions made for those met again inside
     /// themselves (between recursive types).
     pub(crate) coerce_stack: Vec<(TyId, TyId)>,
+    /// Recursive aliases for arrays, held as the array (see `flatten_recs`).
+    pub(crate) rec_flat: FxMap<TyId, TyId>,
     /// A script's static fields whose initializers can throw.
     pub(crate) static_throws: FxSet<(u32, u32)>,
     /// Bodies found quiet or not (see `quiet`), those being looked at, whether a result relied on
@@ -390,6 +393,7 @@ impl<'c, 'a> Gen<'c, 'a> {
             itabs: FxMap::default(),
             fn_adapters: FxMap::default(),
             coerce_stack: Vec::new(),
+            rec_flat: FxMap::default(),
             static_throws: FxSet::default(),
             quiet_memo: FxMap::default(),
             quiet_stack: Vec::new(),
@@ -449,8 +453,32 @@ impl<'c, 'a> Gen<'c, 'a> {
         match *self.c.types.get(t) {
             // (`true` as a type is a `bool` that's always true: the same C value)
             Ty::BoolLit(_) => Ty::Bool,
+            // (a recursive alias for an array: the array, see `flatten_recs`)
+            Ty::Rec(..) if let Some(&b) = self.rec_flat.get(&t) => *self.c.types.get(b),
             t => t,
         }
+    }
+
+    /// A recursive alias whose body is an array (`type Tree = (Tree | undefined)[]`) needs no
+    /// box: an array's elements are behind its header whatever they are, so the alias is held
+    /// as the array itself.
+    fn flatten_recs(&mut self) {
+        for i in 0..self.c.types.count() {
+            let t = TyId(i);
+            if let Ty::Rec(_, args) = *self.c.types.get(t)
+                && self.c.types.tys(args).is_empty()
+            {
+                let body = self.c.unfold(t);
+                if matches!(self.c.types.get(body), Ty::Array(_)) {
+                    self.rec_flat.insert(t, body);
+                }
+            }
+        }
+    }
+
+    /// `t` as held: a flattened recursive alias is its array (see `flatten_recs`).
+    pub(crate) fn held(&self, t: TyId) -> TyId {
+        self.rec_flat.get(&t).copied().unwrap_or(t)
     }
 
     // ------------------------------------------------------------ program
@@ -1025,8 +1053,26 @@ impl<'c, 'a> Gen<'c, 'a> {
         // (`C | null` too: NULL for `null`)
         let ui = ms.iter().position(|&m| m == UNDEFINED || m == NULL)?;
         let pi = 1 - ui;
-        // A class instance, a recursive alias's box or an object: a pointer, with NULL for `undefined`.
-        (matches!(self.tget(ms[pi]), Ty::Class(..) | Ty::Rec(..)) || self.is_obj(ms[pi])).then_some((pi, ui))
+        // A class instance, a recursive alias's box or an object: a pointer, with NULL for
+        // `undefined`; an array: its header pointer NULL.
+        (matches!(self.tget(ms[pi]), Ty::Class(..) | Ty::Rec(..) | Ty::Array(_)) || self.is_obj(ms[pi])).then_some((pi, ui))
+    }
+
+    /// A niche union holding an array (`T[] | undefined`): absent is a NULL header pointer.
+    pub(crate) fn niche_arr(&self, u: TyId) -> bool {
+        let Some((pi, _)) = self.niche(u) else { return false };
+        let Ty::Union(ms) = self.tget(u) else { return false };
+        matches!(self.tget(self.c.types.tys(ms)[pi]), Ty::Array(_))
+    }
+
+    /// A niche union's value `code` is there (not its absent `undefined` / `null`).
+    pub(crate) fn niche_there(&self, code: &str, u: TyId) -> String {
+        if self.niche_arr(u) { format!("(({code}).p != NULL)") } else { format!("(({code}) != NULL)") }
+    }
+
+    /// A niche union's absent value.
+    pub(crate) fn niche_none(&self, u: TyId) -> &'static str {
+        if self.niche_arr(u) { "((tv_arr){NULL})" } else { "NULL" }
     }
 
     /// How a niche union's absent value prints: `undefined`, or `null` for `C | null`.
@@ -1043,13 +1089,13 @@ impl<'c, 'a> Gen<'c, 'a> {
         let (pi, _) = self.niche(u)?;
         let Ty::Union(ms) = self.tget(u) else { return None };
         let m = self.c.types.tys(ms)[pi];
-        (matches!(self.tget(m), Ty::Rec(..)) || self.is_obj(m)).then_some(m)
+        (matches!(self.tget(m), Ty::Rec(..) | Ty::Array(_)) || self.is_obj(m)).then_some(m)
     }
 
     /// The tag of a union value (for `switch`).
     pub(crate) fn u_tag(&self, code: &str, u: TyId) -> String {
         match self.niche(u) {
-            Some((pi, ui)) => format!("(({code}) != NULL ? {pi} : {ui})"),
+            Some((pi, ui)) => format!("({} ? {pi} : {ui})", self.niche_there(code, u)),
             None => format!("({code}).tag"),
         }
     }
@@ -1057,8 +1103,8 @@ impl<'c, 'a> Gen<'c, 'a> {
     /// Does a union value hold member `k`?
     pub(crate) fn u_is(&self, code: &str, u: TyId, k: usize) -> String {
         match self.niche(u) {
-            Some((pi, _)) if k == pi => format!("(({code}) != NULL)"),
-            Some(_) => format!("(({code}) == NULL)"),
+            Some((pi, _)) if k == pi => self.niche_there(code, u),
+            Some(_) => format!("(!{})", self.niche_there(code, u)),
             None => format!("(({code}).tag == {k})"),
         }
     }
@@ -1074,8 +1120,8 @@ impl<'c, 'a> Gen<'c, 'a> {
     /// A union value holding member `k` (`payload`: its C value, `None` for unit members).
     pub(crate) fn u_make(&mut self, u: TyId, k: usize, payload: Option<&str>) -> String {
         match self.niche(u) {
-            Some((pi, _)) if k == pi => payload.unwrap_or("NULL").to_string(),
-            Some(_) => "NULL".to_string(),
+            Some((pi, _)) if k == pi => payload.unwrap_or(self.niche_none(u)).to_string(),
+            Some(_) => self.niche_none(u).to_string(),
             None => {
                 let ct = self.ctype(u);
                 match payload {
@@ -1112,7 +1158,7 @@ impl<'c, 'a> Gen<'c, 'a> {
             Ty::Unknown => "((tv_dyn){&tv_type_undefined, NULL})".into(),
             Ty::Class(..) => "NULL".into(),
             Ty::Interface(..) => "((tv_iface){NULL, NULL})".into(),
-            Ty::Union(_) if self.niche(t).is_some() => "NULL".into(),
+            Ty::Union(_) if self.niche(t).is_some() => self.niche_none(t).into(),
             Ty::Record(_) | Ty::Union(_) | Ty::Rec(..) => {
                 self.ensure_helper(t, H_DEFAULT);
                 let n = self.box_name(t);
@@ -1403,7 +1449,8 @@ impl<'c, 'a> Gen<'c, 'a> {
             Ty::Union(_) if self.niche_rec(t).is_some() => {
                 let m = self.niche_rec(t).unwrap();
                 let inner = self.retain_code(m, place);
-                format!("({{ if (({place}) != NULL) {inner}; }})")
+                let there = self.niche_there(place, t);
+                format!("({{ if ({there}) {inner}; }})")
             }
             Ty::Union(_) if self.niche(t).is_some() => format!("tvg_obj_retain({place})"),
             _ if self.is_rc(t) => {
@@ -1440,7 +1487,8 @@ impl<'c, 'a> Gen<'c, 'a> {
             Ty::Union(_) if self.niche_rec(t).is_some() => {
                 let m = self.niche_rec(t).unwrap();
                 let inner = self.release_code(m, place);
-                format!("({{ if (({place}) != NULL) {inner}; }})")
+                let there = self.niche_there(place, t);
+                format!("({{ if ({there}) {inner}; }})")
             }
             Ty::Union(ms) if self.niche(t).is_some() => {
                 let (pi, _) = self.niche(t).unwrap();
@@ -1467,11 +1515,17 @@ impl<'c, 'a> Gen<'c, 'a> {
             Ty::Class(..) | Ty::Promise(..) | Ty::Gen(_) | Ty::AsyncGen(_) => format!("((void *)({a}) == (void *)({b}))"),
             Ty::Interface(..) => format!("(({a}).p == ({b}).p)"),
             Ty::Js => format!("tv_type_js.eq(&({a}), &({b}))"),
+            Ty::Union(_) if self.niche_arr(t) => format!("(({a}).p == ({b}).p)"),
             Ty::Union(_) if self.niche_rec(t).is_some() => {
                 // values: equal when both are undefined, or both hold equal trees
                 let m = self.niche_rec(t).unwrap();
                 let inner = self.eq_code(m, a, b);
-                format!("((({a}) == NULL || ({b}) == NULL) ? (({a}) == ({b})) : {inner})")
+                let (ta, tb) = (self.niche_there(a, t), self.niche_there(b, t));
+                if self.niche_arr(t) {
+                    format!("((!{ta} || !{tb}) ? (({a}).p == ({b}).p) : {inner})")
+                } else {
+                    format!("((!{ta} || !{tb}) ? (({a}) == ({b})) : {inner})")
+                }
             }
             Ty::Union(_) if self.niche(t).is_some() => format!("((void *)({a}) == (void *)({b}))"),
             Ty::Record(_) if self.is_obj(t) => format!("(({a}) == ({b}))"),
@@ -1518,7 +1572,8 @@ impl<'c, 'a> Gen<'c, 'a> {
                 let m = self.c.types.tys(ms)[pi];
                 let inner = if self.niche_rec(t).is_some() { self.string_code(m, place) } else { self.class_string_code(m, place) };
                 let absent = self.niche_absent(t);
-                format!("({{ if (({place}) != NULL) {inner}; else tv_sb_push_cstr(sb, \"{absent}\"); }})")
+                let there = self.niche_there(place, t);
+                format!("({{ if ({there}) {inner}; else tv_sb_push_cstr(sb, \"{absent}\"); }})")
             }
             // (as JavaScript's `String(m)`; a `Record` made as an object is one)
             Ty::Map(..) => format!("tv_sb_push_cstr(sb, tv_map_is_object({place}) ? \"[object Object]\" : \"[object Map]\")"),
@@ -1583,7 +1638,8 @@ impl<'c, 'a> Gen<'c, 'a> {
                 let m = self.niche_rec(t).unwrap();
                 let inner = self.inspect_code(m, place, depth);
                 let absent = self.niche_absent(t);
-                format!("({{ if (({place}) != NULL) {inner}; else tv_sb_push_cstr(sb, \"{absent}\"); }})")
+                let there = self.niche_there(place, t);
+                format!("({{ if ({there}) {inner}; else tv_sb_push_cstr(sb, \"{absent}\"); }})")
             }
             Ty::Union(_) if self.niche(t).is_some() => format!("({{ if (({place}) != NULL) tvg_obj_inspect(sb, (void *)({place}), {depth}); else tv_sb_push_cstr(sb, \"{}\"); }})", self.niche_absent(t)),
             _ => {
@@ -1640,6 +1696,8 @@ impl<'c, 'a> Gen<'c, 'a> {
             let hash = match self.tget(t) {
                 Ty::Class(..) => "((uint64_t)(uintptr_t)(*(void *const *)p) * 0x9E3779B97F4A7C15ull)".into(),
                 Ty::Interface(..) => "((uint64_t)(uintptr_t)(((const tv_iface *)p)->p) * 0x9E3779B97F4A7C15ull)".into(),
+                // (an array or nothing: by which array, as `===` compares arrays)
+                Ty::Union(_) if self.niche_arr(t) => "((uint64_t)(uintptr_t)(*(void *const *)p) * 0x9E3779B97F4A7C15ull)".into(),
                 Ty::Union(_) if self.niche_rec(t).is_some() => {
                     let m = self.niche_rec(t).unwrap();
                     self.ensure_helper(m, H_HASH);

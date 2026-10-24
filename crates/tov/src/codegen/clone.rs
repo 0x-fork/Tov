@@ -113,7 +113,8 @@ impl<'c, 'a> Gen<'c, 'a> {
                 if let Some((pi, _)) = self.niche(t) {
                     let c = self.clone_of(ms[pi], "x");
                     let mct = self.ctype(ms[pi]);
-                    return format!("    if (*v == NULL) return NULL;\n    {mct} x = *v;\n    return {c};\n");
+                    let (there, none) = (self.niche_there("*v", t), self.niche_none(t));
+                    return format!("    if (!{there}) return {none};\n    {mct} x = *v;\n    return {c};\n");
                 }
                 let mut b = format!("    {ct} r = *v;\n    switch (v->tag) {{\n");
                 for (i, &m) in ms.iter().enumerate() {

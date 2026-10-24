@@ -2265,6 +2265,7 @@ impl<'a> Checker<'a> {
             }
             self.types.without_undefined(t)
         };
+        let base = self.array_alias(base);
         if base == JS {
             let it = self.expr(index, None);
             if !(self.types.is_numeric(it) || self.assignable(it, STR) || it == JS || it == ERROR) {
@@ -5801,6 +5802,20 @@ impl<'a> Checker<'a> {
 
     fn has_default(&self, t: TyId) -> bool {
         self.types.is_numeric(t) || matches!(*self.types.get(t), Ty::Bool | Ty::Str)
+    }
+
+    /// `type Tree = (Tree | undefined)[]` (a recursive alias, not generic, for an array): the
+    /// array, which is what it's held as.
+    pub(super) fn array_alias(&mut self, t: TyId) -> TyId {
+        if let Ty::Rec(_, args) = *self.types.get(t)
+            && self.types.tys(args).is_empty()
+        {
+            let body = self.unfold(t);
+            if matches!(self.types.get(body), Ty::Array(_)) {
+                return body;
+            }
+        }
+        t
     }
 
     /// A tuple type's elements (`[A, B]`: a record with fields `0`, `1`), in order.

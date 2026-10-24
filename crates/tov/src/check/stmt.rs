@@ -622,6 +622,7 @@ impl<'a> Checker<'a> {
             }
             StmtKind::ForOf { mutable, name, name_span, iter, body } => {
                 let t = self.expr(*iter, None);
+                let t = self.array_alias(t);
                 let ispan = self.ast().expr(*iter).span;
                 let tt = *self.types.get(t);
                 let elem = match tt {
