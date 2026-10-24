@@ -698,7 +698,14 @@ impl<'a> Checker<'a> {
             self.report(Diagnostic::new("T0807", span, format!("`{n}` is {a} in the base class but {b} here")));
             return;
         }
-        let ok_params = base.params.len() == over.params.len()
+        // (`number` taken as `int` in one and as a float in the other: both floats, next round)
+        if self.spec.on && self.override_floats(base, over) {
+            return;
+        }
+        // (an override may take more parameters, if they're optional: calls through the base
+        // leave them `undefined`)
+        let ok_params = base.params.len() <= over.params.len()
+            && over.params[base.params.len()..].iter().all(|p| p.optional && !p.inout)
             && base.params.iter().zip(&over.params).all(|(b, o)| b.inout == o.inout && b.optional == o.optional && self.assignable(b.ty, o.ty));
         // Inferred return types are compared once the class is resolved (see `check_class_interface`).
         let (Some(bret), Some(oret)) = (base.ret, over.ret) else {
@@ -722,6 +729,40 @@ impl<'a> Checker<'a> {
                     .note("rule", "an override takes the same parameters (or wider types) and returns the same type (or a narrower one)"),
             );
         }
+    }
+
+    /// Parameters an override and its base take as different numbers (one site found to hold
+    /// floats, the other not): both sites are blamed. True when any were.
+    fn override_floats(&mut self, base: &CMethod, over: &CMethod) -> bool {
+        let tes = |c: &Self, mm: &CMethod| -> Vec<Option<ast::TypeId>> {
+            match &c.class_decl(mm.owner).members[mm.member as usize].kind {
+                MemberKind::Method(f) | MemberKind::Getter(f) => f.params.iter().map(|p| p.ty).collect(),
+                _ => Vec::new(),
+            }
+        };
+        let (bt, ot) = (tes(self, base), tes(self, over));
+        let (bm, om) = (self.classes[base.owner as usize].module, self.classes[over.owner as usize].module);
+        let mut blamed = false;
+        for (i, (b, o)) in base.params.iter().zip(&over.params).enumerate() {
+            let (b0, o0) = (self.types.without_undefined(b.ty), self.types.without_undefined(o.ty));
+            let (bi, oi) = (self.types.is_int(b0), self.types.is_int(o0));
+            let (bf, of) = (self.types.is_float(b0), self.types.is_float(o0));
+            if !(bi && of || bf && oi) {
+                continue;
+            }
+            let mut sites = Vec::new();
+            if let Some(Some(t)) = bt.get(i) {
+                sites.extend(self.type_sites(bm, *t));
+            }
+            if let Some(Some(t)) = ot.get(i) {
+                sites.extend(self.type_sites(om, *t));
+            }
+            if !sites.is_empty() {
+                self.blame(&sites);
+                blamed = true;
+            }
+        }
+        blamed
     }
 
     fn method_desc(&mut self, mm: &CMethod, n: &str) -> String {

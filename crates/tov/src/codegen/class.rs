@@ -1113,7 +1113,15 @@ impl<'c, 'a> Gen<'c, 'a> {
                 if !ci.constructed || !self.c.class_descends(ci.decl, recv_decl) || self.c.upcast_to(t, recv_decl) != Some(recv) {
                     continue;
                 }
-                let call = self.method_call_code(&format!("(({} *)self_)", ci.name), t, method, true, args.clone());
+                // (an override's extra optional parameters: `undefined`)
+                let mut args = args.clone();
+                if let Some(ClassMemberRef::Method(om)) = self.c.class_member(t, method) {
+                    for p in om.params.iter().skip(params.len()) {
+                        let pt = self.c.types.subst(p.ty, &ci.subst);
+                        args.push(self.default_value(pt));
+                    }
+                }
+                let call = self.method_call_code(&format!("(({} *)self_)", ci.name), t, method, true, args);
                 let _ = writeln!(cases, "    case {}: {}{call};{}", ci.cid, if ret == VOID { "" } else { "return " }, if ret == VOID { " return;" } else { "" });
             }
             let proto = self.self_proto(&dname, &self.class_insts[&recv].name.clone(), &params, ret);

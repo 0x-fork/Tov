@@ -1446,9 +1446,12 @@ impl<'a> Checker<'a> {
                         self.report(d);
                     }
                     if let Some(radix) = args.get(1) {
+                        // (any number: JavaScript truncates it)
                         let t = self.expr(radix.expr, Some(INT));
-                        let s = self.ast().expr(radix.expr).span;
-                        self.expect_assignable(t, INT, s, None);
+                        if !self.types.is_numeric(t) {
+                            let s = self.ast().expr(radix.expr).span;
+                            self.expect_assignable(t, INT, s, None);
+                        }
                     }
                 }
                 ret
