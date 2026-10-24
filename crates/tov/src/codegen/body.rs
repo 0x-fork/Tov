@@ -3868,7 +3868,7 @@ impl<'c, 'a> Gen<'c, 'a> {
                 }
                 // (its last use, handing it over: moved, the local left empty)
                 let array = matches!(self.tget(ty), Ty::Array(_)) || self.niche_arr(ty);
-                if local.ty == ty && self.b().owned_locals.contains(&k) && self.is_last_use(e) && (matches!(self.tget(ty), Ty::Class(..)) || self.niche(ty).is_some() || array) {
+                if local.ty == ty && self.b().owned_locals.contains(&k) && self.is_last_use(e) && (matches!(self.tget(ty), Ty::Class(..)) || self.niche(ty).is_some() && !self.niche_str(ty) || array) {
                     // (an array's release passes over a NULL header, as a class's over NULL)
                     let (ct, t) = (self.ctype(ty), self.fresh("mv"));
                     let none = if array { "(tv_arr){NULL}" } else { "NULL" };
@@ -4145,7 +4145,9 @@ impl<'c, 'a> Gen<'c, 'a> {
             return self.coerce(u, to);
         }
         // Union of string literals → string.
-        if let (Ty::Union(fms), Ty::Str) = (tf, tt) {
+        if let (Ty::Union(fms), Ty::Str) = (tf, tt)
+            && self.niche(from).is_none()
+        {
             let fms = self.c.types.tys(fms).to_vec();
             let res = self.fresh("s");
             self.line(format!("tv_str {res};"));

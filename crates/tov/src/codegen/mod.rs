@@ -1062,7 +1062,14 @@ impl<'c, 'a> Gen<'c, 'a> {
         let pi = 1 - ui;
         // A class instance, a recursive alias's box or an object: a pointer, with NULL for
         // `undefined`; an array: its header pointer NULL.
-        (matches!(self.tget(ms[pi]), Ty::Class(..) | Ty::Rec(..) | Ty::Array(_)) || self.is_obj(ms[pi])).then_some((pi, ui))
+        (matches!(self.tget(ms[pi]), Ty::Class(..) | Ty::Rec(..) | Ty::Array(_) | Ty::Str) || self.is_obj(ms[pi])).then_some((pi, ui))
+    }
+
+    /// A niche union holding a string (`string | undefined`): absent is a NULL buffer pointer.
+    pub(crate) fn niche_str(&self, u: TyId) -> bool {
+        let Some((pi, _)) = self.niche(u) else { return false };
+        let Ty::Union(ms) = self.tget(u) else { return false };
+        matches!(self.tget(self.c.types.tys(ms)[pi]), Ty::Str)
     }
 
     /// A niche union holding an array (`T[] | undefined`): absent is a NULL header pointer.
@@ -1074,12 +1081,18 @@ impl<'c, 'a> Gen<'c, 'a> {
 
     /// A niche union's value `code` is there (not its absent `undefined` / `null`).
     pub(crate) fn niche_there(&self, code: &str, u: TyId) -> String {
-        if self.niche_arr(u) { format!("(({code}).p != NULL)") } else { format!("(({code}) != NULL)") }
+        if self.niche_arr(u) || self.niche_str(u) { format!("(({code}).p != NULL)") } else { format!("(({code}) != NULL)") }
     }
 
     /// A niche union's absent value.
     pub(crate) fn niche_none(&self, u: TyId) -> &'static str {
-        if self.niche_arr(u) { "((tv_arr){NULL})" } else { "NULL" }
+        if self.niche_arr(u) {
+            "((tv_arr){NULL})"
+        } else if self.niche_str(u) {
+            "((tv_str){NULL})"
+        } else {
+            "NULL"
+        }
     }
 
     /// How a niche union's absent value prints: `undefined`, or `null` for `C | null`.
@@ -1096,7 +1109,7 @@ impl<'c, 'a> Gen<'c, 'a> {
         let (pi, _) = self.niche(u)?;
         let Ty::Union(ms) = self.tget(u) else { return None };
         let m = self.c.types.tys(ms)[pi];
-        (matches!(self.tget(m), Ty::Rec(..) | Ty::Array(_)) || self.is_obj(m)).then_some(m)
+        (matches!(self.tget(m), Ty::Rec(..) | Ty::Array(_) | Ty::Str) || self.is_obj(m)).then_some(m)
     }
 
     /// The tag of a union value (for `switch`).
@@ -1522,6 +1535,7 @@ impl<'c, 'a> Gen<'c, 'a> {
             Ty::Class(..) | Ty::Promise(..) | Ty::Gen(_) | Ty::AsyncGen(_) => format!("((void *)({a}) == (void *)({b}))"),
             Ty::Interface(..) => format!("(({a}).p == ({b}).p)"),
             Ty::Js => format!("tv_type_js.eq(&({a}), &({b}))"),
+            Ty::Union(_) if self.niche_str(t) => format!("((({a}).p == NULL || ({b}).p == NULL) ? (({a}).p == ({b}).p) : tv_str_eq({a}, {b}))"),
             Ty::Union(_) if self.niche_arr(t) => format!("(({a}).p == ({b}).p)"),
             Ty::Union(_) if self.niche_rec(t).is_some() => {
                 // values: equal when both are undefined, or both hold equal trees
@@ -1705,6 +1719,8 @@ impl<'c, 'a> Gen<'c, 'a> {
                 Ty::Interface(..) => "((uint64_t)(uintptr_t)(((const tv_iface *)p)->p) * 0x9E3779B97F4A7C15ull)".into(),
                 // (an array or nothing: by which array, as `===` compares arrays)
                 Ty::Union(_) if self.niche_arr(t) => "((uint64_t)(uintptr_t)(*(void *const *)p) * 0x9E3779B97F4A7C15ull)".into(),
+                // (a string or nothing: by its text)
+                Ty::Union(_) if self.niche_str(t) => "(*(void *const *)p == NULL ? 0x9E3779B97F4A7C15ull : tv_str_hash(*(const tv_str *)p))".into(),
                 Ty::Union(_) if self.niche_rec(t).is_some() => {
                     let m = self.niche_rec(t).unwrap();
                     self.ensure_helper(m, H_HASH);

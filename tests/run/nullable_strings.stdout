@@ -1,0 +1,11 @@
+null undefined true true
+b true true {"current":"b","idx":1,"input":"ab\ncd"}
+true 1
+zed! ZED zed 3
+[ 'a', undefined, 'c' ] a-c 1 true
+2 3 2 [ 'k', null ]
+2 true true
+same same q same
+onetwo 6 string string
+[ '\n', 'zed' ] [ '\n', 'zed' ]
+newline
