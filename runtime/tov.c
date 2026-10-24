@@ -2649,6 +2649,28 @@ void tv_arr_fill(tv_arr *a, const tv_type *t, const void *elem, tv_int start, bo
     if (s >= e) return;
     tv_arr_make_unique(a, t, len);
     unsigned char *d = tv_arrbuf_data(a->p);
+    if (!t->release && !t->retain) {
+        /* plain data: zeros and bytes by memset, the rest by whole-element stores */
+        size_t n = (size_t)(e - s), es = t->size;
+        unsigned char *p = d + (size_t)s * es;
+        const unsigned char *b = elem;
+        bool zero = true;
+        for (size_t k = 0; k < es; k++) zero &= b[k] == 0;
+        if (zero || es == 1) {
+            memset(p, es ? b[0] : 0, n * es);
+        } else if (es == 8) {
+            uint64_t v;
+            memcpy(&v, elem, 8);
+            for (size_t i = 0; i < n; i++) memcpy(p + i * 8, &v, 8);
+        } else if (es == 4) {
+            uint32_t v;
+            memcpy(&v, elem, 4);
+            for (size_t i = 0; i < n; i++) memcpy(p + i * 4, &v, 4);
+        } else {
+            for (size_t i = 0; i < n; i++) memcpy(p + i * es, elem, es);
+        }
+        return;
+    }
     for (int64_t i = s; i < e; i++) {
         if (t->release) t->release(d + (size_t)i * t->size);
         tv_copy_retain(d + (size_t)i * t->size, elem, 1, t);
