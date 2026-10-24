@@ -2342,7 +2342,7 @@ static void tvg_cyc_collect(void) {
      * structure that mostly lives on isn't walked again and again; but never more than 2M
      * allocations past twice the live objects, so the garbage that a later phase makes is still
      * found) */
-    tvg_cyc_factor = found * 2 >= walked && found ? 2 : (tvg_cyc_factor < 64 ? tvg_cyc_factor * 4 : 64);
+    tvg_cyc_factor = found * 2 >= walked && found ? 4 : (tvg_cyc_factor < 64 ? tvg_cyc_factor * 4 : 64);
     int64_t live = tvg_cyc_count * tvg_cyc_factor, most = tvg_cyc_count * 2 + ((int64_t)1 << 21);
     if (live > most) live = most;
     tvg_cyc_limit = live > 10000 ? live : 10000;
