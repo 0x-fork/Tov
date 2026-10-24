@@ -2800,6 +2800,40 @@ impl<'c, 'a> Gen<'c, 'a> {
         }
     }
 
+    /// `e` reads a path from `this`, a parameter or a local never assigned again (`xs[i]`,
+    /// `this.items[k].next`), in a function that releases nothing (see `quiet_body`): what it
+    /// reads stays alive as long as the function runs, so a `const` of it can borrow it.
+    fn quiet_path(&mut self, e: ExprId) -> bool {
+        let m = self.cur_m();
+        let ast = self.ast(m);
+        let mut cur = e;
+        loop {
+            match &ast.expr(cur).kind {
+                ExprKind::Paren(x) | ExprKind::NonNull(x) => cur = *x,
+                ExprKind::Member { obj, optional: false, .. } => cur = *obj,
+                ExprKind::Index { obj, .. } => cur = *obj,
+                ExprKind::This => break,
+                ExprKind::Ident(_) => match self.ident_fact(m, cur) {
+                    Some(IdentFact::Local(k)) => {
+                        let b = self.bodies.last().unwrap();
+                        if b.mutated.contains(&k) || b.boxed.contains(&k) {
+                            return false;
+                        }
+                        break;
+                    }
+                    _ => return false,
+                },
+                _ => return false,
+            }
+        }
+        let b = self.bodies.last().unwrap();
+        if b.async_fn.is_some() || b.gen_elem.is_some() || b.ctor_class.is_some() {
+            return false;
+        }
+        let Some(root) = b.root else { return false };
+        self.quiet_body_pub(m, root)
+    }
+
     pub(crate) fn cell_type(&mut self, ty: TyId) -> String {
         let ct = self.ctype(ty);
         let name = format!("C{}", ty.0);
@@ -2956,7 +2990,7 @@ impl<'c, 'a> Gen<'c, 'a> {
                     && !v.owned
                     && (object || !self.b().mutated.contains(&key))
                     && !self.b().boxed.contains(&key)
-                    && self.stable_path(*i)
+                    && (self.stable_path(*i) || object && self.quiet_path(*i))
                 {
                     self.line(format!("{ct} {cname} = {};", v.code));
                     self.pop_temps();
@@ -6685,6 +6719,12 @@ impl<'c, 'a> Gen<'c, 'a> {
     /// happens once.
     fn place_lvalue(&mut self, p: &Place) -> String {
         if p.lv.starts_with(|c: char| c.is_ascii_alphabetic() || c == '_') && p.lv.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
+            return p.lv.clone();
+        }
+        // (a field of an object that can't change: written as `o->f`, which tells the C compiler
+        // it's that field of that struct, not any double anywhere: a store to `a->vx` then leaves
+        // `b->mass` in a register)
+        if self.stable_places.contains(&p.lv) {
             return p.lv.clone();
         }
         let ct = self.ctype(p.ty);

@@ -214,6 +214,10 @@ impl Gen<'_, '_> {
         true
     }
 
+    pub(crate) fn quiet_body_pub(&mut self, m: u32, body: StmtId) -> bool {
+        self.quiet_body(m, body, false)
+    }
+
     fn quiet_body(&mut self, m: u32, body: StmtId, ctor: bool) -> bool {
         let key = (m, body, ctor);
         // (the body being written out, looked at as itself: what's found for its instance,
@@ -310,8 +314,31 @@ impl Gen<'_, '_> {
             ExprKind::Assign(_, t, v) => {
                 // (what's stored: by the target's, the value's or the assignment's type, any that
                 // may hold a reference)
-                let tys = [self.facts(m).expr_ty[*t as usize], self.facts(m).expr_ty[*v as usize], self.facts(m).expr_ty[e as usize]];
-                let rc = tys.into_iter().any(|t| t == ERROR || self.quiet_rc(t));
+                // (a target has no type of its own recorded: the value's, the assignment's and,
+                // for a class field, the field's declared one stand for it)
+                let mut tys = vec![self.facts(m).expr_ty[*t as usize], self.facts(m).expr_ty[*v as usize], self.facts(m).expr_ty[e as usize]];
+                match &ast.expr(*t).kind {
+                    ExprKind::Member { obj, name, .. } => {
+                        let ot = self.facts(m).expr_ty[*obj as usize];
+                        let ot = self.c.types.without_nullish(ot);
+                        if self.c.class_of(ot).is_some() {
+                            match self.class_field(ot, *name) {
+                                Some(f) => tys.push(f.ty),
+                                None => return false,
+                            }
+                        }
+                    }
+                    // (the slot's type: `xs[i] = null` releases the `T` a `(T | null)[]` held)
+                    ExprKind::Index { obj, .. } => match self.c.types.get(self.facts(m).expr_ty[*obj as usize]) {
+                        Ty::Array(et) => tys.push(*et),
+                        _ => return false,
+                    },
+                    // (a module variable: of a type not recorded here)
+                    ExprKind::Ident(_) if !matches!(self.ident_fact(m, *t), Some(IdentFact::Local(_))) => return false,
+                    _ => {}
+                }
+                let known: Vec<TyId> = tys.into_iter().filter(|&x| x != ERROR).collect();
+                let rc = known.is_empty() || known.into_iter().any(|t| self.quiet_rc(t));
                 let tt = if rc { UNKNOWN } else { INT };
                 let ok = match &ast.expr(*t).kind {
                     ExprKind::Ident(_) => match self.ident_fact(m, *t) {

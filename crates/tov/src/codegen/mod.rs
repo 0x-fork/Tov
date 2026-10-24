@@ -313,6 +313,9 @@ pub(crate) struct Gen<'c, 'a> {
     pub(crate) arrow_protos: FxMap<String, String>,
     /// Array types given a free function of their own (see `arr_free_fn`).
     pub(crate) arr_frees: FxSet<TyId>,
+    /// Field places of objects that can't change before the store (see `class_field_place`).
+    pub(crate) stable_places: FxSet<String>,
+    pub(crate) reassigned_memo: FxMap<(u32, crate::ast::StmtId), FxSet<u32>>,
     pub(crate) quiet_inst_memo: FxMap<((u32, crate::ast::StmtId, bool), Vec<(u32, TyId)>), bool>,
     /// The call being made, for its arguments (see `call_spares`).
     pub(crate) cur_calls: Vec<(usize, u32, crate::ast::ExprId)>,
@@ -446,6 +449,8 @@ impl<'c, 'a> Gen<'c, 'a> {
             devirt: Vec::new(),
             arrow_protos: FxMap::default(),
             arr_frees: FxSet::default(),
+            stable_places: FxSet::default(),
+            reassigned_memo: FxMap::default(),
             quiet_inst_memo: FxMap::default(),
             cur_calls: Vec::new(),
             pquiet_stack: Vec::new(),

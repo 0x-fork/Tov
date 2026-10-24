@@ -216,7 +216,60 @@ impl<'c, 'a> Gen<'c, 'a> {
             return super::body::Place { lv: "tv__dummy".into(), ty: ERROR, weak: false };
         };
         let lv = self.field_lv_of(&v.code, v.ty, &f);
+        // (`this`, or a local never assigned again: the object can't change before the store,
+        // so the field is written as itself, not through a pointer taken first; see place_lvalue)
+        let m = self.cur_m();
+        let mut o = obj;
+        while let ExprKind::Paren(x) | ExprKind::NonNull(x) = self.ast(m).expr(o).kind {
+            o = x;
+        }
+        let stable = match self.ast(m).expr(o).kind {
+            ExprKind::This => true,
+            ExprKind::Ident(_) => match self.ident_fact(m, o) {
+                Some(crate::check::IdentFact::Local(k)) => {
+                    let b = self.bodies.last().unwrap();
+                    let ok = !b.boxed.contains(&k) && b.locals.get(&k).is_some_and(|l| l.access == v.code);
+                    ok && !self.reassigned(k)
+                }
+                _ => false,
+            },
+            _ => false,
+        };
+        if stable && !v.owned {
+            self.stable_places.insert(lv.clone());
+        }
         super::body::Place { lv, ty: f.ty, weak: f.weak }
+    }
+
+    /// Local `k` of the body being written out is assigned again somewhere in it (or changed
+    /// by `++`, or passed by reference): not just its fields.
+    fn reassigned(&mut self, k: u32) -> bool {
+        let m = self.cur_m();
+        let Some(root) = self.bodies.last().and_then(|b| b.root) else { return true };
+        if !self.reassigned_memo.contains_key(&(m, root)) {
+            let ast = self.ast(m);
+            let mut exprs = Vec::new();
+            super::body::collect_exprs_stmt_pub(ast, root, &mut exprs);
+            let mut set: crate::hash::FxSet<u32> = crate::hash::FxSet::default();
+            for &e in &exprs {
+                let mut targets: Vec<ExprId> = Vec::new();
+                match &ast.expr(e).kind {
+                    ExprKind::Assign(_, t, _) | ExprKind::Update { target: t, .. } => targets.push(*t),
+                    ExprKind::Call { args, .. } => targets.extend(args.iter().filter(|a| a.by_ref.is_some()).map(|a| a.expr)),
+                    _ => {}
+                }
+                for mut t in targets {
+                    while let ExprKind::Paren(x) = ast.expr(t).kind {
+                        t = x;
+                    }
+                    if let Some(crate::check::IdentFact::Local(j)) = self.ident_fact(m, t) {
+                        set.insert(j);
+                    }
+                }
+            }
+            self.reassigned_memo.insert((m, root), set);
+        }
+        self.reassigned_memo[&(m, root)].contains(&k)
     }
 
     /// `field = value` for a weak field: weak counts instead of strong ones.
