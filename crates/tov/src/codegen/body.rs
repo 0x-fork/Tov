@@ -54,6 +54,9 @@ pub(crate) struct Body {
     pub labeled: Vec<(crate::intern::Sym, String, usize, usize)>,
     /// A `for...of` variable made for each iteration: its release, at the end of each.
     pub iter_release: Option<String>,
+    /// `for (const k in m)` walking the map `m` itself (see `keys_loop`): (the map's code, the
+    /// key variable, the current entry's value pointer, the value type). `m[k]` there is that value.
+    pub map_loops: Vec<(String, String, String, TyId)>,
     /// (target, scope depth to unwind to)
     breaks: Vec<(BreakTarget, usize)>,
     /// Locals (by declaration offset) that live in heap cells because a heap closure captures them and they change.
@@ -269,6 +272,7 @@ impl<'c, 'a> Gen<'c, 'a> {
             loops: Vec::new(),
             labeled: Vec::new(),
             iter_release: None,
+            map_loops: Vec::new(),
             breaks: Vec::new(),
             boxed: FxSet::default(),
             stack_arrows: FxSet::default(),
@@ -469,6 +473,7 @@ impl<'c, 'a> Gen<'c, 'a> {
             loops: Vec::new(),
             labeled: Vec::new(),
             iter_release: None,
+            map_loops: Vec::new(),
             breaks: Vec::new(),
             boxed,
             stack_arrows,
@@ -2743,6 +2748,44 @@ impl<'c, 'a> Gen<'c, 'a> {
                 self.pop_scope();
                 self.close("}");
             }
+            StmtKind::ForOf { name, name_span, iter, body, .. } if self.keys_loop(*iter, *name, *body).is_some() => {
+                // `for (const k in m)` / `for (const k of Object.keys(m))` of a map whose keys the
+                // body can't change: the map's own entries, in order (no array of keys), and
+                // `m[k]` the entry's value
+                let (mx, k, v) = self.keys_loop(*iter, *name, *body).unwrap();
+                let cont = self.fresh("cont");
+                self.open("{");
+                self.push_scope();
+                self.push_temps();
+                let mv = self.expr(mx);
+                let mt = mv.ty;
+                let snap = self.consume(mv);
+                let sn = self.fresh("it");
+                self.line(format!("tv_map {sn} = {snap};"));
+                self.pop_temps();
+                let rel = format!("{};", self.release_code(mt, &sn));
+                self.b().scopes.last_mut().unwrap().releases.push(rel);
+                let (kd, vd, kct) = (self.desc(k), self.desc(v), self.ctype(k));
+                let uniq = self.fresh("");
+                let var = format!("v_{}_{}", self.sym(*name), uniq);
+                let cur = self.fresh("i");
+                self.line(format!("tv_int {cur} = 0; void *{cur}k, *{cur}v;"));
+                self.open(&format!("while (tv_map_next({sn}, {kd}, {vd}, &{cur}, &{cur}k, &{cur}v)) {{"));
+                self.line(format!("{kct} {var} = *({kct} *){cur}k;"));
+                self.b().locals.insert(name_span.start, Local { access: var.clone(), ty: k });
+                // (`m[k]` reads the map's code: the variable it's in, unchanged by the body)
+                let mcode = self.expr_code_of(mx);
+                self.b().map_loops.push((mcode, var, format!("{cur}v"), v));
+                let hoisted = self.hoist_unique(&[*body], &[]);
+                let binding = self.b().boxed.contains(&name_span.start).then_some(name_span.start);
+                self.loop_body_with_binding(*body, &cont, binding);
+                self.unhoist(hoisted);
+                self.b().map_loops.pop();
+                self.line(format!("{cont}:;"));
+                self.close("}");
+                self.pop_scope();
+                self.close("}");
+            }
             StmtKind::ForOf { name, name_span, iter, body, .. } => {
                 let elem = self.facts(m).bindings.get(&s).copied().unwrap_or(ERROR);
                 let elem = self.inst(elem);
@@ -2750,6 +2793,21 @@ impl<'c, 'a> Gen<'c, 'a> {
                 self.open("{");
                 self.push_scope();
                 self.push_temps();
+                // (`for (k in m)` of a map variable: the map, to test each key's still there)
+                let for_in_map = match &self.ast(m).expr(*iter).kind {
+                    ExprKind::Call { args, .. } if self.ast(m).for_in_keys.contains(iter) && args.len() == 1 && matches!(self.ast(m).expr(args[0].expr).kind, ExprKind::Ident(_)) => {
+                        let mx = args[0].expr;
+                        let mt = self.ty(mx);
+                        match self.tget(mt) {
+                            Ty::Map(k, v) if k == STR => {
+                                let code = self.expr_code_of(mx);
+                                Some((code, self.desc(k), self.desc(v)))
+                            }
+                            _ => None,
+                        }
+                    }
+                    _ => None,
+                };
                 let coll = self.expr(*iter);
                 // a string: its characters (code points), as JavaScript iterates it
                 let coll = if matches!(self.tget(coll.ty), Ty::Str | Ty::StrLit(_)) {
@@ -2820,6 +2878,10 @@ impl<'c, 'a> Gen<'c, 'a> {
                         let idx = self.fresh("i");
                         self.open(&format!("for (tv_int {idx} = 0; {idx} < tv_arr_len({sn}); {idx}++) {{"));
                         self.line(format!("{ect} {var} = (({ect} *)tv_arr_data({sn}))[{idx}];"));
+                        // (`for (k in m)`: a key deleted on the way is skipped, as in JavaScript)
+                        if let Some((mcode, kd, vd)) = for_in_map {
+                            self.line(format!("if (!tv_map_has({mcode}, {kd}, {vd}, &{var})) continue;"));
+                        }
                     }
                 }
                 self.b().locals.insert(name_span.start, Local { access: var, ty: elem });
@@ -5417,6 +5479,122 @@ impl<'c, 'a> Gen<'c, 'a> {
         self.index_of(a, index, ty, span)
     }
 
+    /// `for (const k in m)` (`Object.keys(m)`) of a map variable with string keys whose body can't
+    /// change which keys it holds or reassign it: (the map, its key and value types).
+    fn keys_loop(&mut self, iter: ExprId, key: crate::intern::Sym, body: crate::ast::StmtId) -> Option<(ExprId, TyId, TyId)> {
+        let m = self.cur_m();
+        let ast = self.ast(m);
+        let ExprKind::Call { callee, args, optional: false, .. } = &ast.expr(iter).kind else { return None };
+        let ExprKind::Member { obj, name: keys, .. } = ast.expr(*callee).kind else { return None };
+        let ExprKind::Ident(o) = ast.expr(obj).kind else { return None };
+        if self.sym(keys) != "keys" || self.sym(o) != "Object" || args.len() != 1 {
+            return None;
+        }
+        let mx = args[0].expr;
+        let ExprKind::Ident(ms) = ast.expr(mx).kind else { return None };
+        let mt = self.ty(mx);
+        let Ty::Map(k, v) = self.tget(mt) else { return None };
+        if k != STR {
+            return None;
+        }
+        let mut stmts = vec![body];
+        let mut exprs = Vec::new();
+        while let Some(s) = stmts.pop() {
+            match &ast.stmt(s).kind {
+                StmtKind::Let { init, .. } => exprs.extend(*init),
+                StmtKind::Expr(e) => exprs.push(*e),
+                StmtKind::If(c, t, e) => {
+                    exprs.push(*c);
+                    stmts.push(*t);
+                    stmts.extend(*e);
+                }
+                StmtKind::While(c, b) | StmtKind::DoWhile(b, c) => {
+                    exprs.push(*c);
+                    stmts.push(*b);
+                }
+                StmtKind::For { init, cond, step, body } => {
+                    stmts.extend(*init);
+                    exprs.extend([cond, step].into_iter().flatten().copied());
+                    stmts.push(*body);
+                }
+                StmtKind::ForOf { iter, body, .. } => {
+                    exprs.push(*iter);
+                    stmts.push(*body);
+                }
+                StmtKind::Block(ss) => stmts.extend(ss.iter().copied()),
+                StmtKind::Break(_) | StmtKind::Continue(_) | StmtKind::Empty => {}
+                _ => return None,
+            }
+        }
+        let is_map = |e: ExprId| matches!(ast.expr(e).kind, ExprKind::Ident(n) if n == ms);
+        let is_key = |e: ExprId| matches!(ast.expr(e).kind, ExprKind::Ident(n) if n == key);
+        while let Some(e) = exprs.pop() {
+            let class_ty = |g: &mut Self, x: ExprId| {
+                let t = g.ty(x);
+                matches!(g.tget(t), Ty::Class(..))
+            };
+            match &ast.expr(e).kind {
+                ExprKind::Int(_) | ExprKind::Float(_) | ExprKind::Str(_) | ExprKind::Bool(_) | ExprKind::Undefined | ExprKind::Null | ExprKind::Ident(_) | ExprKind::BigInt(_) => {}
+                // (nothing that may run the program's code: calls, getters, `valueOf`s)
+                ExprKind::Call { callee, args, optional: false, .. }
+                    if matches!(ast.expr(*callee).kind, ExprKind::Member { obj, .. } if matches!(ast.expr(obj).kind, ExprKind::Ident(n) if self.sym(n) == "Math")) =>
+                {
+                    exprs.extend(args.iter().map(|a| a.expr));
+                }
+                ExprKind::Member { obj, .. } => {
+                    if class_ty(self, *obj) {
+                        return None;
+                    }
+                    exprs.push(*obj);
+                }
+                ExprKind::Index { obj, index, .. } => exprs.extend([*obj, *index]),
+                ExprKind::Unary(_, x) | ExprKind::Paren(x) | ExprKind::NonNull(x) | ExprKind::Typeof(x) => exprs.push(*x),
+                ExprKind::Binary(_, a, b) => {
+                    if class_ty(self, *a) || class_ty(self, *b) {
+                        return None;
+                    }
+                    exprs.extend([*a, *b]);
+                }
+                ExprKind::Cond(a, b, c) => exprs.extend([*a, *b, *c]),
+                ExprKind::Template(_, xs) => {
+                    for &x in xs {
+                        if class_ty(self, x) {
+                            return None;
+                        }
+                    }
+                    exprs.extend(xs.iter().copied());
+                }
+                // (the map itself only at the loop's key: a value changed in place)
+                ExprKind::Assign(_, t, _) | ExprKind::Update { target: t, .. } => {
+                    match &ast.expr(*t).kind {
+                        ExprKind::Ident(n) if *n == ms || *n == key => return None,
+                        ExprKind::Index { obj, index, .. } if is_map(*obj) && !is_key(*index) => return None,
+                        _ => {}
+                    }
+                    exprs.push(*t);
+                    if let ExprKind::Assign(_, _, v) = ast.expr(e).kind {
+                        exprs.push(v);
+                    }
+                }
+                _ => return None,
+            }
+        }
+        Some((mx, k, v))
+    }
+
+    /// In a loop over the keys of the map whose code is `map` (`keys_loop`), `index` that loop's
+    /// key: the current entry's value pointer.
+    fn map_loop_value(&mut self, map: &str, index: ExprId) -> Option<String> {
+        let ExprKind::Ident(_) = self.ast(self.cur_m()).expr(index).kind else { return None };
+        let key = self.expr(index).code;
+        self.b().map_loops.iter().rev().find(|(mc, kv, ..)| mc == map && *kv == key).map(|l| l.2.clone())
+    }
+
+    /// The code of a variable (an identifier): what it's read as.
+    fn expr_code_of(&mut self, e: ExprId) -> String {
+        self.expr(e).code
+    }
+
     /// `a[index]` read as `ty`, for a present `a`.
     fn index_of(&mut self, a: Val, index: ExprId, ty: TyId, span: Span) -> Val {
         // a tuple's element: its field
@@ -5428,6 +5606,11 @@ impl<'c, 'a> Gen<'c, 'a> {
             return self.project(v, ty);
         }
         if let Ty::Map(k, v) = self.tget(a.ty) {
+            // (`m[k]` in a loop over `m`'s keys: the current entry's value)
+            if let Some(p) = self.map_loop_value(&a.code, index) {
+                let got = Val::plain(format!("(*({} *){p})", self.ctype(v)), v);
+                return self.coerce(got, ty);
+            }
             let arg = [crate::ast::Arg { expr: index, by_ref: None }];
             if self.c.types.has_undefined(ty) {
                 return self.map_method_pub(a, k, v, "get", &arg, ty);
@@ -6123,6 +6306,22 @@ impl<'c, 'a> Gen<'c, 'a> {
                     let vv = self.expr(value);
                     self.coerce(vv, v)
                 }
+                // (`m[k] += x` in a loop over `m`'s keys: the current entry's value, in place)
+                AssignOp::Op(bop) if let Some(ep) = self.map_loop_value(&mp.lv, index) => {
+                    let cur = Val::plain(format!("(*({vct} *){ep})"), v);
+                    let rv = self.expr(value);
+                    let r = self.arith(bop, cur, rv, v, span);
+                    let r = self.coerce(r, v);
+                    let r = self.own(r);
+                    let rc = self.consume(r);
+                    let vn = self.fresh("v");
+                    self.line(format!("{vct} {vn} = {rc};"));
+                    let rel = self.release_code(v, &format!("(*({vct} *){ep})"));
+                    self.line(format!("{rel}; *({vct} *){ep} = {vn};"));
+                    let rel_k = self.release_code(k, &kn);
+                    self.line(format!("{rel_k};"));
+                    return Val { code: vn, ty: v, owned: false };
+                }
                 AssignOp::Op(bop) => {
                     // the current value (traps if missing: `undefined + 1` has no value of its type)
                     let loc = self.loc(span);
@@ -6576,6 +6775,7 @@ impl<'c, 'a> Gen<'c, 'a> {
             loops: Vec::new(),
             labeled: Vec::new(),
             iter_release: None,
+            map_loops: Vec::new(),
             breaks: Vec::new(),
             boxed: outer_boxed.union(&inner_boxed).copied().collect(),
             stack_arrows: outer_stack.union(&inner_stack).copied().collect(),

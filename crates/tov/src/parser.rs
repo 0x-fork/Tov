@@ -3648,7 +3648,9 @@ impl<'a> Parser<'a> {
                     let isp = self.expr_span(iter);
                     let o = self.mk_expr(ExprKind::Ident(object), kw);
                     let callee = self.mk_expr(ExprKind::Member { obj: o, name: keys, name_span: kw, optional: false }, kw);
-                    self.mk_expr(ExprKind::Call { callee, type_args: Vec::new(), args: vec![Arg { expr: iter, by_ref: None }], optional: false }, isp)
+                    let keys = self.mk_expr(ExprKind::Call { callee, type_args: Vec::new(), args: vec![Arg { expr: iter, by_ref: None }], optional: false }, isp);
+                    self.ast.for_in_keys.push(keys);
+                    keys
                 } else {
                     iter
                 };

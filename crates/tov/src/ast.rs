@@ -37,6 +37,8 @@ pub struct Ast {
     /// Parameters with a default value and no type (`b = CURVE.P`), by the name's position: the
     /// default, whose type the parameter takes.
     pub param_defaults: std::collections::HashMap<u32, ExprId>,
+    /// `for (k in o)`'s `Object.keys(o)`: a key deleted before the loop reaches it is skipped.
+    pub for_in_keys: Vec<ExprId>,
     /// Comparisons a rewrite made (`k === "a"` choosing a field): never reported as always
     /// false, as where `k` is known.
     pub quiet_tests: Vec<ExprId>,
