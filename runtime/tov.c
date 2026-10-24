@@ -3029,7 +3029,10 @@ static inline uint64_t tv_key_hash(const tv_type *kt, const void *key) {
         const tv_strbuf *b = ((const tv_str *)key)->p;
         return tv_hash_bytes(b->data, (size_t)b->len) | TV_LIVE_BIT;
     }
-    return kt->hash(key) | TV_LIVE_BIT;
+    /* (the high bits folded down: an object key's hash is its address times a constant, whose
+     * low bits are the same for every object of a size) */
+    uint64_t h = kt->hash(key);
+    return (h ^ (h >> 32)) | TV_LIVE_BIT;
 }
 
 /* Map keys use SameValueZero: like === except NaN equals NaN. */

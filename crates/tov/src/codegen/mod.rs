@@ -2151,6 +2151,9 @@ typedef void (*tvg_gv_fn)(void *buf, int64_t len);
 typedef struct { void *buf; int64_t internal; int64_t len; tvg_gv_fn fn; int reached; } tvg_gcb;
 static tvg_gcb *tvg_gcb_tab; static size_t tvg_gcb_cap, tvg_gcb_n;
 static void **tvg_gc_stack; static size_t tvg_gc_sn, tvg_gc_scap;
+/* (the product's high bits, folded down: an address's low bits are its alignment's, the same
+ * for every buffer of a size) */
+static inline size_t tvg_gcb_hash(void *buf) { uint64_t z = (uint64_t)(uintptr_t)buf * 0x9E3779B97F4A7C15ull; return (size_t)(z ^ (z >> 32)); }
 static tvg_gcb *tvg_gcb_find(void *buf, int *fresh) {
     if ((tvg_gcb_n + 1) * 2 > tvg_gcb_cap) {
         size_t oc = tvg_gcb_cap, nc = oc ? oc * 2 : 1024;
@@ -2159,13 +2162,13 @@ static tvg_gcb *tvg_gcb_find(void *buf, int *fresh) {
         if (!tvg_gcb_tab) tv_trap("out of memory", "cycle collector");
         tvg_gcb_cap = nc;
         for (size_t i = 0; i < oc; i++) if (old[i].buf) {
-            size_t h = ((uintptr_t)old[i].buf >> 3) * 0x9E3779B97F4A7C15ull & (nc - 1);
+            size_t h = tvg_gcb_hash(old[i].buf) & (nc - 1);
             while (tvg_gcb_tab[h].buf) h = (h + 1) & (nc - 1);
             tvg_gcb_tab[h] = old[i];
         }
         free(old);
     }
-    size_t h = ((uintptr_t)buf >> 3) * 0x9E3779B97F4A7C15ull & (tvg_gcb_cap - 1);
+    size_t h = tvg_gcb_hash(buf) & (tvg_gcb_cap - 1);
     while (tvg_gcb_tab[h].buf && tvg_gcb_tab[h].buf != buf) h = (h + 1) & (tvg_gcb_cap - 1);
     *fresh = tvg_gcb_tab[h].buf == NULL;
     if (*fresh) { tvg_gcb_tab[h].buf = buf; tvg_gcb_n++; }
