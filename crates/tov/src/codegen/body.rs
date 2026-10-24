@@ -125,6 +125,9 @@ pub(crate) struct Body {
     /// where x is declared.
     pub take_slot: Option<(StmtId, usize)>,
     pub take_let: bool,
+    /// `x = P; P = v` being emitted: the P read that x takes (see `take_assign_pair`).
+    pub take_assign: Option<ExprId>,
+    pub take_failed: bool,
     /// Locals holding a reference of their own, and the uses that hand it over (see `moves`;
     /// found when first needed).
     pub owned_locals: FxSet<u32>,
@@ -314,6 +317,8 @@ impl<'c, 'a> Gen<'c, 'a> {
             take: None,
             take_slot: None,
             take_let: false,
+            take_assign: None,
+            take_failed: false,
             no_release: None,
             owned_locals: FxSet::default(),
             moves: None,
@@ -522,6 +527,8 @@ impl<'c, 'a> Gen<'c, 'a> {
             take: None,
             take_slot: None,
             take_let: false,
+            take_assign: None,
+            take_failed: false,
             no_release: None,
             owned_locals: FxSet::default(),
             moves: None,
@@ -708,6 +715,18 @@ impl<'c, 'a> Gen<'c, 'a> {
                 skip = n == 2;
             } else if let Some(n) = self.permutation(ss, i) {
                 in_group = n - 1;
+            } else if let Some((p, t2)) = self.take_assign_pair(ss, i) {
+                // `x = P; P = v`: x takes P's reference (see `take_assign_pair`)
+                self.b().take_assign = Some(p);
+                self.b().take_failed = false;
+                self.stmt(x);
+                self.b().take_assign = None;
+                if !std::mem::take(&mut self.b().take_failed) {
+                    self.b().no_release = Some(t2);
+                }
+                self.stmt(ss[i + 1]);
+                self.b().no_release = None;
+                skip = true;
             } else if let Some(j) = self.take_plan(ss, i) {
                 // `const x = P; ...; P = v`: x takes P's reference (see `take_plan`)
                 self.b().take_slot = Some((ss[j], i));
@@ -879,6 +898,39 @@ impl<'c, 'a> Gen<'c, 'a> {
             }
             _ => false,
         }
+    }
+
+    /// `x = P; P = v` (statements `i`, `i + 1`): x a local holding its own reference, P a field
+    /// or element path (see `simple_place`) of a class type, and `v` calls nothing. Nothing runs
+    /// between the two, so x can take P's reference (no retain) and the store skip releasing it.
+    fn take_assign_pair(&mut self, ss: &[StmtId], i: usize) -> Option<(ExprId, ExprId)> {
+        let m = self.cur_m();
+        let ast = self.ast(m);
+        let (&s1, &s2) = (ss.get(i)?, ss.get(i + 1)?);
+        let (StmtKind::Expr(e1), StmtKind::Expr(e2)) = (&ast.stmt(s1).kind, &ast.stmt(s2).kind) else { return None };
+        let ExprKind::Assign(crate::ast::AssignOp::Assign, x, p) = &ast.expr(*e1).kind else { return None };
+        let ExprKind::Assign(crate::ast::AssignOp::Assign, t2, v) = &ast.expr(*e2).kind else { return None };
+        let Some(IdentFact::Local(k)) = self.ident_fact(m, *x) else { return None };
+        if !matches!(ast.expr(*x).kind, ExprKind::Ident(_)) || !self.b().owned_locals.contains(&k) || self.b().boxed.contains(&k) || self.b().cursors.contains(&k) {
+            return None;
+        }
+        if !self.same_place(m, *p, *t2) {
+            return None;
+        }
+        let (mut roots, mut fields) = (Vec::new(), Vec::new());
+        if !self.simple_place(m, *p, &mut roots, &mut fields, true) || roots.contains(&k) {
+            return None;
+        }
+        let ty = self.ty(*p);
+        if !(matches!(self.tget(ty), Ty::Class(..)) || self.niche(ty).is_some() && !self.niche_str(ty) && !self.niche_arr(ty)) {
+            return None;
+        }
+        let mut es = Vec::new();
+        collect_exprs_expr(ast, *v, &mut es);
+        if es.iter().any(|&e| matches!(ast.expr(e).kind, ExprKind::Call { .. } | ExprKind::New { .. } | ExprKind::Assign(..) | ExprKind::Update { .. } | ExprKind::Await(_) | ExprKind::Yield(..) | ExprKind::Arrow(_))) {
+            return None;
+        }
+        Some((*p, *t2))
     }
 
     /// `a` and `b` are the same path (see `simple_place`).
@@ -6992,6 +7044,28 @@ impl<'c, 'a> Gen<'c, 'a> {
                 if p.weak {
                     return self.weak_store(&p.lv, p.ty, v);
                 }
+                // (`x = P` taking P's reference: see `take_assign_pair`)
+                if self.b().take_assign == Some(value) {
+                    self.b().take_assign = None;
+                    let v = self.coerce(v, p.ty);
+                    if !v.owned {
+                        let lv = self.place_lvalue(&p);
+                        let ct = self.ctype(p.ty);
+                        let nv = self.fresh("n");
+                        let r = self.release_code(p.ty, &lv);
+                        self.line(format!("{ct} {nv} = {}; {r}; {lv} = {nv};", v.code));
+                        return Val::plain(lv, p.ty);
+                    }
+                    // (owned already: the plan can't hold, so the store releases as usual)
+                    self.b().take_failed = true;
+                    let code = self.consume(v);
+                    let lv = self.place_lvalue(&p);
+                    let ct = self.ctype(p.ty);
+                    let nv = self.fresh("n");
+                    let r = self.release_code(p.ty, &lv);
+                    self.line(format!("{ct} {nv} = {code}; {r}; {lv} = {nv};"));
+                    return Val::plain(lv, p.ty);
+                }
                 // (a cursor: points at the next node, borrowed)
                 if let Some(IdentFact::Local(k)) = self.ident_fact(m, target)
                     && self.b().cursors.contains(&k)
@@ -7407,6 +7481,8 @@ impl<'c, 'a> Gen<'c, 'a> {
             take: None,
             take_slot: None,
             take_let: false,
+            take_assign: None,
+            take_failed: false,
             no_release: None,
             owned_locals: FxSet::default(),
             moves: None,

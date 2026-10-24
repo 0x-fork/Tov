@@ -37,3 +37,20 @@ console.log(s.replace(new N(9)), s.head!.v, s.head!.next);
 let n = 0;
 for (let x = s.slots[0]; x !== null; x = x.next) n++;
 console.log(n);
+// (`x = P; P = v`: an assigned local taking the reference too)
+class Queue {
+  head: N | null = null;
+  take(): number {
+    let x: N | null = null;
+    if (this.head !== null) {
+      x = this.head;
+      this.head = x.next;
+    }
+    return x === null ? -1 : x.v;
+  }
+}
+const q = new Queue();
+q.head = new N(1);
+q.head.next = new N(2);
+const a = q.take(), b = q.take(), c = q.take();
+console.log(a, b, c);
