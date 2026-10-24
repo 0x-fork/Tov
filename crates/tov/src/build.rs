@@ -666,7 +666,19 @@ fn jsc_flags() -> Result<JscFlags, BuildError> {
         if cfg!(target_vendor = "apple") {
             libs.extend(["-licucore", "-lc++", "-framework", "CoreFoundation", "-framework", "Foundation"].map(String::from));
         } else {
-            libs.extend(["-licui18n", "-licuuc", "-licudata", "-lstdc++", "-ldl", "-latomic"].map(String::from));
+            // ICU and the C++ library linked in, as Bun links them, when the static libraries are
+            // there (Debian's libicu-dev has them): a program then binds no symbols of theirs as it
+            // starts (the dynamic loader was a sixth of an npm program's start); and the program
+            // isn't position independent (`-no-pie`: no relocations to apply at start either)
+            let has = |name: &str| {
+                let out = Command::new(c_compiler().0).arg(format!("-print-file-name={name}")).output().ok();
+                out.is_some_and(|o| Path::new(String::from_utf8_lossy(&o.stdout).trim()).is_absolute())
+            };
+            if has("libicuuc.a") && has("libicui18n.a") && has("libicudata.a") {
+                libs.extend(["-Wl,-Bstatic", "-licui18n", "-licuuc", "-licudata", "-lstdc++", "-latomic", "-Wl,-Bdynamic", "-ldl", "-no-pie"].map(String::from));
+            } else {
+                libs.extend(["-licui18n", "-licuuc", "-licudata", "-lstdc++", "-ldl", "-latomic"].map(String::from));
+            }
         }
         return Ok(JscFlags { cflags, libs, own: true });
     }
