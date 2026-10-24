@@ -1742,8 +1742,8 @@ impl<'a> Parser<'a> {
     }
 
     fn const_item(&mut self, start: Span, exported: bool) {
-        let mutable = self.at(Tok::Let);
-        self.bump(); // const / let
+        let mutable = matches!(self.kind(), Tok::Let | Tok::Var);
+        self.bump(); // const / let / var
         if self.at(Tok::LBrace) || self.at(Tok::LBracket) {
             // `const [lo, hi] = f()`: a module variable each (the value in a hidden one)
             let pat = self.pattern();
