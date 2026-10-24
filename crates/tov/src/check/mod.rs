@@ -210,12 +210,19 @@ impl Frame {
 const EV_ARRAY: u8 = 0;
 const EV_LET: u8 = 1;
 const EV_COLLECTION: u8 = 2;
+/// `const lru = new LRU(size)` of a generic class whose type arguments the constructor's don't
+/// give: what its methods are given (`lru.put(k, v)`), as TypeScript's `LRU<unknown, unknown>`
+/// takes anything.
+const EV_CLASS: u8 = 3;
 
 #[derive(Default)]
 struct FnCtx {
     locals: Vec<Local>,
     /// Innermost last. Each entry: (name, local, narrowed type).
     pub(crate) scopes: Vec<Vec<(Sym, LocalId, Option<TyId>)>>,
+    /// Locals holding what an untyped map's `get` gave (TypeScript's `any`), by declaration:
+    /// read where a value must be, they're checked to be there, as `x!`.
+    loose: HashSet<u32>,
     frames: Vec<Frame>,
     tscope: Vec<(Sym, TyId)>,
     promoted: HashSet<u32>,
@@ -315,6 +322,13 @@ pub struct Checker<'a> {
     checked_members_base: Arc<HashSet<(u32, u32)>>,
     checked_members: HashSet<(u32, u32)>,
     class_resolving: HashSet<u32>,
+    /// Fields written with no type (TypeScript's `any`) typed by what they're given: (class,
+    /// field). A map's `get` reads its value where one must be, as `any`'s would.
+    untyped_fields: HashSet<(u32, Sym)>,
+    /// Checking `const x = new C(...)` with no type: type arguments nothing gives are left to the
+    /// calls on `x` (`lenient_hit` when that happened; see `EV_CLASS`).
+    lenient_new: Option<Span>,
+    lenient_hit: bool,
     /// Overrides whose (inferred) return types are compared after their class is resolved.
     pending_overrides: Vec<(class::CMethod, class::CMethod)>,
     /// Inferred `throws` of method bodies being checked, keyed by (class, member).
@@ -445,6 +459,9 @@ fn new_checker<'a>(modules: &'a [Module], interner: &'a Interner, sm: &'a Source
         checked_members_base: Arc::default(),
         checked_members: HashSet::default(),
         class_resolving: HashSet::default(),
+        untyped_fields: HashSet::default(),
+        lenient_new: None,
+        lenient_hit: false,
         pending_overrides: Vec::new(),
         inferred_throws: HashMap::default(),
         gparams_base: Arc::default(),
@@ -706,6 +723,9 @@ impl<'a> Checker<'a> {
             checked_members_base: self.checked_members_base.clone(),
             checked_members: HashSet::default(),
             class_resolving: HashSet::default(),
+            untyped_fields: self.untyped_fields.clone(),
+            lenient_new: None,
+            lenient_hit: false,
             pending_overrides: Vec::new(),
             inferred_throws: HashMap::default(),
             gparams_base: self.gparams_base.clone(),
@@ -827,6 +847,68 @@ impl<'a> Checker<'a> {
             module_names: &self.module_names,
         }
         .show(ty)
+    }
+
+    /// The type of a parameter with a default value and no type (`b = CURVE.P`): the default's,
+    /// widened, if it checks on its own (outside the function: not naming other parameters).
+    fn default_param_type(&mut self, name_span: Span) -> Option<TyId> {
+        let e = *self.ast().param_defaults.get(&name_span.start)?;
+        let saved = std::mem::take(&mut self.diags);
+        self.fcx.push(FnCtx::default());
+        self.fcx.last_mut().unwrap().scopes.push(Vec::new());
+        let t = self.expr(e, None);
+        self.fcx.pop();
+        let failed = !self.diags.is_empty();
+        self.diags = saved;
+        let t = self.types.widen(t);
+        (!failed && t != ERROR).then_some(t)
+    }
+
+    /// `var IUB = { a: 0.27, c: 0.12 }` given where a dictionary goes (`{ [key: string]: number }`):
+    /// the variable is checked again as a map.
+    fn dict_hit(&mut self, found: TyId, expected: TyId, span: Span) {
+        let expected = self.types.without_undefined(expected);
+        if !matches!(self.types.get(found), Ty::Record(_)) || !matches!(*self.types.get(expected), Ty::Map(k, _) if k == STR) {
+            return;
+        }
+        let text = self.src(span).trim();
+        let Some(sym) = self.interner.lookup(text) else { return };
+        let m = self.cur;
+        // (a local: by where it's declared)
+        if let Some(f) = self.fcx.last()
+            && let Some(&(_, local, _)) = f.scopes.iter().rev().flat_map(|s| s.iter().rev()).find(|(n, ..)| *n == sym)
+        {
+            let at = self.local(local).span.start;
+            self.global_hits.push(spec::dict_key(m, 0x8000_0000 | at));
+            return;
+        }
+        for (ii, it) in self.modules[m as usize].ast.items.iter().enumerate() {
+            if let ItemKind::Const { name, ty: None, init, .. } = &it.kind
+                && *name == sym
+                && matches!(self.modules[m as usize].ast.expr(*init).kind, ast::ExprKind::Object(_))
+            {
+                self.global_hits.push(spec::dict_key(m, ii as u32));
+                return;
+            }
+        }
+    }
+
+    /// An object literal given where a dictionary goes, checked again as one: a map of what its
+    /// fields hold.
+    fn as_dict(&mut self, init: ExprId, found: TyId) -> TyId {
+        let Ty::Record(fs) = *self.types.get(found) else { return found };
+        if !matches!(self.ast().expr(init).kind, ast::ExprKind::Object(_)) {
+            return found;
+        }
+        let tys: Vec<TyId> = self.types.fields(fs).iter().map(|f| f.ty).collect();
+        let v = if tys.iter().all(|&t| self.types.is_numeric(t)) {
+            if tys.iter().any(|&t| self.types.is_float(t)) { F64 } else { INT }
+        } else {
+            let ws: Vec<TyId> = tys.iter().map(|&t| self.types.widen(t)).collect();
+            self.types.union(&ws)
+        };
+        let map = self.types.intern(Ty::Map(STR, v));
+        self.expr(init, Some(map))
     }
 
     /// Runs `f` with its diagnostics committed immediately (for cached results that won't be recomputed).
@@ -1429,6 +1511,43 @@ impl<'a> Checker<'a> {
         let mut grew = false;
         for (key, span, given, kind) in evolving {
             let whole = kind == EV_LET;
+            if kind == EV_CLASS {
+                // (each type argument: what the calls gave it)
+                let mut t = None;
+                for &g in &given {
+                    if let Ty::Class(c, args) = *self.types.get(g) {
+                        let args = self.types.tys(args).to_vec();
+                        t = match t {
+                            None => Some((c, args.iter().map(|&a| vec![a]).collect::<Vec<_>>())),
+                            Some((c0, mut acc)) => {
+                                for (k, &a) in args.iter().enumerate() {
+                                    acc[k].push(a);
+                                }
+                                Some((c0, acc))
+                            }
+                        };
+                    }
+                }
+                let Some((c, acc)) = t else { continue };
+                let mut args = Vec::new();
+                for ts in acc {
+                    let ts: Vec<TyId> = ts.into_iter().filter(|&t| t != ERROR).collect();
+                    if ts.is_empty() {
+                        break;
+                    }
+                    args.push(self.types.union(&ts));
+                }
+                if args.len() != self.classes[c as usize].params.len() {
+                    let n = self.src(span).to_string();
+                    self.report(Diagnostic::new("T0305", span, format!("can't infer the type arguments of `{n}`")).note("instead", "pass them explicitly: `new C<K, V>(...)`"));
+                    continue;
+                }
+                let t = self.types.class(c, &args);
+                if evolved.insert(key, t) != Some(t) {
+                    grew = true;
+                }
+                continue;
+            }
             if kind == EV_COLLECTION {
                 // (a map's keys and values, a set's elements: what each `set`/`add` gave it)
                 let (mut ks, mut vs, mut es) = (Vec::new(), Vec::new(), Vec::new());
@@ -1545,7 +1664,10 @@ impl<'a> Checker<'a> {
                             {
                                 c.want_optional = true;
                             }
-                            let found = c.expr(init, None);
+                            let mut found = c.expr(init, None);
+                            if c.spec.float_globals.contains(&spec::dict_key(m, ii)) {
+                                found = c.as_dict(init, found);
+                            }
                             let t = c.check_inferred_binding(found, c.ast().expr(init).span);
                             // `let s = ""` holds any string later, as in TypeScript; `let x = 0`
                             // that's given a float is an `f64`
@@ -1728,6 +1850,7 @@ impl<'a> Checker<'a> {
                     }
                     let ty = match p.ty {
                         Some(t) => c.resolve_type(t, &tscope),
+                        None if let Some(t) = c.default_param_type(p.span) => t,
                         None => {
                             let n = c.name(p.name).to_string();
                             c.report(
@@ -3155,6 +3278,7 @@ impl<'a> Checker<'a> {
 
     fn mismatch(&mut self, found: TyId, expected: TyId, span: Span, context: Option<String>) -> Diagnostic {
         self.spec_mismatch(found, expected, span);
+        self.dict_hit(found, expected, span);
         self.class_to_record(found, expected);
         let (fs, es) = (self.show(found), self.show(expected));
         let mut d = Diagnostic::new("T0001", span, format!("expected `{es}`, found `{fs}`"));

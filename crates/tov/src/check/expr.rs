@@ -95,7 +95,21 @@ impl<'a> Checker<'a> {
         {
             self.fcx().evolving[slot].2.push(x);
         }
-        let t = self.expr_inner(e, exp, want);
+        let mut t = self.expr_inner(e, exp, want);
+        // (a local holding an untyped map's value, read where a value must be: `x!`)
+        if let Some(x) = exp
+            && x != ERROR
+            && x != UNKNOWN
+            && !self.types.has_undefined(x)
+            && self.types.has_undefined(t)
+            && let ExprKind::Ident(s) = self.ast().expr(e).kind
+            && let Some((id, _)) = self.lookup(s)
+            && let Some(f) = self.fcx.last()
+            && f.loose.contains(&f.locals[id].span.start)
+        {
+            self.rewrites.nonnulls.push((self.cur, e));
+            t = self.types.without_undefined(t);
+        }
         if self.spec.on {
             self.derive_sites(e);
         }
@@ -358,8 +372,10 @@ impl<'a> Checker<'a> {
                     && args.is_empty()
                     && let ExprKind::Member { obj: g, name: nn, .. } = self.ast().expr(*callee).kind
                     && self.name(nn) == "next"
-                    && let Some(gt) = self.expr_type_peek(g)
-                    && matches!(self.types.get(gt), Ty::Gen(_))
+                    && (self.expr_type_peek(g).is_some_and(|gt| matches!(self.types.get(gt), Ty::Gen(_)))
+                        // (`m.keys().next().value` of an untyped map's)
+                        || matches!(&self.ast().expr(g).kind, ExprKind::Call { callee: kc, .. }
+                            if matches!(self.ast().expr(*kc).kind, ExprKind::Member { obj: coll, name: kn, .. } if matches!(self.name(kn), "keys" | "values") && self.untyped_map(coll))))
                 {
                     self.rewrites.nonnulls.push((self.cur, e));
                     return self.types.without_undefined(t);
@@ -1648,11 +1664,47 @@ impl<'a> Checker<'a> {
     }
 
     /// `m`, a map made with `new Map()`, its types found from what it's given.
-    fn untyped_map(&self, m: ExprId) -> bool {
+    pub(super) fn untyped_map(&self, m: ExprId) -> bool {
+        // (`this.m`, a field written with no type)
+        if let ExprKind::Member { obj, name, .. } = self.ast().expr(m).kind
+            && matches!(self.ast().expr(obj).kind, ExprKind::This)
+            && let Some((_, t)) = self.lookup(super::THIS_SYM)
+            && let Some((c, _)) = self.class_of(t)
+        {
+            return self.untyped_fields.contains(&(c, name));
+        }
         let ExprKind::Ident(s) = self.ast().expr(m).kind else { return false };
         let Some((id, t)) = self.lookup(s) else { return false };
         let fcx = self.fcx.last().unwrap();
         matches!(self.types.get(t), Ty::Map(..)) && fcx.evolved.contains_key(&fcx.locals[id].span.start)
+    }
+
+    /// `x` (an expression), when it's a `new C()` still finding its type arguments.
+    fn evolving_class(&self, x: ExprId) -> Option<usize> {
+        let ExprKind::Ident(s) = self.ast().expr(x).kind else { return None };
+        let (id, _) = self.lookup(s)?;
+        let fcx = self.fcx.last()?;
+        let key = fcx.locals[id].span.start;
+        fcx.evolving.iter().position(|e| e.0 == key && e.3 == EV_CLASS)
+    }
+
+    /// A method call on an evolving `new C()`: the type arguments its arguments give.
+    fn class_evidence(&mut self, slot: usize, recv: TyId, name: Sym, args: &[Arg]) {
+        let Some((c, _)) = self.class_of(recv) else { return };
+        let own = self.classes[c as usize].this_ty;
+        let Some(super::class::ClassMemberRef::Method(mm)) = self.class_member(own, name) else { return };
+        let (params, _) = self.method_call_params(&mm);
+        let free = self.classes[c as usize].params.clone();
+        let mut map = HashMap::default();
+        for (p, a) in params.iter().zip(args) {
+            let checked = self.facts_mut().map(|f| f.expr_ty[a.expr as usize]).filter(|&t| t != ERROR);
+            if let Some(t) = checked.or_else(|| self.expr_type_peek(a.expr)) {
+                self.unify(p.ty, t, &free, &mut map);
+            }
+        }
+        let targs: Vec<TyId> = free.iter().map(|p| map.get(p).copied().unwrap_or(ERROR)).collect();
+        let t = self.types.class(c, &targs);
+        self.fcx().evolving[slot].2.push(t);
     }
 
     /// `x` (an expression), when it's a `new Map()` / `new Set()` still finding its type.
@@ -4082,6 +4134,9 @@ impl<'a> Checker<'a> {
                     self.set_call_spec(sites);
                     let cls = self.show(base);
                     let r = self.call_sig(&cs, &format!("{cls}.{mtext}"), type_args, args, exp, span);
+                    if let Some(slot) = self.evolving_class(obj) {
+                        self.class_evidence(slot, base, name, args);
+                    }
                     if self.spec.on && mtext == "json" && self.modules[self.classes[mm.owner as usize].module as usize].std {
                         // (a body parsed as JSON may hold any number)
                         self.spec_poison(r);
@@ -4856,7 +4911,24 @@ impl<'a> Checker<'a> {
                 self.flow(Self::arg_sites(sites, i), |c| c.spec_poison(pty));
             }
         }
-        let unresolved: Vec<u32> = cs.tparams.iter().copied().filter(|p| !map.contains_key(p) && self.types.mentions(cs.ret, &[*p])).collect();
+        let mut unresolved: Vec<u32> = cs.tparams.iter().copied().filter(|p| !map.contains_key(p) && self.types.mentions(cs.ret, &[*p])).collect();
+        // (the rest from where the result goes: `const c: Cache<string> = new Cache(10)`)
+        if !unresolved.is_empty()
+            && let Some(x) = exp
+            && !self.types.mentions_error(x)
+        {
+            self.unify(cs.ret, x, &unresolved, &mut map);
+            unresolved.retain(|p| !map.contains_key(p));
+        }
+        // (`const lru = new LRU(size)`: found from its method calls, see `EV_CLASS`)
+        if !unresolved.is_empty() && self.lenient_new == Some(span) && desc.starts_with("new ") {
+            self.lenient_new = None;
+            for p in unresolved {
+                map.insert(p, ERROR);
+            }
+            self.lenient_hit = true;
+            return self.types.subst(cs.ret, &map);
+        }
         if !unresolved.is_empty() {
             let names: Vec<String> = unresolved.iter().map(|&p| self.name(self.gparam(p).name).to_string()).collect();
             let _ = exp;

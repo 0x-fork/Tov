@@ -343,10 +343,36 @@ impl<'a> Checker<'a> {
                         (t, false)
                     }
                     (None, Some(i)) => {
-                        let found = match self.recursive_arrow(*name, *name_span, *i, kind) {
+                        // (`new C(...)` of a generic class: type arguments the constructor doesn't
+                        // give are what the calls on it give, see `EV_CLASS`)
+                        let is_new = matches!(&self.ast().expr(*i).kind, ExprKind::New { type_args, .. } if type_args.is_empty()) && !self.fcx.is_empty();
+                        let evolved_class = if is_new { self.fcx.last().unwrap().evolved.get(&name_span.start).copied() } else { None };
+                        self.lenient_new = (is_new && evolved_class.is_none()).then(|| self.ast().expr(*i).span);
+                        self.lenient_hit = false;
+                        let mut found = match self.recursive_arrow(*name, *name_span, *i, kind) {
                             Some(t) => t,
-                            None => self.expr(*i, None),
+                            None => self.expr(*i, evolved_class),
                         };
+                        self.lenient_new = None;
+                        if std::mem::take(&mut self.lenient_hit) {
+                            let span = self.ast().expr(*i).span;
+                            self.fcx().evolving.push((name_span.start, span, Vec::new(), super::EV_CLASS));
+                        }
+                        if let Some(t) = evolved_class {
+                            found = t;
+                        }
+                        // (`const v = m.get(k)` of an untyped map: TypeScript's `any`)
+                        if let ExprKind::Call { callee, .. } = &self.ast().expr(*i).kind
+                            && let ExprKind::Member { obj, name: g, .. } = self.ast().expr(*callee).kind
+                            && self.name(g) == "get"
+                            && self.untyped_map(obj)
+                        {
+                            self.fcx().loose.insert(name_span.start);
+                        }
+                        // (an object literal given where a dictionary goes: a map)
+                        if self.spec.float_globals.contains(&super::spec::dict_key(self.cur, 0x8000_0000 | name_span.start)) {
+                            found = self.as_dict(*i, found);
+                        }
                         let ispan = self.ast().expr(*i).span;
                         let t = self.check_inferred_binding(found, ispan);
                         let t = if *mutable { self.types.widen(t) } else { t };

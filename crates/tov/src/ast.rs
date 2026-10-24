@@ -34,6 +34,9 @@ pub struct Ast {
     /// Fields declared `x!: T`: assigned somewhere the constructor reaches, as TypeScript
     /// takes on trust (by the field name's position).
     pub definite_fields: Vec<u32>,
+    /// Parameters with a default value and no type (`b = CURVE.P`), by the name's position: the
+    /// default, whose type the parameter takes.
+    pub param_defaults: std::collections::HashMap<u32, ExprId>,
     /// Comparisons a rewrite made (`k === "a"` choosing a field): never reported as always
     /// false, as where `k` is known.
     pub quiet_tests: Vec<ExprId>,

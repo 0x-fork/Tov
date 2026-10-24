@@ -5,7 +5,7 @@
 //! into this class's type parameters), so member lookup never walks the base chain.
 
 use super::*;
-use crate::ast::{ClassDecl, ClassMember, ExprKind, FnDecl, MemberKind, StmtKind, Visibility};
+use crate::ast::{ClassDecl, ClassMember, ExprKind, FnDecl, MemberKind, Param, StmtKind, Visibility};
 
 #[derive(Clone, Debug)]
 pub(crate) struct CField {
@@ -262,8 +262,28 @@ impl<'a> Checker<'a> {
                         }
                         None => None,
                     };
+                    // (no type, and no value or an empty map, set or array: what the
+                    // constructor assigns, and what the methods put in it)
+                    let untyped = if declared.is_none() && !mem.is_static && init.is_none_or(|e| self.empty_collection(e).is_some()) {
+                        self.untyped_field(cd, mem.name, *init, &tscope)
+                    } else {
+                        None
+                    };
                     let fty = match (declared, init) {
                         (Some(t), _) => t,
+                        (None, _) if let Some(t) = untyped => {
+                            self.untyped_fields.insert((c, mem.name));
+                            t
+                        }
+                        // (`static ZERO = new P(0n, 1n)`: an instance of the class being resolved,
+                        // without checking the call, which needs the class's constructor)
+                        (None, Some(e))
+                            if cd.tparams.is_empty()
+                                && matches!(&self.ast().expr(*e).kind, ExprKind::New { callee, type_args, .. }
+                                    if type_args.is_empty() && matches!(self.ast().expr(*callee).kind, ExprKind::Ident(n) if n == cd.name)) =>
+                        {
+                            this_ty
+                        }
                         (None, Some(e)) => {
                             // Infer from the initializer (checked again with `this` in phase B),
                             // the class's type parameters in scope (`map = new Map<K, V>()`).
@@ -504,12 +524,144 @@ impl<'a> Checker<'a> {
         (mm.params[..n - 1].to_vec(), Some(elem))
     }
 
+    /// The type of a field written with no type (TypeScript's implicit `any`): what the
+    /// constructor first assigns it (a parameter, or a value that checks on its own), and for an
+    /// empty map, set or array, the types of what the class's methods put in it.
+    fn untyped_field(&mut self, cd: &'a ClassDecl, f: Sym, init: Option<ExprId>, tscope: &[(Sym, TyId)]) -> Option<TyId> {
+        let ast = self.ast();
+        let ctor = cd.members.iter().find_map(|m| match &m.kind {
+            MemberKind::Constructor(fd) => Some(fd),
+            _ => None,
+        });
+        let value = match init {
+            Some(e) => e,
+            None => {
+                let mut es = Vec::new();
+                ctor_stmt_exprs(ast, ctor?.body, &mut es);
+                es.iter().find_map(|&e| match &ast.expr(e).kind {
+                    ExprKind::Assign(crate::ast::AssignOp::Assign, t, v)
+                        if matches!(&ast.expr(*t).kind, ExprKind::Member { obj, name, .. } if *name == f && matches!(ast.expr(*obj).kind, ExprKind::This)) =>
+                    {
+                        Some(*v)
+                    }
+                    _ => None,
+                })?
+            }
+        };
+        if let ExprKind::Ident(n) = ast.expr(value).kind
+            && init.is_none()
+            && let Some(p) = ctor?.params.iter().find(|p| p.name == n)
+        {
+            let t = self.resolve_type(p.ty?, tscope);
+            return Some(if p.optional { self.types.optional(t) } else { t });
+        }
+        if let Some(kind) = self.empty_collection(value) {
+            return self.filled_field(cd, f, kind, tscope);
+        }
+        // (a value that checks outside the constructor: no parameters, no `this`)
+        let saved = std::mem::take(&mut self.diags);
+        self.fcx.push(FnCtx { tscope: tscope.to_vec(), ..FnCtx::default() });
+        self.fcx.last_mut().unwrap().scopes.push(Vec::new());
+        let t = self.expr(value, None);
+        self.fcx.pop();
+        let failed = !self.diags.is_empty();
+        self.diags = saved;
+        let t = self.types.widen(t);
+        (!failed && t != ERROR).then_some(t)
+    }
+
+    /// An empty map (`kind` 0), set (1) or array (2) field: typed by what the class's methods
+    /// give it (`this.m.set(key, value)`, `this.s.add(x)`, `this.xs.push(x)`), each argument a
+    /// parameter with a type or a literal.
+    fn filled_field(&mut self, cd: &'a ClassDecl, f: Sym, kind: u8, tscope: &[(Sym, TyId)]) -> Option<TyId> {
+        let ast = self.ast();
+        let (method, arity) = match kind {
+            0 => ("set", 2),
+            1 => ("add", 1),
+            _ => ("push", 1),
+        };
+        let mut found: Vec<Vec<TyId>> = vec![Vec::new(); arity];
+        for mem in &cd.members {
+            let (MemberKind::Method(fd) | MemberKind::Getter(fd) | MemberKind::Constructor(fd)) = &mem.kind else { continue };
+            if !fd.tparams.is_empty() {
+                continue;
+            }
+            let mut es = Vec::new();
+            ctor_stmt_exprs(ast, fd.body, &mut es);
+            let mut i = 0;
+            while i < es.len() {
+                let e = es[i];
+                i += 1;
+                es.extend(children(ast, e));
+                let ExprKind::Call { callee, args, .. } = &ast.expr(e).kind else { continue };
+                let ExprKind::Member { obj, name, .. } = &ast.expr(*callee).kind else { continue };
+                if self.name(*name) != method || args.len() != arity {
+                    continue;
+                }
+                let ExprKind::Member { obj: this, name: field, .. } = &ast.expr(*obj).kind else { continue };
+                if *field != f || !matches!(ast.expr(*this).kind, ExprKind::This) {
+                    continue;
+                }
+                // (other arguments are left to these)
+                for (k, a) in args.iter().enumerate() {
+                    let t = match &ast.expr(a.expr).kind {
+                        ExprKind::Ident(n) => match fd.params.iter().find(|p| p.name == *n) {
+                            Some(Param { ty: Some(te), optional, .. }) => {
+                                let t = self.resolve_type(*te, tscope);
+                                if *optional { self.types.optional(t) } else { t }
+                            }
+                            _ => continue,
+                        },
+                        ExprKind::Int(_) => INT,
+                        ExprKind::Float(_) => F64,
+                        ExprKind::Str(_) | ExprKind::Template(..) => STR,
+                        ExprKind::Bool(_) => BOOL,
+                        _ => continue,
+                    };
+                    found[k].push(t);
+                }
+            }
+        }
+        let mut join = |ts: &[TyId]| -> Option<TyId> {
+            if ts.is_empty() {
+                return None;
+            }
+            if ts.iter().all(|&t| self.types.is_numeric(t)) && ts.iter().any(|&t| self.types.is_float(t)) {
+                return Some(F64);
+            }
+            Some(self.types.union(ts))
+        };
+        let a = join(&found[0])?;
+        Some(match kind {
+            0 => {
+                let b = join(&found[1])?;
+                self.types.intern(Ty::Map(a, b))
+            }
+            1 => self.types.intern(Ty::Set(a)),
+            _ => self.types.array(a),
+        })
+    }
+
+    /// `new Map()`, `new Set()` (0, 1) and `[]` (2), with no types to go by.
+    fn empty_collection(&self, e: ExprId) -> Option<u8> {
+        match &self.ast().expr(e).kind {
+            ExprKind::Array(xs) if xs.is_empty() => Some(2),
+            ExprKind::New { callee, type_args, args } if type_args.is_empty() && args.is_empty() => match self.ast().expr(*callee).kind {
+                ExprKind::Ident(n) if self.name(n) == "Map" => Some(0),
+                ExprKind::Ident(n) if self.name(n) == "Set" => Some(1),
+                _ => None,
+            },
+            _ => None,
+        }
+    }
+
     fn member_params(&mut self, f: &FnDecl, scope: &[(Sym, TyId)]) -> (Vec<FnParam>, Vec<Sym>) {
         let mut ps = Vec::new();
         let mut names = Vec::new();
         for p in &f.params {
             let ty = match p.ty {
                 Some(t) => self.resolve_type(t, scope),
+                None if let Some(t) = self.default_param_type(p.span) => t,
                 None => {
                     let n = self.name(p.name).to_string();
                     self.report(

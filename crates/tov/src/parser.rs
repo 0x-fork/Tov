@@ -1464,6 +1464,9 @@ impl<'a> Parser<'a> {
                     if ty.is_none() {
                         ty = self.literal_type(e);
                     }
+                    if ty.is_none() {
+                        self.ast.param_defaults.insert(span.start, e);
+                    }
                     optional = true;
                     self.defaults.push((name, span, ty, e));
                 }

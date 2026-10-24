@@ -586,6 +586,12 @@ pub(crate) fn promise_key(m: u32, at: u32) -> (u32, u32) {
     (0x1000_0000 + m, at)
 }
 
+/// A module variable's key among `float_globals` when it's an object literal given where a
+/// dictionary (`{ [key: string]: V }`) goes: a map, as such an object is (2^27 + module, item).
+pub(crate) fn dict_key(m: u32, item: u32) -> (u32, u32) {
+    (0x0800_0000 + m, item)
+}
+
 /// An integer literal's key among `float_globals` (a field of an inferred record literal,
 /// `{ n: 0 }`): (2^30 + module, expression), apart from the rest.
 pub(crate) fn lit_key(m: u32, e: ExprId) -> (u32, u32) {
