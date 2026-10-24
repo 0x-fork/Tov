@@ -2141,6 +2141,7 @@ static void tvg_obj_dropfields(void *p);
 static inline void *tvg_cyc_alloc(size_t size) {
     if (__builtin_expect(++tvg_cyc_since > tvg_cyc_limit, 0)) tvg_cyc_collect();
     tvg_cyc *c = tvg_alloc_small(size + sizeof(tvg_cyc));
+    c->gc = 0;
     c->next = tvg_cyc_head.next; c->prev = &tvg_cyc_head; tvg_cyc_head.next->prev = c; tvg_cyc_head.next = c;
     tvg_cyc_count++;
     return c + 1;
@@ -2207,9 +2208,10 @@ static void tvg_cyc_collect(void) {
     tvg_cyc_since = 0;
     if (tvg_gcb_n) memset(tvg_gcb_tab, 0, tvg_gcb_cap * sizeof(tvg_gcb));
     tvg_gcb_n = 0;
-    for (tvg_cyc *c = tvg_cyc_head.next; c != &tvg_cyc_head; c = c->next) c->gc = TVG_OBJ(c)->rc;
+    /* (each object's count less the references from others: its own added as it's reached in
+     * the walk, theirs taken off as they're walked, in any order; it's 0 between collections) */
     tvg_gc_phase = 1;
-    for (tvg_cyc *c = tvg_cyc_head.next; c != &tvg_cyc_head; c = c->next) tvg_obj_traverse(TVG_OBJ(c));
+    for (tvg_cyc *c = tvg_cyc_head.next; c != &tvg_cyc_head; c = c->next) { c->gc += TVG_OBJ(c)->rc; tvg_obj_traverse(TVG_OBJ(c)); }
     tvg_gc_phase = 2;
     tvg_gc_sn = 0;
     for (tvg_cyc *c = tvg_cyc_head.next; c != &tvg_cyc_head; c = c->next)
@@ -2226,14 +2228,16 @@ static void tvg_cyc_collect(void) {
     /* Garbage: not reached. Unlink it, release its fields (freeing what only it referenced; its
      * own count reaching zero is ignored while it's being collected), then free it. */
     tvg_cyc *garbage = NULL;
+    int64_t walked = tvg_cyc_count, found = 0;
     for (tvg_cyc *c = tvg_cyc_head.next, *next; c != &tvg_cyc_head; c = next) {
         next = c->next;
         tvg_obj *h = TVG_OBJ(c);
-        if (h->flags & TVG_REACHED) { h->flags &= ~TVG_REACHED; continue; }
+        if (h->flags & TVG_REACHED) { h->flags &= ~TVG_REACHED; c->gc = 0; continue; }
         h->flags |= TVG_COLLECTING;
         tvg_cyc_unlink(h);
         c->next = garbage;
         garbage = c;
+        found++;
     }
     for (tvg_cyc *c = garbage; c; c = c->next) TVG_WEAK(TVG_OBJ(c))++; /* pinned while fields are released */
     for (tvg_cyc *c = garbage; c; c = c->next) tvg_obj_dropfields(TVG_OBJ(c));
@@ -2245,10 +2249,11 @@ static void tvg_cyc_collect(void) {
         if (--TVG_WEAK(h) == 0) tvg_obj_free(h);
     }
     /* (the next one after as many allocations as are live, times a factor that grows fourfold,
-     * to 64, each time a collection finds nothing: a structure that only grows isn't walked
-     * again and again; but never more than 2M allocations past twice the live objects, so the
-     * garbage that a later phase makes is still found) */
-    tvg_cyc_factor = garbage ? 2 : (tvg_cyc_factor < 64 ? tvg_cyc_factor * 4 : 64);
+     * to 64, each time a collection finds little (less than half of what it walked): a
+     * structure that mostly lives on isn't walked again and again; but never more than 2M
+     * allocations past twice the live objects, so the garbage that a later phase makes is still
+     * found) */
+    tvg_cyc_factor = found * 2 >= walked && found ? 2 : (tvg_cyc_factor < 64 ? tvg_cyc_factor * 4 : 64);
     int64_t live = tvg_cyc_count * tvg_cyc_factor, most = tvg_cyc_count * 2 + ((int64_t)1 << 21);
     if (live > most) live = most;
     tvg_cyc_limit = live > 10000 ? live : 10000;
