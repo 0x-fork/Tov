@@ -5442,6 +5442,21 @@ impl<'c, 'a> Gen<'c, 'a> {
 
     fn index(&mut self, e: ExprId, obj: ExprId, index: ExprId, optional: bool, ty: TyId, span: Span) -> Val {
         let ot = self.ty(obj);
+        // (`({ "&": "&amp;", "<": "&lt;" })[c]`: a dictionary of constants, only read: made once)
+        if let Some(lit) = self.const_dict(obj) {
+            let cm = self.fresh("cmap");
+            self.line(format!("static tv_map {cm};"));
+            self.open(&format!("if (!{cm}.p) {{"));
+            self.push_temps();
+            let v = self.expr(lit);
+            let c = self.consume(v);
+            self.line(format!("{cm} = {c};"));
+            self.pop_temps();
+            self.close("}");
+            let lt = self.ty(lit);
+            let a = Val { code: cm, ty: lt, owned: false };
+            return self.index_of(a, index, ty, span);
+        }
         if self.c.types.without_undefined(ot) == JS {
             let base = self.expr(obj);
             let base = self.js_of(base);
@@ -5595,6 +5610,21 @@ impl<'c, 'a> Gen<'c, 'a> {
     /// The code of a variable (an identifier): what it's read as.
     fn expr_code_of(&mut self, e: ExprId) -> String {
         self.expr(e).code
+    }
+
+    /// An object literal (in parentheses or not) checked as a map whose fields are all constants.
+    fn const_dict(&mut self, obj: ExprId) -> Option<ExprId> {
+        let m = self.cur_m();
+        let ast = self.ast(m);
+        let mut x = obj;
+        while let ExprKind::Paren(y) = ast.expr(x).kind {
+            x = y;
+        }
+        let ExprKind::Object(fields) = &ast.expr(x).kind else { return None };
+        let constant = !fields.is_empty()
+            && fields.iter().all(|f| matches!(ast.expr(f.value).kind, ExprKind::Str(_) | ExprKind::Int(_) | ExprKind::Float(_) | ExprKind::Bool(_) | ExprKind::Null | ExprKind::Undefined));
+        let t = self.ty(x);
+        (constant && matches!(self.tget(t), Ty::Map(..))).then_some(x)
     }
 
     /// `a[index]` read as `ty`, for a present `a`.
