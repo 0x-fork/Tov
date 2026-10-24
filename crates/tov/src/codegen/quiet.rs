@@ -762,3 +762,46 @@ impl Gen<'_, '_> {
         }
     }
 }
+
+impl Gen<'_, '_> {
+    pub(crate) fn quiet_overridden_pub(&mut self, decl: u32, name: crate::intern::Sym) -> bool {
+        self.quiet_overridden(decl, name)
+    }
+
+    /// The arrow literals (module, expression) parameter `key` of body `(m, body)` can be: each
+    /// call's argument, or what the caller's own parameter given there can be; `None` when one is
+    /// something else (or the body is called from where it can't be seen).
+    pub(crate) fn param_closures(&mut self, m: u32, body: StmtId, key: u32) -> Option<Vec<(u32, ExprId)>> {
+        if self.bind_index.is_none() {
+            let ix = self.build_binds();
+            self.bind_index = Some(std::rc::Rc::new(ix));
+        }
+        let ix = self.bind_index.clone().unwrap();
+        let mut out = Vec::new();
+        let mut work = vec![(m, body, key)];
+        let mut seen: FxSet<(u32, StmtId, u32)> = FxSet::default();
+        while let Some((bm, bb, k)) = work.pop() {
+            if !seen.insert((bm, bb, k)) {
+                continue;
+            }
+            if seen.len() > 64 || !ix.indexed.contains(&(bm, bb)) || ix.escaped.contains(&(bm, bb)) || ix.method_names.get(&(bm, bb)).is_some_and(|n| ix.escaped_names.contains(n)) {
+                return None;
+            }
+            for &(am, ab, arg) in ix.binds.get(&(bm, bb, k)).map(|v| v.as_slice()).unwrap_or(&[]) {
+                let mut a = arg;
+                while let ExprKind::Paren(x) = self.ast(am).expr(a).kind {
+                    a = x;
+                }
+                match &self.ast(am).expr(a).kind {
+                    ExprKind::Arrow(_) => out.push((am, a)),
+                    ExprKind::Ident(_) => match self.ident_fact(am, a) {
+                        Some(IdentFact::Local(k2)) if ix.params.get(&(am, ab)).is_some_and(|ps| ps.contains(&k2)) => work.push((am, ab, k2)),
+                        _ => return None,
+                    },
+                    _ => return None,
+                }
+            }
+        }
+        Some(out)
+    }
+}

@@ -24,6 +24,7 @@ mod iface;
 mod js;
 mod json;
 mod moves;
+mod writes;
 mod quiet;
 mod range;
 mod resize;
@@ -292,6 +293,12 @@ pub(crate) struct Gen<'c, 'a> {
     /// (their arguments' address, which arguments are handed over).
     pub(crate) owned_memo: FxMap<(u32, crate::ast::StmtId), Vec<bool>>,
     pub(crate) owned_calls: Vec<(usize, Vec<bool>)>,
+    /// What bodies may release (see `writes`), those being looked at, and what types reach.
+    pub(crate) writes_memo: FxMap<(u32, crate::ast::StmtId, bool), writes::Writes>,
+    pub(crate) writes_stack: Vec<(u32, crate::ast::StmtId, bool)>,
+    pub(crate) reach_memo: FxMap<TyId, Option<FxSet<u32>>>,
+    /// The call being made, for its arguments (see `call_spares`).
+    pub(crate) cur_calls: Vec<(usize, u32, crate::ast::ExprId)>,
     pub(crate) pquiet_stack: Vec<(u32, crate::ast::StmtId, u32)>,
     pub(crate) called_stack: Vec<(u32, crate::ast::StmtId, u32)>,
     pub(crate) rec_cvs: FxMap<(TyId, TyId), String>,
@@ -412,6 +419,10 @@ impl<'c, 'a> Gen<'c, 'a> {
             pquiet_memo: FxMap::default(),
             owned_memo: FxMap::default(),
             owned_calls: Vec::new(),
+            writes_memo: FxMap::default(),
+            writes_stack: Vec::new(),
+            reach_memo: FxMap::default(),
+            cur_calls: Vec::new(),
             pquiet_stack: Vec::new(),
             called_stack: Vec::new(),
             rec_cvs: FxMap::default(),

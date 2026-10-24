@@ -32,7 +32,9 @@ impl<'c, 'a> Gen<'c, 'a> {
         self.quiet_calls.push((key, q));
         let owned = if key != 0 { self.owned_args(m, e) } else { Vec::new() };
         self.owned_calls.push((key, owned));
+        self.cur_calls.push((key, m, e));
         let v = self.call_inner(e);
+        self.cur_calls.pop();
         self.owned_calls.pop();
         self.quiet_calls.pop();
         if self.facts(m).throwing.contains(&e) {
@@ -322,7 +324,7 @@ impl<'c, 'a> Gen<'c, 'a> {
                 let v = if args[i + 1..].iter().any(|later| self.changes_in(later.expr)) { self.snapshot(v) } else { v };
                 // A value reached through a class instance (or a closure's cell) could be released by
                 // the callee through another reference: keep it alive for the call.
-                let v = if !v.owned && self.is_rc(v.ty) && (self.heap_rooted(a.expr) && !quiet || (has_inout && self.is_place_expr(a.expr))) { self.own(v) } else { v };
+                let v = if !v.owned && self.is_rc(v.ty) && (self.heap_rooted(a.expr) && !quiet && !self.call_spares_arg(args, v.ty) || (has_inout && self.is_place_expr(a.expr))) { self.own(v) } else { v };
                 let v = self.coerce(v, p.ty);
                 out.push(v.code);
             }
@@ -3262,5 +3264,15 @@ impl<'c, 'a> Gen<'c, 'a> {
 
     pub(crate) fn bump(&mut self, d: i32) {
         self.b().bump_indent(d);
+    }
+}
+
+impl Gen<'_, '_> {
+    /// The call whose arguments are `args` can't release an object of type `t` (see `writes`).
+    pub(crate) fn call_spares_arg(&mut self, args: &[Arg], t: TyId) -> bool {
+        match self.cur_calls.last() {
+            Some(&(k, m, e)) if !args.is_empty() && k == args.as_ptr() as usize => self.call_spares(m, e, t),
+            _ => false,
+        }
     }
 }
