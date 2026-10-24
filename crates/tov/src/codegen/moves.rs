@@ -125,7 +125,7 @@ impl Gen<'_, '_> {
 
     fn mv_local(&self, m: u32, e: ExprId) -> Option<IdentFact> {
         match &self.ast(m).expr(e).kind {
-            ExprKind::Paren(x) => self.mv_local(m, *x),
+            ExprKind::Paren(x) | ExprKind::NonNull(x) | ExprKind::As(x, _) => self.mv_local(m, *x),
             ExprKind::Ident(_) => self.ident_fact(m, e),
             _ => None,
         }
@@ -141,7 +141,12 @@ impl Gen<'_, '_> {
                     w.uses.entry(k).or_default().push((at, w.loops.clone(), handed.then_some(e)));
                 }
             }
-            ExprKind::Paren(x) => self.mv_expr(m, *x, w, handed),
+            // (`return t!`, `x as C`: the same reference, handed on)
+            ExprKind::Paren(x) | ExprKind::NonNull(x) => self.mv_expr(m, *x, w, handed),
+            ExprKind::As(x, _) if {
+                let (a, b) = (self.facts(m).expr_ty[e as usize], self.facts(m).expr_ty[*x as usize]);
+                matches!(self.tget(a), crate::types::Ty::Class(..)) && (matches!(self.tget(b), crate::types::Ty::Class(..)) || self.niche(b).is_some())
+            } => self.mv_expr(m, *x, w, handed),
             ExprKind::Assign(op, t, v) => {
                 // (the value first: `a.next = x` hands x over; `x = x.next` reads x before its
                 // own store)
