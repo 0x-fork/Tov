@@ -739,17 +739,46 @@ impl<'c, 'a> Gen<'c, 'a> {
             let _ = writeln!(self.protos, "static {ct} {gname};");
             let MemberKind::Field { init: Some(init), .. } = &self.c.class_member_decl(decl, member).kind else { return Val::plain(gname, f.ty) };
             let m = info.module;
+            // (the module variables what it calls reads, first)
+            for (cm, ci) in self.consts_read_by_called_fns(m, *init) {
+                self.const_ref(cm, ci);
+            }
             let code = self.function_body(m, FxMap::default(), &[], f.ty, FnBodyKind::Expr(*init), None, None, None);
             let fname = format!("init_{gname}");
             let _ = writeln!(self.funcs, "static {ct} {fname}(void) {{\n{code}}}\n");
-            let _ = writeln!(self.const_init, "    {gname} = {fname}();");
-            // (an error it throws is uncaught: the program ends with it)
-            if code.contains("tvg_err") {
-                let _ = writeln!(self.const_init, "    if (tvg_err) {{ tvg_uncaught(); return 1; }}");
-                self.needs_uncaught = true;
+            // (a script's own classes: where they're declared, see `init_script_statics`)
+            if self.script_module != Some(m) {
+                let _ = writeln!(self.const_init, "    {gname} = {fname}();");
+                // (an error it throws is uncaught: the program ends with it)
+                if code.contains("tvg_err") {
+                    let _ = writeln!(self.const_init, "    if (tvg_err) {{ tvg_uncaught(); return 1; }}");
+                    self.needs_uncaught = true;
+                }
+            } else if code.contains("tvg_err") {
+                self.static_throws.insert((decl, member));
             }
         }
         Val::plain(gname, f.ty)
+    }
+
+    /// A script's class (item `ii`) is declared here: its static fields are initialized, in order
+    /// (an error one throws is uncaught).
+    pub(crate) fn init_script_statics(&mut self, m: u32, ii: u32) {
+        let Some(decl) = (0..self.c.classes.len() as u32).find(|&c| self.c.classes[c as usize].module == m && self.c.classes[c as usize].item == ii) else { return };
+        let fields: Vec<u32> = self.c.classes[decl as usize].static_fields.iter().filter_map(|f| f.member).collect();
+        let mut fields = fields;
+        fields.sort();
+        for mi in fields {
+            if !matches!(&self.c.class_member_decl(decl, mi).kind, MemberKind::Field { init: Some(_), .. }) {
+                continue;
+            }
+            let g = self.static_field_ref(decl, mi);
+            self.line(format!("{} = init_{}();", g.code, g.code));
+            if self.static_throws.contains(&(decl, mi)) {
+                self.needs_uncaught = true;
+                self.line("if (tvg_err) { tvg_uncaught(); tv_out_flush(); exit(1); }");
+            }
+        }
     }
 
     // ------------------------------------------------------------ conversions

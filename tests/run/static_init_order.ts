@@ -19,3 +19,16 @@ class Table {
   static doubled: number = Table.check(21);
 }
 console.log(S.all[0].v, S.all[1].v, Table.doubled);
+// (a script's variables, read by what a static initializer calls: set by then)
+class Sym {
+  constructor(public n: number) {}
+}
+const FIRST = new Sym(7);
+function table(): Sym[] {
+  return [FIRST, new Sym(8)];
+}
+class Strength {
+  static all: Sym[] = table();
+  static first: number = Strength.all[0].n;
+}
+console.log(Strength.first, Strength.all.length);

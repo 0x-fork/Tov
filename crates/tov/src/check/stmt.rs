@@ -246,6 +246,7 @@ impl<'a> Checker<'a> {
         let span = node.span;
         match &node.kind {
             StmtKind::Empty | StmtKind::Error => {}
+            StmtKind::InitGlobal(ii) if !matches!(self.modules[self.cur as usize].ast.items[*ii as usize].kind, ItemKind::Const { .. }) => {}
             StmtKind::InitGlobal(ii) => {
                 let m = self.cur;
                 let t = self.const_type(m, *ii);

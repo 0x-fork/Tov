@@ -701,6 +701,13 @@ impl<'a> Parser<'a> {
                 };
                 body.push(self.mk_stmt(st, span));
             }
+            // (a class's static fields: initialized where it's declared, in order)
+            if let ItemKind::Class(cd) = &self.ast.items[ii].kind
+                && cd.members.iter().any(|mem| mem.is_static && matches!(mem.kind, MemberKind::Field { init: Some(_), .. }))
+            {
+                let span = self.ast.items[ii].span;
+                body.push(self.mk_stmt(StmtKind::InitGlobal(new_index[ii]), span));
+            }
         }
         body.extend(stmt_iter.map(|(_, s)| s));
         if local.iter().any(|&l| l) {

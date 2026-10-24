@@ -271,12 +271,17 @@ pub(crate) struct Gen<'c, 'a> {
     /// Conversions under way (see `coerce`), and the functions made for those met again inside
     /// themselves (between recursive types).
     pub(crate) coerce_stack: Vec<(TyId, TyId)>,
+    /// A script's static fields whose initializers can throw.
+    pub(crate) static_throws: FxSet<(u32, u32)>,
     /// Bodies found quiet or not (see `quiet`), those being looked at, whether a result relied on
     /// one of those, and the calls being made (their arguments' address, quiet).
     pub(crate) quiet_memo: FxMap<(u32, crate::ast::StmtId, bool), bool>,
     pub(crate) quiet_stack: Vec<(u32, crate::ast::StmtId, bool)>,
     pub(crate) quiet_tainted: bool,
     pub(crate) quiet_calls: Vec<(usize, bool)>,
+    /// Callback parameters found only called (see `arg_called_only`), and those being looked at.
+    pub(crate) called_memo: FxMap<(u32, crate::ast::StmtId, u32), bool>,
+    pub(crate) called_stack: Vec<(u32, crate::ast::StmtId, u32)>,
     pub(crate) rec_cvs: FxMap<(TyId, TyId), String>,
     /// Emit `tvg_uncaught` (main can throw, or tests).
     pub(crate) needs_uncaught: bool,
@@ -384,10 +389,13 @@ impl<'c, 'a> Gen<'c, 'a> {
             itabs: FxMap::default(),
             fn_adapters: FxMap::default(),
             coerce_stack: Vec::new(),
+            static_throws: FxSet::default(),
             quiet_memo: FxMap::default(),
             quiet_stack: Vec::new(),
             quiet_tainted: false,
             quiet_calls: Vec::new(),
+            called_memo: FxMap::default(),
+            called_stack: Vec::new(),
             rec_cvs: FxMap::default(),
             needs_uncaught: false,
             test_call_done: false,

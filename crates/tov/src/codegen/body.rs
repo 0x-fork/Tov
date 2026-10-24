@@ -2517,6 +2517,11 @@ impl<'c, 'a> Gen<'c, 'a> {
                 if self.script_module != Some(m) {
                     return;
                 }
+                // a class: its static fields, where it's declared
+                if let ast::ItemKind::Class(_) = &self.ast(m).items[*ii as usize].kind {
+                    self.init_script_statics(m, *ii);
+                    return;
+                }
                 // `g = init_g();` here, in source order (a script's module variable); an
                 // initializer that awaits is evaluated right here, in the async script body.
                 let g = self.const_ref(m, *ii);
