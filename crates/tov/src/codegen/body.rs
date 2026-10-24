@@ -552,6 +552,18 @@ impl<'c, 'a> Gen<'c, 'a> {
                 }
             }
         }
+        // (parameters it takes ownership of, see `owned_params`: released unless moved on)
+        if let FnBodyKind::Block(s) = &kind {
+            let flags = self.owned_params(m, *s);
+            for (i, &(key, ty, inout)) in params.iter().enumerate() {
+                if flags.get(i).copied().unwrap_or(false) && !inout && self.is_rc(ty) && !self.b().boxed.contains(&key) {
+                    let rel = format!("{};", self.release_code(ty, &format!("p{i}")));
+                    self.b().scopes[0].releases.push(rel);
+                    self.b().params.remove(&key);
+                    self.b().owned_locals.insert(key);
+                }
+            }
+        }
         // A parameter the body reassigns is owned from the start (borrowed, it can't be released
         // when replaced).
         let reassigned = self.reassigned_locals(&kind);
@@ -3928,8 +3940,9 @@ impl<'c, 'a> Gen<'c, 'a> {
         if self.b().moves.is_none() {
             let m = self.cur_m();
             let (root, plain) = (self.b().root, self.b().async_fn.is_none() && self.b().gen_elem.is_none());
+            let owned: Vec<u32> = self.b().owned_locals.iter().copied().collect();
             let moves = match root {
-                Some(root) if plain => self.last_use_moves(m, root),
+                Some(root) if plain => self.last_use_moves(m, root, &owned),
                 _ => FxSet::default(),
             };
             self.b().moves = Some(moves);

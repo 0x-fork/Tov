@@ -25,8 +25,12 @@ struct Walk {
 impl Gen<'_, '_> {
     /// The uses (identifier expressions) of the current function's locals that are their last
     /// and hand them over.
-    pub(crate) fn last_use_moves(&self, m: u32, root: StmtId) -> FxSet<ExprId> {
+    pub(crate) fn last_use_moves(&self, m: u32, root: StmtId, params: &[u32]) -> FxSet<ExprId> {
         let mut w = Walk::default();
+        // (parameters: declared at the top, outside every loop)
+        for &k in params {
+            w.decl.insert(k, Vec::new());
+        }
         self.mv_stmt(m, root, &mut w);
         let mut out = FxSet::default();
         for (k, uses) in &w.uses {

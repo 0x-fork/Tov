@@ -30,7 +30,10 @@ impl<'c, 'a> Gen<'c, 'a> {
         };
         let q = key != 0 && self.quiet_call(m, e);
         self.quiet_calls.push((key, q));
+        let owned = if key != 0 { self.owned_args(m, e) } else { Vec::new() };
+        self.owned_calls.push((key, owned));
         let v = self.call_inner(e);
+        self.owned_calls.pop();
         self.quiet_calls.pop();
         if self.facts(m).throwing.contains(&e) {
             self.error_check();
@@ -265,6 +268,11 @@ impl<'c, 'a> Gen<'c, 'a> {
         let mut out = Vec::new();
         let has_inout = params.iter().any(|p| p.inout);
         let quiet = !args.is_empty() && self.quiet_calls.last().is_some_and(|&(k, q)| q && k == args.as_ptr() as usize);
+        // (arguments the callee takes ownership of: handed over, see `owned_params`)
+        let owned: Vec<bool> = match self.owned_calls.last() {
+            Some((k, o)) if !args.is_empty() && *k == args.as_ptr() as usize => o.clone(),
+            _ => Vec::new(),
+        };
         for (i, a) in args.iter().enumerate() {
             let p = params.get(i).copied().unwrap_or(FnParam { ty: ERROR, inout: false, optional: false });
             if p.inout && a.by_ref.is_none() && !self.is_place_expr(a.expr) {
@@ -301,6 +309,11 @@ impl<'c, 'a> Gen<'c, 'a> {
                 let at = self.ty(a.expr);
                 let v = self.coerce(Val::plain(v, at), p.ty);
                 out.push(v.code);
+            } else if owned.get(i).copied().unwrap_or(false) && !args[i + 1..].iter().any(|later| self.changes_in(later.expr)) {
+                let v = self.expr(a.expr);
+                let v = self.coerce(v, p.ty);
+                let code = self.consume(v);
+                out.push(code);
             } else {
                 let v = self.expr(a.expr);
                 // An argument before one that awaits (or assigns) is read first, as in JavaScript.

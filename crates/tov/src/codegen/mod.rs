@@ -288,6 +288,10 @@ pub(crate) struct Gen<'c, 'a> {
     /// Where parameters get their values (see `param_quiet`), and its findings.
     pub(crate) bind_index: Option<std::rc::Rc<quiet::BindIndex>>,
     pub(crate) pquiet_memo: FxMap<(u32, crate::ast::StmtId, u32), bool>,
+    /// Parameters bodies take ownership of (see `owned_params`), and the calls being made
+    /// (their arguments' address, which arguments are handed over).
+    pub(crate) owned_memo: FxMap<(u32, crate::ast::StmtId), Vec<bool>>,
+    pub(crate) owned_calls: Vec<(usize, Vec<bool>)>,
     pub(crate) pquiet_stack: Vec<(u32, crate::ast::StmtId, u32)>,
     pub(crate) called_stack: Vec<(u32, crate::ast::StmtId, u32)>,
     pub(crate) rec_cvs: FxMap<(TyId, TyId), String>,
@@ -406,6 +410,8 @@ impl<'c, 'a> Gen<'c, 'a> {
             called_memo: FxMap::default(),
             bind_index: None,
             pquiet_memo: FxMap::default(),
+            owned_memo: FxMap::default(),
+            owned_calls: Vec::new(),
             pquiet_stack: Vec::new(),
             called_stack: Vec::new(),
             rec_cvs: FxMap::default(),

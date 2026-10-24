@@ -524,8 +524,9 @@ pub(crate) struct BindIndex {
     escaped_names: FxSet<crate::intern::Sym>,
     /// Each body's parameter keys.
     params: FxMap<(u32, StmtId), Vec<u32>>,
-    /// Method bodies by name (for `escaped_names`).
+    /// Method bodies by name (for `escaped_names`), and their class.
     method_names: FxMap<(u32, StmtId), crate::intern::Sym>,
+    method_class: FxMap<(u32, StmtId), u32>,
 }
 
 impl Gen<'_, '_> {
@@ -551,6 +552,7 @@ impl Gen<'_, '_> {
                     if matches!(mem.kind, MemberKind::Method(_)) && !f.is_async && !f.is_gen {
                         ix.indexed.insert((m, f.body));
                         ix.method_names.insert((m, f.body), mem.name);
+                        ix.method_class.insert((m, f.body), c);
                     }
                     bodies.push((m, f.body));
                 }
@@ -663,5 +665,100 @@ impl Gen<'_, '_> {
         }
         self.quiet_tainted = saved || (tainted && q);
         q
+    }
+}
+
+impl Gen<'_, '_> {
+    /// The parameters of function or method body `(m, body)` it takes ownership of: each is
+    /// stored somewhere by a statement of the body itself (`this.f = p`, `xs[i] = p`), a class
+    /// instance, never reassigned or captured. Its callers hand over a reference (theirs if they
+    /// own one, else a new one) and the body moves it into the store. Only for bodies every call
+    /// of which is a direct one (not used as values, overridden or reached through an interface).
+    pub(crate) fn owned_params(&mut self, m: u32, body: StmtId) -> Vec<bool> {
+        if let Some(v) = self.owned_memo.get(&(m, body)) {
+            return v.clone();
+        }
+        if self.bind_index.is_none() {
+            let ix = self.build_binds();
+            self.bind_index = Some(std::rc::Rc::new(ix));
+        }
+        let ix = self.bind_index.clone().unwrap();
+        let keys = ix.params.get(&(m, body)).cloned().unwrap_or_default();
+        let mut out = vec![false; keys.len()];
+        let direct = ix.indexed.contains(&(m, body))
+            && !ix.escaped.contains(&(m, body))
+            && !ix.method_names.get(&(m, body)).is_some_and(|n| ix.escaped_names.contains(n))
+            && match (ix.method_class.get(&(m, body)), ix.method_names.get(&(m, body))) {
+                (Some(&c), Some(&n)) => !self.quiet_overridden(c, n) && !self.overrides_one(c, n),
+                _ => true,
+            };
+        if direct && !keys.is_empty() {
+            let ast = self.ast(m);
+            let mut exprs = Vec::new();
+            super::body::collect_exprs_stmt_pub(ast, body, &mut exprs);
+            let top: Vec<StmtId> = match &ast.stmt(body).kind {
+                StmtKind::Block(ss) => ss.clone(),
+                _ => Vec::new(),
+            };
+            for (i, &k) in keys.iter().enumerate() {
+                let is_k = |g: &Self, x: ExprId| matches!(g.ident_fact(m, x), Some(IdentFact::Local(j)) if j == k);
+                // (stored by a top-level statement)
+                let stored = top.iter().any(|&st| match &ast.stmt(st).kind {
+                    StmtKind::Expr(e) => match &ast.expr(*e).kind {
+                        ExprKind::Assign(crate::ast::AssignOp::Assign, t, v) => {
+                            !matches!(ast.expr(*t).kind, ExprKind::Ident(_)) && is_k(self, *v) && {
+                                let vt = self.facts(m).expr_ty[*v as usize];
+                                !self.c.types.has_param(vt) && matches!(self.tget(vt), Ty::Class(..))
+                            }
+                        }
+                        _ => false,
+                    },
+                    _ => false,
+                });
+                if !stored {
+                    continue;
+                }
+                // (never reassigned, passed by reference or seen by a closure)
+                let changed = exprs.iter().any(|&x| match &ast.expr(x).kind {
+                    ExprKind::Assign(_, t, _) | ExprKind::Update { target: t, .. } => is_k(self, *t),
+                    ExprKind::Call { args, .. } => args.iter().any(|a| a.by_ref.is_some() && is_k(self, a.expr)),
+                    ExprKind::Arrow(_) => super::body::arrow_captures(ast, self.facts(m), x).contains(&k),
+                    _ => false,
+                });
+                out[i] = !changed;
+            }
+        }
+        self.owned_memo.insert((m, body), out.clone());
+        out
+    }
+
+    /// A base class of `c` has a method `name` (so `c`'s overrides it).
+    fn overrides_one(&mut self, c: u32, name: crate::intern::Sym) -> bool {
+        let mut k = self.c.classes[c as usize].base.and_then(|b| self.c.class_of(b)).map(|(b, _)| b);
+        let mut depth = 0;
+        while let Some(b) = k {
+            depth += 1;
+            if depth > 32 {
+                return true;
+            }
+            self.c.resolve_class(b);
+            if self.c.classes[b as usize].methods.iter().any(|mm| mm.name == name) {
+                return true;
+            }
+            k = self.c.classes[b as usize].base.and_then(|bb| self.c.class_of(bb)).map(|(bb, _)| bb);
+        }
+        false
+    }
+
+    /// For call `e` (module `m`): which arguments the callee takes ownership of (see
+    /// `owned_params`).
+    pub(crate) fn owned_args(&mut self, m: u32, e: ExprId) -> Vec<bool> {
+        match self.callee_bodies(m, e) {
+            Some(bodies) if bodies.len() == 1 => {
+                let (bm, bb, _) = bodies[0];
+                self.owned_params(bm, bb)
+            }
+            _ => Vec::new(),
+        }
     }
 }
