@@ -784,3 +784,34 @@ export function __testHere(name: string, f: () => void, after?: () => void): voi
   if (after === undefined) __test(__suiteName(name), () => f())
   else __test(__suiteName(name), () => f(), () => after())
 }
+
+/** Deno's standard output: `Deno.stdout.write(bytes)` */
+export class __DenoStdout {
+  write(data: u8[]): Promise<int> {
+    process.stdout.write(__native.bytesToString(data))
+    return Promise.resolve(data.length)
+  }
+  writeSync(data: u8[]): int {
+    process.stdout.write(__native.bytesToString(data))
+    return data.length
+  }
+}
+
+/** The part of Deno's global programs written for Deno use most: its arguments, output,
+ * files and exit */
+export class Deno {
+  static args: string[] = process.argv.slice(2)
+  static stdout: __DenoStdout = new __DenoStdout()
+  static exit(code?: int): void {
+    process.exit(code ?? 0)
+  }
+  static readTextFileSync(path: string): string throws Error {
+    const text = __native.readFile(path)
+    const err = __native.takeError()
+    if (err !== "") throw new Error(err)
+    return text
+  }
+  static async readTextFile(path: string): Promise<string, Error> {
+    return Deno.readTextFileSync(path)
+  }
+}
