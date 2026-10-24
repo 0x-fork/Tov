@@ -1146,9 +1146,11 @@ impl<'c, 'a> Gen<'c, 'a> {
             matches!(self.tget(t), Ty::Func(..))
         });
         let recursive = code.contains(&format!("{cname}("));
-        if takes_fn && code.lines().count() <= 40 && !recursive {
+        let lines = code.lines().count();
+        if !recursive && (takes_fn && lines <= 40 || lines <= 25) {
+            // (a callback's caller, or a tiny function: always inlined)
             "inline __attribute__((always_inline)) "
-        } else if !recursive && code.lines().count() <= 60 {
+        } else if !recursive && lines <= 60 {
             // (a small one, as a hint: its cold paths, errors and traps, count against it)
             "inline "
         } else {
