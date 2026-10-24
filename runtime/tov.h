@@ -402,6 +402,30 @@ typedef struct tv_arrbuf {
 } tv_arrbuf;                    /* 32 bytes: elements that follow it are 16-byte aligned */
 
 static inline unsigned char *tv_arrbuf_data(const tv_arrbuf *b) { return b->ext ? b->ext : (unsigned char *)(b + 1); }
+/* A header and `data` bytes of elements after it: a block of a multiple of 16 bytes (so the
+ * elements stay 16-byte aligned), with room for at least one word (where the elements' count
+ * goes once they move out, see tv_arr_make_unique). Small ones come from the small-object free
+ * lists: a tree of little arrays is made and dropped without malloc. */
+enum { TV_ARRBUF_SMALL = 256 };
+static inline size_t tv_arrbuf_block(size_t data) {
+    size_t s = sizeof(tv_arrbuf) + (data < 8 ? 8 : data);
+    return s < data ? SIZE_MAX : (s + 15) & ~(size_t)15;
+}
+#if defined(__SANITIZE_ADDRESS__) || (defined(__has_feature) && __has_feature(address_sanitizer))
+#define TV_ARRBUF_PLAIN 1
+#endif
+static inline void *tv_arrbuf_alloc(size_t data) {
+    size_t s = tv_arrbuf_block(data);
+#ifndef TV_ARRBUF_PLAIN
+    if (s <= TV_ARRBUF_SMALL) {
+        size_t c = s >> 3;
+        void **f = (void **)tv_small_bins[c];
+        if (__builtin_expect(f != NULL, 1)) { tv_small_bins[c] = *f; return f; }
+        return tv_small_refill(c);
+    }
+#endif
+    return tv_alloc(s);
+}
 
 typedef struct tv_arr {
     tv_arrbuf *p;
@@ -424,7 +448,7 @@ static inline tv_arr tv_arr_of(tv_arrbuf *b, int64_t len) { b->len = len; return
  * the C compiler sees the length it stores, and that nothing else can change it until the
  * array is passed somewhere: a literal's length stays a constant it can unroll loops by. */
 static inline tv_arr tv_arr_new_len(size_t es, tv_int n) {
-    tv_arrbuf *b = (tv_arrbuf *)tv_alloc(sizeof(tv_arrbuf) + (size_t)n * es);
+    tv_arrbuf *b = (tv_arrbuf *)tv_arrbuf_alloc((size_t)n * es);
     b->rc = 1;
     b->len = n;
     b->cap = n;

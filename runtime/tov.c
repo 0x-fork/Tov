@@ -2492,7 +2492,7 @@ tv_arrbuf tv_empty_arrbuf = {-1, 0, 0, NULL};
 
 /* A header with room for cap elements right after it (len 0). */
 static tv_arrbuf *tv_arrbuf_new(size_t esize, int64_t cap) {
-    tv_arrbuf *b = (tv_arrbuf *)tv_alloc(tv_size_mul_add((size_t)cap, esize, sizeof(tv_arrbuf)));
+    tv_arrbuf *b = (tv_arrbuf *)tv_arrbuf_alloc(tv_size_mul_add((size_t)cap, esize, 0));
     b->rc = 1;
     b->len = 0;
     b->cap = cap;
@@ -2512,9 +2512,30 @@ static void tv_copy_retain(unsigned char *dst, const unsigned char *src, int64_t
 void tv_arrbuf_release_slow(tv_arrbuf *TV_NOESCAPE p, const tv_type *t) {
     if (t && t->release && t->size) {
         size_t es = t->size;
-        for (int64_t i = 0; i < p->len; i++) t->release(tv_arrbuf_data(p) + (size_t)i * es);
+        unsigned char *d = tv_arrbuf_data(p);
+        if (es == sizeof(void *)) {
+            /* (a word of zeros, `null`/`undefined` of a reference type: nothing to release) */
+            for (int64_t i = 0; i < p->len; i++)
+                if (((void **)(void *)d)[i]) t->release(d + (size_t)i * es);
+        } else {
+            for (int64_t i = 0; i < p->len; i++) t->release(d + (size_t)i * es);
+        }
     }
-    free(p->ext);
+    /* (the header's block: the size it was made with, from the count of elements it held) */
+    int64_t inl = p->cap;
+    if (p->ext) {
+        memcpy(&inl, p + 1, sizeof inl);
+        free(p->ext);
+    }
+    size_t s = tv_arrbuf_block((size_t)inl * (t ? t->size : 0));
+#ifndef TV_ARRBUF_PLAIN
+    if (t && s <= TV_ARRBUF_SMALL) {
+        size_t c = s >> 3;
+        *(void **)(void *)p = tv_small_bins[c];
+        tv_small_bins[c] = p;
+        return;
+    }
+#endif
     free(p);
 }
 
@@ -2535,6 +2556,10 @@ void tv_arr_make_unique(tv_arr *a, const tv_type *t, tv_int min_cap) {
         if (!p->ext) {
             unsigned char *d = (unsigned char *)tv_alloc(bytes ? bytes : 1);
             if (es && p->len) memcpy(d, tv_arrbuf_data(p), (size_t)p->len * es);
+            /* (the count the header's block was made for, where the elements were: see
+             * tv_arrbuf_release_slow) */
+            int64_t inl = p->cap;
+            memcpy(p + 1, &inl, sizeof inl);
             p->ext = d;
         } else {
             p->ext = (unsigned char *)tv_realloc(p->ext, bytes ? bytes : 1);
@@ -2707,10 +2732,20 @@ tv_arr tv_arr_make(const tv_type *t, tv_int n, const void *elem, const char *loc
     if (n == 0) return tv_arr_fresh();
     tv_arrbuf *b = tv_arrbuf_new(t->size, n);
     unsigned char *d = tv_arrbuf_data(b);
+    size_t es = t->size;
     bool zero = true;
-    for (size_t k = 0; k < t->size; k++) zero &= ((const unsigned char *)elem)[k] == 0;
-    if (zero && !t->retain) memset(d, 0, (size_t)n * t->size);
-    else for (tv_int i = 0; i < n; i++) tv_copy_retain(d + (size_t)i * t->size, elem, 1, t);
+    for (size_t k = 0; k < es; k++) zero &= ((const unsigned char *)elem)[k] == 0;
+    /* (a word of zeros, `null`/`undefined` of a reference type, holds nothing to retain) */
+    if (zero && (!t->retain || es == sizeof(void *))) {
+        memset(d, 0, (size_t)n * es);
+    } else if (es == 8) {
+        uint64_t w;
+        memcpy(&w, elem, 8);
+        for (tv_int i = 0; i < n; i++) memcpy(d + (size_t)i * 8, &w, 8);
+        if (t->retain) for (tv_int i = 0; i < n; i++) t->retain(d + (size_t)i * 8);
+    } else {
+        for (tv_int i = 0; i < n; i++) tv_copy_retain(d + (size_t)i * es, elem, 1, t);
+    }
     return tv_arr_of(b, n);
 }
 
