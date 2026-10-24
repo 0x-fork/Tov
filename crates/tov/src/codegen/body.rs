@@ -3876,7 +3876,9 @@ impl<'c, 'a> Gen<'c, 'a> {
                 }
                 // (its last use, handing it over: moved, the local left empty)
                 let array = matches!(self.tget(ty), Ty::Array(_)) || self.niche_arr(ty);
-                if local.ty == ty && self.b().owned_locals.contains(&k) && self.is_last_use(e) && (matches!(self.tget(ty), Ty::Class(..)) || self.niche(ty).is_some() && !self.niche_str(ty) || array) {
+                // (narrowed, `C | null` read as `C`: the same pointer)
+                let same = local.ty == ty || self.niche(local.ty).is_some() && !self.niche_str(local.ty) && self.ctype(local.ty) == self.ctype(ty);
+                if same && self.b().owned_locals.contains(&k) && self.is_last_use(e) && (matches!(self.tget(ty), Ty::Class(..)) || self.niche(ty).is_some() && !self.niche_str(ty) || array) {
                     // (an array's release passes over a NULL header, as a class's over NULL)
                     let (ct, t) = (self.ctype(ty), self.fresh("mv"));
                     let none = if array { "(tv_arr){NULL}" } else { "NULL" };
