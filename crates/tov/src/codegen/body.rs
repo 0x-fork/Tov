@@ -1031,6 +1031,7 @@ impl<'c, 'a> Gen<'c, 'a> {
         }
         let facts = self.facts(m);
         let mut stack_arrows = FxSet::default();
+        let mut called_cands: Vec<(ExprId, usize, ExprId)> = Vec::new();
         let mut mutated: FxSet<u32> = FxSet::default();
         let mut heap_captures: FxSet<u32> = FxSet::default();
         let root = |e: ExprId| -> Option<u32> {
@@ -1079,6 +1080,19 @@ impl<'c, 'a> Gen<'c, 'a> {
                             }
                         }
                     }
+                    // (a function or method that only calls its callback: an arrow given for it
+                    // lives on the stack)
+                    if facts.calls.get(&e).is_some_and(|f| matches!(f.callee, Callee::Fn(..) | Callee::ClassMethod { .. } | Callee::StaticMethod(..))) {
+                        for (j, a) in args.iter().enumerate() {
+                            if matches!(&ast.expr(a.expr).kind, ExprKind::Arrow(f) if !f.is_async) {
+                                let mut nested = Vec::new();
+                                collect_exprs_expr(ast, a.expr, &mut nested);
+                                if !nested.iter().any(|&x| x != a.expr && matches!(ast.expr(x).kind, ExprKind::Arrow(_))) {
+                                    called_cands.push((e, j, a.expr));
+                                }
+                            }
+                        }
+                    }
                     if let Some(fact) = facts.calls.get(&e)
                         && let ExprKind::Member { obj, name, .. } = &ast.expr(*callee).kind
                             && let Callee::Method(recv) = fact.callee
@@ -1110,6 +1124,12 @@ impl<'c, 'a> Gen<'c, 'a> {
                 _ => {}
             }
         }
+        for (call, j, arrow) in called_cands {
+            if self.arg_called_only(m, call, j) {
+                stack_arrows.insert(arrow);
+            }
+        }
+        let facts = self.facts(m);
         for &e in &exprs {
             if matches!(ast.expr(e).kind, ExprKind::Arrow(_)) && !stack_arrows.contains(&e) {
                 for k in arrow_captures(ast, facts, e) {
@@ -7094,7 +7114,7 @@ pub(crate) fn is_mutating_method(name: &str) -> bool {
 }
 
 /// Locals referenced inside an arrow (including nested arrows) but declared outside it.
-fn arrow_captures(ast: &ast::Ast, facts: &crate::check::ModuleFacts, arrow: ExprId) -> Vec<u32> {
+pub(crate) fn arrow_captures(ast: &ast::Ast, facts: &crate::check::ModuleFacts, arrow: ExprId) -> Vec<u32> {
     let span = ast.expr(arrow).span;
     let mut exprs = Vec::new();
     collect_exprs_expr(ast, arrow, &mut exprs);

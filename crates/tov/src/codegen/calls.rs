@@ -291,6 +291,16 @@ impl<'c, 'a> Gen<'c, 'a> {
                     }
                 }
                 out.push(format!("&{}", pl.lv));
+            } else if self.b().stack_arrows.contains(&a.expr) && matches!(self.ast(self.cur_m()).expr(a.expr).kind, ExprKind::Arrow(_)) {
+                // (a callback the callee only calls: on the stack, its captures by address)
+                let cb = self.prepare_callback(a.expr);
+                let v = match cb.direct {
+                    Some((cname, env)) => format!("((tv_fn){{ (void *){cname}, {env} }})"),
+                    None => cb.value,
+                };
+                let at = self.ty(a.expr);
+                let v = self.coerce(Val::plain(v, at), p.ty);
+                out.push(v.code);
             } else {
                 let v = self.expr(a.expr);
                 // An argument before one that awaits (or assigns) is read first, as in JavaScript.

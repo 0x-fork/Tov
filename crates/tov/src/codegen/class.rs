@@ -1118,7 +1118,8 @@ impl<'c, 'a> Gen<'c, 'a> {
                     return;
                 }
                 let code = self.function_body(m, subst, &ps, ret, FnBodyKind::Block(fd.body), None, Some((fd.name_span.start, ty)), None);
-                let _ = writeln!(self.funcs, "static {proto} {{\n{code}}}\n");
+                let attr = self.callback_inline(&params, &code, &cname);
+                let _ = writeln!(self.funcs, "static {attr}{proto} {{\n{code}}}\n");
             }
             ClassWork::Static { decl, member, cname, subst } => {
                 let m = self.c.classes[decl as usize].module;
@@ -1133,6 +1134,20 @@ impl<'c, 'a> Gen<'c, 'a> {
                 let code = self.function_body(m, subst, &ps, ret, FnBodyKind::Block(fd.body), None, None, None);
                 let _ = writeln!(self.funcs, "static {proto} {{\n{code}}}\n");
             }
+        }
+    }
+
+    /// A small function taking a callback is inlined where it's called: the C compiler then
+    /// sees which closure it calls, and inlines that too (`xs.forEach((x) => ...)`).
+    pub(crate) fn callback_inline(&mut self, params: &[FnParam], code: &str, cname: &str) -> &'static str {
+        let takes_fn = params.iter().any(|p| {
+            let t = self.c.types.without_undefined(p.ty);
+            matches!(self.tget(t), Ty::Func(..))
+        });
+        if takes_fn && code.lines().count() <= 40 && !code.contains(&format!("{cname}(")) {
+            "inline __attribute__((always_inline)) "
+        } else {
+            ""
         }
     }
 

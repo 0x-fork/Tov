@@ -289,7 +289,7 @@ fn stmt_parts(ast: &crate::ast::Ast, s: StmtId) -> (Vec<ExprId>, Vec<StmtId>) {
 }
 
 /// The expressions directly inside `e` (not an arrow's body).
-fn expr_parts(ast: &crate::ast::Ast, e: ExprId) -> Vec<ExprId> {
+pub(crate) fn expr_parts(ast: &crate::ast::Ast, e: ExprId) -> Vec<ExprId> {
     match &ast.expr(e).kind {
         ExprKind::Assign(_, t, v) => vec![*t, *v],
         ExprKind::Update { target, .. } => vec![*target],
@@ -385,5 +385,112 @@ impl Gen<'_, '_> {
             }
             _ => false,
         }
+    }
+}
+
+impl Gen<'_, '_> {
+    /// The functions or methods call `e` (in module `m`) runs: (module, body, parameter keys).
+    fn callee_bodies(&mut self, m: u32, e: ExprId) -> Option<Vec<(u32, StmtId, Vec<u32>)>> {
+        let fact = self.facts(m).calls.get(&e).cloned()?;
+        let fn_of = |g: &Self, c: u32, mi: u32| -> Option<(u32, StmtId, Vec<u32>)> {
+            let fm = g.c.classes[c as usize].module;
+            match &g.c.class_decl(c).members[mi as usize].kind {
+                MemberKind::Method(f) if !f.is_async && !f.is_gen => Some((fm, f.body, f.params.iter().map(|p| p.span.start).collect())),
+                _ => None,
+            }
+        };
+        match fact.callee {
+            Callee::Fn(fm, fi) => match &self.c.modules[fm as usize].ast.items[fi as usize].kind {
+                ItemKind::Function(f) if !f.is_async && !f.is_gen => Some(vec![(fm, f.body, f.params.iter().map(|p| p.span.start).collect())]),
+                _ => None,
+            },
+            Callee::StaticMethod(c, mi) => fn_of(self, c, mi).map(|x| vec![x]),
+            Callee::ClassMethod { recv, name, sup } => {
+                let (decl, _) = self.c.class_of(recv)?;
+                let direct = sup || !self.quiet_overridden(decl, name);
+                let mut out = Vec::new();
+                let mut seen: Vec<(u32, u32)> = Vec::new();
+                for d in 0..self.c.classes.len() as u32 {
+                    if d != decl && (direct || !self.c.class_descends(d, decl)) {
+                        continue;
+                    }
+                    self.c.resolve_class(d);
+                    let Some(mm) = self.c.classes[d as usize].methods.iter().find(|mm| mm.name == name).map(|mm| (mm.owner, mm.member)) else { continue };
+                    if seen.contains(&mm) {
+                        continue;
+                    }
+                    seen.push(mm);
+                    out.push(fn_of(self, mm.0, mm.1)?);
+                }
+                (!out.is_empty()).then_some(out)
+            }
+            _ => None,
+        }
+    }
+
+    /// Argument `i` of call `e` is only called by the callee (or handed on to a parameter that
+    /// is): an arrow given there can live on the caller's stack.
+    pub(crate) fn arg_called_only(&mut self, m: u32, e: ExprId, i: usize) -> bool {
+        let Some(bodies) = self.callee_bodies(m, e) else { return false };
+        bodies.into_iter().all(|(bm, body, keys)| keys.get(i).is_some_and(|&k| self.param_called_only(bm, body, k)))
+    }
+
+    fn param_called_only(&mut self, m: u32, body: StmtId, key: u32) -> bool {
+        let mk = (m, body, key);
+        if let Some(&q) = self.called_memo.get(&mk) {
+            return q;
+        }
+        if self.called_stack.contains(&mk) {
+            self.quiet_tainted = true;
+            return true;
+        }
+        if self.called_stack.len() > 32 {
+            return false;
+        }
+        self.called_stack.push(mk);
+        let saved = std::mem::replace(&mut self.quiet_tainted, false);
+        let q = self.param_called_only_in(m, body, key);
+        let tainted = self.quiet_tainted;
+        self.called_stack.pop();
+        if !q || !tainted || self.called_stack.is_empty() {
+            self.called_memo.insert(mk, q);
+        }
+        self.quiet_tainted = saved || (tainted && q);
+        q
+    }
+
+    fn param_called_only_in(&mut self, m: u32, body: StmtId, key: u32) -> bool {
+        let ast = self.ast(m);
+        let mut exprs = Vec::new();
+        super::body::collect_exprs_stmt_pub(ast, body, &mut exprs);
+        let is_key = |g: &Self, x: ExprId| matches!(g.ident_fact(m, x), Some(IdentFact::Local(k)) if k == key);
+        let mut uses = 0usize;
+        let mut ok_uses = 0usize;
+        let mut handed: Vec<(ExprId, usize)> = Vec::new();
+        for &x in &exprs {
+            match &ast.expr(x).kind {
+                ExprKind::Ident(_) if is_key(self, x) => uses += 1,
+                // (a closure that sees it could keep it)
+                ExprKind::Arrow(_) if super::body::arrow_captures(ast, self.facts(m), x).contains(&key) => return false,
+                ExprKind::Call { callee, args, .. } => {
+                    if is_key(self, *callee) {
+                        ok_uses += 1;
+                    }
+                    for (j, a) in args.iter().enumerate() {
+                        if a.by_ref.is_none() && is_key(self, a.expr) {
+                            handed.push((x, j));
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+        for (call, j) in handed {
+            if !self.arg_called_only(m, call, j) {
+                return false;
+            }
+            ok_uses += 1;
+        }
+        uses == ok_uses
     }
 }
