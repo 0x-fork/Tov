@@ -496,8 +496,10 @@ tv_arr tv_native_reExec(tv_int h, tv_str s, tv_int from) {
         type = 1; /* (UTF-16: lre_exec reads surrogate pairs itself for a `u` expression) */
         shift = 1;
     }
-    tv_arr out = tv_arr_fresh();
-    if (tv_re_find(r, cap, buf, n, from, ascii, type)) {
+    tv_arr out;
+    if (!tv_re_find(r, cap, buf, n, from, ascii, type)) {
+        out = tv_arr_fresh();
+    } else {
         out = tv_arr_with_capacity(&tv_type_int, 2 * ncap);
         tv_int *w = (tv_int *)tv_arr_data(out);
         for (int i = 0; i < 2 * ncap; i++) w[i] = cap[i] ? (tv_int)((cap[i] - buf) >> shift) : -1;
