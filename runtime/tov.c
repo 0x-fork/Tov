@@ -2692,11 +2692,13 @@ tv_arr tv_arr_splice(tv_arr *a, const tv_type *t, tv_int start, tv_int del, bool
     if (d == 0 && n == 0) return tv_arr_fresh();
     tv_arr_make_unique(a, t, len - d + n > len ? len - d + n : len);
     size_t es = t->size;
-    tv_arr removed = tv_arr_fresh();
+    tv_arr removed;
     if (d > 0) {
         tv_arrbuf *b = tv_arrbuf_new(es, d);
         if (es) memcpy(tv_arrbuf_data(b), tv_arrbuf_data(a->p) + (size_t)s * es, (size_t)d * es); /* moved out */
         removed = tv_arr_of(b, d);
+    } else {
+        removed = tv_arr_fresh();
     }
     if (es) {
         unsigned char *data = tv_arrbuf_data(a->p);
