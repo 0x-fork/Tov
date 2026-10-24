@@ -5969,7 +5969,9 @@ impl<'c, 'a> Gen<'c, 'a> {
         self.pop_temps();
         self.close("} else {");
         self.b().indent += 1;
-        let u = self.coerce(Val::plain("0", UNDEFINED), ty);
+        // (past the end: `undefined`, or the `null` an element type that has no `undefined` has)
+        let none = if !self.c.types.has_undefined(ty) && self.members(ty).contains(&NULL) { NULL } else { UNDEFINED };
+        let u = self.coerce(Val::plain("0", none), ty);
         let code = self.consume(u);
         self.line(format!("{res} = {code};"));
         self.close("}");

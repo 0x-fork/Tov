@@ -2291,7 +2291,9 @@ impl<'a> Checker<'a> {
                 self.index_type(index);
                 // (in TypeScript a typed array's element is a number: `bytes[i]` reads an `int`)
                 let e = if self.ts_module() { promoted(e) } else { e };
-                if absent { self.types.optional(e) } else { e }
+                // (an element that may already be `null`: past the end it's that, keeping the
+                // element type TypeScript gives the read)
+                if absent && !self.types.has_nullish(e) { self.types.optional(e) } else { e }
             }
             Ty::Map(k, v) => {
                 // `counts[w]` on a `Record<string, V>` (a map): its value, if any
