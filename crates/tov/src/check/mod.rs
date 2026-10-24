@@ -328,6 +328,9 @@ pub struct Checker<'a> {
     /// Checking `const x = new C(...)` with no type: type arguments nothing gives are left to the
     /// calls on `x` (`lenient_hit` when that happened; see `EV_CLASS`).
     lenient_new: Option<Span>,
+    /// `any` written in a function's parameters: each a type parameter of its own the calls bind,
+    /// by (module, where the name is).
+    any_types: HashMap<(u32, u32), TyId>,
     lenient_hit: bool,
     /// Overrides whose (inferred) return types are compared after their class is resolved.
     pending_overrides: Vec<(class::CMethod, class::CMethod)>,
@@ -461,6 +464,7 @@ fn new_checker<'a>(modules: &'a [Module], interner: &'a Interner, sm: &'a Source
         class_resolving: HashSet::default(),
         untyped_fields: HashSet::default(),
         lenient_new: None,
+        any_types: HashMap::default(),
         lenient_hit: false,
         pending_overrides: Vec::new(),
         inferred_throws: HashMap::default(),
@@ -725,6 +729,7 @@ impl<'a> Checker<'a> {
             class_resolving: HashSet::default(),
             untyped_fields: self.untyped_fields.clone(),
             lenient_new: None,
+            any_types: self.any_types.clone(),
             lenient_hit: false,
             pending_overrides: Vec::new(),
             inferred_throws: HashMap::default(),
@@ -1830,6 +1835,23 @@ impl<'a> Checker<'a> {
                         c.gparams[id as usize - base].default = Some(default);
                     }
                 }
+                // (`x: any`: a type parameter of its own, bound by each call to what it's given, as
+                // TypeScript's `any` takes anything; `xs: any[]` an array of one)
+                let ts = c.ts_module();
+                for p in f.params.iter().filter(|_| ts) {
+                    let mut anys = Vec::new();
+                    if let Some(t) = p.ty {
+                        c.any_uses(t, &mut anys);
+                    }
+                    for at in anys {
+                        let name = c.interner.lookup("any").unwrap_or(p.name);
+                        let id = c.new_gparam(name, None);
+                        let ty = c.types.intern(Ty::Param(id));
+                        tparams.push(id);
+                        let cur = c.cur;
+                        c.any_types.insert((cur, at), ty);
+                    }
+                }
                 let mut params = Vec::new();
                 let mut param_names = Vec::new();
                 for (pi, p) in f.params.iter().enumerate() {
@@ -1864,7 +1886,8 @@ impl<'a> Checker<'a> {
                     params.push(FnParam { ty, inout: p.inout, optional: p.optional });
                     param_names.push(p.name);
                 }
-                let ret = f.ret.map(|t| c.resolve_type(t, &tscope));
+                // (`: any` as the result: what the body returns, as if it weren't written)
+                let ret = f.ret.filter(|&t| !c.ts_module() || !matches!(&c.ast().ty(t).kind, TypeExprKind::Named { ns: None, name, args, .. } if args.is_empty() && c.name(*name) == "any")).map(|t| c.resolve_type(t, &tscope));
                 // An async function's body returns the `T` of its `Promise<T>`.
                 let ret = match ret {
                     Some(r) if f.is_async && !f.is_gen => Some(c.async_inner(r, f.ret.map(|te| c.ast().ty(te).span).unwrap())),
@@ -2639,7 +2662,26 @@ impl<'a> Checker<'a> {
         }
     }
 
+    /// Where `any` is written in a type (its name's position): a parameter's `any`, `any[]`,
+    /// `Map<string, any>`.
+    fn any_uses(&self, te: ast::TypeId, out: &mut Vec<u32>) {
+        match &self.ast().ty(te).kind {
+            TypeExprKind::Named { ns: None, name, name_span, args } if args.is_empty() && self.name(*name) == "any" => out.push(name_span.start),
+            TypeExprKind::Named { args, .. } => args.iter().for_each(|&a| self.any_uses(a, out)),
+            TypeExprKind::Array(e) | TypeExprKind::Keyof(e) => self.any_uses(*e, out),
+            TypeExprKind::Union(ts) | TypeExprKind::Intersection(ts) => ts.iter().for_each(|&t| self.any_uses(t, out)),
+            TypeExprKind::Record(fs) => fs.iter().for_each(|f| self.any_uses(f.ty, out)),
+            _ => {}
+        }
+    }
+
     fn resolve_named(&mut self, ns: Option<(Sym, Span)>, name: Sym, name_span: Span, args: &[ast::TypeId], span: Span, tscope: &[(Sym, TyId)]) -> TyId {
+        if ns.is_none()
+            && args.is_empty()
+            && let Some(&t) = self.any_types.get(&(self.cur, name_span.start))
+        {
+            return t;
+        }
         // (`Generator<T, TReturn, TNext>`: only what it yields matters here)
         let args = if ns.is_none() && args.len() > 1 && matches!(self.name(name), "Generator" | "Iterator" | "IterableIterator" | "AsyncGenerator") && !self.scopes[self.cur as usize].types.contains_key(&name) { &args[..1] } else { args };
         let targs: Vec<TyId> = args.iter().map(|&a| self.resolve_type(a, tscope)).collect();
@@ -3247,6 +3289,11 @@ impl<'a> Checker<'a> {
     /// Can values of these types ever be equal?
     fn comparable(&mut self, a: TyId, b: TyId) -> bool {
         if a == ERROR || b == ERROR || a == UNKNOWN || b == UNKNOWN || a == JS || b == JS {
+            return true;
+        }
+        // (a parameter's `any`: compared with anything, as TypeScript's is)
+        let any = self.interner.lookup("any");
+        if [a, b].iter().any(|&t| matches!(*self.types.get(t), Ty::Param(p) if Some(self.gparam(p).name) == any)) {
             return true;
         }
         if self.types.is_numeric(a) && self.types.is_numeric(b) {
