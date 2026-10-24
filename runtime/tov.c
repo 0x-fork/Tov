@@ -3069,7 +3069,7 @@ struct tv_mapbuf {
 };
 
 #define TV_LIVE_BIT ((uint64_t)1 << 63)
-#define TV_MAP_MIN_CAP 8
+#define TV_MAP_MIN_CAP 2
 
 typedef struct { size_t voff, stride; } tv_mlayout;
 
