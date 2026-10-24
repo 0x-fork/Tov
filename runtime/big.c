@@ -121,6 +121,24 @@ void tv_big_free(tv_big a) {
 /* Scratch limbs for one operation (division's working copy): grown, never shrunk. */
 static tv_limb *tv_big_scratch;
 static size_t tv_big_scratch_n;
+/* n limbs from s to d: a short copy inline (most numbers are a few limbs, and a call into the C
+ * library's memcpy costs more than the copy), a long one through memcpy. (The empty asm keeps
+ * the compiler from turning the loop back into a memcpy call.) */
+static inline void tv_limbs_copy(tv_limb *d, const tv_limb *s, size_t n) {
+    if (n > 16) {
+        memcpy(d, s, n * sizeof(tv_limb));
+        return;
+    }
+    size_t i = 0;
+    for (; i + 2 <= n; i += 2) {
+        tv_limb a = s[i], b = s[i + 1];
+        __asm__("" : "+r"(a), "+r"(b));
+        d[i] = a;
+        d[i + 1] = b;
+    }
+    if (i < n) d[i] = s[i];
+}
+
 static tv_limb *tv_scratch(size_t n) {
     if (n > tv_big_scratch_n) {
         free(tv_big_scratch);
@@ -137,7 +155,7 @@ static tv_bigbuf *tv_bb_reserve(tv_bigbuf *b, uint32_t cap) {
     tv_bigbuf *n = tv_bb_new(ncap);
     n->len = b->len;
     n->neg = b->neg;
-    memcpy(n->d, b->d, (size_t)b->len * sizeof(tv_limb));
+    tv_limbs_copy(n->d, b->d, b->len);
     tv_big_free(tv_big_of(b));
     return n;
 }
@@ -593,7 +611,7 @@ static void tv_mag_divrem(tv_limb *q, tv_limb *r, const tv_limb *a, uint32_t n, 
         return;
     }
     tv_limb *u = tv_scratch((size_t)n + 1);
-    memcpy(u, a, (size_t)n * sizeof(tv_limb));
+    tv_limbs_copy(u, a, n);
     u[n] = 0;
     for (uint32_t j = n - m + 1; j-- > 0;) {
         uint32_t k = j + m;
@@ -625,7 +643,7 @@ static void tv_mag_divrem(tv_limb *q, tv_limb *r, const tv_limb *a, uint32_t n, 
         if (q) q[j] = qhat;
     }
 #undef TV_UN
-    if (r) memcpy(r, u, (size_t)m * sizeof(tv_limb));
+    if (r) tv_limbs_copy(r, u, m);
 }
 
 /* ---------------------------------------------------------------- add, subtract, multiply */
@@ -690,7 +708,7 @@ tv_big tv_big_neg(tv_big a) {
     if (tv_big_is_small(a)) return tv_big_from_i64(-(a.v >> 1));
     tv_bigbuf *s = tv_bb(a);
     tv_bigbuf *r = tv_bb_new(s->len);
-    memcpy(r->d, s->d, (size_t)s->len * sizeof(tv_limb));
+    tv_limbs_copy(r->d, s->d, s->len);
     r->len = s->len;
     r->neg = !s->neg;
     return tv_bb_finish(r);
