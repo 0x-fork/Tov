@@ -1476,6 +1476,28 @@ impl<'c, 'a> Gen<'c, 'a> {
                     }
                     None => self.lit(b","),
                 };
+                // (`undefined` and `null` elements join as nothing, as in JavaScript)
+                let all_absent = et == UNDEFINED || et == NULL;
+                let absent: Vec<String> = if all_absent {
+                    vec!["true".to_string()]
+                } else {
+                    [UNDEFINED, NULL].iter().filter_map(|&n| self.tag_of(et, n)).map(|t| self.u_is("(*e_)", et, t)).collect()
+                };
+                if !absent.is_empty() {
+                    let (sbv, i, ect) = (self.fresh("sb"), self.fresh("i"), self.ctype(et));
+                    let sv = self.fresh("sep");
+                    self.line(format!("tv_sb {sbv} = {{0}}; tv_str {sv} = {sep};"));
+                    self.open(&format!("for (tv_int {i} = 0; {i} < tv_arr_len({}); {i}++) {{", arr.code));
+                    self.line(format!("{ect} *e_ = &(({ect} *)tv_arr_data({}))[{i}];", arr.code));
+                    self.line(format!("tv_sb *sb = &{sbv};"));
+                    self.line(format!("if ({i}) tv_sb_push_str(sb, {sv});"));
+                    if !all_absent {
+                        let c = self.string_code(et, "(*e_)");
+                        self.line(format!("if (!({})) {{ {c}; }}", absent.join(" || ")));
+                    }
+                    self.close("}");
+                    return self.tmp(STR, &format!("tv_str_from_sb(&{sbv})"), true);
+                }
                 self.tmp(STR, &format!("tv_arr_join({}, {d}, {sep})", arr.code), true)
             }
             "slice" => {
