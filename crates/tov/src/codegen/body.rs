@@ -2950,9 +2950,11 @@ impl<'c, 'a> Gen<'c, 'a> {
                 }
                 // `const x = <field path of a read-only parameter or unchanging local>` that is never
                 // changed itself: x is a borrowed view — no retain now, no release at scope end.
+                // (a class instance's fields changing through x is fine: x is the same object)
+                let object = matches!(self.tget(ty), Ty::Class(..)) || self.niche(ty).is_some_and(|(pi, _)| matches!(self.tget(ty), Ty::Union(ms) if matches!(self.tget(self.c.types.tys(ms)[pi]), Ty::Class(..))));
                 if let (false, Some(i), Some(v)) = (*mutable, init, &value)
                     && !v.owned
-                    && !self.b().mutated.contains(&key)
+                    && (object || !self.b().mutated.contains(&key))
                     && !self.b().boxed.contains(&key)
                     && self.stable_path(*i)
                 {
