@@ -730,6 +730,29 @@ static inline void tv_mag_mul_small(tv_limb *restrict r, const tv_limb *a, uint3
     }
 }
 
+/* r (8 limbs) = a^2 for a of 4 limbs: each cross product once, doubled, and the squares added
+ * (10 limb products where multiplying would take 16). */
+static inline void tv_mag_sqr4(tv_limb *restrict r, const tv_limb *a) {
+    tv_limb t[8] = {0};
+    for (int i = 0; i < 3; i++) {
+        tv_limb c = 0;
+        for (int j = i + 1; j < 4; j++) {
+            tv_dlimb p = (tv_dlimb)a[i] * a[j] + t[i + j] + c;
+            t[i + j] = (tv_limb)p;
+            c = (tv_limb)(p >> 64);
+        }
+        t[i + 4] = c;
+    }
+    for (int k = 7; k > 0; k--) t[k] = (t[k] << 1) | (t[k - 1] >> 63);
+    t[0] <<= 1;
+    unsigned long long c = 0;
+    for (int i = 0; i < 4; i++) {
+        tv_dlimb p = (tv_dlimb)a[i] * a[i];
+        r[2 * i] = __builtin_addcll(t[2 * i], (tv_limb)p, c, &c);
+        r[2 * i + 1] = __builtin_addcll(t[2 * i + 1], (tv_limb)(p >> 64), c, &c);
+    }
+}
+
 tv_big tv_big_mul_slow(tv_big a, tv_big b) {
     if (tv_big_is_small(a) && tv_big_is_small(b)) return tv_big_from_i128((__int128)(a.v >> 1) * (b.v >> 1));
     tv_bview x, y;
@@ -737,7 +760,8 @@ tv_big tv_big_mul_slow(tv_big a, tv_big b) {
     tv_view(b, &y);
     if (!x.n || !y.n) return tv_big_small(0);
     tv_bigbuf *r = tv_bb_new(x.n + y.n);
-    if (x.n <= 4 && y.n <= 4) tv_mag_mul_small(r->d, x.d, x.n, y.d, y.n);
+    if (x.d == y.d && x.n == 4) tv_mag_sqr4(r->d, x.d);
+    else if (x.n <= 4 && y.n <= 4) tv_mag_mul_small(r->d, x.d, x.n, y.d, y.n);
     else if (y.n == 1) r->d[x.n] = tv_mag_mul1(r->d, x.d, x.n, y.d[0]);
     else if (x.n == 1) r->d[y.n] = tv_mag_mul1(r->d, y.d, y.n, x.d[0]);
     else tv_mag_mul(r->d, x.d, x.n, y.d, y.n);
@@ -1034,7 +1058,12 @@ static const tv_barrett *tv_barrett_of(const tv_limb *d, uint32_t k) {
         b->ready = true;
         return b;
     }
-    tv_barrett *b = &tv_barretts[tv_barrett_next++ & 3];
+    /* (a divisor seen once takes the place of another seen once, not of a kept mu: the changing
+     * divisors of a gcd don't push out the modulus) */
+    tv_barrett *b = NULL;
+    for (int i = 0; i < 4 && !b; i++) if (!tv_barretts[(tv_barrett_next + i) & 3].ready) b = &tv_barretts[(tv_barrett_next + i) & 3];
+    if (!b) b = &tv_barretts[tv_barrett_next & 3];
+    tv_barrett_next++;
     b->k = k;
     b->ready = false;
     memcpy(b->d, d, k * sizeof(tv_limb));
@@ -1042,7 +1071,7 @@ static const tv_barrett *tv_barrett_of(const tv_limb *d, uint32_t k) {
 }
 
 /* r (k limbs) = x mod d by Barrett, for x of at most 2k limbs. */
-static void tv_barrett_rem(const tv_barrett *b, tv_limb *r, const tv_limb *x, uint32_t n) {
+static void tv_barrett_rem2k(const tv_barrett *b, tv_limb *r, const tv_limb *x, uint32_t n) {
     tv_limb xx[16];
     for (uint32_t i = 0; i < 2 * b->k; i++) xx[i] = i < n ? x[i] : 0;
     switch (b->k) {
@@ -1053,6 +1082,26 @@ static void tv_barrett_rem(const tv_barrett *b, tv_limb *r, const tv_limb *x, ui
     case 6: tv_barrett_rem6(r, xx, b->d, b->mu); break;
     case 7: tv_barrett_rem7(r, xx, b->d, b->mu); break;
     default: tv_barrett_rem8(r, xx, b->d, b->mu); break;
+    }
+}
+
+/* r (k limbs) = x mod d, for x of any length: its top 2k limbs reduced, then the remainder with
+ * the next k limbs below it, and so on down (each window under d * B^k <= B^2k). */
+static void tv_barrett_rem(const tv_barrett *b, tv_limb *r, const tv_limb *x, uint32_t n) {
+    uint32_t k = b->k;
+    if (n <= 2 * k) {
+        tv_barrett_rem2k(b, r, x, n);
+        return;
+    }
+    tv_limb w[16];
+    uint32_t pos = n - 2 * k;
+    tv_barrett_rem2k(b, r, x + pos, 2 * k);
+    while (pos > 0) {
+        uint32_t take = pos >= k ? k : pos;
+        pos -= take;
+        for (uint32_t i = 0; i < take; i++) w[i] = x[pos + i];
+        for (uint32_t i = 0; i < k; i++) w[take + i] = r[i];
+        tv_barrett_rem2k(b, r, w, take + k);
     }
 }
 
@@ -1093,7 +1142,7 @@ static void tv_big_divmod(tv_big a, tv_big b, tv_big *q, tv_big *r, const char *
     }
     tv_bigbuf *qb = q ? tv_bb_new(x.n - y.n + 1) : NULL;
     tv_bigbuf *rb = r ? tv_bb_new(y.n) : NULL;
-    const tv_barrett *bar = !q && y.n >= 2 && y.n <= 8 && x.n <= 2 * y.n ? tv_barrett_of(y.d, y.n) : NULL;
+    const tv_barrett *bar = !q && y.n >= 2 && y.n <= 8 && x.n <= 8 * y.n ? tv_barrett_of(y.d, y.n) : NULL;
     if (bar) tv_barrett_rem(bar, rb->d, x.d, x.n);
     else tv_mag_divrem(qb ? qb->d : NULL, rb ? rb->d : NULL, x.d, x.n, y.d, y.n);
     if (qb) {
@@ -1133,13 +1182,23 @@ tv_big tv_big_pow(tv_big a, tv_big b, const char *loc) {
         if (x == -1) return tv_big_small(e & 1 ? -1 : 1);
     }
     if (e > ((int64_t)1 << 32)) tv_trap("bigint exponent too large", loc);
+    if (e == 0) return tv_big_small(1);
+    if (e == 2) return tv_big_mul(a, a);
+    /* (the result starts as the first power taken, not as 1 times it) */
     tv_big base = a, acc = tv_big_small(1);
+    bool have = false;
     tv_big_retain(base);
     while (e > 0) {
         if (e & 1) {
-            tv_big t = tv_big_mul(acc, base);
-            tv_big_release(acc);
-            acc = t;
+            if (have) {
+                tv_big t = tv_big_mul(acc, base);
+                tv_big_release(acc);
+                acc = t;
+            } else {
+                tv_big_retain(base);
+                acc = base;
+                have = true;
+            }
         }
         e >>= 1;
         if (e) {
