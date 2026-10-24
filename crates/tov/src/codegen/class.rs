@@ -1144,17 +1144,13 @@ impl<'c, 'a> Gen<'c, 'a> {
         }
     }
 
-    /// A small function taking a callback is inlined where it's called: the C compiler then
-    /// sees which closure it calls, and inlines that too (`xs.forEach((x) => ...)`).
-    pub(crate) fn callback_inline(&mut self, params: &[FnParam], code: &str, cname: &str) -> &'static str {
-        let takes_fn = params.iter().any(|p| {
-            let t = self.c.types.without_undefined(p.ty);
-            matches!(self.tget(t), Ty::Func(..))
-        });
+    /// A small function is inlined where it's called (one taking a callback: the C compiler then
+    /// sees which closure it calls, and inlines that too, `xs.forEach((x) => ...)`).
+    pub(crate) fn callback_inline(&mut self, _params: &[FnParam], code: &str, cname: &str) -> &'static str {
         let recursive = code.contains(&format!("{cname}("));
         let lines = code.lines().count();
-        if !recursive && (takes_fn && lines <= 40 || lines <= 25) {
-            // (a callback's caller, or a tiny function: always inlined)
+        if !recursive && lines <= 40 {
+            // (a small function: always inlined; a callback's caller sees which closure it calls)
             "inline __attribute__((always_inline)) "
         } else if !recursive && lines <= 60 {
             // (a small one, as a hint: its cold paths, errors and traps, count against it)
