@@ -2391,11 +2391,9 @@ double tv_js_number(tv_str s) {
     return tv_parse_float(s, &d) ? d : NAN;
 }
 
-double tv_js_parse_float(tv_str s) {
-    /* the longest prefix that's a decimal number (after leading whitespace), else NaN */
-    size_t a, b;
-    tv_trim_range(s, true, false, &a, &b);
-    const char *p = s.p->data + a, *e = s.p->data + b, *q = p;
+/* parseFloat of the bytes p..e (leading whitespace already skipped) */
+static double tv_parse_float_bytes(const char *p, const char *e) {
+    const char *q = p;
     bool neg = q < e && *q == '-';
     if (q < e && (*q == '+' || *q == '-')) q++;
     if (e - q >= 8 && memcmp(q, "Infinity", 8) == 0) return neg ? -INFINITY : INFINITY;
@@ -2430,6 +2428,29 @@ double tv_js_parse_float(tv_str s) {
     memcpy(buf, p, n);
     buf[n] = 0;
     return strtod(buf, NULL);
+}
+
+double tv_js_parse_float(tv_str s) {
+    /* the longest prefix that's a decimal number (after leading whitespace), else NaN */
+    size_t a, b;
+    tv_trim_range(s, true, false, &a, &b);
+    return tv_parse_float_bytes(s.p->data + a, s.p->data + b);
+}
+
+/* parseFloat(s.slice(start, end)) without making the slice (of ASCII text: its units are bytes). */
+double tv_js_parse_float_slice(tv_str s, tv_int start, tv_int end, bool has_end) {
+    if (!tv_str_is_ascii(s)) {
+        tv_str piece = tv_str_slice(s, start, end, has_end, NULL);
+        double d = tv_js_parse_float(piece);
+        tv_str_release(piece);
+        return d;
+    }
+    int64_t len = tv_str_byte_len(s);
+    int64_t a = tv_clamp_index(start, len), b = has_end ? tv_clamp_index(end, len) : len;
+    if (b < a) b = a;
+    const char *p = s.p->data + a, *e = s.p->data + b;
+    while (p < e && (*p == ' ' || (*p >= 9 && *p <= 13))) p++;
+    return tv_parse_float_bytes(p, e);
 }
 
 bool tv_parse_int(tv_str s, tv_int radix, tv_int *out) {

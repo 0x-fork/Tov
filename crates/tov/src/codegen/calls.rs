@@ -2203,6 +2203,31 @@ impl<'c, 'a> Gen<'c, 'a> {
                 Val::plain(format!("({ok} ? {out} : (double)NAN)"), F64)
             }
             (None, "Number" | "parseFloat" | "parseInt") => {
+                // `parseFloat(s.slice(a, b))`: parsed where it is, the slice never made
+                let m = self.cur_m();
+                if name == "parseFloat"
+                    && let ExprKind::Call { callee, args: sa, optional: false, .. } = &self.ast(m).expr(args[0].expr).kind
+                    && let ExprKind::Member { obj: so, name: sl, optional: false, .. } = self.ast(m).expr(*callee).kind
+                    && self.sym(sl) == "slice"
+                    && (1..=2).contains(&sa.len())
+                    && !sa.iter().any(|a| matches!(self.ast(m).expr(a.expr).kind, ExprKind::Spread(_)))
+                    && {
+                        let st = self.ty(so);
+                        matches!(self.tget(st), Ty::Str)
+                    }
+                {
+                    let sv = self.expr_before(so, &sa.iter().map(|a| a.expr).collect::<Vec<_>>());
+                    let a0 = self.expr(sa[0].expr);
+                    let a0 = self.coerce(a0, INT);
+                    let (a1, has_end) = match sa.get(1) {
+                        Some(a) => {
+                            let v = self.expr(a.expr);
+                            (self.coerce(v, INT).code, "true")
+                        }
+                        None => ("0".to_string(), "false"),
+                    };
+                    return self.tmp(F64, &format!("tv_js_parse_float_slice({}, {}, {a1}, {has_end})", sv.code, a0.code), false);
+                }
                 let v = self.expr(args[0].expr);
                 let s = self.coerce(v, STR);
                 let ok = self.fresh("ok");
