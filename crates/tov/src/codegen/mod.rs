@@ -2098,7 +2098,7 @@ static inline void tvg_free_small(void *p, size_t size) {
 typedef struct tvg_cyc { struct tvg_cyc *prev, *next; int64_t gc; } tvg_cyc;
 enum { TVG_CYCLIC = 1, TVG_COLLECTING = 2, TVG_REACHED = 4 };
 static tvg_cyc tvg_cyc_head = { &tvg_cyc_head, &tvg_cyc_head, 0 };
-static int64_t tvg_cyc_count, tvg_cyc_since, tvg_cyc_limit = 10000;
+static int64_t tvg_cyc_count, tvg_cyc_since, tvg_cyc_limit = 10000, tvg_cyc_factor = 2;
 static int tvg_gc_phase; /* 1: count internal references; 2: mark what's reachable */
 #define TVG_CYC(p) ((tvg_cyc *)(void *)((char *)(p) - sizeof(tvg_cyc)))
 #define TVG_OBJ(c) ((tvg_obj *)(void *)((char *)(c) + sizeof(tvg_cyc)))
@@ -2208,7 +2208,13 @@ static void tvg_cyc_collect(void) {
         h->flags &= ~TVG_COLLECTING;
         if (--TVG_WEAK(h) == 0) tvg_obj_free(h);
     }
-    int64_t live = tvg_cyc_count * 2;
+    /* (the next one after as many allocations as are live, times a factor that grows fourfold,
+     * to 64, each time a collection finds nothing: a structure that only grows isn't walked
+     * again and again; but never more than 2M allocations past twice the live objects, so the
+     * garbage that a later phase makes is still found) */
+    tvg_cyc_factor = garbage ? 2 : (tvg_cyc_factor < 64 ? tvg_cyc_factor * 4 : 64);
+    int64_t live = tvg_cyc_count * tvg_cyc_factor, most = tvg_cyc_count * 2 + ((int64_t)1 << 21);
+    if (live > most) live = most;
     tvg_cyc_limit = live > 10000 ? live : 10000;
 }
 /* Slow paths take arrays by value and return the updated value, so the array itself never
