@@ -284,7 +284,7 @@ static inline tv_int tv_str_char_code_at(tv_str s, tv_int i) {
 }
 tv_int tv_str_code_point_at(tv_str s, tv_int i);            /* -1 out of range */
 bool tv_str_next_char(tv_str s, tv_int *pos, tv_str *out);   /* for...of: the next code point, owned */
-tv_str tv_str_unit_at(tv_str s, tv_int i);                  /* one unit as a string (0 <= i < length) */
+tv_str tv_str_unit_at_slow(tv_str s, tv_int i);
 tv_str tv_str_char_at(tv_str s, tv_int i);                  /* charAt: "" out of range */
 tv_str tv_str_from_char_code(tv_int c);                     /* String.fromCharCode(c) */
 tv_str tv_str_from_char_codes(const tv_int *c, size_t n);   /* pairs surrogates given together */
@@ -356,6 +356,15 @@ tv_str tv_str_substring_slow(tv_str s, tv_int start, tv_int end, bool has_end);
 typedef struct { int32_t rc; int32_t len; char data[4]; } tv_small_strbuf;
 extern const tv_small_strbuf tv_ascii_strs[96];
 static inline tv_str tv_ascii_str(unsigned char c) { return (tv_str){(tv_strbuf *)(void *)&tv_ascii_strs[c - 32]}; }
+/* One unit as a string (0 <= i < length): a printable ASCII one is the shared one-character
+ * string, inline (a literal's characters become table lookups). */
+static inline tv_str tv_str_unit_at(tv_str s, tv_int i) {
+    if (tv_str_is_ascii(s)) {
+        unsigned char c = (unsigned char)s.p->data[i];
+        if (c - 32u < 96u) return tv_ascii_str(c);
+    }
+    return tv_str_unit_at_slow(s, i);
+}
 static inline tv_str tv_str_substring(tv_str s, tv_int start, tv_int end, bool has_end) {
     /* (one ASCII character, `s.substring(i, i + 1)`: the shared one-character string) */
     if (has_end && end == start + 1 && (uint64_t)start < (uint64_t)s.p->len && tv_str_is_ascii(s)) {

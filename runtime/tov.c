@@ -1323,6 +1323,41 @@ static int tv_fixed_into(double v, int f, char *buf) {
     int e = be ? be - 1075 : -1074;
     if (be) mant |= UINT64_C(1) << 52;
     while (mant && !(mant & 1)) { mant >>= 1; e++; }
+    /* (exact in 128-bit integers, the common case: n = |v| × 10^f, rounded half up as JS's
+     * toFixed picks the larger of two nearest; then its digits with the point put in) */
+    if (f <= 19 && (mant == 0 || (e < 0 && e >= -100) || (e >= 0 && e <= 10))) {
+        static const uint64_t p10[20] = {1ull, 10ull, 100ull, 1000ull, 10000ull, 100000ull, 1000000ull, 10000000ull, 100000000ull, 1000000000ull,
+            10000000000ull, 100000000000ull, 1000000000000ull, 10000000000000ull, 100000000000000ull, 1000000000000000ull,
+            10000000000000000ull, 100000000000000000ull, 1000000000000000000ull, 10000000000000000000ull};
+        unsigned __int128 n;
+        if (mant == 0) {
+            n = 0;
+        } else if (e >= 0) {
+            n = (unsigned __int128)(mant << e) * p10[f];
+        } else {
+            unsigned __int128 p = (unsigned __int128)mant * p10[f];
+            int sh = -e;
+            if (sh >= 128) {
+                n = 0;
+            } else {
+                n = p >> sh;
+                unsigned __int128 rem = p - (n << sh), half = (unsigned __int128)1 << (sh - 1);
+                if (rem >= half) n++;
+            }
+        }
+        char dig[48];
+        int nd = 0;
+        do { dig[nd++] = (char)('0' + (int)(n % 10)); n /= 10; } while (n);
+        while (nd < f + 1) dig[nd++] = '0';
+        len = 0;
+        if (v < 0) buf[len++] = '-';
+        for (int i = nd - 1; i >= 0; i--) {
+            buf[len++] = dig[i];
+            if (i == f && f > 0) buf[len++] = '.';
+        }
+        buf[len] = 0;
+        return len;
+    }
     if (mant && e == -(f + 1)) {
         len = snprintf(buf, 160, "%.*f", f + 1, v);
         buf[--len] = 0;                 /* drop the '5' */
@@ -1768,7 +1803,7 @@ static tv_str tv_str_units(tv_str s, int64_t a, int64_t b) {
     return tv_str_from_sb(&sb);
 }
 
-tv_str tv_str_unit_at(tv_str s, tv_int i) {
+tv_str tv_str_unit_at_slow(tv_str s, tv_int i) {
     if (tv_str_is_ascii(s)) {
         unsigned char c = (unsigned char)s.p->data[i];
         return c - 32u < 96u ? tv_ascii_str(c) : tv_str_from(s.p->data + i, 1);
