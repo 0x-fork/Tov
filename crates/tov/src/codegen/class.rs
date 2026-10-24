@@ -428,7 +428,7 @@ impl<'c, 'a> Gen<'c, 'a> {
                 ExprKind::Ident(ps) => {
                     let Some(pi) = fd.params.iter().position(|p| p.name == ps) else { break };
                     let field = info.fields.iter().find(|f| f.name == *name && f.owner == decl);
-                    if uses.get(&ps).copied() == Some(1) && field.is_some_and(|f| !f.weak && Some(f.ty) == info.ctor.params.get(pi).map(|p| p.ty)) && !fd.params[pi].rest && !fd.params[pi].optional {
+                    if uses.get(&ps).copied() == Some(1) && field.is_some_and(|f| !f.weak && Some(f.ty) == info.ctor.params.get(pi).map(|p| p.ty)) && !fd.params[pi].rest {
                         out.insert(pi as u32);
                     }
                 }
@@ -1158,7 +1158,10 @@ impl<'c, 'a> Gen<'c, 'a> {
                         format!("{pre}{body}")
                     }
                 };
-                let _ = writeln!(self.funcs, "static {proto} {{\n{code}}}\n");
+                // (a small constructor, inlined where `new` is: the fields it sets, just
+                // cleared, are seen to hold nothing)
+                let inl = self.callback_inline(&[], &code, &cname);
+                let _ = writeln!(self.funcs, "static {inl}{proto} {{\n{code}}}\n");
             }
             ClassWork::Method { ty, member, cname, msubst } => {
                 let ci = self.class_inst(ty);
