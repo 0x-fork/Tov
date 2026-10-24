@@ -475,6 +475,11 @@ static inline tv_arr tv_arr_zeros(size_t es, tv_int n, const char *loc) {
     if (n) memset(tv_arrbuf_data(a.p), 0, (size_t)n * es);
     return a;
 }
+/* `new Array(n)` whose elements the caller writes next (all n of them). */
+static inline tv_arr tv_arr_uninit(size_t es, tv_int n, const char *loc) {
+    if (__builtin_expect((uint64_t)n > (uint64_t)INT32_MAX, 0)) tv_trap("Invalid array length", loc);
+    return tv_arr_new_len(es, n);
+}
 /* A new empty array of its own (what every array a program sees is: TV_EMPTY_ARR, shared,
  * only stands in where no value has been given yet). */
 static inline tv_arr tv_arr_fresh(void) { return tv_arr_new_len(0, 0); }

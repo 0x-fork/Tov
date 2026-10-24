@@ -2819,6 +2819,17 @@ tv_arr tv_arr_make(const tv_type *t, tv_int n, const void *elem, const char *loc
     /* (a word of zeros, `null`/`undefined` of a reference type, holds nothing to retain) */
     if (zero && (!t->retain || es == sizeof(void *))) {
         memset(d, 0, (size_t)n * es);
+    } else if (!t->retain && es == 1) {
+        memset(d, *(const unsigned char *)elem, (size_t)n);
+    } else if (!t->retain) {
+        /* (values that hold nothing: the first copied in, then the filled part doubled) */
+        size_t total = (size_t)n * es, done = es;
+        memcpy(d, elem, es);
+        while (done < total) {
+            size_t c = done < total - done ? done : total - done;
+            memcpy(d + done, d, c);
+            done += c;
+        }
     } else if (es == 8) {
         uint64_t w;
         memcpy(&w, elem, 8);

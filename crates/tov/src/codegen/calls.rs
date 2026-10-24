@@ -752,6 +752,13 @@ impl<'c, 'a> Gen<'c, 'a> {
     /// A built-in method call. `given` is an already-evaluated receiver (for `x?.m()`).
     #[allow(clippy::too_many_arguments)]
     fn method_on(&mut self, given: Option<Val>, obj: ExprId, recv: TyId, name: &str, args: &[Arg], params: &[FnParam], ty: TyId, span: Span) -> Val {
+        // `new Array<T>(n).fill(v)`: made with n copies of v, each element written once
+        if given.is_none() && name == "fill" && args.len() == 1
+            && !matches!(self.ast(self.cur_m()).expr(args[0].expr).kind, ExprKind::Spread(_))
+            && let Some(v) = self.new_filled(obj, recv, args[0].expr, span)
+        {
+            return v;
+        }
         // Receiver: a place for mutating methods, a value otherwise.
         let mutating = is_mutating_method(name) && matches!(self.tget(recv), Ty::Array(_) | Ty::Map(..) | Ty::Set(_));
         if mutating && given.is_some() {
@@ -2899,6 +2906,65 @@ impl<'c, 'a> Gen<'c, 'a> {
         arr
     }
 
+    /// `new Array<T>(n).fill(v)` (`obj` the `new`, of array type `recv`): the array, made with
+    /// n copies of v; `None` when `obj` is something else.
+    fn new_filled(&mut self, obj: ExprId, recv: TyId, fill: ExprId, span: Span) -> Option<Val> {
+        let m = self.cur_m();
+        let ast = self.ast(m);
+        let mut o = obj;
+        while let ExprKind::Paren(x) = ast.expr(o).kind {
+            o = x;
+        }
+        let ExprKind::New { callee, args, .. } = &ast.expr(o).kind else { return None };
+        let ExprKind::Ident(s) = ast.expr(*callee).kind else { return None };
+        if self.sym(s) != "Array" || args.len() != 1 || matches!(ast.expr(args[0].expr).kind, ExprKind::Spread(_)) || self.facts(m).filled_arrays.contains(&o) {
+            return None;
+        }
+        let Ty::Array(et) = self.tget(recv) else { return None };
+        let at = self.ty(args[0].expr);
+        if !(self.c.types.is_int(at) || self.c.types.is_float(at)) || self.ty(o) != recv {
+            return None;
+        }
+        let n_expr = args[0].expr;
+        let n = self.expr(n_expr);
+        let n = self.int_code(n);
+        let v = self.expr(fill);
+        let v = self.coerce(v, et);
+        let (d, ect) = (self.desc(et), self.ctype(et));
+        let loc = self.loc(span);
+        // (a fill of zeros: `0`, `false`, `null`; not `-0`, whose bytes aren't)
+        if matches!(v.code.as_str(), "0" | "INT64_C(0)" | "0.0" | "false" | "NULL") && !self.is_rc(et) {
+            return Some(self.tmp(recv, &format!("tv_arr_zeros(sizeof({ect}), {n}, {loc})"), true));
+        }
+        let z = self.fresh("z");
+        self.line(format!("{ect} {z} = {};", v.code));
+        if !self.is_rc(et) {
+            // (elements that hold nothing: written here, the count a constant the C compiler
+            // can see when it's one)
+            let a = self.tmp(recv, &format!("tv_arr_uninit(sizeof({ect}), {n}, {loc})"), true);
+            let (dp, i) = (self.fresh("d"), self.fresh("i"));
+            self.line(format!("{{ {ect} *{dp} = ({ect} *)tv_arr_data({}); for (tv_int {i} = 0; {i} < tv_arr_len({}); {i}++) {dp}[{i}] = {z}; }}", a.code, a.code));
+            return Some(a);
+        }
+        Some(self.tmp(recv, &format!("tv_arr_make({d}, {n}, &{z}, {loc})"), true))
+    }
+
+    /// Every byte of type `t`'s default value is zero (see `default_value`).
+    pub(crate) fn zero_default(&mut self, t: TyId) -> bool {
+        let zero = self.default_value(t);
+        if matches!(zero.as_str(), "0" | "NULL" | "false" | "((tv_arr){NULL})" | "((tv_str){NULL})") {
+            return true;
+        }
+        match self.tget(t) {
+            Ty::Union(ms) if self.niche(t).is_none() => {
+                let ms = self.c.types.tys(ms).to_vec();
+                let i = ms.iter().position(|&m| m == UNDEFINED).unwrap_or(0);
+                i == 0 && (self.is_unit(ms[0]) || !self.is_rc(ms[0]) && self.zero_default(ms[0]))
+            }
+            _ => false,
+        }
+    }
+
     /// `new Uint8Array(n)`, `new Float64Array(xs)`, `new Array<number>(n)`, `new Array(a, b)`.
     pub(crate) fn new_array(&mut self, args: &[Arg], ty: TyId, span: Span) -> Val {
         let Ty::Array(et) = self.tget(ty) else { return Val::plain("TV_EMPTY_ARR", ty) };
@@ -2915,7 +2981,7 @@ impl<'c, 'a> Gen<'c, 'a> {
             let zero = self.default_value(et);
             let loc = self.loc(span);
             // (zeros: `null`, `0`, `false`, an empty array or string slot)
-            if matches!(zero.as_str(), "0" | "NULL" | "false" | "((tv_arr){NULL})" | "((tv_str){NULL})") {
+            if self.zero_default(et) {
                 return self.tmp(ty, &format!("tv_arr_zeros(sizeof({ect}), {n}, {loc})"), true);
             }
             // (the fill value in a variable: a compound literal can't hold a compound literal)
