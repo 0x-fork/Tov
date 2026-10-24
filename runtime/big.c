@@ -961,6 +961,101 @@ void tv_big_muladd_to(tv_big *z, tv_big x, tv_big y, int sign) {
 
 /* ---------------------------------------------------------------- divide */
 
+/* ---- Remainders by a divisor seen again (modular arithmetic: x % P with the same P over and
+ * over), by Barrett's method: with mu = floor(B^2k / d) kept, x mod d (x under B^2k) is two
+ * multiplications that don't wait on each other, where long division is a chain of k + 1
+ * dependent quotient digits. (Handbook of Applied Cryptography, 14.42.) */
+typedef unsigned __int128 tv_u128;
+#define TV_BARRETT(K)                                                                                       \
+    static void tv_barrett_rem##K(tv_limb *restrict r, const tv_limb *restrict x, const tv_limb *restrict d, \
+                                  const tv_limb *restrict mu) {                                             \
+        const tv_limb *q1 = x + (K - 1);                                                                    \
+        tv_limb p[2 * K + 2];                                                                               \
+        for (int i = 0; i < 2 * K + 2; i++) p[i] = 0;                                                       \
+        for (int i = 0; i <= K; i++) {                                                                      \
+            tv_limb c = 0;                                                                                  \
+            for (int j = 0; j <= K; j++) {                                                                  \
+                tv_u128 t = (tv_u128)q1[i] * mu[j] + p[i + j] + c;                                          \
+                p[i + j] = (tv_limb)t;                                                                      \
+                c = (tv_limb)(t >> 64);                                                                     \
+            }                                                                                               \
+            p[i + K + 1] = c;                                                                               \
+        }                                                                                                   \
+        const tv_limb *q3 = p + K + 1;                                                                      \
+        tv_limb s[K + 1];                                                                                   \
+        for (int i = 0; i <= K; i++) s[i] = 0;                                                              \
+        for (int i = 0; i <= K; i++) {                                                                      \
+            tv_limb c = 0;                                                                                  \
+            for (int j = 0; j < K && i + j <= K; j++) {                                                     \
+                tv_u128 t = (tv_u128)q3[i] * d[j] + s[i + j] + c;                                           \
+                s[i + j] = (tv_limb)t;                                                                      \
+                c = (tv_limb)(t >> 64);                                                                     \
+            }                                                                                               \
+            if (i == 0) s[K] += c;                                                                          \
+        }                                                                                                   \
+        tv_limb w[K + 1];                                                                                   \
+        unsigned long long br = 0;                                                                          \
+        for (int i = 0; i <= K; i++) w[i] = __builtin_subcll(x[i], s[i], br, &br);                         \
+        for (int k = 0; k < 2; k++) {                                                                       \
+            tv_limb t[K + 1];                                                                               \
+            unsigned long long b2 = 0;                                                                      \
+            for (int i = 0; i < K; i++) t[i] = __builtin_subcll(w[i], d[i], b2, &b2);                       \
+            t[K] = __builtin_subcll(w[K], 0, b2, &b2);                                                      \
+            if (b2) break;                                                                                  \
+            for (int i = 0; i <= K; i++) w[i] = t[i];                                                       \
+        }                                                                                                   \
+        for (int i = 0; i < K; i++) r[i] = w[i];                                                            \
+    }
+TV_BARRETT(2)
+TV_BARRETT(3)
+TV_BARRETT(4)
+TV_BARRETT(5)
+TV_BARRETT(6)
+TV_BARRETT(7)
+TV_BARRETT(8)
+
+typedef struct { tv_limb d[8], mu[9]; uint32_t k; bool ready; } tv_barrett;
+static tv_barrett tv_barretts[4];
+static unsigned tv_barrett_next;
+
+/* The kept mu of the k-limb divisor d: NULL the first time it's seen (it's kept, its mu made
+ * the second time). */
+static const tv_barrett *tv_barrett_of(const tv_limb *d, uint32_t k) {
+    for (int i = 0; i < 4; i++) {
+        tv_barrett *b = &tv_barretts[i];
+        if (b->k != k || memcmp(b->d, d, k * sizeof(tv_limb))) continue;
+        if (b->ready) return b;
+        /* (seen twice: mu = floor(B^2k / d), when it fits k + 1 limbs) */
+        tv_limb num[17] = {0}, q[17] = {0};
+        num[2 * k] = 1;
+        tv_mag_divrem(q, NULL, num, 2 * k + 1, d, k);
+        if (q[k + 1]) return NULL;
+        for (uint32_t j = 0; j <= k; j++) b->mu[j] = q[j];
+        b->ready = true;
+        return b;
+    }
+    tv_barrett *b = &tv_barretts[tv_barrett_next++ & 3];
+    b->k = k;
+    b->ready = false;
+    memcpy(b->d, d, k * sizeof(tv_limb));
+    return NULL;
+}
+
+/* r (k limbs) = x mod d by Barrett, for x of at most 2k limbs. */
+static void tv_barrett_rem(const tv_barrett *b, tv_limb *r, const tv_limb *x, uint32_t n) {
+    tv_limb xx[16];
+    for (uint32_t i = 0; i < 2 * b->k; i++) xx[i] = i < n ? x[i] : 0;
+    switch (b->k) {
+    case 2: tv_barrett_rem2(r, xx, b->d, b->mu); break;
+    case 3: tv_barrett_rem3(r, xx, b->d, b->mu); break;
+    case 4: tv_barrett_rem4(r, xx, b->d, b->mu); break;
+    case 5: tv_barrett_rem5(r, xx, b->d, b->mu); break;
+    case 6: tv_barrett_rem6(r, xx, b->d, b->mu); break;
+    case 7: tv_barrett_rem7(r, xx, b->d, b->mu); break;
+    default: tv_barrett_rem8(r, xx, b->d, b->mu); break;
+    }
+}
+
 /* Truncated division (JavaScript's): q = a / b, r = a % b (either may be NULL). */
 static void tv_big_divmod(tv_big a, tv_big b, tv_big *q, tv_big *r, const char *loc) {
     if (tv_big_is_small(b) && b.v == 1) tv_trap("bigint division by zero", loc);
@@ -998,7 +1093,9 @@ static void tv_big_divmod(tv_big a, tv_big b, tv_big *q, tv_big *r, const char *
     }
     tv_bigbuf *qb = q ? tv_bb_new(x.n - y.n + 1) : NULL;
     tv_bigbuf *rb = r ? tv_bb_new(y.n) : NULL;
-    tv_mag_divrem(qb ? qb->d : NULL, rb ? rb->d : NULL, x.d, x.n, y.d, y.n);
+    const tv_barrett *bar = !q && y.n >= 2 && y.n <= 8 && x.n <= 2 * y.n ? tv_barrett_of(y.d, y.n) : NULL;
+    if (bar) tv_barrett_rem(bar, rb->d, x.d, x.n);
+    else tv_mag_divrem(qb ? qb->d : NULL, rb ? rb->d : NULL, x.d, x.n, y.d, y.n);
     if (qb) {
         qb->len = x.n - y.n + 1;
         qb->neg = x.neg != y.neg;
