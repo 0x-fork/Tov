@@ -4425,6 +4425,13 @@ impl<'c, 'a> Gen<'c, 'a> {
                 }
             }
             if let Some(k) = members.iter().position(|&mt| mt == from) {
+                // (a niche union of the value's own type: the same pointer, borrowed as it was)
+                if let Some((pi, _)) = self.niche(to)
+                    && pi == k
+                    && !v.owned
+                {
+                    return Val { ty: to, ..v };
+                }
                 if self.is_unit(from) {
                     let u = self.u_make(to, k, None);
                     // Holds nothing: owned, so consuming it retains nothing (and it needs no release).
