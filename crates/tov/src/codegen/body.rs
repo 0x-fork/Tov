@@ -3644,6 +3644,17 @@ impl<'c, 'a> Gen<'c, 'a> {
                         result = (Some(self.u_tag(&v.code, v.ty)), Box::new(move |_, l| lits.iter().find(|(s, _)| *s == l).map(|(_, i)| *i)));
                     }
                 }
+                // Every case a string literal: matched first, the value borrowed (nothing in
+                // the matching can release it, and no case looks at it again)
+                if result.0.is_none()
+                    && self.ctype(v.ty) == "tv_str"
+                    && cases.iter().all(|c| c.test.is_none_or(|t| matches!(ast.expr(t).kind, ExprKind::Str(_))))
+                {
+                    let target = self.literal_match(&v, cases);
+                    self.pop_temps();
+                    self.run_cases(&target, cases);
+                    return;
+                }
                 if result.0.is_none() {
                     // General: keep the value for the if-chain.
                     // The discriminant owns one reference for the whole switch and is released with the enclosing scope (so `return` in a case
@@ -3696,6 +3707,70 @@ impl<'c, 'a> Gen<'c, 'a> {
         }
         self.b().breaks.pop();
         self.close("}");
+    }
+
+    /// The index of the case string `v` matches (or the default's, else -1), every case's
+    /// test a string literal: a switch on its byte when they're all one ASCII character.
+    fn literal_match(&mut self, v: &Val, cases: &[ast::Case]) -> String {
+        let m = self.cur_m();
+        let ast = self.ast(m);
+        let target = self.fresh("sw");
+        self.line(format!("int {target} = -1;"));
+        let lits: Vec<Option<String>> = cases.iter().map(|c| c.test.map(|t| match &ast.expr(t).kind {
+            ExprKind::Str(l) => self.sym(*l).to_string(),
+            _ => unreachable!(),
+        })).collect();
+        let one_byte = lits.iter().flatten().all(|l| l.len() == 1 && l.as_bytes()[0] < 0x80);
+        let d = &v.code;
+        if one_byte {
+            self.open(&format!("if (({d}).p != NULL && ({d}).p->len == 1) switch ((unsigned char)({d}).p->data[0]) {{"));
+            let mut seen = Vec::new();
+            for (i, l) in lits.iter().enumerate() {
+                if let Some(l) = l
+                    && !seen.contains(l)
+                {
+                    seen.push(l.clone());
+                    self.line(format!("case {}: {target} = {i}; break;", l.as_bytes()[0]));
+                }
+            }
+            self.close("}");
+        } else {
+            for (i, l) in lits.iter().enumerate() {
+                if let Some(l) = l {
+                    let lit = self.lit(l.as_bytes());
+                    self.line(format!("if ({target} < 0 && ({d}).p != NULL && tv_str_eq({d}, {lit})) {target} = {i};"));
+                }
+            }
+        }
+        if let Some(di) = lits.iter().position(|l| l.is_none()) {
+            self.line(format!("if ({target} < 0) {target} = {di};"));
+        }
+        target
+    }
+
+    /// The cases' bodies, from the one numbered `target` on (see `if_chain_switch`).
+    fn run_cases(&mut self, target: &str, cases: &[ast::Case]) {
+        let end = self.fresh("swend");
+        let depth = self.b().scopes.len();
+        self.b().breaks.push((BreakTarget::Goto(end.clone()), depth));
+        self.open(&format!("switch ({target}) {{"));
+        for (i, case) in cases.iter().enumerate() {
+            self.line(format!("case {i}:"));
+            if !case.body.is_empty() {
+                self.open("{");
+                self.push_scope();
+                for &x in &case.body {
+                    self.stmt(x);
+                }
+                self.pop_scope();
+                self.close("}");
+                self.line(format!("goto {end};"));
+            }
+        }
+        self.line("default: break;");
+        self.close("}");
+        self.b().breaks.pop();
+        self.line(format!("{end}:;"));
     }
 
     fn if_chain_switch(&mut self, dv: &str, dty: TyId, cases: &[ast::Case], owned: bool) {
