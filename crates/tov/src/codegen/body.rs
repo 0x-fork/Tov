@@ -117,6 +117,10 @@ pub(crate) struct Body {
     pub root: Option<StmtId>,
     /// Locals that borrow what they point to (see `cursor_local`): never retained or released.
     pub cursors: FxSet<u32>,
+    /// Locals holding a reference of their own, and the uses that hand it over (see `moves`;
+    /// found when first needed).
+    pub owned_locals: FxSet<u32>,
+    pub moves: Option<FxSet<ExprId>>,
     /// `const` array locals whose length never changes in the function (see `fixed_lens`).
     /// Arrays of a fixed length: (length, where in the source it holds from).
     pub fixed: Option<FxMap<u32, (u64, u32)>>,
@@ -299,6 +303,8 @@ impl<'c, 'a> Gen<'c, 'a> {
             nowrap_locals: Vec::new(),
             root: None,
             cursors: FxSet::default(),
+            owned_locals: FxSet::default(),
+            moves: None,
             fixed: None,
         });
     }
@@ -501,6 +507,8 @@ impl<'c, 'a> Gen<'c, 'a> {
             nowrap_locals: Vec::new(),
             root: None,
             cursors: FxSet::default(),
+            owned_locals: FxSet::default(),
+            moves: None,
             fixed: None,
         };
         for (i, &(key, ty, inout)) in params.iter().enumerate() {
@@ -2622,6 +2630,7 @@ impl<'c, 'a> Gen<'c, 'a> {
                     if self.is_rc(ty) {
                         let rel = format!("{};", self.release_code(ty, &cname));
                         self.b().scopes.last_mut().unwrap().releases.push(rel);
+                        self.b().owned_locals.insert(key);
                     }
                     self.b().locals.insert(key, Local { access: cname, ty });
                 }
@@ -3811,6 +3820,19 @@ impl<'c, 'a> Gen<'c, 'a> {
         }
     }
 
+    fn is_last_use(&mut self, e: ExprId) -> bool {
+        if self.b().moves.is_none() {
+            let m = self.cur_m();
+            let (root, plain) = (self.b().root, self.b().async_fn.is_none() && self.b().gen_elem.is_none());
+            let moves = match root {
+                Some(root) if plain => self.last_use_moves(m, root),
+                _ => FxSet::default(),
+            };
+            self.b().moves = Some(moves);
+        }
+        self.b().moves.as_ref().is_some_and(|mv| mv.contains(&e))
+    }
+
     fn ident(&mut self, e: ExprId, ty: TyId) -> Val {
         let m = self.cur_m();
         match self.ident_fact(m, e) {
@@ -3822,6 +3844,12 @@ impl<'c, 'a> Gen<'c, 'a> {
                 };
                 if local.ty == ty && self.b().owned_once.remove(&k) {
                     return Val { code: local.access, ty, owned: true };
+                }
+                // (its last use, handing it over: moved, the local left empty)
+                if local.ty == ty && self.b().owned_locals.contains(&k) && self.is_last_use(e) && (matches!(self.tget(ty), Ty::Class(..)) || self.niche(ty).is_some()) {
+                    let (ct, t) = (self.ctype(ty), self.fresh("mv"));
+                    self.line(format!("{ct} {t} = {0}; {0} = NULL;", local.access));
+                    return Val { code: t, ty, owned: true };
                 }
                 self.project(Val::plain(local.access, local.ty), ty)
             }
@@ -6991,6 +7019,8 @@ impl<'c, 'a> Gen<'c, 'a> {
             nowrap_locals: Vec::new(),
             root: None,
             cursors: FxSet::default(),
+            owned_locals: FxSet::default(),
+            moves: None,
             fixed: None,
         };
         for (i, &(key, ty, inout)) in params.iter().enumerate() {

@@ -23,6 +23,7 @@ pub(crate) mod class;
 mod iface;
 mod js;
 mod json;
+mod moves;
 mod quiet;
 mod range;
 mod resize;
