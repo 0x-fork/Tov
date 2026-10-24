@@ -2714,15 +2714,13 @@ void tv_arr_set_length_fill(tv_arr *a, const tv_type *t, tv_int n, const void *f
     }
     if (n > INT32_MAX) tv_trap("invalid array length", loc);
     size_t es = t->size;
-    unsigned char tmp[64];
-    for (int64_t i = len; i < n; i++) {
-        if (es <= sizeof tmp) {
-            memcpy(tmp, fill, es);
-            tv_arr_push(a, t, tmp);
-        } else {
-            tv_arr_push(a, t, (void *)fill);
-        }
+    /* (room for all of them at once, then copies of `fill`, which holds nothing to retain) */
+    tv_arr_make_unique(a, t, n);
+    if (es) {
+        unsigned char *d = tv_arrbuf_data(a->p);
+        for (int64_t i = len; i < n; i++) memcpy(d + (size_t)i * es, fill, es);
     }
+    a->p->len = n;
 }
 
 /* (a queue taken from the front: once it's longer than this, its elements get a block of their
