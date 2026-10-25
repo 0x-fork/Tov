@@ -128,7 +128,8 @@ impl<'c, 'a> Gen<'c, 'a> {
                 self.coerce(n, to)
             }
             Ty::Str => self.tmp(STR, &format!("({{ tv_str s_ = *(tv_str *)tv_dyn_data({d}); tv_str_retain(s_); s_; }})"), true),
-            Ty::Bool => Val::plain(format!("(*(bool *)tv_dyn_data({d}))"), BOOL),
+            // (`false` of `string | false`: the one it was tested to be)
+            Ty::Bool => Val::plain(format!("(*(bool *)tv_dyn_data({d}))"), to),
             Ty::Undefined | Ty::Null | Ty::Void => Val::plain("0", to),
             _ => {
                 let ct = self.ctype(to);
@@ -157,7 +158,8 @@ impl<'c, 'a> Gen<'c, 'a> {
         match self.tget(to) {
             _ if self.c.types.is_numeric(to) => format!("tv_dyn_is_num({d}.t)"),
             Ty::Str | Ty::StrLit(_) => format!("({d}.t == &tv_type_str)"),
-            Ty::Bool | Ty::BoolLit(_) => format!("({d}.t == &tv_type_bool)"),
+            Ty::Bool if let Ty::BoolLit(b) = *self.c.types.get(to) => format!("({d}.t == &tv_type_bool && *(bool *)tv_dyn_data({d}) == {b})"),
+            Ty::Bool => format!("({d}.t == &tv_type_bool)"),
             Ty::Undefined | Ty::Void => format!("({d}.t == &tv_type_undefined)"),
             Ty::Null => format!("({d}.t == &tv_type_null)"),
             Ty::Unknown => "true".into(),

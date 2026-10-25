@@ -547,7 +547,14 @@ impl<'a> Checker<'a> {
                 // The target guides literal typing (`[] as int[]`), like an annotation would
                 // (and is where the value goes: `JSON.parse(t) as number[]` may hold any number).
                 let sites = if self.spec.on { self.type_sites(self.cur, *te) } else { Vec::new() };
-                let src = self.flow(sites, |c| c.expr(*x, Some(target)));
+                // (`[] as unknown as Token[]`: the empty array is the outer cast's)
+                let guide = match exp {
+                    Some(e) if (target == UNKNOWN || target == ANY)
+                        && matches!(&self.ast().expr(*x).kind, ExprKind::Array(xs) if xs.is_empty())
+                        && matches!(self.types.get(e), Ty::Array(_)) => e,
+                    _ => target,
+                };
+                let src = self.flow(sites, |c| c.expr(*x, Some(guide)));
                 if self.spec.on && (src == UNKNOWN || src == JS) {
                     // (a value from outside the program may be any number)
                     let sites = self.type_sites(self.cur, *te);
@@ -1733,6 +1740,18 @@ impl<'a> Checker<'a> {
                         // a `string | undefined` leaves a `string`, as TypeScript's does)
                         let declared = self.types.members(self.local(local).ty);
                         let ms: Vec<TyId> = self.types.members(tv).into_iter().map(|m| if declared.contains(&m) { m } else { self.types.widen(m) }).collect();
+                        // (a record the declared type doesn't name is held as the member it's
+                        // made into: `token = escape(src)` on a `Generic | undefined` holds a
+                        // `Generic`)
+                        let ms: Vec<TyId> = ms
+                            .into_iter()
+                            .map(|m| {
+                                if declared.contains(&m) || !matches!(self.types.get(m), Ty::Record(_) | Ty::Interface(..) | Ty::Rec(..)) {
+                                    return m;
+                                }
+                                declared.iter().copied().find(|&d| matches!(self.types.get(d), Ty::Record(_) | Ty::Interface(..) | Ty::Rec(..)) && self.assignable(m, d)).unwrap_or(m)
+                            })
+                            .collect();
                         let tv = self.types.union(&ms);
                         self.narrow(local, tv);
                     }
@@ -3028,6 +3047,8 @@ impl<'a> Checker<'a> {
                 super::class::ClassMemberRef::Getter(g) => Some(self.method_ret(&g)),
                 super::class::ClassMemberRef::Method(_) => None,
             },
+            // (an array's own property, `tokens.links` of a `Token[] & { links: Links }`)
+            Ty::Array(_) if n != "length" && let Some(&t) = self.array_props.get(&name) => Some(t),
             _ => builtins::property(&self.types, ty, &n),
         }
     }
@@ -4708,6 +4729,35 @@ impl<'a> Checker<'a> {
                     let desc = format!("{}.{mtext}", self.src(self.ast().expr(obj).span));
                     return self.js_call(e, Some(name), &desc, args, span, false);
                 }
+                // (`x.replace(/re/, y)` of an `any`: the prelude's `__anyReplaceRe` and so on, a
+                // string's when it holds one, a pattern being one of the program's own classes)
+                if recv == ANY
+                    && !self.modules[self.cur as usize].builtin
+                    && let Some(target) = match mtext.as_str() {
+                        "replace" if args.len() == 2 => Some("__anyReplaceRe"),
+                        "replaceAll" if args.len() == 2 => Some("__anyReplaceAllRe"),
+                        "split" if args.len() == 1 => Some("__anySplitRe"),
+                        "match" if args.len() == 1 => Some("__anyMatchRe"),
+                        "search" if args.len() == 1 => Some("__anySearchRe"),
+                        _ => None,
+                    }
+                    && let Some(a0) = args.first()
+                    && a0.by_ref.is_none()
+                    && let Some(f) = self.interner.lookup(target)
+                {
+                    let re = self.builtin_class("RegExp");
+                    let marks = self.diags.len();
+                    let t0 = self.expr(a0.expr, None);
+                    self.diags.truncate(marks);
+                    if re != ERROR && t0 == re {
+                        self.rewrites.calls.push((self.cur, e, f));
+                        let _ = self.expr(a0.expr, Some(re));
+                        for a in &args[1..] {
+                            self.expr(a.expr, Some(ANY));
+                        }
+                        return ANY;
+                    }
+                }
                 if recv == ANY {
                     return self.any_call(e, Some(name), args, span);
                 }
@@ -6345,10 +6395,10 @@ impl<'a> Checker<'a> {
                             ExprKind::Member { obj, name, optional, .. } if !*optional || eq => {
                                 let Some((target, ty)) = self.target_of(*obj) else { return Vec::new() };
                                 let ty = if *optional { self.types.without_nullish(ty) } else { ty };
-                                let members = self.flat_members(ty);
+                                let members = self.boxed_members(ty);
                                 let keep: Vec<TyId> = members
                                     .into_iter()
-                                    .filter(|&m| match *self.types.get(m) {
+                                    .filter(|&m| match { let u = self.unfold(m); *self.types.get(u) } {
                                         Ty::Record(fs) => match self.types.fields(fs).iter().find(|f| f.name == *name) {
                                             Some(f) if matches!(self.types.get(f.ty), Ty::StrLit(_)) => (f.ty == lit_ty) == eq,
                                             _ => true,
@@ -6403,8 +6453,9 @@ impl<'a> Checker<'a> {
                 let ExprKind::Str(key) = ast.expr(*l).kind else { return Vec::new() };
                 let Some((target, ty)) = self.target_of(*r) else { return Vec::new() };
                 let mut keep = Vec::new();
-                for m in self.flat_members(ty) {
-                    match self.has_key(m, key) {
+                for m in self.boxed_members(ty) {
+                    let u = self.unfold(m);
+                    match self.has_key(u, key) {
                         Some(has) if has != positive => {}
                         _ => keep.push(m),
                     }

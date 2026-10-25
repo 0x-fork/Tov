@@ -329,6 +329,8 @@ pub struct Checker<'a> {
     class_resolving: HashSet<u32>,
     /// The class whose members are being resolved (see `this_field_default`).
     building_class: Option<u32>,
+    /// Properties arrays may have of their own (`T[] & { links: L }`), and their types.
+    pub(crate) array_props: Arc<HashMap<Sym, TyId>>,
     /// Fields written with no type (TypeScript's `any`) typed by what they're given: (class,
     /// field). A map's `get` reads its value where one must be, as `any`'s would.
     untyped_fields: HashSet<(u32, Sym)>,
@@ -474,6 +476,7 @@ fn new_checker<'a>(modules: &'a [Module], interner: &'a Interner, sm: &'a Source
         checked_members: HashSet::default(),
         class_resolving: HashSet::default(),
             building_class: None,
+            array_props: Arc::default(),
         untyped_fields: HashSet::default(),
         lenient_new: None,
         any_types: HashMap::default(),
@@ -740,6 +743,7 @@ impl<'a> Checker<'a> {
             checked_members: HashSet::default(),
             class_resolving: HashSet::default(),
             building_class: None,
+            array_props: self.array_props.clone(),
             untyped_fields: self.untyped_fields.clone(),
             lenient_new: None,
             any_types: self.any_types.clone(),
@@ -2456,6 +2460,35 @@ impl<'a> Checker<'a> {
     /// `A & B`: one record with the fields of each (a field in both has the narrower type, and is
     /// optional only if it is in both).
     fn intersection(&mut self, tys: &[TyId], span: Span) -> TyId {
+        // (`T[] & { links: L }`: the array, its properties its own, as JavaScript's arrays are
+        // objects: see `array_props`)
+        if let Some(&arr) = tys.iter().find(|&&t| matches!(self.types.get(t), Ty::Array(_))) {
+            let mut props = Vec::new();
+            let mut ok = true;
+            for &t in tys {
+                if t == arr {
+                    continue;
+                }
+                match *self.types.get(t) {
+                    Ty::Record(_) => props.extend(self.types.fields_in_order(t)),
+                    Ty::Interface(i, args) => {
+                        let args = self.types.tys(args).to_vec();
+                        props.extend(self.iface_fields_inst(i, &args));
+                    }
+                    _ => ok = false,
+                }
+            }
+            if ok {
+                for f in props {
+                    let t = match Arc::make_mut(&mut self.array_props).get(&f.name).copied() {
+                        Some(prev) => self.types.union(&[prev, f.ty]),
+                        None => f.ty,
+                    };
+                    Arc::make_mut(&mut self.array_props).insert(f.name, t);
+                }
+                return arr;
+            }
+        }
         let mut out: Vec<Field> = Vec::new();
         let mut sites: Vec<(Sym, Vec<spec::Site>)> = Vec::new();
         for &t in tys {
@@ -2530,6 +2563,31 @@ impl<'a> Checker<'a> {
             let u = self.unfold(m);
             if u != m {
                 self.flat_members_into(u, out, depth + 1);
+            } else {
+                out.push(m);
+            }
+        }
+    }
+
+    /// `flat_members`, a recursive alias of a record kept as itself (a box, shared: a
+    /// narrowing to it is the same object, as JavaScript's is); one of a union, its members.
+    pub(crate) fn boxed_members(&mut self, ty: TyId) -> Vec<TyId> {
+        let mut out = Vec::new();
+        self.boxed_members_into(ty, &mut out, 0);
+        out.sort();
+        out.dedup();
+        out
+    }
+
+    fn boxed_members_into(&mut self, ty: TyId, out: &mut Vec<TyId>, depth: u32) {
+        if depth > 32 {
+            return;
+        }
+        let ty = self.unfold(ty);
+        for m in self.types.members(ty) {
+            let u = self.unfold(m);
+            if u != m && matches!(self.types.get(u), Ty::Union(_)) {
+                self.boxed_members_into(u, out, depth + 1);
             } else {
                 out.push(m);
             }
@@ -3933,7 +3991,9 @@ impl<'a> Checker<'a> {
         let (name, declared) = (fcx.locals[local].name, fcx.locals[local].ty);
         let assigned_by_closure = fcx.closure_assigned.contains(&name);
         let mutated_by_closure = fcx.closure_mutated.contains(&name);
-        let changed = assigned_by_closure || mutated_by_closure && !self.references_only(declared);
+        // (changing a value through, `xs.push(x)`, never makes it `undefined`: a narrowing that
+        // only takes `undefined` and `null` away holds)
+        let changed = assigned_by_closure || mutated_by_closure && !self.references_only(declared) && !self.only_nullish_dropped(declared, ty);
         // (a TypeScript module's `let` a closure assigns narrows as TypeScript's does, until the
         // next call, which could run the closure: see `invalidate_heap`)
         let ts_narrows = assigned_by_closure && self.ts_module();
@@ -3966,6 +4026,13 @@ impl<'a> Checker<'a> {
             Some(Some((si, ei))) => fcx.scopes[si].insert(ei + 1, (name, local, Some(ty))),
             Some(None) => {}
         }
+    }
+
+    /// Whether `to` is `from` without (some of) its `undefined` and `null`.
+    fn only_nullish_dropped(&mut self, from: TyId, to: TyId) -> bool {
+        let kept: Vec<TyId> = self.flat_members(from).into_iter().filter(|&m| !matches!(self.types.get(m), Ty::Undefined | Ty::Null)).collect();
+        let to = self.flat_members(to);
+        !kept.is_empty() && kept.iter().all(|m| to.contains(m)) && to.iter().all(|m| kept.contains(m) || matches!(self.types.get(*m), Ty::Undefined | Ty::Null))
     }
 
     /// Only references (class instances, promises, functions, `undefined`): changing what they

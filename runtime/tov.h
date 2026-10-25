@@ -570,7 +570,13 @@ void tv_arrbuf_release_slow(tv_arrbuf *TV_NOESCAPE p, const tv_type *t);
 void tv_arrbuf_free_block(tv_arrbuf *TV_NOESCAPE p, size_t es);
 /* Frees an array's blocks, its elements released: inline when they follow the header and the
  * block goes back on a small-object list. */
+/* Arrays' own properties (`T[] & { links: L }`), by header: see tv_arr_prop_get. */
+extern int64_t tv_arr_props_n;
+void tv_arr_props_forget(tv_arrbuf *p);
+tv_dyn tv_arr_prop_get(tv_arr a, tv_str key);              /* owned; undefined if not set */
+void tv_arr_prop_set(tv_arr *a, tv_str key, tv_dyn v);     /* v moved */
 static inline void tv_arrbuf_free(tv_arrbuf *p, size_t es) {
+    if (__builtin_expect(tv_arr_props_n != 0, 0)) tv_arr_props_forget(p);
 #ifndef TV_ARRBUF_PLAIN
     if (!p->ext) {
         size_t s = tv_arrbuf_block((size_t)p->cap * es);

@@ -20,7 +20,7 @@ pub fn parse(src: &str, file: FileId, interner: &mut Interner) -> (Ast, Vec<Diag
             lexed.tokens[i].kind = Tok::Ident;
         }
     }
-    let mut p = Parser { src, toks: lexed.tokens, strings: lexed.strings, pos: 0, file, interner, ast: Ast::default(), diags, script_stmts: Vec::new(), defaults: Vec::new(), more_stmts: Vec::new(), hidden: 0, prologue: Vec::new(), index_sig: None, mapped: None, const_strs: Vec::new(), call_sig: None, local_fns: Vec::new(), prop_defaults: false, var_frames: Vec::new(), extra_members: Vec::new(), generic_arrows: Vec::new(), local_types: Vec::new(), local_type_items: Vec::new(), local_classes: Vec::new(), runtime_tests: false, chai: false, lifted: Vec::new(), classes: Vec::new() };
+    let mut p = Parser { src, toks: lexed.tokens, strings: lexed.strings, pos: 0, file, interner, ast: Ast::default(), diags, script_stmts: Vec::new(), defaults: Vec::new(), more_stmts: Vec::new(), hidden: 0, prologue: Vec::new(), index_sig: None, mapped: None, const_strs: Vec::new(), call_sig: None, local_fns: Vec::new(), prop_defaults: false, var_frames: Vec::new(), extra_members: Vec::new(), generic_arrows: Vec::new(), local_types: Vec::new(), local_type_items: Vec::new(), local_classes: Vec::new(), runtime_tests: false, chai: false, lifted: Vec::new(), classes: Vec::new(), overload_rets: Vec::new() };
     p.ast.iterator_sym = Some(p.interner.intern("__iterator"));
     // (`// @ts-expect-error`: the next line's start)
     let mut at = 0usize;
@@ -324,6 +324,8 @@ struct Parser<'a> {
     hidden: u32,
     /// Statements destructuring the parameters of the list just parsed, for its body.
     prologue: Vec<StmtId>,
+    /// Methods' overload signatures' result types so far (name, type).
+    overload_rets: Vec<(Sym, TypeId)>,
     /// The index signature `[k: K]: V` of the object type just parsed.
     index_sig: Option<(TypeId, TypeId, Span)>,
     /// `{ [K in U]: V }`: the mapped type of the record type just parsed (see `record_fields`).
@@ -1186,8 +1188,26 @@ impl<'a> Parser<'a> {
             // calls are checked against the implementation's)
             if !self.at(Tok::LBrace) && !is_abstract && self.member_named_next(&text) {
                 self.eat(Tok::Semi);
+                if let Some(r) = ret {
+                    self.overload_rets.push((name, r));
+                }
                 return None;
             }
+            // (an implementation without a result type after its overloads: theirs, what its
+            // callers see in TypeScript)
+            let ret = match ret {
+                None if self.overload_rets.iter().any(|(n, _)| *n == name) => {
+                    let rets: Vec<TypeId> = self.overload_rets.iter().filter(|(n, _)| *n == name).map(|(_, r)| *r).collect();
+                    self.overload_rets.retain(|(n, _)| *n != name);
+                    if rets.len() == 1 {
+                        Some(rets[0])
+                    } else {
+                        let span = self.ast.types[rets[0] as usize].span;
+                        Some(self.mk_ty(TypeExprKind::Union(rets), span))
+                    }
+                }
+                r => r,
+            };
             let body = if self.at(Tok::LBrace) {
                 let b = self.fn_block(&params);
                 self.with_defaults(defaults, b)
@@ -4436,6 +4456,24 @@ impl<'a> Parser<'a> {
                 if is_satisfies {
                     lhs = self.mk_expr(ExprKind::Paren(lhs), span);
                     self.ast.satisfies.insert(lhs, ty);
+                    continue;
+                }
+                // (`{ exec: () => null } as unknown as RegExp`, a pattern that never matches:
+                // one, `/(?!)/`)
+                if let TypeExprKind::Named { ns: None, name, args, .. } = &self.ast.ty(ty).kind
+                    && args.is_empty()
+                    && self.interner.get(*name) == "RegExp"
+                    && let ExprKind::As(inner, _) = self.ast.expr(lhs).kind
+                    && let ExprKind::Object(fs) = &self.ast.expr(inner).kind
+                    && let [f] = &fs[..]
+                    && self.interner.get(f.name) == "exec"
+                    && matches!(&self.ast.expr(f.value).kind, ExprKind::Arrow(a) if matches!(a.body, crate::ast::ArrowBody::Expr(b) if matches!(self.ast.expr(b).kind, ExprKind::Null)))
+                {
+                    let (p, fl, r) = (self.interner.intern("(?!)"), self.interner.intern(""), self.interner.intern("__reLiteral"));
+                    let callee = self.mk_expr(ExprKind::Ident(r), span);
+                    let pe = self.mk_expr(ExprKind::Str(p), span);
+                    let fe = self.mk_expr(ExprKind::Str(fl), span);
+                    lhs = self.mk_expr(ExprKind::Call { callee, type_args: Vec::new(), args: vec![Arg { expr: pe, by_ref: None }, Arg { expr: fe, by_ref: None }], optional: false }, span);
                     continue;
                 }
                 lhs = self.mk_expr(ExprKind::As(lhs, ty), span);

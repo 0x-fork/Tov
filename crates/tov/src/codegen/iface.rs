@@ -48,6 +48,10 @@ impl<'c, 'a> Gen<'c, 'a> {
             for k in 0..self.iface_members(t).len() {
                 let _ = write!(fields, " void *(*f{k})(void *);");
             }
+            // (with an index signature: any key's value, by name, and its setting)
+            if self.iface_keyed(t) {
+                let _ = write!(fields, " tv_dyn (*g)(void *, tv_str); bool (*s)(void *, tv_str, tv_dyn); tv_iface (*o)(void *, tv_str, tv_dyn);");
+            }
             let _ = writeln!(self.typedefs, "typedef struct {name} {{ tvg_itab h;{fields} }} {name};");
         }
         name
@@ -81,7 +85,7 @@ impl<'c, 'a> Gen<'c, 'a> {
     }
 
     /// A heap box holding a value inside an interface value.
-    fn iface_box(&mut self, src: TyId) -> String {
+    pub(crate) fn iface_box(&mut self, src: TyId) -> String {
         let bn = format!("IB{}", src.0);
         if self.helpers_done.insert((src, 103)) {
             let ct = self.ctype(src);
@@ -92,7 +96,7 @@ impl<'c, 'a> Gen<'c, 'a> {
     }
 
     /// The itab for values of type `src` seen as interface `to`.
-    fn itab_for(&mut self, src: TyId, to: TyId, m: u32) -> Option<String> {
+    pub(crate) fn itab_for(&mut self, src: TyId, to: TyId, m: u32) -> Option<String> {
         if let Some(n) = self.itabs.get(&(src, to)) {
             return Some(n.clone());
         }
@@ -248,11 +252,14 @@ impl<'c, 'a> Gen<'c, 'a> {
                     self.begin_scratch(m);
                     self.line(&self_decl);
                     let v = match self.tget(src) {
-                        Ty::Class(..) => {
-                            let mt = self.class_member_ty(src, f.name)?;
-                            let span = crate::source::Span::new(self.c.modules[m as usize].file, 0, 0);
-                            self.class_field_read(Val::plain("x", src), f.name, mt, span)
-                        }
+                        // (one it lacks, an index signature's `$rest`: none)
+                        Ty::Class(..) => match self.class_member_ty(src, f.name) {
+                            Some(mt) => {
+                                let span = crate::source::Span::new(self.c.modules[m as usize].file, 0, 0);
+                                self.class_field_read(Val::plain("x", src), f.name, mt, span)
+                            }
+                            None => self.coerce(Val::plain("0", UNDEFINED), f.ty),
+                        },
                         Ty::Record(fs) => match self.c.types.fields(fs).iter().find(|x| x.name == f.name).copied() {
                             Some(rf) => Val::plain(self.fld(src, &value, self.sym(f.name)), rf.ty),
                             None => self.coerce(Val::plain("0", UNDEFINED), f.ty),
@@ -316,6 +323,13 @@ impl<'c, 'a> Gen<'c, 'a> {
             let _ = writeln!(out, "static void *{tname}(void *self) {{ {body} }}");
             entries.push(tname);
         }
+        if self.iface_keyed(to) {
+            let (g, st) = self.keyed_thunks(src, &name, &self_decl, &value, m, &mut out)?;
+            entries.push(g);
+            entries.push(st);
+            let o = self.reopen_thunk(src, to, &name, &self_decl, &value, m, &mut out);
+            entries.push(o);
+        }
         let mut init = format!("{{ {rt}, {rl}, TVG_INS({name}_in), {name}_ts }}");
         for e in &entries {
             let _ = write!(init, ", {e}");
@@ -324,6 +338,197 @@ impl<'c, 'a> Gen<'c, 'a> {
         self.helpers_after.push(out);
         let _ = writeln!(self.protos, "static const {it} {name};");
         Some(name)
+    }
+
+    /// Interface `t` has an index signature (a `$rest` member).
+    pub(crate) fn iface_keyed(&mut self, t: TyId) -> bool {
+        let Some(rest) = self.c.interner.lookup("$rest") else { return false };
+        self.iface_members(t).iter().any(|f| f.name == rest)
+    }
+
+    /// The fields of `src` a key may name (functions and `$rest` left out), with their types.
+    fn key_fields(&mut self, src: TyId) -> Vec<(crate::intern::Sym, TyId)> {
+        let rest = self.c.interner.lookup("$rest");
+        let all: Vec<(crate::intern::Sym, TyId)> = match self.tget(src) {
+            Ty::Record(fs) => self.c.types.fields(fs).iter().map(|f| (f.name, f.ty)).collect(),
+            Ty::Interface(..) => self.iface_members(src).iter().map(|f| (f.name, f.ty)).collect(),
+            Ty::Class(d, _) => {
+                let names: Vec<crate::intern::Sym> = self.c.classes[d as usize].fields.iter().map(|f| f.name).collect();
+                names.into_iter().filter_map(|n| self.class_field(src, n).filter(|f| !f.weak).map(|f| (n, f.ty))).collect()
+            }
+            _ => Vec::new(),
+        };
+        all.into_iter().filter(|&(n, t)| Some(n) != rest && !matches!(self.tget(t), Ty::Func(..))).collect()
+    }
+
+    /// An lvalue for field `name` of `src` held as `value` (in a thunk).
+    fn key_field_lv(&mut self, src: TyId, value: &str, name: crate::intern::Sym) -> Option<String> {
+        match self.tget(src) {
+            Ty::Record(_) => Some(self.fld(src, value, self.sym(name))),
+            Ty::Interface(..) => self.iface_field_lv(&Val::plain(value.to_string(), src), name).map(|(lv, _)| lv),
+            Ty::Class(..) => {
+                let cf = self.class_field(src, name)?;
+                Some(self.field_lv_of(value, src, &cf))
+            }
+            _ => None,
+        }
+    }
+
+    /// The thunks reading and setting a key of `src` seen as an interface with an index
+    /// signature: its field of that name, else its own `$rest`'s (`undefined` where it has none;
+    /// a key it has no room for is dropped).
+    fn keyed_thunks(&mut self, src: TyId, name: &str, self_decl: &str, value: &str, m: u32, out: &mut String) -> Option<(String, String)> {
+        // (an interface value keyed itself: its own)
+        if matches!(self.tget(src), Ty::Interface(..)) && self.iface_keyed(src) {
+            let sit = self.itab_type(src);
+            let (g, st) = (format!("{name}_g"), format!("{name}_s"));
+            let _ = writeln!(out, "static tv_dyn {g}(void *self, tv_str key) {{ {self_decl} return ((const {sit} *)({value}).t)->g(({value}).p, key); }}");
+            let _ = writeln!(out, "static bool {st}(void *self, tv_str key, tv_dyn v) {{ {self_decl} return ((const {sit} *)({value}).t)->s(({value}).p, key, v); }}");
+            return Some((g, st));
+        }
+        let fields = self.key_fields(src);
+        let rest = self.c.interner.lookup("$rest");
+        let rest_slot = match rest {
+            Some(r) if self.key_fields_has_rest(src, r) => self.key_field_lv(src, value, r).map(|lv| (lv, self.rest_ty(src, r))),
+            _ => None,
+        };
+        // get
+        self.begin_scratch(m);
+        self.line(self_decl);
+        let fields: Vec<(crate::intern::Sym, TyId, String)> = fields.into_iter().filter_map(|(n, t)| self.key_field_lv(src, value, n).map(|lv| (n, t, lv))).collect();
+        for (fname, fty, lv) in fields.iter().cloned() {
+            let lit = self.lit(self.sym(fname).to_string().as_bytes());
+            self.open(&format!("if (tv_str_eq(key, {lit})) {{"));
+            self.push_temps_pub();
+            let b = self.box_dyn(Val { code: lv, ty: fty, owned: false });
+            let code = self.consume(b);
+            self.line(format!("tv_dyn r_ = {code};"));
+            self.pop_temps_pub();
+            self.line("return r_;");
+            self.close("}");
+        }
+        match &rest_slot {
+            Some((lv, Some(rt))) if let Some(v) = self.rest_read_code(lv.clone(), *rt, "key", ANY) => {
+                let v = self.own(v);
+                let code = self.consume(v);
+                self.line(format!("tv_dyn r_ = {code};"));
+                self.release_all_temps();
+                self.line("return r_;");
+            }
+            _ => self.line("return (tv_dyn){&tv_type_undefined, NULL};"),
+        }
+        let body = self.end_scratch();
+        let g = format!("{name}_g");
+        let _ = writeln!(out, "static tv_dyn {g}(void *self, tv_str key) {{\n{body}}}");
+        // set
+        self.begin_scratch(m);
+        self.line(self_decl);
+        for (fname, fty, lv) in fields.iter().cloned() {
+            let lit = self.lit(self.sym(fname).to_string().as_bytes());
+            self.open(&format!("if (tv_str_eq(key, {lit})) {{"));
+            self.push_temps_pub();
+            // (a literal, `type: "text"`: holds only that; another value can't be stored)
+            if let Ty::StrLit(want) = *self.c.types.get(fty) {
+                let wl = self.lit(self.sym(want).to_string().as_bytes());
+                self.line(format!("bool ok_ = v.t == &tv_type_str && tv_str_eq(*(tv_str *)tv_dyn_data(v), {wl});"));
+                self.pop_temps_pub();
+                self.line("tv_dyn_release(v); return ok_;");
+                self.close("}");
+                continue;
+            }
+            let nv = self.any_to(Val::plain("v", ANY), fty, "NULL");
+            let nv = self.own(nv);
+            let code = self.consume(nv);
+            let ct = self.ctype(fty);
+            let rel = self.release_code(fty, &lv);
+            let rel = if rel.is_empty() { String::new() } else { format!("{rel}; ") };
+            self.line(format!("{ct} n_ = {code}; {rel}{lv} = n_;"));
+            self.pop_temps_pub();
+            self.line("tv_dyn_release(v); return true;");
+            self.close("}");
+        }
+        if let Some((lv, Some(rt))) = &rest_slot {
+            let mt = self.c.types.without_undefined(*rt);
+            if let Ty::Map(k, vt) = self.tget(mt) {
+                let rp = Val::plain(lv.clone(), *rt);
+                let present = self.truthy_val(rp.clone());
+                self.open(&format!("if (!{present}) {{"));
+                self.push_temps_pub();
+                self.line("tv_map fm_ = tv_map_fresh_object();");
+                let fm = self.coerce(Val { code: "fm_".into(), ty: mt, owned: true }, *rt);
+                let fm = self.consume(fm);
+                self.line(format!("{lv} = {fm};"));
+                self.pop_temps_pub();
+                self.close("}");
+                self.push_temps_pub();
+                let ml = self.project(Val::plain(lv.clone(), *rt), mt);
+                let nv = self.any_to(Val::plain("v", ANY), vt, "NULL");
+                let nv = self.own(nv);
+                let code = self.consume(nv);
+                let (kd, vd, vct) = (self.desc(k), self.desc(vt), self.ctype(vt));
+                self.line(format!("tv_str k_ = key; tv_str_retain(k_); {vct} x_ = {code}; tv_map_set(&{}, {kd}, {vd}, &k_, &x_);", ml.code));
+                self.pop_temps_pub();
+                self.line("tv_dyn_release(v);");
+                self.line("return true;");
+            }
+        }
+        // (no room for it: see `reopen_thunk`)
+        self.line("tv_dyn_release(v);");
+        self.line("return false;");
+        let body = self.end_scratch();
+        let st = format!("{name}_s");
+        let _ = writeln!(out, "static bool {st}(void *self, tv_str key, tv_dyn v) {{\n{body}}}");
+        Some((g, st))
+    }
+
+    /// The thunk making a new value of the open interface `to` from `src`'s, key `key` set to
+    /// `v`: for a key `src` can't hold (`type` of a `Text`, `"paragraph"` now), as JavaScript's
+    /// object takes any.
+    #[allow(clippy::too_many_arguments)]
+    fn reopen_thunk(&mut self, src: TyId, to: TyId, name: &str, self_decl: &str, value: &str, m: u32, out: &mut String) -> String {
+        let oname = format!("{name}_o");
+        let rest = self.c.interner.lookup("$rest");
+        let declared: Vec<(crate::intern::Sym, TyId)> = self.iface_members(to).iter().filter(|f| Some(f.name) != rest && !matches!(self.tget(f.ty), Ty::Func(..))).map(|f| (f.name, f.ty)).collect();
+        let it = self.itab_type(to);
+        self.begin_scratch(m);
+        self.line(self_decl);
+        let sv = Val::plain(value.to_string(), src);
+        for (fname, fty) in declared {
+            let lit = self.lit(self.sym(fname).to_string().as_bytes());
+            self.open(&format!("if (tv_str_eq(key, {lit})) {{"));
+            self.push_temps_pub();
+            let nv = self.any_to(Val::plain("v", ANY), fty, "NULL");
+            let ng = self.reopen_as(&sv, to, Some((fname, nv)), None);
+            let ng = self.own(ng);
+            let code = self.consume(ng);
+            self.line(format!("tv_iface r_ = {code};"));
+            self.pop_temps_pub();
+            self.line("tv_dyn_release(v); return r_;");
+            self.close("}");
+        }
+        self.push_temps_pub();
+        let ng = self.reopen_as(&sv, to, None, None);
+        let ng = self.own(ng);
+        let code = self.consume(ng);
+        self.line(format!("tv_iface r_ = {code};"));
+        self.pop_temps_pub();
+        self.line(format!("((const {it} *)r_.t)->s(r_.p, key, v);"));
+        self.line("return r_;");
+        let body = self.end_scratch();
+        let _ = writeln!(out, "static tv_iface {oname}(void *self, tv_str key, tv_dyn v) {{\n{body}}}");
+        oname
+    }
+
+    fn key_fields_has_rest(&mut self, src: TyId, rest: crate::intern::Sym) -> bool {
+        self.rest_ty(src, rest).is_some()
+    }
+
+    fn rest_ty(&mut self, src: TyId, rest: crate::intern::Sym) -> Option<TyId> {
+        match self.tget(src) {
+            Ty::Record(fs) => self.c.types.fields(fs).iter().find(|f| f.name == rest).map(|f| f.ty),
+            Ty::Interface(..) => self.iface_members(src).iter().find(|f| f.name == rest).map(|f| f.ty),
+            _ => None,
+        }
     }
 
     fn class_member_ty(&mut self, cls: TyId, name: crate::intern::Sym) -> Option<TyId> {

@@ -4871,12 +4871,53 @@ void tv_arrbuf_release_slow(tv_arrbuf *TV_NOESCAPE p, const tv_type *t) {
         tv_arrbuf_free_block(p, t->size);
         return;
     }
+    if (__builtin_expect(tv_arr_props_n != 0, 0)) tv_arr_props_forget(p);
     if (p->ext) free(tv_ext_base(p->ext));
     free(p);
 }
 
+/* ---------------------------------------------------------------- arrays' own properties */
+
+/* An array with properties of its own (`T[] & { links: L }`, as JavaScript's arrays are objects):
+ * kept here by its header (which never moves), an object of them; dropped when it's freed. */
+static tv_map tv_arr_props;
+int64_t tv_arr_props_n;
+void tv_arr_props_forget(tv_arrbuf *p) {
+    tv_int k = (tv_int)(uintptr_t)p;
+    if (tv_map_delete(&tv_arr_props, &tv_type_int, &tv_type_dyn, &k)) tv_arr_props_n--;
+}
+
+tv_dyn tv_arr_prop_get(tv_arr a, tv_str key) {
+    if (!tv_arr_props_n) return (tv_dyn){&tv_type_undefined, NULL};
+    tv_int k = (tv_int)(uintptr_t)a.p;
+    tv_dyn *o = tv_map_get(tv_arr_props, &tv_type_int, &tv_type_dyn, &k);
+    if (!o) return (tv_dyn){&tv_type_undefined, NULL};
+    tv_dyn *v = tv_map_get(*(tv_map *)tv_dyn_data(*o), &tv_type_str, &tv_type_dyn, &key);
+    if (!v) return (tv_dyn){&tv_type_undefined, NULL};
+    tv_dyn_retain(*v);
+    return *v;
+}
+
+void tv_arr_prop_set(tv_arr *a, tv_str key, tv_dyn v) {
+    /* (an immortal array, the empty one every `[]` shares: an array of its own first) */
+    if (a->p->rc < 0) *a = tv_arr_fresh();
+    if (!tv_arr_props.p) tv_arr_props = tv_map_fresh();
+    tv_int k = (tv_int)(uintptr_t)a->p;
+    tv_dyn *o = tv_map_get(tv_arr_props, &tv_type_int, &tv_type_dyn, &k);
+    if (!o) {
+        tv_map m = tv_map_fresh_object();
+        tv_dyn d = tv_dyn_box(&tv_type_dynobj, &m);
+        tv_map_set(&tv_arr_props, &tv_type_int, &tv_type_dyn, &k, &d);
+        tv_arr_props_n++;
+        o = tv_map_get(tv_arr_props, &tv_type_int, &tv_type_dyn, &k);
+    }
+    tv_str_retain(key);
+    tv_map_set((tv_map *)tv_dyn_data(*o), &tv_type_str, &tv_type_dyn, &key, &v);
+}
+
 /* Frees an array's header and elements' blocks (its elements released already). */
 void tv_arrbuf_free_block(tv_arrbuf *TV_NOESCAPE p, size_t es) {
+    if (__builtin_expect(tv_arr_props_n != 0, 0)) tv_arr_props_forget(p);
     /* (the header's block: the size it was made with, from the count of elements it held) */
     int64_t inl = p->cap;
     if (p->ext) {

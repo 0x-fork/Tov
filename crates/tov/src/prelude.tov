@@ -747,6 +747,27 @@ function __reGroup(s: string, p: int[], n: int, k: int): string {
 }
 
 /** `s.replace(p, r)` (`replaceAll`, `split`) of a pattern that's a string or a RegExp: by what it is. */
+// `x.replace(/re/, y)` and so on of an `any` (see the checker's): a string's, when it holds one.
+export function __anyReplaceRe(x: any, re: RegExp, rep: any): any {
+  if (typeof x === "string" && typeof rep === "string") return __reReplace(x, re, rep)
+  return x.replace(re, rep)
+}
+export function __anyReplaceAllRe(x: any, re: RegExp, rep: any): any {
+  if (typeof x === "string" && typeof rep === "string") return __reReplace(x, re, rep)
+  return x.replaceAll(re, rep)
+}
+export function __anySplitRe(x: any, re: RegExp): any {
+  if (typeof x === "string") return x.split(re)
+  return x.split(re)
+}
+export function __anyMatchRe(x: any, re: RegExp): any {
+  if (typeof x === "string") return x.match(re)
+  return x.match(re)
+}
+export function __anySearchRe(x: any, re: RegExp): any {
+  if (typeof x === "string") return x.search(re)
+  return x.search(re)
+}
 export function __replaceSR(s: string, pat: string | RegExp, rep: string): string {
   if (typeof pat === "string") return s.replace(pat, rep)
   return __reReplace(s, pat, rep)
