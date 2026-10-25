@@ -910,6 +910,18 @@ static size_t tv_fmt_i64(char *buf, int64_t v) { /* buf >= 21 bytes */
 }
 
 tv_str tv_str_from_int(tv_int v) {
+    /* (0 to 999, `String(i % 50)`, a key or a label: shared immortal strings, made on first use) */
+    static tv_small_strbuf small[1000];
+    if ((uint64_t)v < 1000) {
+        tv_small_strbuf *b = &small[v];
+        if (!b->len) {
+            int n = v >= 100 ? 3 : v >= 10 ? 2 : 1;
+            for (int i = n - 1, x = (int)v; i >= 0; i--, x /= 10) b->data[i] = (char)('0' + x % 10);
+            b->rc = TV_STR_IMMORTAL | TV_STR_ASCII;
+            b->len = n;
+        }
+        return (tv_str){(tv_strbuf *)(void *)b};
+    }
     char buf[24];
     return tv_str_from_ascii(buf, tv_fmt_i64(buf, v));
 }
@@ -5253,6 +5265,12 @@ struct tv_mapbuf {
 
 typedef struct { size_t voff, stride; } tv_mlayout;
 
+/* An element's bytes copied: 8 of them (most keys and values) without a call to memcpy. */
+static inline void tv_elem_copy(void *d, const void *s, size_t n) {
+    if (n == 8) { uint64_t x; memcpy(&x, s, 8); memcpy(d, &x, 8); }
+    else if (n) memcpy(d, s, n);
+}
+
 static inline tv_mlayout tv_mlay(const tv_type *kt, const tv_type *vt) {
     tv_mlayout L;
     L.voff = 8 + ((kt->size + 7) & ~(size_t)7);
@@ -5424,11 +5442,16 @@ void tv_map_retain(tv_map m) {
 static void tv_map_release_entries(tv_mapbuf *m, const tv_type *kt, const tv_type *vt, tv_mlayout L) {
     bool rk = kt->release && kt->size, rv = vt->release && vt->size;
     if (!rk && !rv) return;
+    /* (string keys and values released here, not through the descriptor: an immortal literal's is
+     * a check) */
+    bool sk = kt == &tv_type_str, sv = vt == &tv_type_str;
     for (int64_t i = 0; i < m->used; i++) {
         unsigned char *e = tv_entry(m, L, i);
         if (!tv_entry_hash(e)) continue;
-        if (rk) kt->release(e + 8);
-        if (rv) vt->release(e + L.voff);
+        if (sk) { tv_str x; memcpy(&x, e + 8, sizeof x); tv_str_release(x); }
+        else if (rk) kt->release(e + 8);
+        if (sv) { tv_str x; memcpy(&x, e + L.voff, sizeof x); tv_str_release(x); }
+        else if (rv) vt->release(e + L.voff);
     }
 }
 
@@ -5479,6 +5502,33 @@ static unsigned char *tv_map_add(tv_map *mp, tv_mapbuf *m, tv_mlayout L, const t
     return e;
 }
 
+tv_map tv_map_from_entries(const tv_type *kt, const tv_type *vt, tv_int n, const void *keys, const void *vals, bool object, uint64_t *hashes) {
+    tv_map mm = tv_map_fresh();
+    mm.p->object = object;
+    if (n <= 0) return mm;
+    tv_mlayout L = tv_mlay(kt, vt);
+    int64_t cap = TV_MAP_MIN_CAP;
+    while (cap < n) cap *= 2;
+    tv_mapbuf *m = tv_mapbuf_new(cap, L);
+    const unsigned char *k = keys, *v = vals;
+    /* (the keys' hashes, kept by the literal's site from its first time: its keys are constants) */
+    if (hashes && !hashes[0])
+        for (int64_t i = 0; i < n; i++) hashes[i] = tv_key_hash(kt, k + (size_t)i * kt->size);
+    for (int64_t i = 0; i < n; i++, k += kt->size, v += vt->size) {
+        uint64_t h = hashes ? hashes[i] : tv_key_hash(kt, k);
+        uint64_t pos = h & m->mask;
+        while (m->index[pos]) pos = (pos + 1) & m->mask;
+        unsigned char *e = tv_entry(m, L, i);
+        tv_entry_set_hash(e, h);
+        tv_elem_copy(e + 8, k, kt->size);
+        tv_elem_copy(e + L.voff, v, vt->size);
+        m->index[pos] = tv_slot_of(m, h, i);
+    }
+    m->count = m->used = n;
+    mm.p->b = m;
+    return mm;
+}
+
 void tv_map_set(tv_map *mp, const tv_type *kt, const tv_type *vt, void *key, void *value) {
     tv_mlayout L = tv_mlay(kt, vt);
     tv_mapbuf *m = tv_map_unique(mp, kt, vt, L);
@@ -5489,14 +5539,14 @@ void tv_map_set(tv_map *mp, const tv_type *kt, const tv_type *vt, void *key, voi
         unsigned char *e = tv_entry(m, L, tv_slot_entry(m, m->index[pos]));
         if (vt->size) {
             if (vt->release) vt->release(e + L.voff);
-            memcpy(e + L.voff, value, vt->size);
+            tv_elem_copy(e + L.voff, value, vt->size);
         }
         if (kt->release && kt->size) kt->release(key);
         return;
     }
     unsigned char *e = tv_map_add(mp, m, L, kt, vt, h, pos);
-    if (kt->size) memcpy(e + 8, key, kt->size);
-    if (vt->size) memcpy(e + L.voff, value, vt->size);
+    tv_elem_copy(e + 8, key, kt->size);
+    tv_elem_copy(e + L.voff, value, vt->size);
 }
 
 /* Find-or-insert, for `m.set(k, (m.get(k) ?? d) op e)`: one probe. */
@@ -5521,7 +5571,7 @@ void *tv_map_slot(tv_map *mp, const tv_type *kt, const tv_type *vt, void *key, b
         return tv_entry(m, L, tv_slot_entry(m, m->index[pos])) + L.voff;
     }
     unsigned char *e = tv_map_add(mp, m, L, kt, vt, h, pos);
-    if (kt->size) memcpy(e + 8, key, kt->size);
+    tv_elem_copy(e + 8, key, kt->size);
     memset(e + L.voff, 0, vt->size);
     *inserted = true;
     return e + L.voff;

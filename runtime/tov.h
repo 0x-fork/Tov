@@ -637,6 +637,9 @@ typedef struct tv_map {
 tv_map tv_map_fresh(void);                                           /* a new empty map */
 tv_map tv_map_fresh_object(void);                                    /* the same, made as an object (printed as one) */
 tv_map tv_map_copy(tv_map m, const tv_type *kt, const tv_type *vt);  /* new Map(m): a new map, same entries */
+/* A map of n entries with distinct keys, keys[i] to vals[i] (moved in), made at its size: an object
+ * literal. hashes (or NULL): n slots kept for constant keys, filled the first time (0: not yet). */
+tv_map tv_map_from_entries(const tv_type *kt, const tv_type *vt, tv_int n, const void *keys, const void *vals, bool object, uint64_t *hashes);
 
 void tv_map_retain(tv_map m);
 void tv_map_release(tv_map m, const tv_type *kt, const tv_type *vt);

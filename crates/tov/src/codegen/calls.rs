@@ -2255,6 +2255,11 @@ impl<'c, 'a> Gen<'c, 'a> {
                 if v.ty == STR {
                     return v;
                 }
+                // (an integer: its digits at once, a small one shared)
+                if self.c.types.is_int(v.ty) && v.ty != U64 {
+                    let f = if v.ty == INT && self.js_ints(self.cur_m()) { "tv_str_from_jint" } else { "tv_str_from_int" };
+                    return self.tmp(STR, &format!("{f}((tv_int)({}))", v.code), true);
+                }
                 let sbv = self.fresh("sb");
                 self.line(format!("tv_sb {sbv} = {{0}};"));
                 self.line("{");

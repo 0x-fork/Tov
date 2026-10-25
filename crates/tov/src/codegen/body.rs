@@ -4360,9 +4360,34 @@ impl<'c, 'a> Gen<'c, 'a> {
                 };
                 // A `Record<string, V>` literal: a map built key by key.
                 if let Ty::Map(k, v) = self.tget(target) {
-                    let res = self.tmp(target, "tv_map_fresh_object()", true);
                     let (kd, vd) = (self.desc(k), self.desc(v));
                     let (kct, vct) = (self.ctype(k), self.ctype(v));
+                    // (distinct keys: made at once, at its size)
+                    // (values that can't throw or suspend: the arrays are never left half made)
+                    let distinct = fields.iter().enumerate().all(|(i, f)| fields[..i].iter().all(|g| g.name != f.name));
+                    let m = self.cur_m();
+                    let calm = fields.iter().all(|f| {
+                        let mut xs = Vec::new();
+                        collect_exprs_expr(self.ast(m), f.value, &mut xs);
+                        xs.push(f.value);
+                        xs.iter().all(|&x| !self.facts(m).throwing.contains(&x) && !matches!(self.ast(m).expr(x).kind, ExprKind::Await(_) | ExprKind::Yield(..)))
+                    });
+                    // (not where locals live in a frame, an async function's or a generator's: no arrays there)
+                    let framed = self.b().async_fn.is_some() || self.b().gen_elem.is_some();
+                    if k == STR && distinct && calm && !framed && fields.len() >= 2 && !matches!(self.tget(v), Ty::Undefined | Ty::Null | Ty::Void) {
+                        let (ka, va, ha) = (self.fresh("ks"), self.fresh("vs"), self.fresh("hs"));
+                        let keys: Vec<String> = fields.iter().map(|f| self.lit(self.sym(f.name).to_string().as_bytes())).collect();
+                        self.line(format!("{kct} {ka}[{}] = {{{}}}; {vct} {va}[{}]; static uint64_t {ha}[{}];", keys.len(), keys.join(", "), keys.len(), keys.len()));
+                        for (i, f) in fields.iter().enumerate() {
+                            let vv = self.expr(f.value);
+                            let vv = self.coerce(vv, v);
+                            let vc = self.consume(vv);
+                            self.line(format!("{va}[{i}] = {vc};"));
+                        }
+                        let res = self.tmp(target, &format!("tv_map_from_entries({kd}, {vd}, {}, {ka}, {va}, true, {ha})", fields.len()), true);
+                        return self.coerce(res, ty);
+                    }
+                    let res = self.tmp(target, "tv_map_fresh_object()", true);
                     for f in fields {
                         let key = self.lit(self.sym(f.name).to_string().as_bytes());
                         let vv = self.expr(f.value);
