@@ -4374,8 +4374,23 @@ static tv_arr tv_str_split_byte(tv_str s, unsigned char c) {
 tv_arr tv_str_split_limit(tv_str s, tv_str sep, double limit) {
     uint32_t n = (uint32_t)(int64_t)(limit == limit ? limit : 0);
     if (n == 0) return tv_arr_fresh();
-    tv_arr a = tv_str_split(s, sep);
-    if ((uint64_t)tv_arr_len(a) > n) tv_arr_set_length(&a, &tv_type_str, (tv_int)n, "split");
+    if (sep.p->len == 0) {
+        tv_arr a = tv_str_split(s, sep);
+        if ((uint64_t)tv_arr_len(a) > n) tv_arr_set_length(&a, &tv_type_str, (tv_int)n, "split");
+        return a;
+    }
+    /* (the first n pieces only: `src.split("\n", 1)` of a long text looks at its first line) */
+    tv_arr a = tv_arr_fresh();
+    const char *d = s.p->data, *sd = sep.p->data;
+    size_t len = (size_t)s.p->len, sl = (size_t)sep.p->len, i = 0;
+    while ((uint64_t)tv_arr_len(a) < n) {
+        const char *hit = len - i >= sl ? memmem(d + i, len - i, sd, sl) : NULL;
+        size_t end = hit ? (size_t)(hit - d) : len;
+        tv_str piece = tv_str_from(d + i, end - i);
+        tv_arr_push(&a, &tv_type_str, &piece);
+        if (!hit) break;
+        i = end + sl;
+    }
     return a;
 }
 
@@ -4882,7 +4897,13 @@ void tv_arrbuf_release_slow(tv_arrbuf *TV_NOESCAPE p, const tv_type *t) {
  * kept here by its header (which never moves), an object of them; dropped when it's freed. */
 static tv_map tv_arr_props;
 int64_t tv_arr_props_n;
+/* (which headers may have some, by a hash of their address: most arrays freed have none) */
+static uint64_t tv_arr_props_bits[1024];
+static inline uint32_t tv_arr_props_bit(const tv_arrbuf *p) { return (uint32_t)(((uintptr_t)p >> 4) * 0x9E3779B97F4A7C15ull >> 48); }
+
 void tv_arr_props_forget(tv_arrbuf *p) {
+    uint32_t b = tv_arr_props_bit(p);
+    if (!(tv_arr_props_bits[b >> 6] >> (b & 63) & 1)) return;
     tv_int k = (tv_int)(uintptr_t)p;
     if (tv_map_delete(&tv_arr_props, &tv_type_int, &tv_type_dyn, &k)) tv_arr_props_n--;
 }
@@ -4909,6 +4930,8 @@ void tv_arr_prop_set(tv_arr *a, tv_str key, tv_dyn v) {
         tv_dyn d = tv_dyn_box(&tv_type_dynobj, &m);
         tv_map_set(&tv_arr_props, &tv_type_int, &tv_type_dyn, &k, &d);
         tv_arr_props_n++;
+        uint32_t b = tv_arr_props_bit(a->p);
+        tv_arr_props_bits[b >> 6] |= 1ull << (b & 63);
         o = tv_map_get(tv_arr_props, &tv_type_int, &tv_type_dyn, &k);
     }
     tv_str_retain(key);

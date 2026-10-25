@@ -91,6 +91,36 @@ fn main() {
         println!("cargo:rerun-if-changed={}", p.display());
     }
     node_shims(&root);
+    regexp_library(&root, &out_dir);
+}
+
+/// QuickJS's libregexp compiled into the compiler itself: `tov build` compiles a program's
+/// patterns to bytecode, the very bytecode its runtime makes, and that into C (codegen/rejit.rs).
+fn regexp_library(root: &Path, out_dir: &Path) {
+    let dir = root.join("vendor/quickjs-regexp");
+    let cc = if cfg!(target_vendor = "apple") { rt_flags::xcrun_toolchain().map(|(c, _)| c).unwrap_or_else(rt_flags::other_compiler) } else { rt_flags::other_compiler() };
+    let sysroot = if cfg!(target_vendor = "apple") { rt_flags::xcrun_toolchain().map(|(_, s)| s) } else { None };
+    let mut objs = Vec::new();
+    for unit in ["libregexp.c", "libunicode.c", "cutils.c"] {
+        let obj = out_dir.join(format!("tovre-{}.o", unit.trim_end_matches(".c")));
+        let mut cmd = Command::new(&cc);
+        if let Some(s) = &sysroot {
+            cmd.args(["-isysroot", s]);
+        }
+        let ok = cmd.args(["-O2", "-w", "-fPIC", "-c", "-o"]).arg(&obj).arg(format!("-I{}", dir.display())).arg(dir.join(unit)).status().map(|s| s.success()).unwrap_or(false);
+        assert!(ok, "couldn't compile vendor/quickjs-regexp/{unit}");
+        objs.push(obj);
+        println!("cargo:rerun-if-changed={}", dir.join(unit).display());
+    }
+    let lib = out_dir.join("libtovre.a");
+    let _ = std::fs::remove_file(&lib);
+    let ok = Command::new("ar").arg("rcs").arg(&lib).args(&objs).status().map(|s| s.success()).unwrap_or(false);
+    assert!(ok, "couldn't archive libregexp");
+    println!("cargo:rustc-link-search=native={}", out_dir.display());
+    println!("cargo:rustc-link-lib=static=tovre");
+    for h in ["libregexp.h", "libregexp-exec.h", "libregexp-opcode.h", "libunicode.h", "libunicode-table.h", "cutils.h"] {
+        println!("cargo:rerun-if-changed={}", dir.join(h).display());
+    }
 }
 
 /// The vendored libraries compiled into an archive in OUT_DIR, as `tov build` would compile them

@@ -200,6 +200,10 @@ extern const tv_type tv_type_i8, tv_type_i16, tv_type_i32, tv_type_u8, tv_type_u
 
 /* ------------------------------------------------------------------ strings (immutable UTF-8) */
 
+/* A function with no effect but its result, read from its arguments and memory: a call whose
+ * result goes unused is dropped, one of the same arguments made once (strings never change). */
+#define __attribute__((pure))
+
 typedef struct tv_strbuf {
     int32_t rc;        /* the count (TV_STR_COUNT bits) and what's known of the text (TV_STR_ASCII
                         * or TV_STR_WIDE, set once it's first looked at); < 0: immortal (literals) */
@@ -351,6 +355,8 @@ bool tv_parse_int(tv_str s, tv_int radix, tv_int *out);  /* radix 0 = 10 (or 16 
 /* Regular expressions (runtime/regexp.c, linked when a program uses them): a compiled
  * expression's id (-1 and an error when it doesn't compile); a match's group positions. */
 tv_int tv_native_reCompile(tv_str source, tv_str flags);
+/* The matchers `tov build` compiled from the program's patterns (runtime/regexp.c's tv_rejit). */
+void tv_rejit_table(const void *table, size_t n);
 tv_str tv_native_reFlags(tv_int h);
 struct tv_arr tv_native_reExec(tv_int h, tv_str s, tv_int from);
 tv_int tv_native_reTest(tv_int h, tv_str s, tv_int from);

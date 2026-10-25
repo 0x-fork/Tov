@@ -4,6 +4,7 @@
  * string is matched as its bytes, anything else as UTF-16). */
 #include "tov.h"
 #include "libregexp.h"
+#include "libregexp-exec.h"
 #include <stdio.h>
 #include <stdlib.h>
 
@@ -50,7 +51,29 @@ typedef struct tv_re {
     tv_arr names;        /* reNames' answer, made once (p NULL until then) */
     bool first[128];
     struct tv_re_lin *lin; /* a sequence matched without the engine, or NULL (see tv_re_lin_parse) */
+    /* bc's and bc1's matchers compiled by `tov build` (for ASCII text), or NULL: see tv_rejit_add */
+    lre_jit_fn jit, jit1;
 } tv_re;
+
+/* The matchers `tov build` compiled from the program's patterns: (key, the bytecode each was
+ * compiled from, the matcher), bc's and bc1's. One is used only for the very bytecode it was
+ * made from. */
+typedef struct {
+    const char *key; size_t klen;
+    const uint8_t *bc; size_t bclen; lre_jit_fn fn;
+    const uint8_t *bc1; size_t bc1len; lre_jit_fn fn1;
+} tv_rejit;
+static const tv_rejit *tv_rejits;
+static size_t tv_nrejits;
+
+void tv_rejit_table(const void *table, size_t n) {
+    tv_rejits = table;
+    tv_nrejits = n;
+}
+
+static size_t tv_bc_size(const uint8_t *bc) {
+    return 8 + (size_t)((uint32_t)bc[4] | (uint32_t)bc[5] << 8 | (uint32_t)bc[6] << 16 | (uint32_t)bc[7] << 24);
+}
 
 /* A sequence of characters, classes and greedy quantifiers, groups around parts of it (none
  * quantified), `^` first and `$` last at most: matched by taking each item's longest run and,
@@ -568,13 +591,13 @@ static bool tv_re_find(const tv_re *r, uint8_t **cap, const uint8_t *buf, tv_int
                 while (i < n && (buf[i] >= 128 || !r->first[buf[i]])) i++;
                 if (i >= n) return false;
             }
-            int ret = lre_exec(cap, r->bc1, buf, (int)i, (int)n, type, NULL);
+            int ret = r->jit1 && type == 0 ? lre_exec_jit(r->jit1, cap, r->bc1, buf, (int)i, (int)n, NULL) : lre_exec(cap, r->bc1, buf, (int)i, (int)n, type, NULL);
             if (ret == LRE_RET_MEMORY_ERROR) tv_trap("out of memory in a regular expression", NULL);
             if (ret == 1) return true;
         }
         return false;
     }
-    int ret = lre_exec(cap, r->bc, buf, (int)from, (int)n, type, NULL);
+    int ret = r->jit && type == 0 ? lre_exec_jit(r->jit, cap, r->bc, buf, (int)from, (int)n, NULL) : lre_exec(cap, r->bc, buf, (int)from, (int)n, type, NULL);
     if (ret == LRE_RET_MEMORY_ERROR) tv_trap("out of memory in a regular expression", NULL);
     return ret == 1;
 }
@@ -711,6 +734,18 @@ tv_int tv_native_reCompile(tv_str source, tv_str flags) {
         int len1;
         char err1[64];
         r->bc1 = lre_compile(&len1, err1, sizeof err1, src, src_len, re_flags | LRE_FLAG_STICKY, NULL);
+    }
+    r->jit = r->jit1 = NULL;
+    for (size_t k = 0; k < tv_nrejits; k++) {
+        const tv_rejit *j = &tv_rejits[k];
+        if (j->klen != (size_t)key.p->len || memcmp(j->key, key.p->data, j->klen)) continue;
+        size_t bl = tv_bc_size(bc);
+        if (j->bclen == bl && !memcmp(j->bc, bc, bl)) r->jit = j->fn;
+        if (r->bc1 && j->fn1) {
+            size_t bl1 = tv_bc_size(r->bc1);
+            if (j->bc1len == bl1 && !memcmp(j->bc1, r->bc1, bl1)) r->jit1 = j->fn1;
+        }
+        break;
     }
     if (tv_nres * 2 > tv_re_index_cap) {
         tv_int cap = tv_re_index_cap ? tv_re_index_cap * 2 : 64;

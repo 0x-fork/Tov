@@ -29,6 +29,7 @@ mod writes;
 mod quiet;
 mod range;
 mod resize;
+mod rejit;
 
 use crate::ast::{self, ExprId, ExprKind, ItemKind, StmtKind};
 use crate::check::{Callee, Checker, IdentFact, ModuleFacts};
@@ -57,6 +58,7 @@ pub const REGEXP_FILES: &[(&str, &str)] = &[
     ("cutils.c", include_str!("../../../../vendor/quickjs-regexp/cutils.c")),
     ("libregexp.h", include_str!("../../../../vendor/quickjs-regexp/libregexp.h")),
     ("libregexp-opcode.h", include_str!("../../../../vendor/quickjs-regexp/libregexp-opcode.h")),
+    ("libregexp-exec.h", include_str!("../../../../vendor/quickjs-regexp/libregexp-exec.h")),
     ("libunicode.h", include_str!("../../../../vendor/quickjs-regexp/libunicode.h")),
     ("libunicode-table.h", include_str!("../../../../vendor/quickjs-regexp/libunicode-table.h")),
     ("cutils.h", include_str!("../../../../vendor/quickjs-regexp/cutils.h")),
@@ -778,6 +780,17 @@ impl<'c, 'a> Gen<'c, 'a> {
             init.insert_str(0, "    tv_crypto_install();\n");
             self.uses_tls = true;
         }
+        // (the program's pattern literals compiled to C, given to the runtime before any is
+        // compiled: see rejit.rs)
+        if self.uses_regexp && std::env::var_os("TOV_NO_REJIT").is_none() {
+            let pats = self.pattern_literals();
+            if let Some((code, n)) = rejit::matchers(&pats) {
+                self.helpers.push_str(rejit::EXEC_H);
+                self.helpers.push_str(rejit::PRELUDE);
+                self.helpers.push_str(&code);
+                init.insert_str(0, &format!("    tv_rejit_table(tvg_rejits, {n});\n"));
+            }
+        }
         // (Math.random's seed, read from TOV_SEED once, before the first draw: tv_random has no
         // check of its own)
         if self.funcs.contains("tv_random()") || main_body.contains("tv_random()") {
@@ -839,6 +852,26 @@ impl<'c, 'a> Gen<'c, 'a> {
 
     /// The program's C: the runtime header, the prelude and the generated code. It links
     /// against the runtime object (see `runtime_source`); `standalone` makes it self-contained.
+    /// The (source, flags) of the program's regular expression literals, each once.
+    fn pattern_literals(&self) -> Vec<(String, String)> {
+        let Some(re) = self.c.interner.lookup("__reLiteral") else { return Vec::new() };
+        let mut out: Vec<(String, String)> = Vec::new();
+        for m in self.c.modules.iter() {
+            for e in &m.ast.exprs {
+                let crate::ast::ExprKind::Call { callee, args, .. } = &e.kind else { continue };
+                if !matches!(m.ast.expr(*callee).kind, crate::ast::ExprKind::Ident(n) if n == re) || args.len() != 2 {
+                    continue;
+                }
+                let (crate::ast::ExprKind::Str(p), crate::ast::ExprKind::Str(f)) = (&m.ast.expr(args[0].expr).kind, &m.ast.expr(args[1].expr).kind) else { continue };
+                let pair = (self.c.interner.get(*p).to_string(), self.c.interner.get(*f).to_string());
+                if !out.contains(&pair) {
+                    out.push(pair);
+                }
+            }
+        }
+        out
+    }
+
     fn assemble(&self) -> String {
         let mut out = String::with_capacity(RUNTIME_H.len() + JS_H.len() + PRELUDE.len() + self.funcs.len() * 2);
         out.push_str(&fixed_prefix());
