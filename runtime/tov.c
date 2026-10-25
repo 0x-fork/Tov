@@ -1139,7 +1139,29 @@ static size_t tv_fmt_number(char *buf, double v, bool is_f32) {
         return (size_t)(p - buf) + tv_fmt_i64(p, (int64_t)v);
     char d[24] = {0};
     int n, k = 0;
+    /* (a number of a few decimals, a price: the fewest that give it back exactly, m / 10^j with m
+     * below 10^15 (one such m: the double's spacing is finer than 10^-j there) are its shortest
+     * digits, without the general search) */
+    static const double p10[7] = {1, 10, 100, 1000, 10000, 100000, 1000000};
+    double t6 = v * 1e6;
+    /* (v * 10^6 a whole number but for its rounding: else it has more decimals, past this path) */
+    if (!is_f32 && v < 1e9 && v >= 1e-6 && __builtin_fabs(t6 - __builtin_round(t6)) <= t6 * 1e-15) {
+        for (int j = 1; j <= 6; j++) {
+            double t = v * p10[j];
+            if (t >= 1e15) break;
+            int64_t m = (int64_t)(t + 0.5);
+            if ((double)m / p10[j] != v) continue;
+            char tmp[20];
+            int nd = 0;
+            for (int64_t x = m; x; x /= 10) tmp[nd++] = (char)('0' + x % 10);
+            for (int i = 0; i < nd; i++) d[i] = tmp[nd - 1 - i];
+            k = nd;
+            n = nd - j;
+            goto laid_out;
+        }
+    }
     k = tv_shortest_digits(v, is_f32, d, &n);
+laid_out:
     if (k <= n && n <= 21) {
         memcpy(p, d, (size_t)k); p += k;
         for (int i = k; i < n; i++) *p++ = '0';
