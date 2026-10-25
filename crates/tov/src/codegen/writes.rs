@@ -89,7 +89,7 @@ impl Gen<'_, '_> {
                 self.reach_into(u, out, seen, depth + 1)
             }
             // (values that hold nothing)
-            Ty::Int | Ty::F64 | Ty::F32 | Ty::I8 | Ty::I16 | Ty::I32 | Ty::U8 | Ty::U16 | Ty::U32 | Ty::U64 | Ty::Bool | Ty::Str | Ty::StrLit(_) | Ty::BigInt | Ty::Decimal | Ty::Undefined | Ty::Null | Ty::Void | Ty::BoolLit(_) => true,
+            Ty::Int | Ty::F64 | Ty::F32 | Ty::I8 | Ty::I16 | Ty::I32 | Ty::U8 | Ty::U8C | Ty::U16 | Ty::U32 | Ty::U64 | Ty::Bool | Ty::Str | Ty::StrLit(_) | Ty::BigInt | Ty::Decimal | Ty::Undefined | Ty::Null | Ty::Void | Ty::BoolLit(_) => true,
             // (closures, interfaces, promises, dynamic values: anything)
             _ => false,
         }

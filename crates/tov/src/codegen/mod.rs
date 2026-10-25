@@ -951,7 +951,7 @@ impl<'c, 'a> Gen<'c, 'a> {
             Ty::I8 => "int8_t".into(),
             Ty::I16 => "int16_t".into(),
             Ty::I32 => "int32_t".into(),
-            Ty::U8 => "uint8_t".into(),
+            Ty::U8 | Ty::U8C => "uint8_t".into(),
             Ty::U16 => "uint16_t".into(),
             Ty::U32 => "uint32_t".into(),
             Ty::U64 => "uint64_t".into(),
@@ -1644,7 +1644,7 @@ impl<'c, 'a> Gen<'c, 'a> {
             Ty::Int if self.bodies.last().is_some_and(|b| self.js_ints(b.m)) => format!("tv_sb_push_jint(sb, {place})"),
             Ty::Int => format!("tv_sb_push_int(sb, {place})"),
             Ty::F64 | Ty::F32 => format!("tv_sb_push_f64(sb, {place})"),
-            Ty::I8 | Ty::I16 | Ty::I32 | Ty::U8 | Ty::U16 | Ty::U32 => format!("tv_sb_push_int(sb, (tv_int)({place}))"),
+            Ty::I8 | Ty::I16 | Ty::I32 | Ty::U8 | Ty::U8C | Ty::U16 | Ty::U32 => format!("tv_sb_push_int(sb, (tv_int)({place}))"),
             Ty::U64 => format!("tv_sb_push_f64(sb, (double)({place}))"),
             Ty::BigInt => format!("tv_sb_push_big(sb, {place})"),
             Ty::Decimal => format!("tv_sb_push_dec(sb, {place})"),
@@ -1685,7 +1685,7 @@ impl<'c, 'a> Gen<'c, 'a> {
     /// first one that goes through descriptors links the formatter in (see `TVG_INS`).
     pub(crate) fn inspect_root(&mut self, t: TyId, place: &str, depth: &str) -> String {
         let code = self.inspect_code(t, place, depth);
-        if !matches!(self.tget(t), Ty::Str | Ty::StrLit(_) | Ty::Func(..) | Ty::BigInt | Ty::Decimal | Ty::Int | Ty::F64 | Ty::F32 | Ty::I8 | Ty::I16 | Ty::I32 | Ty::U8 | Ty::U16 | Ty::U32 | Ty::U64 | Ty::Bool | Ty::Undefined | Ty::Null | Ty::Void | Ty::Never) {
+        if !matches!(self.tget(t), Ty::Str | Ty::StrLit(_) | Ty::Func(..) | Ty::BigInt | Ty::Decimal | Ty::Int | Ty::F64 | Ty::F32 | Ty::I8 | Ty::I16 | Ty::I32 | Ty::U8 | Ty::U8C | Ty::U16 | Ty::U32 | Ty::U64 | Ty::Bool | Ty::Undefined | Ty::Null | Ty::Void | Ty::Never) {
             self.uses_inspect = true;
         }
         code
@@ -1701,7 +1701,7 @@ impl<'c, 'a> Gen<'c, 'a> {
             }
             // (console.log writes negative zero as -0; String(x) as 0)
             Ty::F64 | Ty::F32 => format!("({{ double v_ = (double)({place}); if (v_ == 0 && signbit(v_)) tv_sb_push_cstr(sb, \"-0\"); else tv_sb_push_f64(sb, v_); }})"),
-            Ty::Int | Ty::I8 | Ty::I16 | Ty::I32 | Ty::U8 | Ty::U16 | Ty::U32 | Ty::U64 | Ty::Bool | Ty::Undefined | Ty::Null | Ty::Void | Ty::Never => {
+            Ty::Int | Ty::I8 | Ty::I16 | Ty::I32 | Ty::U8 | Ty::U8C | Ty::U16 | Ty::U32 | Ty::U64 | Ty::Bool | Ty::Undefined | Ty::Null | Ty::Void | Ty::Never => {
                 self.string_code(t, place)
             }
             Ty::BigInt => format!("({{ tv_sb_push_big(sb, {place}); tv_sb_push_char(sb, 'n'); }})"),
@@ -1757,7 +1757,7 @@ impl<'c, 'a> Gen<'c, 'a> {
             Ty::I8 => return "&tv_type_i8".into(),
             Ty::I16 => return "&tv_type_i16".into(),
             Ty::I32 => return "&tv_type_i32".into(),
-            Ty::U8 => return "&tv_type_u8".into(),
+            Ty::U8 | Ty::U8C => return "&tv_type_u8".into(),
             Ty::U16 => return "&tv_type_u16".into(),
             Ty::U32 => return "&tv_type_u32".into(),
             Ty::U64 => return "&tv_type_u64".into(),
@@ -1975,7 +1975,7 @@ impl<'c, 'a> Gen<'c, 'a> {
         if !subst.is_empty() || ret != INT || self.c.sigs[&(m, item)].throws != NEVER {
             return None;
         }
-        let scalar = |g: &Self, t: TyId| matches!(g.tget(t), Ty::Int | Ty::F64 | Ty::F32 | Ty::Bool | Ty::I8 | Ty::I16 | Ty::I32 | Ty::U8 | Ty::U16 | Ty::U32 | Ty::U64);
+        let scalar = |g: &Self, t: TyId| matches!(g.tget(t), Ty::Int | Ty::F64 | Ty::F32 | Ty::Bool | Ty::I8 | Ty::I16 | Ty::I32 | Ty::U8 | Ty::U8C | Ty::U16 | Ty::U32 | Ty::U64);
         if params.iter().any(|&(_, t, inout)| inout || !scalar(self, t)) {
             return None;
         }

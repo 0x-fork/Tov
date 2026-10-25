@@ -63,6 +63,9 @@ pub enum Ty {
     I16,
     I32,
     U8,
+    /// A `Uint8ClampedArray`'s element: a `u8` that a number stored into it is clamped to (0 to
+    /// 255, rounded half to even, NaN 0) instead of wrapped.
+    U8C,
     U16,
     U32,
     U64,
@@ -187,6 +190,7 @@ prims! {
     BIGINT = 18 => Ty::BigInt,
     DECIMAL = 19 => Ty::Decimal,
     NULL = 20 => Ty::Null,
+    U8C = 21 => Ty::U8C,
 }
 
 impl Default for Types {
@@ -521,7 +525,7 @@ impl Types {
     }
 
     pub fn is_int(&self, ty: TyId) -> bool {
-        matches!(self.get(ty), Ty::Int | Ty::I8 | Ty::I16 | Ty::I32 | Ty::U8 | Ty::U16 | Ty::U32 | Ty::U64)
+        matches!(self.get(ty), Ty::Int | Ty::I8 | Ty::I16 | Ty::I32 | Ty::U8 | Ty::U8C | Ty::U16 | Ty::U32 | Ty::U64)
     }
 
     pub fn is_float(&self, ty: TyId) -> bool {
@@ -732,7 +736,7 @@ impl Display<'_> {
             Ty::I8 => out.push_str("i8"),
             Ty::I16 => out.push_str("i16"),
             Ty::I32 => out.push_str("i32"),
-            Ty::U8 => out.push_str("u8"),
+            Ty::U8 | Ty::U8C => out.push_str("u8"),
             Ty::U16 => out.push_str("u16"),
             Ty::U32 => out.push_str("u32"),
             Ty::U64 => out.push_str("u64"),

@@ -731,11 +731,11 @@ impl<'c, 'a> Gen<'c, 'a> {
             _ => e,
         };
         let ty = match elem_of(inner) {
-            Some(el) if ty == INT && matches!(self.tget(el), Ty::U8 | Ty::I8 | Ty::U16 | Ty::I16 | Ty::U32 | Ty::I32) => el,
+            Some(el) if ty == INT && matches!(self.tget(el), Ty::U8 | Ty::U8C | Ty::I8 | Ty::U16 | Ty::I16 | Ty::U32 | Ty::I32) => el,
             _ => ty,
         };
         let sized = match self.tget(ty) {
-            Ty::U8 => Some((0, u8::MAX as i128)),
+            Ty::U8 | Ty::U8C => Some((0, u8::MAX as i128)),
             Ty::I8 => Some((i8::MIN as i128, i8::MAX as i128)),
             Ty::U16 => Some((0, u16::MAX as i128)),
             Ty::I16 => Some((i16::MIN as i128, i16::MAX as i128)),

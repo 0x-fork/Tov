@@ -130,7 +130,7 @@ impl<'c, 'a> Gen<'c, 'a> {
         let code = match self.tget(from) {
             Ty::Js => return Val { ty: JS, ..v },
             Ty::Bool => format!("tv_js_bool({})", v.code),
-            Ty::Int | Ty::F64 | Ty::F32 | Ty::I8 | Ty::I16 | Ty::I32 | Ty::U8 | Ty::U16 | Ty::U32 | Ty::U64 => format!("tv_js_num((double)({}))", v.code),
+            Ty::Int | Ty::F64 | Ty::F32 | Ty::I8 | Ty::I16 | Ty::I32 | Ty::U8 | Ty::U8C | Ty::U16 | Ty::U32 | Ty::U64 => format!("tv_js_num((double)({}))", v.code),
             Ty::Str => format!("tv_js_from_str({})", v.code),
             Ty::StrLit(s) => {
                 let text = self.sym(s).to_string();
@@ -189,7 +189,7 @@ impl<'c, 'a> Gen<'c, 'a> {
         match self.tget(t) {
             Ty::Js => code.to_string(),
             Ty::Bool => format!("tv_js_bool({code})"),
-            Ty::Int | Ty::F64 | Ty::F32 | Ty::I8 | Ty::I16 | Ty::I32 | Ty::U8 | Ty::U16 | Ty::U32 | Ty::U64 => format!("tv_js_num((double)({code}))"),
+            Ty::Int | Ty::F64 | Ty::F32 | Ty::I8 | Ty::I16 | Ty::I32 | Ty::U8 | Ty::U8C | Ty::U16 | Ty::U32 | Ty::U64 => format!("tv_js_num((double)({code}))"),
             Ty::Str => format!("tv_js_from_str({code})"),
             Ty::StrLit(s) => {
                 let text = self.sym(s).to_string();
@@ -335,13 +335,13 @@ impl<'c, 'a> Gen<'c, 'a> {
             Ty::Bool => format!("if (!tv_js_as_bool({src}, &{dst})) return false;"),
             Ty::F64 => format!("if (!tv_js_as_num({src}, &{dst})) return false;"),
             Ty::F32 => format!("{{ double d; if (!tv_js_as_num({src}, &d)) return false; {dst} = (float)d; }}"),
-            Ty::Int | Ty::I8 | Ty::I16 | Ty::I32 | Ty::U8 | Ty::U16 | Ty::U32 | Ty::U64 => {
+            Ty::Int | Ty::I8 | Ty::I16 | Ty::I32 | Ty::U8 | Ty::U8C | Ty::U16 | Ty::U32 | Ty::U64 => {
                 let ct = self.ctype(t);
                 let (lo, hi) = match self.tget(t) {
                     Ty::I8 => ("-128.0", "127.0"),
                     Ty::I16 => ("-32768.0", "32767.0"),
                     Ty::I32 => ("-2147483648.0", "2147483647.0"),
-                    Ty::U8 => ("0.0", "255.0"),
+                    Ty::U8 | Ty::U8C => ("0.0", "255.0"),
                     Ty::U16 => ("0.0", "65535.0"),
                     Ty::U32 => ("0.0", "4294967295.0"),
                     Ty::U64 => ("0.0", "18446744073709549568.0"),

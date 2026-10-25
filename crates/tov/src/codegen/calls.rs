@@ -1070,6 +1070,40 @@ impl<'c, 'a> Gen<'c, 'a> {
                 }
                 self.optional_from(&ok, Val { code: out, ty: et, owned: true }, ty)
             }
+            // (a typed array's `set`: the source's elements copied in at the offset)
+            (Ty::Array(et), "set") => {
+                let d = self.desc(et);
+                let src = self.expr(args[0].expr);
+                let src = self.coerce(src, recv);
+                let src = self.own(src);
+                let code = self.consume(src);
+                let s = self.fresh("s");
+                self.line(format!("tv_arr {s} = {code};"));
+                let off = match args.get(1) {
+                    Some(a) => {
+                        let o = self.expr(a.expr);
+                        let o = self.coerce(o, INT);
+                        o.code
+                    }
+                    None => "0".into(),
+                };
+                let err = self.c.builtin_error_class("RangeError");
+                if err != ERROR {
+                    self.open(&format!("if (!tv_arr_set_from(&{lv}, {d}, {s}, {off})) {{"));
+                    let msg = self.lit(b"offset is out of bounds");
+                    let obj = self.error_object(err, &msg);
+                    self.line(format!("tvg_err = (void *)({obj});"));
+                    self.close("}");
+                } else {
+                    let loc = self.loc(span);
+                    self.line(format!("if (!tv_arr_set_from(&{lv}, {d}, {s}, {off})) tv_trap(\"RangeError: offset is out of bounds\", {loc});"));
+                }
+                let r = self.release_code(recv, &s);
+                if !r.is_empty() {
+                    self.line(format!("{r};"));
+                }
+                Val::plain("0", ty)
+            }
             (Ty::Array(et), "fill") => {
                 let (d, ect) = (self.desc(et), self.ctype(et));
                 let v = self.expr(args[0].expr);
@@ -2660,7 +2694,7 @@ impl<'c, 'a> Gen<'c, 'a> {
             }
             Ty::Bool => Val::plain(format!("(({}) ? ((tv_big){{3}}) : ((tv_big){{1}}))", v.code), BIGINT),
             Ty::U64 => self.tmp(BIGINT, &format!("tv_big_from_u64_({})", v.code), true),
-            Ty::Int | Ty::I8 | Ty::I16 | Ty::I32 | Ty::U8 | Ty::U16 | Ty::U32 => {
+            Ty::Int | Ty::I8 | Ty::I16 | Ty::I32 | Ty::U8 | Ty::U8C | Ty::U16 | Ty::U32 => {
                 let x = self.int_code(v);
                 self.tmp(BIGINT, &format!("tv_big_from_i64({x})"), true)
             }

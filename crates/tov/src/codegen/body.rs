@@ -4174,6 +4174,17 @@ impl<'c, 'a> Gen<'c, 'a> {
                     self.line(format!("{lv} = {f}({old}, tv_dec_from_int(1));"));
                     return Val::plain(if *prefix { lv } else { old }, p.ty);
                 }
+                // (a typed array's element: a number, wrapped or clamped as it's stored back)
+                let elem_of = match self.ast(m).expr(*target).kind {
+                    ExprKind::Index { obj, .. } => Some(obj),
+                    _ => None,
+                };
+                if crate::check::promoted_ty(p.ty) == INT && p.ty != INT && elem_of.is_some_and(|o| { let ot = self.ty(o); matches!(self.tget(ot), Ty::Array(_)) }) {
+                    let n = Val::plain(format!("((tv_int){old} {} 1)", if *inc { "+" } else { "-" }), INT);
+                    let n = self.coerce(n, p.ty);
+                    self.line(format!("{lv} = {};", n.code));
+                    return Val::plain(if *prefix { lv } else { old }, p.ty);
+                }
                 // (in TypeScript, never past 2^53 either: see TV_JADD)
                 let limit: i128 = if self.js_ints(m) { 1 << 53 } else { i64::MAX as i128 };
                 let nowrap = matches!(self.ident_fact(m, *target), Some(IdentFact::Local(k)) if Some(k) == self.b().nowrap_step || self.b().nowrap_locals.contains(&k))
@@ -4722,7 +4733,7 @@ impl<'c, 'a> Gen<'c, 'a> {
             return self.tmp(to, &format!("tv_gen_of_arr({code}, {d})"), true);
         }
         // (a typed array's element into a union of numbers: `bytes[i]` read as `int | undefined`)
-        if matches!(self.tget(from), Ty::I8 | Ty::I16 | Ty::I32 | Ty::U8 | Ty::U16 | Ty::U32)
+        if matches!(self.tget(from), Ty::I8 | Ty::I16 | Ty::I32 | Ty::U8 | Ty::U8C | Ty::U16 | Ty::U32)
             && matches!(self.tget(to), Ty::Union(_))
             && self.tag_of(to, from).is_none()
             && self.tag_of(to, INT).is_some()
@@ -4732,15 +4743,19 @@ impl<'c, 'a> Gen<'c, 'a> {
         }
         let (tf, tt) = (self.tget(from), self.tget(to));
         match (tf, tt) {
-            (Ty::Int | Ty::I8 | Ty::I16 | Ty::I32 | Ty::U8 | Ty::U16 | Ty::U32 | Ty::U64, Ty::F64) => return Val::plain(format!("((double)({}))", v.code), to),
-            (Ty::Int | Ty::I8 | Ty::I16 | Ty::I32 | Ty::U8 | Ty::U16 | Ty::U32 | Ty::U64 | Ty::F64, Ty::F32) => return Val::plain(format!("((float)({}))", v.code), to),
+            (Ty::Int | Ty::I8 | Ty::I16 | Ty::I32 | Ty::U8 | Ty::U8C | Ty::U16 | Ty::U32 | Ty::U64, Ty::F64) => return Val::plain(format!("((double)({}))", v.code), to),
+            (Ty::Int | Ty::I8 | Ty::I16 | Ty::I32 | Ty::U8 | Ty::U8C | Ty::U16 | Ty::U32 | Ty::U64 | Ty::F64, Ty::F32) => return Val::plain(format!("((float)({}))", v.code), to),
             (Ty::F32, Ty::F64) => return Val::plain(format!("((double)({}))", v.code), to),
             // (a number passed for a built-in's integer: truncated, NaN is 0)
             (Ty::F64 | Ty::F32, Ty::Int) => return Val::plain(format!("tv_f64_to_int_js({})", v.code), to),
             // (sized integers compute as `int`; a number stored into a sized element wraps, as a
             // typed array's does in JavaScript)
-            (Ty::I8 | Ty::I16 | Ty::I32 | Ty::U8 | Ty::U16 | Ty::U32, Ty::Int) => return Val::plain(format!("((tv_int)({}))", v.code), to),
-            (Ty::Int | Ty::I8 | Ty::I16 | Ty::I32 | Ty::U8 | Ty::U16 | Ty::U32, Ty::I8 | Ty::I16 | Ty::I32 | Ty::U8 | Ty::U16 | Ty::U32) => {
+            (Ty::I8 | Ty::I16 | Ty::I32 | Ty::U8 | Ty::U8C | Ty::U16 | Ty::U32, Ty::Int) => return Val::plain(format!("((tv_int)({}))", v.code), to),
+            // (into a `Uint8ClampedArray`: clamped instead)
+            (Ty::U8 | Ty::U8C, Ty::U8C) => return Val::plain(v.code, to),
+            (Ty::Int | Ty::I8 | Ty::I16 | Ty::I32 | Ty::U16 | Ty::U32, Ty::U8C) => return Val::plain(format!("tv_int_to_u8c((tv_int)({}))", v.code), to),
+            (Ty::F64 | Ty::F32, Ty::U8C) => return Val::plain(format!("tv_f64_to_u8c({})", v.code), to),
+            (Ty::Int | Ty::I8 | Ty::I16 | Ty::I32 | Ty::U8 | Ty::U8C | Ty::U16 | Ty::U32, Ty::I8 | Ty::I16 | Ty::I32 | Ty::U8 | Ty::U16 | Ty::U32) => {
                 let ct = self.ctype(to);
                 return Val::plain(format!("(({ct})({}))", v.code), to);
             }
@@ -4748,7 +4763,7 @@ impl<'c, 'a> Gen<'c, 'a> {
                 let ct = self.ctype(to);
                 return Val::plain(format!("(({ct})tv_f64_to_i32({}))", v.code), to);
             }
-            (Ty::Int | Ty::I8 | Ty::I16 | Ty::I32 | Ty::U8 | Ty::U16 | Ty::U32 | Ty::U64, Ty::Decimal) => return Val::plain(format!("tv_dec_make((__int128)({}), 0)", v.code), to),
+            (Ty::Int | Ty::I8 | Ty::I16 | Ty::I32 | Ty::U8 | Ty::U8C | Ty::U16 | Ty::U32 | Ty::U64, Ty::Decimal) => return Val::plain(format!("tv_dec_make((__int128)({}), 0)", v.code), to),
             (Ty::StrLit(s), Ty::Str) => {
                 let text = self.sym(s).to_string();
                 return Val::plain(self.lit(text.as_bytes()), STR);
@@ -5214,7 +5229,7 @@ impl<'c, 'a> Gen<'c, 'a> {
             Ty::Bool => v.code,
             Ty::Js => format!("tv_js_truthy({})", v.code),
             Ty::Unknown => format!("tv_dyn_truthy({})", v.code),
-            Ty::Int | Ty::I8 | Ty::I16 | Ty::I32 | Ty::U8 | Ty::U16 | Ty::U32 | Ty::U64 => format!("(({}) != 0)", v.code),
+            Ty::Int | Ty::I8 | Ty::I16 | Ty::I32 | Ty::U8 | Ty::U8C | Ty::U16 | Ty::U32 | Ty::U64 => format!("(({}) != 0)", v.code),
             Ty::F64 | Ty::F32 => format!("tv_f64_truthy({})", v.code),
             Ty::Str => format!("(tv_str_byte_len({}) != 0)", v.code),
             Ty::StrLit(s) => if self.sym(s).is_empty() { "false".into() } else { "true".into() },
@@ -5224,7 +5239,7 @@ impl<'c, 'a> Gen<'c, 'a> {
             Ty::Union(_) => {
                 let ms = self.members(t);
                 // (each member that can be falsy, tested on its own)
-                let falsy: Vec<usize> = ms.iter().enumerate().filter(|(_, m)| matches!(self.tget(**m), Ty::Undefined | Ty::Null | Ty::Void | Ty::Bool | Ty::Int | Ty::I8 | Ty::I16 | Ty::I32 | Ty::U8 | Ty::U16 | Ty::U32 | Ty::U64 | Ty::F64 | Ty::F32 | Ty::Str | Ty::StrLit(_) | Ty::BigInt | Ty::Decimal)).map(|(i, _)| i).collect();
+                let falsy: Vec<usize> = ms.iter().enumerate().filter(|(_, m)| matches!(self.tget(**m), Ty::Undefined | Ty::Null | Ty::Void | Ty::Bool | Ty::Int | Ty::I8 | Ty::I16 | Ty::I32 | Ty::U8 | Ty::U8C | Ty::U16 | Ty::U32 | Ty::U64 | Ty::F64 | Ty::F32 | Ty::Str | Ty::StrLit(_) | Ty::BigInt | Ty::Decimal)).map(|(i, _)| i).collect();
                 if falsy.is_empty() {
                     return "true".into();
                 }
@@ -5866,7 +5881,7 @@ impl<'c, 'a> Gen<'c, 'a> {
             return Val::plain(code, ty);
         }
         let loc = self.loc(span);
-        let unsigned = matches!(self.tget(ty), Ty::U8 | Ty::U16 | Ty::U32 | Ty::U64);
+        let unsigned = matches!(self.tget(ty), Ty::U8 | Ty::U8C | Ty::U16 | Ty::U32 | Ty::U64);
         let (a, b) = (lv.code, rv.code);
         let js = ty == INT && self.js_ints(self.cur_m());
         let js_sum = js && std::mem::take(&mut self.js_mul_operand);
@@ -7004,7 +7019,7 @@ impl<'c, 'a> Gen<'c, 'a> {
                 let (callee, arg) = (*callee, args[0].expr);
                 let ExprKind::Ident(s) = self.ast(m).expr(callee).kind else { return false };
                 let at = self.ty(arg);
-                self.sym(s) == "BigInt" && matches!(self.tget(at), Ty::Int | Ty::BigInt | Ty::I32 | Ty::U32 | Ty::I16 | Ty::U16 | Ty::I8 | Ty::U8) && self.pure_without(arg, key)
+                self.sym(s) == "BigInt" && matches!(self.tget(at), Ty::Int | Ty::BigInt | Ty::I32 | Ty::U32 | Ty::I16 | Ty::U16 | Ty::I8 | Ty::U8 | Ty::U8C) && self.pure_without(arg, key)
             }
             _ => false,
         }
@@ -7534,7 +7549,7 @@ impl<'c, 'a> Gen<'c, 'a> {
                         return cur;
                     }
                     BinOp::BitAnd | BinOp::BitOr | BinOp::BitXor | BinOp::Shl | BinOp::Shr | BinOp::UShr => {
-                        let ty = if p.ty != INT && self.c.types.is_int(p.ty) { p.ty } else { INT };
+                        let ty = if p.ty != INT && p.ty != U8C && self.c.types.is_int(p.ty) { p.ty } else { INT };
                         let code = self.bitop(bop, &cur, &rhs, ty);
                         self.coerce(Val::plain(code, ty), p.ty)
                     }
@@ -7548,10 +7563,9 @@ impl<'c, 'a> Gen<'c, 'a> {
                         };
                         // (`bytes[i] += 200` in TypeScript: a number, stored wrapped as a typed
                         // array's element is)
-                        if arith_ty != INT && super::super::check::promoted_ty(arith_ty) == INT && self.js_ints(self.cur_m()) {
+                        if arith_ty != INT && super::super::check::promoted_ty(arith_ty) == INT && (self.js_ints(self.cur_m()) || arith_ty == U8C) {
                             let r = self.arith(bop, cur.clone(), rhs, INT, span);
-                            let ct = self.ctype(p.ty);
-                            Val::plain(format!("(({ct})({}))", r.code), p.ty)
+                            self.coerce(r, p.ty)
                         } else if arith_ty == INT && matches!(bop, BinOp::Add | BinOp::Sub) && rhs.ty == INT && self.cannot_overflow(bop, target, value) {
                             // (`z += 1` where z is bounded: see `range`)
                             Val::plain(format!("({} {} {})", cur.code, if bop == BinOp::Add { "+" } else { "-" }, rhs.code), INT)
@@ -7583,7 +7597,7 @@ impl<'c, 'a> Gen<'c, 'a> {
             _ => false,
         };
         match self.tget(ty) {
-            Ty::U8 if elem => format!("*(TV_U8S *)&{lv} = (TV_U8S)({code});"),
+            Ty::U8 | Ty::U8C if elem => format!("*(TV_U8S *)&{lv} = (TV_U8S)({code});"),
             Ty::I8 if elem => format!("*(TV_I8S *)&{lv} = (TV_I8S)({code});"),
             _ => format!("{lv} = {code};"),
         }

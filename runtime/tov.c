@@ -2877,6 +2877,15 @@ tv_arr tv_arr_make(const tv_type *t, tv_int n, const void *elem, const char *loc
     return tv_arr_of(b, n);
 }
 
+bool tv_arr_set_from(tv_arr *a, const tv_type *t, tv_arr src, tv_int offset) {
+    int64_t len = tv_arr_len(*a), n = tv_arr_len(src);
+    if (offset < 0 || n > len - offset) return false;
+    if (n == 0) return true;
+    tv_arr_make_unique(a, t, len);
+    memmove((unsigned char *)tv_arrbuf_data(a->p) + (size_t)offset * t->size, tv_arrbuf_data(src.p), (size_t)n * t->size);
+    return true;
+}
+
 void tv_arr_fill(tv_arr *a, const tv_type *t, const void *elem, tv_int start, bool has_start, tv_int end, bool has_end) {
     int64_t len = tv_arr_len(*a);
     int64_t s = has_start ? tv_clamp_index(start, len) : 0, e = has_end ? tv_clamp_index(end, len) : len;

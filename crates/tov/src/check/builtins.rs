@@ -13,6 +13,7 @@ pub(super) const BUILTIN_TYPES: &[&str] = &[
 pub(super) fn typed_array_elem(name: &str) -> Option<TyId> {
     Some(match name {
         "Uint8Array" => U8,
+        "Uint8ClampedArray" => U8C,
         "Int8Array" => I8,
         "Uint16Array" => U16,
         "Int16Array" => I16,
@@ -425,6 +426,13 @@ pub(super) fn method(c: &mut Checker, base: TyId, name: &str) -> Option<MethodSi
                 "fill" => {
                     let (a, b) = (opt(c, INT), opt(c, INT));
                     mk(sig(vec![(p(e), "value"), (a, "start"), (b, "end")], arr), true)
+                }
+                // (a typed array's: another's elements copied in at an offset)
+                "set" if c.types.is_numeric(e) => {
+                    let off = opt(c, INT);
+                    // (past the end: a RangeError)
+                    let throws = c.builtin_class("RangeError");
+                    mk(CallSig { throws, ..sig(vec![(p(arr), "array"), (off, "offset")], VOID) }, true)
                 }
                 _ => None,
             }
@@ -1143,7 +1151,7 @@ impl<'a> Checker<'a> {
         seen.push(t);
         let json_ret = if matches!(self.types.get(t), Ty::Class(..)) { self.to_json_ret(t) } else { None };
         match *self.types.get(t) {
-            Ty::Error | Ty::Int | Ty::F64 | Ty::F32 | Ty::I8 | Ty::I16 | Ty::I32 | Ty::U8 | Ty::U16 | Ty::U32 | Ty::U64 | Ty::Decimal | Ty::Bool | Ty::BoolLit(_) | Ty::Str | Ty::StrLit(_) | Ty::Undefined | Ty::Null => true,
+            Ty::Error | Ty::Int | Ty::F64 | Ty::F32 | Ty::I8 | Ty::I16 | Ty::I32 | Ty::U8 | Ty::U8C | Ty::U16 | Ty::U32 | Ty::U64 | Ty::Decimal | Ty::Bool | Ty::BoolLit(_) | Ty::Str | Ty::StrLit(_) | Ty::Undefined | Ty::Null => true,
             // A generic `T`: the instantiated type is written (functions come out as `null`).
             Ty::Param(_) => true,
             // (written as what it holds; `allow_class`: written, not parsed into)

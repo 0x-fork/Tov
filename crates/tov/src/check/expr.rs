@@ -931,7 +931,7 @@ impl<'a> Checker<'a> {
                 if self.ts_module() && promoted(t) == INT && self.types.is_int(t) {
                     return INT;
                 }
-                if matches!(self.types.get(t), Ty::U8 | Ty::U16 | Ty::U32 | Ty::U64) && !self.is_int_literal(x) {
+                if matches!(self.types.get(t), Ty::U8 | Ty::U8C | Ty::U16 | Ty::U32 | Ty::U64) && !self.is_int_literal(x) {
                     let msg = format!("unary `-` on unsigned `{}`", self.show(t));
                     self.report(Diagnostic::new("T0501", span, msg));
                 }
@@ -1573,9 +1573,12 @@ impl<'a> Checker<'a> {
         let vspan = self.ast().expr(value).span;
         match op {
             AssignOp::Assign => {
-                let tv = self.flow(place.sites.clone(), |c| c.expr(value, Some(place.ty)));
+                let wrap = self.is_elem_place(target);
+                // (a typed array's element takes any number, wrapped or clamped: `bytes[i] = 300`
+                // is a number, not a `u8` literal that doesn't fit)
+                let hint = if wrap && self.types.is_int(place.ty) && promoted(place.ty) == INT { INT } else { place.ty };
+                let tv = self.flow(place.sites.clone(), |c| c.expr(value, Some(hint)));
                 if !self.try_promote(&place, tv) {
-                    let wrap = self.is_elem_place(target);
                     self.flow(place.sites.clone(), |c| {
                         c.wrap_store = wrap;
                         c.expect_assignable(tv, place.ty, vspan, None);
@@ -1616,7 +1619,9 @@ impl<'a> Checker<'a> {
                 self.expr(value, None);
             }
             AssignOp::Op(bop) => {
-                let hint = if self.types.is_num_like(place.ty) { Some(place.ty) } else { None };
+                // (a typed array's element: as for `=`, the operand is a number)
+                let elem_ty = if self.is_elem_place(target) && self.types.is_int(place.ty) && promoted(place.ty) == INT { INT } else { place.ty };
+                let hint = if self.types.is_num_like(place.ty) { Some(elem_ty) } else { None };
                 let tv = self.expr(value, hint);
                 let result = if place.ty == DECIMAL || (tv == DECIMAL && !self.types.is_string(place.ty)) {
                     self.decimal_arith(bop, target, value, place.ty, tv, span)
@@ -3898,7 +3903,9 @@ impl<'a> Checker<'a> {
                 }
                 if let Some(a) = args.first() {
                     // (elements are numbers, converted as they're stored: `new Uint8Array([300])` wraps)
-                    let hint = elem.map(|e| self.types.array(promoted(e)));
+                    // (`new Uint8Array([0.5, x / 2])`: of numbers, then, not integers)
+                    let floats = matches!(&self.ast().expr(a.expr).kind, ExprKind::Array(xs) if !xs.iter().all(|&x| self.is_int_literal(x)));
+                    let hint = elem.map(|e| self.types.array(if floats && promoted(e) == INT { F64 } else { promoted(e) }));
                     let t = self.expr(a.expr, if typed.is_some() { hint } else { Some(INT) });
                     let s = self.ast().expr(a.expr).span;
                     let base = self.types.without_undefined(t);
@@ -4639,7 +4646,7 @@ impl<'a> Checker<'a> {
     pub(super) fn js_convertible(&mut self, t: TyId) -> bool {
         match *self.types.get(t) {
             Ty::Js | Ty::Error | Ty::Never | Ty::Str | Ty::StrLit(_) | Ty::Bool | Ty::Undefined | Ty::Null | Ty::Void => true,
-            Ty::Int | Ty::F64 | Ty::F32 | Ty::I8 | Ty::I16 | Ty::I32 | Ty::U8 | Ty::U16 | Ty::U32 | Ty::U64 => true,
+            Ty::Int | Ty::F64 | Ty::F32 | Ty::I8 | Ty::I16 | Ty::I32 | Ty::U8 | Ty::U8C | Ty::U16 | Ty::U32 | Ty::U64 => true,
             Ty::Array(e) => self.js_convertible(e),
             // (a JavaScript promise, settled when this one is)
             Ty::Promise(v, _) => self.js_convertible(v),
@@ -4685,7 +4692,7 @@ impl<'a> Checker<'a> {
     pub(super) fn js_receivable(&mut self, t: TyId) -> bool {
         match *self.types.get(t) {
             Ty::Js | Ty::Error | Ty::Str | Ty::StrLit(_) | Ty::Bool | Ty::Undefined | Ty::Null | Ty::Void => true,
-            Ty::Int | Ty::F64 | Ty::F32 | Ty::I8 | Ty::I16 | Ty::I32 | Ty::U8 | Ty::U16 | Ty::U32 | Ty::U64 => true,
+            Ty::Int | Ty::F64 | Ty::F32 | Ty::I8 | Ty::I16 | Ty::I32 | Ty::U8 | Ty::U8C | Ty::U16 | Ty::U32 | Ty::U64 => true,
             Ty::Array(e) => self.js_receivable(e),
             Ty::Record(fs) => {
                 let fs = self.types.fields(fs).to_vec();
@@ -5756,7 +5763,7 @@ fn int_range(t: TyId) -> Option<(i128, i128)> {
         I8 => (i8::MIN as i128, i8::MAX as i128),
         I16 => (i16::MIN as i128, i16::MAX as i128),
         I32 => (i32::MIN as i128, i32::MAX as i128),
-        U8 => (0, u8::MAX as i128),
+        U8 | U8C => (0, u8::MAX as i128),
         U16 => (0, u16::MAX as i128),
         U32 => (0, u32::MAX as i128),
         U64 => (0, u64::MAX as i128),
@@ -5766,7 +5773,7 @@ fn int_range(t: TyId) -> Option<(i128, i128)> {
 
 /// A sized integer as arithmetic sees it: `int` (all but `u64` fit).
 pub(super) fn promoted(t: TyId) -> TyId {
-    if matches!(t, I8 | I16 | I32 | U8 | U16 | U32) { INT } else { t }
+    if matches!(t, I8 | I16 | I32 | U8 | U8C | U16 | U32) { INT } else { t }
 }
 
 impl<'a> Checker<'a> {

@@ -3144,9 +3144,9 @@ impl<'a> Checker<'a> {
         let (s, d) = (*self.types.get(src), *self.types.get(dst));
         match (&s, &d) {
             (Ty::Int, Ty::F64 | Ty::F32) if top => return true,
-            (Ty::Int | Ty::F64 | Ty::F32 | Ty::I8 | Ty::I16 | Ty::I32 | Ty::U8 | Ty::U16 | Ty::U32, Ty::I8 | Ty::I16 | Ty::I32 | Ty::U8 | Ty::U16 | Ty::U32) if top && self.wrap_store => return true,
+            (Ty::Int | Ty::F64 | Ty::F32 | Ty::I8 | Ty::I16 | Ty::I32 | Ty::U8 | Ty::U8C | Ty::U16 | Ty::U32, Ty::I8 | Ty::I16 | Ty::I32 | Ty::U8 | Ty::U8C | Ty::U16 | Ty::U32) if top && self.wrap_store => return true,
             (Ty::F64 | Ty::F32, Ty::Int) if top && self.float_args => return true,
-            (Ty::Int | Ty::I8 | Ty::I16 | Ty::I32 | Ty::U8 | Ty::U16 | Ty::U32 | Ty::U64, Ty::Decimal) if top => return true,
+            (Ty::Int | Ty::I8 | Ty::I16 | Ty::I32 | Ty::U8 | Ty::U8C | Ty::U16 | Ty::U32 | Ty::U64, Ty::Decimal) if top => return true,
             (Ty::StrLit(_), Ty::Str) => return true,
             (Ty::BoolLit(_), Ty::Bool) => return true,
             (Ty::Undefined, Ty::Void) => return true,

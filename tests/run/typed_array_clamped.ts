@@ -1,0 +1,33 @@
+const c = new Uint8ClampedArray(12);
+c[0] = 300; c[1] = -5; c[2] = 1.5; c[3] = 2.5; c[4] = 0.5; c[5] = NaN; c[6] = 254.5; c[7] = 253.5;
+c[8] = 250; c[8] += 10; c[9] = 255; c[9]++; c[10] = 0; c[10]--; c[11] = 100; c[11] *= 3;
+console.log(c.join(","));
+const u = new Uint8Array(4);
+u[0] = 300; u[1] = -5; u[2] = 2.7; u[3] = 255; u[3]++;
+console.log(u.join(","));
+const d = new Uint8ClampedArray([1, 2, 300, -1]);
+console.log(d.join(","), d.length);
+const e = new Uint8ClampedArray(6);
+e.set(d, 1);
+e.set(new Uint8ClampedArray([9]));
+console.log(e.join(","));
+let sum = 0;
+for (const x of e) sum += x;
+console.log(sum, e[2] * 1000, e.indexOf(255));
+const f = new Float64Array(3);
+f.set(new Float64Array([1.5, 2.5]), 1);
+console.log(f.join(","));
+const i8 = new Int8Array(2); i8[0] = 200; i8[1] = -129;
+const big = 1e10, neg = -1e10;
+const g = new Uint8ClampedArray(2); g[0] = big; g[1] = neg;
+console.log(i8.join(","), g.join(","));
+try { e.set(d, 4); console.log("no throw"); } catch (err) { console.log("threw"); }
+try { e.set(d, -1); } catch (err) { if (err instanceof RangeError) console.log("range", err.message.length > 0); }
+const w = new Uint8Array(3); w[0] = 10; w[0] += 300; w[1] = 7; w[1] -= 10; w[2] = 3; w[2] <<= 7;
+const v = new Uint8ClampedArray(3); v[0] = 10; v[0] += 300; v[1] = 7; v[1] -= 10; v[2] = 3; v[2] <<= 7;
+console.log(w.join(","), v.join(","));
+const fl = new Uint8ClampedArray([0.5, 1.5, 2.49, 2.51, -0.5, 255.5]);
+console.log(fl.join(","));
+let acc = 0;
+for (let i = 0; i < fl.length; i++) acc += fl[i] / 2;
+console.log(acc);

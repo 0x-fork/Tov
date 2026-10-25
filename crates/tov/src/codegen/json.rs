@@ -52,7 +52,7 @@ impl<'c, 'a> Gen<'c, 'a> {
     /// Code writing `*v` (of type `t`).
     fn json_write_body(&mut self, t: TyId) -> String {
         match self.tget(t) {
-            Ty::Int | Ty::I8 | Ty::I16 | Ty::I32 | Ty::U8 | Ty::U16 | Ty::U32 => "    tv_sb_push_int(sb, (tv_int)*v);\n".into(),
+            Ty::Int | Ty::I8 | Ty::I16 | Ty::I32 | Ty::U8 | Ty::U8C | Ty::U16 | Ty::U32 => "    tv_sb_push_int(sb, (tv_int)*v);\n".into(),
             Ty::U64 => "    tv_json_number(sb, (double)*v);\n".into(),
             Ty::Decimal => "    tv_sb_push_dec(sb, *v);\n".into(),
             Ty::F64 | Ty::F32 => "    tv_json_number(sb, (double)*v);\n".into(),
@@ -236,7 +236,7 @@ impl<'c, 'a> Gen<'c, 'a> {
             Ty::I8 => int_range("-128.0", "127.0"),
             Ty::I16 => int_range("-32768.0", "32767.0"),
             Ty::I32 => int_range("-2147483648.0", "2147483647.0"),
-            Ty::U8 => int_range("0.0", "255.0"),
+            Ty::U8 | Ty::U8C => int_range("0.0", "255.0"),
             Ty::U16 => int_range("0.0", "65535.0"),
             Ty::U32 => int_range("0.0", "4294967295.0"),
             Ty::U64 => int_range("0.0", "18446744073709551615.0"),

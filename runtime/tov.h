@@ -64,6 +64,9 @@ static inline int32_t tv_f64_to_i32(double d) {
     if (__builtin_expect(d > -9.2e18 && d < 9.2e18, 1)) return (int32_t)(uint32_t)(uint64_t)(int64_t)d;
     return tv_f64_to_i32_slow(d);
 }
+/* a number stored into a Uint8ClampedArray: clamped to 0..255, rounded half to even, NaN 0 */
+static inline uint8_t tv_f64_to_u8c(double d) { return d > 0 ? (d < 255 ? (uint8_t)__builtin_rint(d) : 255) : 0; }
+static inline uint8_t tv_int_to_u8c(tv_int v) { return v < 0 ? 0 : v > 255 ? 255 : (uint8_t)v; }
 
 /* ------------------------------------------------------------------ traps */
 
@@ -597,6 +600,7 @@ tv_arr tv_arr_concat(tv_arr a, tv_arr b, const tv_type *t);
 void tv_arr_extend(tv_arr *a, const tv_type *t, tv_arr b);         /* appends b's elements (retained) */
 tv_arr tv_arr_make(const tv_type *t, tv_int n, const void *elem, const char *loc);   /* n copies of elem (retained); traps if n < 0 */
 void tv_arr_fill(tv_arr *a, const tv_type *t, const void *elem, tv_int start, bool has_start, tv_int end, bool has_end);   /* JS fill: copies of elem */
+bool tv_arr_set_from(tv_arr *a, const tv_type *t, tv_arr src, tv_int offset); /* a typed array's set: src's plain elements copied in at offset (false: past the end) */
 void tv_arr_reverse(tv_arr *a, const tv_type *t);
 /* Stable sort. cmp returns <0, 0, >0 like a JS comparator (a double). NULL cmp = JS default
  * (compare String(x) of each element). */
