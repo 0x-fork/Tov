@@ -308,6 +308,14 @@ impl<'c, 'a> Gen<'c, 'a> {
     /// Evaluates arguments against (instantiated) parameter types.
     fn args(&mut self, args: &[Arg], params: &[FnParam], callee: Option<(u32, u32)>) -> Vec<String> {
         let m = self.cur_m();
+        // (a function value's rest parameter, `...xs: T[]`: the arguments from there on, packed)
+        if let Some(e) = params.last().and_then(|p| self.c.types.rest_elem(p.ty)) {
+            let k = params.len() - 1;
+            let mut argv = self.args(&args[..args.len().min(k)], &params[..k], callee);
+            let arr = self.pack_rest(&args[k.min(args.len())..], e);
+            argv.push(arr);
+            return argv;
+        }
         let spreads_tuple = |s: &mut Self, a: &Arg| match s.ast(m).expr(a.expr).kind {
             ExprKind::Spread(inner) => {
                 let t = s.ty(inner);
@@ -2376,6 +2384,23 @@ impl<'c, 'a> Gen<'c, 'a> {
                 } else {
                     return cur;
                 }
+            }
+            "split" if argv.len() > 1 && !matches!(self.tget(argv[1].ty), Ty::Undefined) => {
+                let sep = str_arg(self, 0);
+                let lim = argv[1].clone();
+                let lim = if self.c.types.has_undefined(lim.ty) {
+                    // (`undefined`: no limit)
+                    let ot = self.c.types.optional(F64);
+                    let lv = self.coerce(lim, ot);
+                    match (self.tag_of(lv.ty, UNDEFINED), self.tag_of(lv.ty, F64)) {
+                        (Some(k), Some(fk)) => format!("(({0}).tag == {k} ? 4294967295.0 : ({0}).u.m{fk})", lv.code),
+                        _ => lv.code.clone(),
+                    }
+                } else {
+                    let v = self.coerce(lim, F64);
+                    v.code
+                };
+                format!("tv_str_split_limit({}, {sep}, {lim})", s.code)
             }
             "split" => format!("tv_str_split({}, {})", s.code, str_arg(self, 0)),
             "trim" => format!("tv_str_trim({})", s.code),

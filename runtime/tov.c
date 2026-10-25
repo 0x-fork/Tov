@@ -4370,6 +4370,15 @@ static tv_arr tv_str_split_byte(tv_str s, unsigned char c) {
     return tv_arr_of(b, (int64_t)k);
 }
 
+/* s.split(sep, limit): at most `limit` pieces (ToUint32 of it, as JavaScript reads it) */
+tv_arr tv_str_split_limit(tv_str s, tv_str sep, double limit) {
+    uint32_t n = (uint32_t)(int64_t)(limit == limit ? limit : 0);
+    if (n == 0) return tv_arr_fresh();
+    tv_arr a = tv_str_split(s, sep);
+    if ((uint64_t)tv_arr_len(a) > n) tv_arr_set_length(&a, &tv_type_str, (tv_int)n, "split");
+    return a;
+}
+
 tv_arr tv_str_split(tv_str s, tv_str sep) {
     if (sep.p->len == 0) {
         if (tv_str_is_ascii(s)) return tv_str_chars(s);

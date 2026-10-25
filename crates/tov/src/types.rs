@@ -457,6 +457,17 @@ impl Types {
         self.intern(Ty::BoolLit(b))
     }
 
+    /// A function type's rest parameter `...xs: T[]` (`Spread(T[])`): `T`.
+    pub fn rest_elem(&self, t: TyId) -> Option<TyId> {
+        match *self.get(t) {
+            Ty::Spread(a) => match *self.get(a) {
+                Ty::Array(e) => Some(e),
+                _ => None,
+            },
+            _ => None,
+        }
+    }
+
     /// `bool`, or one of its literals.
     pub fn is_bool(&self, ty: TyId) -> bool {
         ty == BOOL || matches!(self.get(ty), Ty::BoolLit(_))

@@ -2877,7 +2877,8 @@ impl<'a> Checker<'a> {
                         };
                         let ty = if p.optional { self.types.optional(ty) } else { ty };
                         // (`...args: A`: the rest of the parameters, as the tuple `A`)
-                        let ty = if p.rest && !matches!(self.types.get(ty), Ty::Array(_)) { self.types.intern(Ty::Spread(ty)) } else { ty };
+                        // (`...args: T[]`: the arguments from there on, each a `T`)
+                        let ty = if p.rest && ty != ERROR { self.types.intern(Ty::Spread(ty)) } else { ty };
                         FnParam { ty, inout: p.inout, optional: p.optional }
                     })
                     .collect();
@@ -3413,6 +3414,48 @@ impl<'a> Checker<'a> {
                     return false;
                 }
                 let (pa, pb) = (self.types.params(pa).to_vec(), self.types.params(pb).to_vec());
+                // (a rest parameter, `...xs: T[]`, on either side: the arguments it takes, each a `T`)
+                let (sa, sb) = (pa.last().and_then(|p| self.types.rest_elem(p.ty)), pb.last().and_then(|p| self.types.rest_elem(p.ty)));
+                if sa.is_some() || sb.is_some() {
+                    let fa = &pa[..pa.len() - sa.is_some() as usize];
+                    let fb = &pb[..pb.len() - sb.is_some() as usize];
+                    for (i, y) in fb.iter().enumerate() {
+                        let x = match (fa.get(i), sa) {
+                            (Some(x), _) => {
+                                if x.inout != y.inout {
+                                    return false;
+                                }
+                                x.ty
+                            }
+                            (None, Some(e)) if !y.inout => e,
+                            (None, Some(_)) => return false,
+                            // (a callback may ignore trailing parameters)
+                            (None, None) => continue,
+                        };
+                        if !self.assignable_in(y.ty, x, true, assuming) {
+                            return false;
+                        }
+                    }
+                    for x in fa.iter().skip(fb.len()) {
+                        match sb {
+                            Some(e) if !x.inout => {
+                                let e = if x.optional { self.types.optional(e) } else { e };
+                                let bare = self.types.without_undefined(e);
+                                if !self.assignable_in(e, x.ty, true, assuming) && !self.assignable_in(bare, x.ty, true, assuming) {
+                                    return false;
+                                }
+                            }
+                            None if x.optional => {}
+                            _ => return false,
+                        }
+                    }
+                    if let (Some(a), Some(b)) = (sa, sb)
+                        && !self.assignable_in(b, a, true, assuming)
+                    {
+                        return false;
+                    }
+                    return rb == VOID || self.assignable_in(ra, rb, true, assuming);
+                }
                 if pa.len() > pb.len() {
                     // A callback may ignore trailing parameters, but can't demand more.
                     if pa[pb.len()..].iter().any(|p| !p.optional) {

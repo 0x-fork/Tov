@@ -334,16 +334,6 @@ impl<'c, 'a> Gen<'c, 'a> {
         self.tmp(STR, &format!("tv_any_str({})", d.code), true)
     }
 
-    /// A number as JavaScript's ToNumber makes it of an `any`.
-    pub(crate) fn any_number(&mut self, v: Val) -> Val {
-        Val::plain(format!("tv_any_num({})", v.code), F64)
-    }
-
-    /// JavaScript's truthiness of an `any`.
-    pub(crate) fn any_truthy(&mut self, v: &Val) -> String {
-        format!("tv_dyn_truthy({})", v.code)
-    }
-
     /// The `any` `v` as a `to`: checked (it traps if it holds something else). Numbers convert
     /// between widths; an object or array of other types (JSON's, an `any[]`) converts field by
     /// field, element by element.

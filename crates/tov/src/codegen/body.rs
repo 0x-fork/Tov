@@ -5358,7 +5358,7 @@ impl<'c, 'a> Gen<'c, 'a> {
                 // Same C calling convention when parameter and return C types agree (e.g. a result
                 // ignored as void); otherwise an adapter converts the arguments and the result.
                 let (fps, tps) = (self.c.types.params(fps).to_vec(), self.c.types.params(tps).to_vec());
-                let same_params = fps.len() == tps.len() && fps.iter().zip(&tps).all(|(a, b)| a.inout == b.inout && self.ctype(a.ty) == self.ctype(b.ty));
+                let same_params = fps.len() == tps.len() && fps.iter().zip(&tps).all(|(a, b)| a.inout == b.inout && self.ctype(a.ty) == self.ctype(b.ty) && self.c.types.rest_elem(a.ty).is_some() == self.c.types.rest_elem(b.ty).is_some());
                 let same_ret = tret == VOID || self.ctype(fret) == self.ctype(tret);
                 if same_params && same_ret {
                     return Val { ty: to, ..v };
@@ -5419,6 +5419,73 @@ impl<'c, 'a> Gen<'c, 'a> {
         let m = self.cur_m();
         self.begin_scratch(m);
         let mut argv = vec!["inner.env".to_string()];
+        let (sf, st) = (fps.last().and_then(|p| self.c.types.rest_elem(p.ty)), tps.last().and_then(|p| self.c.types.rest_elem(p.ty)));
+        if sf.is_some() || st.is_some() {
+            // (a rest parameter on either side: the arguments packed into its array, or taken
+            // out of the caller's)
+            let nf = fps.len() - sf.is_some() as usize;
+            let nt = tps.len() - st.is_some() as usize;
+            let rest_arr = st.map(|_| format!("p{nt}"));
+            let arg = |g: &mut Self, j: usize, to: TyId| -> Val {
+                if j < nt {
+                    g.coerce(Val::plain(format!("p{j}"), tps[j].ty), to)
+                } else if let (Some(arr), Some(e)) = (&rest_arr, st) {
+                    // (an argument the caller may not have: `undefined` where the parameter
+                    // takes it, else its type's default)
+                    let k = j - nt;
+                    let ect = g.ctype(e);
+                    let tct = g.ctype(to);
+                    let w = g.fresh("rw");
+                    g.line(format!("{tct} {w};"));
+                    g.open(&format!("if ({k} < tv_arr_len({arr})) {{"));
+                    g.push_temps();
+                    let el = g.coerce(Val::plain(format!("(({ect} *)tv_arr_data({arr}))[{k}]"), e), to);
+                    let el = g.own(el);
+                    let c = g.consume(el);
+                    g.line(format!("{w} = {c};"));
+                    g.pop_temps();
+                    let u = if g.c.types.has_undefined(to) { g.coerce(Val::plain("0", UNDEFINED), to).code } else { g.default_value(to) };
+                    g.close(&format!("}} else {w} = {u};"));
+                    let owned = g.is_rc(to);
+                    if owned {
+                        g.b().temps.last_mut().unwrap().push((w.clone(), to));
+                    }
+                    Val { code: w, ty: to, owned }
+                } else {
+                    g.coerce(Val::plain("0", UNDEFINED), to)
+                }
+            };
+            for (j, fp) in fps.iter().enumerate().take(nf) {
+                let c = arg(self, j, fp.ty);
+                argv.push(c.code);
+            }
+            if let Some(fe) = sf {
+                // (the source's rest: the caller's arguments from there, as an array)
+                let at = self.c.types.array(fe);
+                let fed = self.desc(fe);
+                let fect = self.ctype(fe);
+                let r = self.tmp(at, "tv_arr_fresh()", true);
+                for j in nf..nt {
+                    let v = arg(self, j, fe);
+                    let v = self.own(v);
+                    let c = self.consume(v);
+                    self.line(format!("TVG_PUSH({fect}, &{}, {fed}, {c});", r.code));
+                }
+                if let (Some(arr), Some(te)) = (&rest_arr, st) {
+                    let tect = self.ctype(te);
+                    let i = self.fresh("i");
+                    self.open(&format!("for (tv_int {i} = {}; {i} < tv_arr_len({arr}); {i}++) {{", nf.saturating_sub(nt)));
+                    self.push_temps();
+                    let el = self.coerce(Val::plain(format!("(({tect} *)tv_arr_data({arr}))[{i}]"), te), fe);
+                    let el = self.own(el);
+                    let c = self.consume(el);
+                    self.line(format!("TVG_PUSH({fect}, &{}, {fed}, {c});", r.code));
+                    self.pop_temps();
+                    self.close("}");
+                }
+                argv.push(r.code);
+            }
+        } else {
         for (i, fp) in fps.iter().enumerate() {
             // (an optional parameter the caller can't pass: `undefined`, which takes its default)
             let Some(&tp) = tps.get(i) else {
@@ -5432,6 +5499,7 @@ impl<'c, 'a> Gen<'c, 'a> {
                 let a = self.coerce(Val::plain(format!("p{i}"), tp.ty), fp.ty);
                 argv.push(a.code);
             }
+        }
         }
         self.line("tv_fn inner = ((tvg_fnbox *)env_)->f;");
         let cast = {

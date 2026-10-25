@@ -541,6 +541,8 @@ impl<'c, 'a> Gen<'c, 'a> {
             Ty::Rec(..) if let Some(&b) = self.rec_flat.get(&t) => *self.c.types.get(b),
             // (`any` is held as `unknown` is: a `tv_dyn`)
             Ty::Any => Ty::Unknown,
+            // (a rest parameter, `...xs: T[]`: its array)
+            Ty::Spread(a) if matches!(self.c.types.get(a), Ty::Array(_)) => *self.c.types.get(a),
             t => t,
         }
     }

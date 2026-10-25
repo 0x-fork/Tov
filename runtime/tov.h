@@ -444,7 +444,8 @@ tv_int tv_str_last_index_of(tv_str s, tv_str needle, tv_int from, bool has_from)
 bool tv_str_includes_at(tv_str s, tv_str needle, tv_int from);
 bool tv_str_starts_with_at(tv_str s, tv_str prefix, tv_int pos);
 bool tv_str_ends_with_at(tv_str s, tv_str suffix, tv_int end);
-struct tv_arr tv_str_split(tv_str s, tv_str sep);           /* "" separator splits into UTF-16 units */
+struct tv_arr tv_str_split(tv_str s, tv_str sep);
+struct tv_arr tv_str_split_limit(tv_str s, tv_str sep, double limit); /* s.split(sep, limit) */           /* "" separator splits into UTF-16 units */
 tv_str tv_str_trim(tv_str s);
 tv_str tv_str_trim_start(tv_str s);
 tv_str tv_str_trim_end(tv_str s);

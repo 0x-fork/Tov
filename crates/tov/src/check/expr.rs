@@ -2213,12 +2213,26 @@ impl<'a> Checker<'a> {
                     return None;
                 }
                 let t = self.expr(*obj, None);
+                let match_items = if matches!(self.types.get(t), Ty::Class(..)) && t == self.builtin_class("RegExpExecArray") {
+                    self.interner.lookup("items").and_then(|items| self.field_of(t, items).and_then(|it| match *self.types.get(it) {
+                        Ty::Array(el) => Some((items, el)),
+                        _ => None,
+                    }))
+                } else {
+                    None
+                };
                 let elem = match *self.types.get(t) {
                     Ty::Array(e) => {
                         self.index_type(*index);
                         e
                     }
                     Ty::Error => return None,
+                    // `m[2] = s` of a match: its element (`m.items[2]`, rewritten so)
+                    Ty::Class(..) if let Some((items, el)) = match_items => {
+                        self.index_type(*index);
+                        self.rewrites.elems.push((self.cur, e, items, false));
+                        el
+                    }
                     // `edge[1] += w`: the tuple's element, a field (`edge.1`, rewritten so)
                     Ty::Record(_) if self.tuple_of(t).is_some() => {
                         let elems = self.tuple_of(t).unwrap();
@@ -3644,7 +3658,7 @@ impl<'a> Checker<'a> {
         let fn_params: Vec<FnParam> = params
             .iter()
             .zip(&f.params)
-            .map(|(fp, p)| if p.rest && !matches!(self.types.get(fp.ty), Ty::Array(_) | Ty::Error) { FnParam { ty: self.types.intern(Ty::Spread(fp.ty)), ..*fp } } else { *fp })
+            .map(|(fp, p)| if p.rest && !matches!(self.types.get(fp.ty), Ty::Error) { FnParam { ty: self.types.intern(Ty::Spread(fp.ty)), ..*fp } } else { *fp })
             .collect();
         let declared_ret = f.ret.map(|t| self.resolve_type(t, &tscope));
         let declared_ret = match declared_ret {
@@ -4907,9 +4921,14 @@ impl<'a> Checker<'a> {
     fn call_value(&mut self, t: TyId, desc: &str, args: &[Arg], exp: Option<TyId>, span: Span) -> TyId {
         match *self.types.get(t) {
             Ty::Func(params, ret, throws) => {
-                let params = self.types.params(params).to_vec();
+                let mut params = self.types.params(params).to_vec();
+                // (`...xs: T[]` last: the arguments from there on)
+                let rest = params.last().and_then(|p| self.types.rest_elem(p.ty));
+                if rest.is_some() {
+                    params.pop();
+                }
                 let names = (0..params.len()).map(|i| format!("arg{i}")).collect();
-                let cs = CallSig { tparams: Vec::new(), params, names, rest: None, ret, throws };
+                let cs = CallSig { tparams: Vec::new(), params, names, rest, ret, throws };
                 self.call_sig(&cs, desc, &[], args, exp, span)
             }
             Ty::Error => {
@@ -4948,7 +4967,15 @@ impl<'a> Checker<'a> {
     /// error on as a direct call does (a `throws` still being inferred reads as `Error`).
     fn fn_value_type(&mut self, sig: Sig) -> TyId {
         let throws = if sig.throws == UNKNOWN { self.error_class() } else { sig.throws };
-        self.types.func_throws(sig.params, sig.ret, throws)
+        let mut params = sig.params;
+        // (a rest parameter: the arguments from there on, see `Types::rest_elem`)
+        if sig.rest
+            && let Some(last) = params.last_mut()
+            && matches!(self.types.get(last.ty), Ty::Array(_))
+        {
+            last.ty = self.types.intern(Ty::Spread(last.ty));
+        }
+        self.types.func_throws(params, sig.ret, throws)
     }
 
     /// A JavaScript read (`o.x`, `o[k]`), whose getter or Proxy can throw: like a JavaScript call
@@ -5778,6 +5805,33 @@ impl<'a> Checker<'a> {
                 v.extend(self.narrowings(*r, true));
                 self.pop_scope();
                 v
+            }
+            // `if ((cap = a.exec(s)) || (cap = b.exec(s)))`: what both sides say of one place,
+            // either type (`!(a && b)` as well)
+            ExprKind::Binary(op @ (BinOp::Or | BinOp::And), l, r) if positive == (*op == BinOp::Or) => {
+                let (l, r) = (*l, *r);
+                let first = self.narrowings(l, positive);
+                self.push_scope();
+                let other = self.narrowings(l, !positive);
+                self.apply(&other);
+                let second = self.narrowings(r, positive);
+                self.pop_scope();
+                let mut out = Vec::new();
+                for a in &first {
+                    if let Narrowing::Local(la, ta) = a
+                        && let Some(Narrowing::Local(_, tb)) = second.iter().find(|b| matches!(b, Narrowing::Local(lb, _) if lb == la))
+                    {
+                        let t = self.types.union(&[*ta, *tb]);
+                        // (a `string` as literals, `c === "(" || c === ")"`: kept a string, as
+                        // it's held)
+                        let declared = self.local(*la).ty;
+                        if self.flat_members(t).iter().any(|&m| matches!(self.types.get(m), Ty::StrLit(_))) && self.flat_members(declared).contains(&STR) {
+                            continue;
+                        }
+                        out.push(Narrowing::Local(*la, t));
+                    }
+                }
+                out
             }
             ExprKind::Binary(BinOp::Or, l, r) if !positive => {
                 let mut v = self.narrowings(*l, false);

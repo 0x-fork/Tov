@@ -481,7 +481,10 @@ pub(super) fn method(c: &mut Checker, base: TyId, name: &str) -> Option<MethodSi
                     mk(sig(vec![(p(INT), "index")], r), false)
                 }
                 "concat" => mk(CallSig { tparams: Vec::new(), params: Vec::new(), names: Vec::new(), rest: Some(STR), ret: STR, throws: NEVER }, false),
-                "split" => mk(sig(vec![(p(STR), "separator")], str_arr), false),
+                "split" => {
+                    let limit = opt(c, F64);
+                    mk(sig(vec![(p(STR), "separator"), (limit, "limit")], str_arr), false)
+                }
                 "trim" | "trimStart" | "trimEnd" | "toUpperCase" | "toLowerCase" | "toString" => mk(sig(vec![], STR), false),
                 "replace" | "replaceAll" => mk(sig(vec![(p(STR), "search"), (p(STR), "replacement")], STR), false),
                 "repeat" => mk(sig(vec![(p(INT), "count")], STR), false),
