@@ -48,7 +48,22 @@ typedef struct tv_re {
     int simple_one;      /* the one byte `set` holds, or -1 */
     tv_arr names;        /* reNames' answer, made once (p NULL until then) */
     bool first[128];
+    struct tv_re_lin *lin; /* a sequence matched without the engine, or NULL (see tv_re_lin_parse) */
 } tv_re;
+
+/* A sequence of characters, classes and greedy quantifiers, groups around parts of it (none
+ * quantified), `^` first and `$` last at most, in which nothing a quantifier may take could
+ * also start what follows it: then the longest run of each item is the only one a match can use,
+ * and the match is found with no backtracking, as the engine would find it. */
+enum { TV_LIN_ITEMS = 32, TV_LIN_GROUPS = 9 };
+typedef struct tv_re_lin {
+    int n, ngroups;
+    bool start, end; /* `^`, `$` */
+    bool any_start;  /* the first item may be empty: a match may start anywhere */
+    int one;         /* the one character the first item takes, or -1 */
+    struct { bool set[128]; int min, max; } item[TV_LIN_ITEMS]; /* max -1: no limit */
+    struct { int first, last; } group[TV_LIN_GROUPS];          /* items [first, last) */
+} tv_re_lin;
 
 /* The set of one escape (`\s`, `\d`, `\w` and their negations), or false when `c` isn't one. */
 static bool tv_re_class_escape(char c, bool set[128]) {
@@ -162,6 +177,155 @@ static bool tv_re_simple_parse(tv_re *r, const char *src, size_t n) {
     for (int c = 0; c < 128; c++) if (set[c]) { count++; one = c; }
     r->simple_one = count == 1 ? one : -1;
     return true;
+}
+
+/* src as a tv_re_lin, or false when it isn't one. */
+static bool tv_re_lin_parse(const tv_re *r, const char *src, size_t n, tv_re_lin *L) {
+    if (r->flags & (LRE_FLAG_STICKY | LRE_FLAG_MULTILINE)) return false;
+    memset(L, 0, sizeof *L);
+    int open[TV_LIN_GROUPS + 1], depth = 0; /* group index of each open group, -1: (?: ) */
+    size_t i = 0;
+    if (i < n && src[i] == '^') { L->start = true; i++; }
+    while (i < n) {
+        char c = src[i];
+        if ((unsigned char)c >= 128) return false;
+        if (c == '$') {
+            if (i + 1 != n || depth) return false;
+            L->end = true;
+            i++;
+            break;
+        }
+        if (c == '(') {
+            if (depth == TV_LIN_GROUPS) return false;
+            if (i + 1 < n && src[i + 1] == '?') {
+                if (i + 2 >= n || src[i + 2] != ':') return false;
+                open[depth++] = -1;
+                i += 3;
+            } else {
+                if (L->ngroups == TV_LIN_GROUPS) return false;
+                L->group[L->ngroups].first = L->n;
+                open[depth++] = L->ngroups++;
+                i++;
+            }
+            continue;
+        }
+        if (c == ')') {
+            if (!depth) return false;
+            int g = open[--depth];
+            if (g >= 0) L->group[g].last = L->n;
+            i++;
+            if (i < n && strchr("*+?{", src[i])) return false; /* (a quantified group) */
+            continue;
+        }
+        if (L->n == TV_LIN_ITEMS) return false;
+        bool *set = L->item[L->n].set;
+        if (c == '\\') {
+            if (i + 1 >= n) return false;
+            if (!tv_re_class_escape(src[i + 1], set)) {
+                int e = tv_re_escaped_char(src[i + 1]);
+                if (e < 0) return false;
+                set[e] = true;
+            }
+            i += 2;
+        } else if (c == '[') {
+            if (!tv_re_class_at(r, src, n, &i, set)) return false;
+        } else if (c == '.') {
+            for (int k = 0; k < 128; k++) set[k] = (r->flags & LRE_FLAG_DOTALL) || (k != '\n' && k != '\r');
+            i++;
+        } else if (strchr("|^*+?{", c)) {
+            return false;
+        } else {
+            set[(unsigned char)c] = true;
+            i++;
+        }
+        if (r->flags & LRE_FLAG_IGNORECASE)
+            for (int k = 'a'; k <= 'z'; k++) if (set[k] || set[k - 32]) set[k] = set[k - 32] = true;
+        int min = 1, max = 1;
+        if (i < n && (src[i] == '*' || src[i] == '+' || src[i] == '?')) {
+            min = src[i] == '+' ? 1 : 0;
+            max = src[i] == '?' ? 1 : -1;
+            i++;
+        } else if (i < n && src[i] == '{') {
+            size_t j = i + 1;
+            int lo = 0, hi;
+            if (j >= n || src[j] < '0' || src[j] > '9') return false;
+            while (j < n && src[j] >= '0' && src[j] <= '9') { lo = lo * 10 + (src[j++] - '0'); if (lo > 1000) return false; }
+            hi = lo;
+            if (j < n && src[j] == ',') {
+                j++;
+                if (j < n && src[j] == '}') hi = -1;
+                else {
+                    hi = 0;
+                    if (j >= n || src[j] < '0' || src[j] > '9') return false;
+                    while (j < n && src[j] >= '0' && src[j] <= '9') { hi = hi * 10 + (src[j++] - '0'); if (hi > 1000) return false; }
+                    if (hi < lo) return false;
+                }
+            }
+            if (j >= n || src[j] != '}') return false;
+            i = j + 1;
+            min = lo, max = hi;
+        }
+        if (i < n && src[i] == '?') return false; /* (lazy) */
+        L->item[L->n].min = min;
+        L->item[L->n].max = max;
+        L->n++;
+    }
+    if (depth || i != n) return false;
+    L->any_start = L->start || L->n == 0 || L->item[0].min == 0;
+    L->one = -1;
+    if (!L->any_start) {
+        int count = 0;
+        for (int ch = 0; ch < 128; ch++) if (L->item[0].set[ch]) { L->one = ch; count++; }
+        if (count != 1) L->one = -1;
+    }
+    /* (each quantifier's characters apart from all that may come next) */
+    for (int k = 0; k < L->n; k++) {
+        if (L->item[k].min == L->item[k].max) continue;
+        for (int j = k + 1; j < L->n; j++) {
+            for (int ch = 0; ch < 128; ch++) if (L->item[k].set[ch] && L->item[j].set[ch]) return false;
+            if (L->item[j].min > 0) break;
+        }
+    }
+    return true;
+}
+
+/* The first match of L at or after from in buf (ASCII), its groups into cap. */
+static bool tv_re_lin_find(const tv_re_lin *L, uint8_t **cap, const uint8_t *buf, tv_int n, tv_int from) {
+    const uint8_t *at[TV_LIN_ITEMS + 1];
+    /* (where it can start: where its first item can, unless it may be empty; at 0 alone after `^`) */
+    if (L->start && from > 0) return false;
+    for (tv_int i = from; i <= n; i++) {
+        if (L->start && i > 0) return false;
+        if (!L->any_start) {
+            if (L->one >= 0) {
+                const uint8_t *q = i < n ? memchr(buf + i, L->one, (size_t)(n - i)) : NULL;
+                if (!q) return false;
+                i = (tv_int)(q - buf);
+            } else {
+                while (i < n && !L->item[0].set[buf[i]]) i++;
+                if (i >= n) return false;
+            }
+        }
+        tv_int p = i;
+        int k = 0;
+        for (; k < L->n; k++) {
+            at[k] = buf + p;
+            const bool *set = L->item[k].set;
+            int max = L->item[k].max, got = 0;
+            while ((max < 0 || got < max) && p < n && set[buf[p]]) p++, got++;
+            if (got < L->item[k].min) break;
+        }
+        if (k < L->n || (L->end && p != n)) continue;
+        at[L->n] = buf + p;
+        cap[0] = (uint8_t *)buf + i;
+        cap[1] = (uint8_t *)buf + p;
+        for (int g = 0; g < L->ngroups; g++) {
+            cap[2 + 2 * g] = (uint8_t *)at[L->group[g].first];
+            cap[3 + 2 * g] = (uint8_t *)at[L->group[g].last];
+        }
+        return true;
+    }
+    return false;
 }
 
 /* Past the rest of a branch: to the `|` or `)` that ends it (not taken), or the end. */
@@ -288,6 +452,7 @@ static bool tv_re_find(const tv_re *r, uint8_t **cap, const uint8_t *buf, tv_int
         }
         return false;
     }
+    if (r->lin && ascii) return tv_re_lin_find(r->lin, cap, buf, n, from);
     if (r->bc1 && ascii) {
         /* only where a match can start, each tried alone */
         bool ml = r->flags & LRE_FLAG_MULTILINE;
@@ -438,6 +603,14 @@ tv_int tv_native_reCompile(tv_str source, tv_str flags) {
     r->names = (tv_arr){NULL};
     r->anchored = false;
     r->lead = -1;
+    r->lin = NULL;
+    if (!r->simple) {
+        tv_re_lin L;
+        if (tv_re_lin_parse(r, source.p->data, (size_t)tv_str_byte_len(source), &L) && L.ngroups + 1 == r->ncap) {
+            r->lin = tv_alloc(sizeof L);
+            *r->lin = L;
+        }
+    }
     if (!r->simple && tv_re_first_parse(r, source.p->data, (size_t)tv_str_byte_len(source))) {
         int len1;
         char err1[64];
