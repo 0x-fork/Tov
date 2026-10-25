@@ -251,6 +251,14 @@ static inline bool tv_str_eq(tv_str a, tv_str b) {
     return a.p == b.p || (a.p->len == b.p->len && memcmp(a.p->data, b.p->data, (size_t)b.p->len) == 0);
 }
 int tv_str_cmp(tv_str a, tv_str b);             /* byte order == code point order */
+/* tv_str_cmp(s, the one-character string c), c ASCII: s's first byte decides (a lead byte of a
+ * longer character is above every ASCII one), then whether there's more of it. */
+static inline int tv_str_cmp1(tv_str s, unsigned char c) {
+    if (s.p->len == 0) return -1;
+    unsigned char b = (unsigned char)s.p->data[0];
+    if (b != c) return b < c ? -1 : 1;
+    return s.p->len > 1;
+}
 uint64_t tv_str_hash(tv_str s);
 static inline tv_int tv_str_byte_len(tv_str s) { return s.p->len; }
 

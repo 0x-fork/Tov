@@ -5552,7 +5552,29 @@ impl<'c, 'a> Gen<'c, 'a> {
                 let (lv, rv) = (self.primitive_of(lv), self.primitive_of(rv));
                 let o = op.as_str();
                 if self.c.types.is_string(lv.ty) {
+                    // (against a one-character ASCII literal, `c >= "0"`: its first byte and length)
+                    let m = self.cur_m();
+                    let one = |g: &Self, e: ExprId| -> Option<u8> {
+                        let mut e = e;
+                        while let ExprKind::Paren(x) = g.ast(m).expr(e).kind {
+                            e = x;
+                        }
+                        match g.ast(m).expr(e).kind {
+                            ExprKind::Str(s) => {
+                                let t = g.sym(s).as_bytes();
+                                (t.len() == 1 && t[0] < 0x80).then(|| t[0])
+                            }
+                            _ => None,
+                        }
+                    };
+                    let (lc, rc) = (one(self, l), one(self, r));
                     let (a, b) = (self.coerce(lv, STR), self.coerce(rv, STR));
+                    if let Some(c) = rc {
+                        return Val::plain(format!("(tv_str_cmp1({}, {c}) {o} 0)", a.code), BOOL);
+                    }
+                    if let Some(c) = lc {
+                        return Val::plain(format!("(0 {o} tv_str_cmp1({}, {c}))", b.code), BOOL);
+                    }
                     return Val::plain(format!("(tv_str_cmp({}, {}) {o} 0)", a.code, b.code), BOOL);
                 }
                 if lv.ty == DECIMAL || rv.ty == DECIMAL {
