@@ -131,6 +131,16 @@ impl<'c, 'a> Gen<'c, 'a> {
                         _ => {}
                     }
                 }
+                // (`f(x)` of a `const f = (x) => ...` capturing nothing, a module's or a local:
+                // its C function, called directly, where the C compiler can inline it)
+                if !*optional
+                    && let Some((cname, fps, fret)) = self.direct_arrow(*callee)
+                {
+                    let argv = self.args(args, &fps, None);
+                    let mut all = vec!["NULL".to_string()];
+                    all.extend(argv);
+                    return self.finish_call(&format!("{cname}({})", all.join(", ")), fret, ty);
+                }
                 let fv = self.expr(*callee);
                 let fty = self.c.types.without_undefined(fv.ty);
                 // `f?.(x)`: undefined when f is (its arguments unevaluated)
@@ -507,6 +517,40 @@ impl<'c, 'a> Gen<'c, 'a> {
         let fvn = self.fresh("cb");
         self.line(format!("tv_fn {fvn} = {};", v.code));
         Callback { direct: None, value: fvn, params, ret, throws }
+    }
+
+    /// `f` naming a `const f = (...) => ...` that captures nothing (a module's, or a local's made
+    /// as one C function): that function, its parameters and its result.
+    fn direct_arrow(&mut self, f: ExprId) -> Option<(String, Vec<FnParam>, TyId)> {
+        let m = self.cur_m();
+        if !matches!(self.ast(m).expr(f).kind, ExprKind::Ident(_)) {
+            return None;
+        }
+        let fty = self.ty(f);
+        let Ty::Func(ps, ret, th) = self.tget(fty) else { return None };
+        if th != NEVER {
+            return None;
+        }
+        let params = self.c.types.params(ps).to_vec();
+        match self.ident_fact(m, f) {
+            Some(crate::check::IdentFact::Const(cm, ci)) => {
+                let crate::ast::ItemKind::Const { init, mutable: false, .. } = &self.ast(cm).items[ci as usize].kind else { return None };
+                let init = *init;
+                if !matches!(&self.ast(cm).expr(init).kind, ExprKind::Arrow(a) if !a.is_async) {
+                    return None;
+                }
+                // (the module variable made, and with it its arrow's function)
+                let _ = self.const_ref(cm, ci);
+                let fns = self.arrow_fns.get(&(cm, init))?.clone();
+                let want = self.fn_ptr_type(&params, ret);
+                match fns.as_slice() {
+                    [(cname, cast)] if *cast == want => Some((cname.clone(), params, ret)),
+                    _ => None,
+                }
+            }
+            Some(crate::check::IdentFact::Local(_)) => self.const_arrow_fn(f, &params, ret).map(|c| (c, params, ret)),
+            _ => None,
+        }
     }
 
     /// `f` a local `const f = (...) => ...` whose arrow captures nothing and was made as one C
