@@ -124,6 +124,9 @@ pub struct ModuleFacts {
     /// A generic function or static method as a value, its type arguments fixed by where it's
     /// used (`compareFn = Comparator.defaultCompareFn`): by the expression.
     pub value_targs: crate::hash::FxMap<ExprId, Vec<(u32, TyId)>>,
+    /// Locals (by key) a closure in their own initializer refers to (`const f: F = wrap(() =>
+    /// f())`): made a cell before the initializer runs.
+    pub self_init: crate::hash::FxSet<u32>,
 }
 
 impl ModuleFacts {

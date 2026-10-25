@@ -285,11 +285,11 @@ struct Syms {
     u: Sym,
     number: Sym,
     /// `0`, `1`, ...: the fields of tuples the checker makes (`map.entries()`'s `[K, V]`).
-    digits: [Sym; 4],
+    digits: [Sym; 16],
 }
 
 fn intern_syms(interner: &mut Interner) -> Syms {
-    let digits = [interner.intern("0"), interner.intern("1"), interner.intern("2"), interner.intern("3")];
+    let digits = std::array::from_fn(|i| interner.intern(&i.to_string()));
     Syms { kind: interner.intern("kind"), main: interner.intern("main"), u: interner.intern("U"), number: interner.intern("number"), digits }
 }
 
@@ -449,7 +449,11 @@ fn new_checker<'a>(modules: &'a [Module], interner: &'a Interner, sm: &'a Source
         modules,
         interner,
         sm,
-        types: Types::default(),
+        types: {
+            let mut t = Types::default();
+            t.set_tuple_syms(syms.digits.to_vec());
+            t
+        },
         diags: Vec::new(),
         done: Vec::new(),
         scopes: Arc::default(),
@@ -2692,6 +2696,8 @@ impl<'a> Checker<'a> {
                             None => ERROR,
                         };
                         let ty = if p.optional { self.types.optional(ty) } else { ty };
+                        // (`...args: A`: the rest of the parameters, as the tuple `A`)
+                        let ty = if p.rest && !matches!(self.types.get(ty), Ty::Array(_)) { self.types.intern(Ty::Spread(ty)) } else { ty };
                         FnParam { ty, inout: p.inout, optional: p.optional }
                     })
                     .collect();
@@ -3150,6 +3156,14 @@ impl<'a> Checker<'a> {
             (Ty::StrLit(_), Ty::Str) => return true,
             (Ty::BoolLit(_), Ty::Bool) => return true,
             (Ty::Undefined, Ty::Void) => return true,
+            // (a tuple spread into parameters: each element as an argument)
+            (Ty::Spread(a), Ty::Spread(b)) => {
+                let (a, b) = (*a, *b);
+                if let (Some(xs), Some(ys)) = (self.types.tuple_elems(a), self.types.tuple_elems(b)) {
+                    return xs.len() == ys.len() && xs.iter().zip(&ys).all(|(&x, &y)| self.assignable_in(x, y, true, assuming));
+                }
+                return self.assignable_in(a, b, top, assuming);
+            }
             _ => {}
         }
         if matches!(s, Ty::Rec(..)) || matches!(d, Ty::Rec(..)) {

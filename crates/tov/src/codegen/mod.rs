@@ -971,6 +971,7 @@ impl<'c, 'a> Gen<'c, 'a> {
             Ty::Promise(..) => "tv_promise *".into(),
             Ty::Gen(_) | Ty::AsyncGen(_) => "tv_gen *".into(),
             Ty::Js => "JSValueRef".into(),
+            Ty::Spread(_) => "tv_int".into(),
             Ty::Map(..) | Ty::Set(_) => "tv_map".into(),
             Ty::Func(..) => "tv_fn".into(),
             Ty::Record(_) if self.is_obj(t) => {

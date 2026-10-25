@@ -3511,8 +3511,19 @@ impl<'a> Checker<'a> {
                 },
             };
             let ty = if p.optional { self.types.optional(ty) } else { ty };
+            // (`(...args: A) => ...` where `(...args: A) => R` is wanted: `args` is the tuple)
+            let ty = match *self.types.get(ty) {
+                Ty::Spread(t) if p.rest => t,
+                _ => ty,
+            };
             params.push(FnParam { ty, inout: p.inout, optional: p.optional });
         }
+        // (the function's type takes a rest parameter of a tuple type as its elements)
+        let fn_params: Vec<FnParam> = params
+            .iter()
+            .zip(&f.params)
+            .map(|(fp, p)| if p.rest && !matches!(self.types.get(fp.ty), Ty::Array(_) | Ty::Error) { FnParam { ty: self.types.intern(Ty::Spread(fp.ty)), ..*fp } } else { *fp })
+            .collect();
         let declared_ret = f.ret.map(|t| self.resolve_type(t, &tscope));
         let declared_ret = match declared_ret {
             Some(r) if is_async => Some(self.async_inner(r, self.ast().ty(f.ret.unwrap()).span)),
@@ -3653,9 +3664,9 @@ impl<'a> Checker<'a> {
         }
         if is_async {
             let p = self.types.promise(body_ty, thrown);
-            return (self.types.func(params, p), None);
+            return (self.types.func(fn_params, p), None);
         }
-        (self.types.func_throws(params, body_ty, thrown), guard)
+        (self.types.func_throws(fn_params, body_ty, thrown), guard)
     }
 
     /// (see `arrow_guarded`; the parameter `id` is still in scope)
@@ -4930,6 +4941,10 @@ impl<'a> Checker<'a> {
     }
 
     pub(super) fn call_sig(&mut self, cs: &CallSig, desc: &str, type_args: &[crate::ast::TypeId], args: &[Arg], exp: Option<TyId>, span: Span) -> TyId {
+        // (`f(...t)` with `t` a tuple: its elements fill as many parameters)
+        let spread_tuples = args.iter().any(|a| matches!(self.ast().expr(a.expr).kind, ExprKind::Spread(_)));
+        let widened = if spread_tuples { self.tuple_spread_sig(cs, args) } else { None };
+        let cs = widened.as_ref().unwrap_or(cs);
         let (mut params, mut ret) = self.call_spec.take().unwrap_or_default();
         if !self.spec.on {
             return self.call_sig_inner(cs, desc, type_args, args, exp, span, &[]);
@@ -4952,6 +4967,49 @@ impl<'a> Checker<'a> {
         let t = self.call_sig_inner(cs, desc, type_args, args, exp, span, &params);
         self.note_sites(span, ret);
         t
+    }
+
+    /// `cs` with the parameters a spread tuple fills (`f(...t)`, `t: [A, B]`) as one, the tuple
+    /// spread (`Ty::Spread`); `None` if no argument spreads a tuple into fixed parameters.
+    fn tuple_spread_sig(&mut self, cs: &CallSig, args: &[Arg]) -> Option<CallSig> {
+        let mut params = Vec::new();
+        let mut names = Vec::new();
+        let mut pi = 0;
+        let mut any = false;
+        for a in args {
+            let tuple = match self.ast().expr(a.expr).kind {
+                ExprKind::Spread(inner) if pi < cs.params.len() && matches!(self.ast().expr(inner).kind, ExprKind::Ident(_) | ExprKind::Member { .. } | ExprKind::Paren(_)) => {
+                    let marks = self.diags.len();
+                    let t = self.expr(inner, None);
+                    self.diags.truncate(marks);
+                    self.types.tuple_elems(t)
+                }
+                _ => None,
+            };
+            match tuple {
+                Some(elems) if pi + elems.len() <= cs.params.len() => {
+                    let tys: Vec<TyId> = cs.params[pi..pi + elems.len()].iter().map(|p| p.ty).collect();
+                    let tup = self.types.tuple(&tys);
+                    params.push(FnParam { ty: self.types.intern(Ty::Spread(tup)), inout: false, optional: false });
+                    names.push(cs.names.get(pi).cloned().unwrap_or_default());
+                    pi += elems.len();
+                    any = true;
+                }
+                _ => {
+                    if let Some(p) = cs.params.get(pi) {
+                        params.push(*p);
+                        names.push(cs.names.get(pi).cloned().unwrap_or_default());
+                    }
+                    pi += 1;
+                }
+            }
+        }
+        if !any {
+            return None;
+        }
+        params.extend(cs.params.iter().skip(pi).copied());
+        names.extend(cs.names.iter().skip(pi).cloned());
+        Some(CallSig { params, names, ..cs.clone() })
     }
 
     /// The sites of the parameter argument `i` goes to.
@@ -5098,6 +5156,11 @@ impl<'a> Checker<'a> {
                 let mut t = match self.ast().expr(a.expr).kind {
                     // (`f(...xs)` spreads into the rest parameter)
                     ExprKind::Spread(inner) if i >= cs.params.len() && cs.rest.is_some() => self.spread_elem(inner, hint),
+                    // (`f(...args)` for `f: (...args: A) => R`: the tuple's elements)
+                    ExprKind::Spread(inner) if let Ty::Spread(want) = *self.types.get(pty) => {
+                        let t = self.expr(inner, Some(want));
+                        self.types.intern(Ty::Spread(t))
+                    }
                     ExprKind::Spread(inner) => {
                         let s = self.ast().expr(a.expr).span;
                         self.report(Diagnostic::new("U0011", s, format!("`...` here would fill fixed parameters of `{desc}`; only a rest parameter (`...xs: T[]`) takes a spread")));
@@ -5328,11 +5391,32 @@ impl<'a> Checker<'a> {
                     }
                 }
             }
+            Ty::Spread(p) => {
+                if let Ty::Spread(a) = *self.types.get(actual) {
+                    self.unify(p, a, free, map);
+                }
+            }
             Ty::Func(pps, pr, _) => {
                 if let Ty::Func(aps, ar, _) = *self.types.get(actual) {
                     let (pps, aps) = (self.types.params(pps).to_vec(), self.types.params(aps).to_vec());
-                    for (pp, ap) in pps.iter().zip(&aps) {
+                    for (k, (pp, ap)) in pps.iter().zip(&aps).enumerate() {
+                        // (`(...args: A) => R` given `(i: number, j: number) => number`: `A` is
+                        // `[number, number]`)
+                        if let Ty::Spread(st) = *self.types.get(pp.ty)
+                            && !matches!(self.types.get(ap.ty), Ty::Spread(_))
+                        {
+                            let elems: Vec<TyId> = aps[k..].iter().map(|p| p.ty).collect();
+                            let tup = self.types.tuple(&elems);
+                            self.unify(st, tup, free, map);
+                            break;
+                        }
                         self.unify(pp.ty, ap.ty, free, map);
+                    }
+                    if let Some(pp) = pps.get(aps.len())
+                        && let Ty::Spread(st) = *self.types.get(pp.ty)
+                    {
+                        let tup = self.types.tuple(&[]);
+                        self.unify(st, tup, free, map);
                     }
                     self.unify(pr, ar, free, map);
                 }

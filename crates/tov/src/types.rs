@@ -112,6 +112,9 @@ pub enum Ty {
     Promise(TyId, TyId),
     /// A JavaScript value from an npm package (dynamically typed; see runtime/js.h).
     Js,
+    /// A function type's last parameters as one tuple type (`(...args: A) => R`, `A extends
+    /// unknown[]`): once `A` is a tuple, its elements are the parameters (see `func_throws`).
+    Spread(TyId),
 }
 
 /// Hash-consed storage for lists of `T`.
@@ -159,6 +162,8 @@ pub struct Types {
     names: HashMap<TyId, String>,
     /// Declaration order of record fields (records themselves store fields sorted by symbol).
     field_order: HashMap<TyId, Vec<Sym>>,
+    /// The field names of tuples (`0`, `1`, ...).
+    tuple_syms: Arc<Vec<Sym>>,
 }
 
 macro_rules! prims {
@@ -205,6 +210,7 @@ impl Default for Types {
             params: Lists::new(),
             names: HashMap::default(),
             field_order: HashMap::default(),
+            tuple_syms: Arc::default(),
         };
         for p in PRIMS {
             t.intern(*p);
@@ -219,7 +225,6 @@ impl Types {
         assert!(base.base.is_none(), "overlays don't nest");
         let off = [base.list.len() as u32, base.fields.items.len() as u32, base.tys.items.len() as u32, base.params.items.len() as u32];
         Types {
-            base: Some(base),
             off,
             list: Vec::new(),
             map: HashMap::default(),
@@ -228,7 +233,43 @@ impl Types {
             params: Lists::new(),
             names: HashMap::default(),
             field_order: HashMap::default(),
+            tuple_syms: base.tuple_syms.clone(),
+            base: Some(base),
         }
+    }
+
+    pub fn set_tuple_syms(&mut self, syms: Vec<Sym>) {
+        self.tuple_syms = Arc::new(syms);
+    }
+
+    /// The names of a tuple's fields, in order (as many as there are).
+    pub fn tuple_syms(&self) -> &[Sym] {
+        &self.tuple_syms
+    }
+
+    /// A tuple's element types, in order (`[A, B]`: the record with fields `0`, `1`; `[]`: the
+    /// empty record).
+    pub fn tuple_elems(&self, ty: TyId) -> Option<Vec<TyId>> {
+        let Ty::Record(fs) = *self.get(ty) else { return None };
+        let fs = self.fields(fs);
+        let mut out = vec![ERROR; fs.len()];
+        for f in fs {
+            let i = self.tuple_syms.iter().position(|&s| s == f.name)?;
+            if i >= fs.len() {
+                return None;
+            }
+            out[i] = f.ty;
+        }
+        Some(out)
+    }
+
+    /// The tuple type of these elements.
+    pub fn tuple(&mut self, elems: &[TyId]) -> TyId {
+        let fields: Vec<Field> = elems.iter().zip(self.tuple_syms.clone().iter()).map(|(&ty, &name)| Field { name, ty, optional: false }).collect();
+        let order: Vec<Sym> = fields.iter().map(|f| f.name).collect();
+        let t = self.record(fields);
+        self.note_field_order(t, order);
+        t
     }
 
     /// Drops everything added since the overlay was created.
@@ -376,7 +417,15 @@ impl Types {
         self.func_throws(params, ret, NEVER)
     }
 
-    pub fn func_throws(&mut self, params: Vec<FnParam>, ret: TyId, throws: TyId) -> TyId {
+    pub fn func_throws(&mut self, mut params: Vec<FnParam>, ret: TyId, throws: TyId) -> TyId {
+        // (`(...args: [number, string]) => R` is `(a: number, b: string) => R`)
+        if let Some(last) = params.last()
+            && let Ty::Spread(t) = *self.get(last.ty)
+            && let Some(elems) = self.tuple_elems(t)
+        {
+            params.pop();
+            params.extend(elems.into_iter().map(|ty| FnParam { ty, inout: false, optional: false }));
+        }
         let l = self.params_list(&params);
         self.intern(Ty::Func(l, ret, throws))
     }
@@ -610,6 +659,10 @@ impl Types {
                 let ms: Vec<TyId> = ms.into_iter().map(|m| self.subst(m, map)).collect();
                 self.union(&ms)
             }
+            Ty::Spread(t) => {
+                let t = self.subst(t, map);
+                self.intern(Ty::Spread(t))
+            }
             Ty::Func(ps, ret, throws) => {
                 let params: Vec<FnParam> = self.params(ps).to_vec();
                 let params = params.into_iter().map(|p| FnParam { ty: self.subst(p.ty, map), ..p }).collect();
@@ -640,7 +693,7 @@ impl Types {
     pub fn has_param(&self, ty: TyId) -> bool {
         match *self.get(ty) {
             Ty::Param(_) => true,
-            Ty::Array(e) | Ty::Set(e) | Ty::Gen(e) | Ty::AsyncGen(e) | Ty::Expect(e) => self.has_param(e),
+            Ty::Array(e) | Ty::Set(e) | Ty::Gen(e) | Ty::AsyncGen(e) | Ty::Expect(e) | Ty::Spread(e) => self.has_param(e),
             Ty::Map(k, v) | Ty::Promise(k, v) => self.has_param(k) || self.has_param(v),
             Ty::Record(fs) => self.fields(fs).iter().any(|f| self.has_param(f.ty)),
             Ty::Union(ms) => self.tys(ms).iter().any(|&m| self.has_param(m)),
@@ -669,7 +722,7 @@ impl Types {
         }
         match *self.get(ty) {
             Ty::Param(p) => params.contains(&p),
-            Ty::Array(e) | Ty::Set(e) | Ty::Gen(e) | Ty::AsyncGen(e) | Ty::Expect(e) => self.mentions(e, params),
+            Ty::Array(e) | Ty::Set(e) | Ty::Gen(e) | Ty::AsyncGen(e) | Ty::Expect(e) | Ty::Spread(e) => self.mentions(e, params),
             Ty::Map(k, v) | Ty::Promise(k, v) => self.mentions(k, params) || self.mentions(v, params),
             Ty::Record(fs) => self.fields(fs).iter().any(|f| self.mentions(f.ty, params)),
             Ty::Union(ms) => self.tys(ms).iter().any(|&m| self.mentions(m, params)),
@@ -726,6 +779,10 @@ impl Display<'_> {
             Ty::Never => out.push_str("never"),
             Ty::Unknown => out.push_str("unknown"),
             Ty::Js => out.push_str("Js"),
+            Ty::Spread(t) => {
+                out.push_str("...");
+                self.write(t, out, false);
+            }
             Ty::Void => out.push_str("void"),
             Ty::Undefined => out.push_str("undefined"),
             Ty::Null => out.push_str("null"),
@@ -863,6 +920,11 @@ impl Display<'_> {
                     }
                     if p.inout {
                         out.push_str("inout ");
+                    }
+                    if let Ty::Spread(t) = *self.types.get(p.ty) {
+                        out.push_str("...");
+                        self.write(t, out, false);
+                        continue;
                     }
                     self.write(p.ty, out, false);
                     if p.optional {

@@ -1458,7 +1458,8 @@ impl<'c, 'a> Gen<'c, 'a> {
                 }
             }
         }
-        let boxed = heap_captures.intersection(&mutated).copied().collect();
+        let mut boxed: FxSet<u32> = heap_captures.intersection(&mutated).copied().collect();
+        boxed.extend(heap_captures.iter().filter(|k| facts.self_init.contains(k)));
         (boxed, stack_arrows, mutated)
     }
 
@@ -3037,6 +3038,22 @@ impl<'c, 'a> Gen<'c, 'a> {
                     && matches!(ast.expr(*i).kind, ExprKind::Arrow(_))
                 {
                     self.self_closure = Some(key);
+                }
+                // (a closure in the initializer refers to the local: its cell exists first, the
+                // value stored into it after)
+                if self.facts(m).self_init.contains(&key) && self.b().boxed.contains(&key) {
+                    let cell = self.cell_type(ty);
+                    let empty = self.default_value(ty);
+                    self.line(format!("{cell} *{cname} = tvg_alloc_small(sizeof({cell})); {cname}->rc = 1; {cname}->v = {empty};"));
+                    self.b().locals.insert(key, Local { access: format!("{cname}->v"), ty });
+                    let v = self.expr(init.unwrap());
+                    let v = self.coerce(v, ty);
+                    let code = self.consume(v);
+                    self.line(format!("{cname}->v = {code};"));
+                    self.pop_temps();
+                    let rel = self.cell_release(ty, &cname);
+                    self.b().scopes.last_mut().unwrap().releases.push(rel);
+                    return;
                 }
                 let value = init.map(|i| {
                     let v = self.expr(i);
@@ -7982,7 +7999,22 @@ impl<'c, 'a> Gen<'c, 'a> {
         let Ty::Func(ps, ret, _) = self.tget(fty) else { unreachable!() };
         let ps = self.c.types.params(ps).to_vec();
         let subst = self.b().subst.clone();
-        let params: Vec<(u32, TyId, bool)> = f.params.iter().zip(&ps).map(|(p, fp)| (p.span.start, fp.ty, fp.inout)).collect();
+        let mut params: Vec<(u32, TyId, bool)> = f.params.iter().zip(&ps).map(|(p, fp)| (p.span.start, fp.ty, fp.inout)).collect();
+        // (`(...args: A) => ...` with `A` a tuple: one C parameter per element, `args` their tuple)
+        let mut rest_tuple = None;
+        if let Some(last) = f.params.last()
+            && last.rest
+            && !matches!(ps.get(f.params.len() - 1).map(|p| self.tget(p.ty)), Some(Ty::Array(_)))
+            && (ps.len() != f.params.len() || ps.last().is_some_and(|p| !matches!(self.tget(p.ty), Ty::Array(_))))
+        {
+            let k = f.params.len() - 1;
+            params.truncate(k);
+            let elems: Vec<TyId> = ps[k..].iter().map(|p| p.ty).collect();
+            for (j, fp) in ps[k..].iter().enumerate() {
+                params.push((u32::MAX - j as u32, fp.ty, false));
+            }
+            rest_tuple = Some((last.span.start, k, elems));
+        }
         let proto = self.fn_proto(cname, &ps, ret, &FxMap::default(), true);
         let _ = writeln!(self.protos, "static {proto};");
         if !stack {
@@ -8007,6 +8039,13 @@ impl<'c, 'a> Gen<'c, 'a> {
         }
         for (k, sib, sty) in siblings {
             env_locals.insert(*k, Local { access: format!("((tv_fn){{ (void *){sib}, env_ }})"), ty: *sty });
+        }
+        if let Some((key, k, elems)) = rest_tuple {
+            let tt = self.c.types.tuple(&elems);
+            let syms = self.c.types.tuple_syms().to_vec();
+            let parts: Vec<String> = (0..elems.len()).map(|j| format!(".f_{} = p{}", self.sym(syms[j]), k + j)).collect();
+            let access = self.rec_lit(tt, &parts.join(", "));
+            env_locals.insert(key, Local { access, ty: tt });
         }
         if f.is_async {
             self.emit_async_arrow(cname, m, subst, &params, ret, kind, env_locals);

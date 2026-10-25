@@ -283,6 +283,44 @@ impl<'c, 'a> Gen<'c, 'a> {
 
     /// Evaluates arguments against (instantiated) parameter types.
     fn args(&mut self, args: &[Arg], params: &[FnParam], callee: Option<(u32, u32)>) -> Vec<String> {
+        let m = self.cur_m();
+        let spreads_tuple = |s: &mut Self, a: &Arg| match s.ast(m).expr(a.expr).kind {
+            ExprKind::Spread(inner) => {
+                let t = s.ty(inner);
+                s.c.types.tuple_elems(t).map(|_| inner)
+            }
+            _ => None,
+        };
+        if args.iter().any(|a| spreads_tuple(self, a).is_some()) {
+            // (`f(...args)` with `args` a tuple: its elements, one parameter each)
+            let mut out = Vec::new();
+            for a in args {
+                let at = out.len();
+                let pty = |k: usize| params.get(k).map(|p| p.ty).unwrap_or(ERROR);
+                if let Some(inner) = spreads_tuple(self, a) {
+                    let v = self.expr(inner);
+                    let v = if args.len() > 1 { self.snapshot(v) } else { v };
+                    let tt = v.ty;
+                    let elems = self.c.types.tuple_elems(tt).unwrap_or_default();
+                    let syms = self.c.types.tuple_syms().to_vec();
+                    for (k, ety) in elems.into_iter().enumerate() {
+                        let f = Val::plain(format!("({}).f_{}", v.code, self.sym(syms[k])), ety);
+                        let f = self.coerce(f, pty(at + k));
+                        out.push(f.code);
+                    }
+                } else {
+                    let v = self.expr(a.expr);
+                    let v = if args.len() > 1 { self.snapshot(v) } else { v };
+                    let v = self.coerce(v, pty(at));
+                    out.push(v.code);
+                }
+            }
+            for p in params.iter().skip(out.len()) {
+                let v = self.coerce(Val::plain("0", UNDEFINED), p.ty);
+                out.push(v.code);
+            }
+            return out;
+        }
         let mut out = Vec::new();
         let has_inout = params.iter().any(|p| p.inout);
         let quiet = !args.is_empty() && self.quiet_calls.last().is_some_and(|&(k, q)| q && k == args.as_ptr() as usize);

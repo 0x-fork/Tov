@@ -128,6 +128,14 @@ impl<'a> Checker<'a> {
         }
     }
 
+    /// Does a closure in `init` refer to `name`?
+    fn closure_refers(&self, init: ExprId, name: Sym) -> bool {
+        let ast = self.ast();
+        let span = ast.expr(init).span;
+        let arrows: Vec<Span> = ast.exprs.iter().filter(|e| matches!(e.kind, ExprKind::Arrow(_)) && e.span.file == span.file && e.span.start >= span.start && e.span.end <= span.end).map(|e| e.span).collect();
+        !arrows.is_empty() && ast.exprs.iter().any(|e| matches!(e.kind, ExprKind::Ident(n) if n == name) && arrows.iter().any(|a| e.span.file == a.file && e.span.start >= a.start && e.span.end <= a.end))
+    }
+
     /// `const fib = (n: number): number => ... fib(n - 1) ...` (a nested `function fib` too): the
     /// name is visible in its own body, with the type its annotations give. Checked again if what
     /// it throws turns out otherwise. `None` if the arrow doesn't refer to itself.
@@ -278,6 +286,18 @@ impl<'a> Checker<'a> {
                 let (t, promotable) = match (ty, init) {
                     (Some(te), init) => {
                         let declared = self.resolve_type(*te, &tscope);
+                        // (`const lev: F = memoize((i, j) => ... lev(i - 1, j) ...)`: a closure in
+                        // its initializer calls it later, so the name is visible there)
+                        if let Some(i) = init
+                            && self.closure_refers(*i, *name)
+                        {
+                            self.declare(*name, declared, kind, *name_span, None, false);
+                            if !matches!(self.ast().expr(*i).kind, ExprKind::Arrow(_))
+                                && let Some(f) = self.facts_mut()
+                            {
+                                f.self_init.insert(name_span.start);
+                            }
+                        }
                         if let Some(i) = init {
                             let sites = self.type_sites(self.cur, *te);
                             self.flow(sites, |c| {
