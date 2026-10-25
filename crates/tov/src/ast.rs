@@ -29,6 +29,9 @@ pub struct Ast {
     /// Declarations of `var`s hoisted to their function's start (see the parser's `fn_block`):
     /// typed by what's assigned, as TypeScript types a `var` (no `undefined` before the first).
     pub hoisted_vars: Vec<StmtId>,
+    /// `namespace N { ... }`: its declarations are module items named `N.x` (see the parser's
+    /// `namespace_decl`); (N, where it's written, each member's name and item name, exported).
+    pub namespaces: Vec<Namespace>,
     /// Where lines start that a `// @ts-expect-error` or `// @ts-ignore` comment covers (the
     /// line after it): in a test, a statement there that doesn't check throws a `TypeError`.
     pub ts_expect: Vec<u32>,
@@ -329,6 +332,13 @@ pub enum TypeExprKind {
     Access(TypeId, TypeId),
     /// `x is T` as a result: a boolean that, when true, says the parameter `x` is a `T`.
     Predicate(Sym, TypeId),
+    /// `{ [K in U]?: V }`: a field for each of U's string literals, V with K that one
+    /// (`optional`: `?` some, `-?` none).
+    Mapped { param: Sym, src: TypeId, value: TypeId, optional: Option<bool> },
+    /// `C extends E ? Y : N`.
+    Cond { check: TypeId, ext: TypeId, yes: TypeId, no: TypeId },
+    /// `infer X` in a conditional type's `extends` clause.
+    Infer(Sym),
     Error,
 }
 
@@ -424,6 +434,13 @@ pub enum ItemKind {
     Class(ClassDecl),
 }
 
+pub struct Namespace {
+    pub name: Sym,
+    pub span: Span,
+    pub members: Vec<(Sym, Sym)>,
+    pub exported: bool,
+}
+
 pub struct Item {
     pub kind: ItemKind,
     pub span: Span,
@@ -477,6 +494,13 @@ impl Ast {
         }
         if let Some((n, _)) = &mut self.default_export {
             *n = f(*n);
+        }
+        for ns in &mut self.namespaces {
+            ns.name = f(ns.name);
+            ns.members.iter_mut().for_each(|(a, b)| {
+                *a = f(*a);
+                *b = f(*b);
+            });
         }
         for item in &mut self.items {
             match &mut item.kind {

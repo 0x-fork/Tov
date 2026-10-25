@@ -268,8 +268,103 @@ pub fn load_with(paths: &[PathBuf], base: &Path, tests: bool) -> Result<Loaded, 
     let (ast, pd) = parser::parse(&sm.get(file).text, file, &mut interner);
     diags.extend(pd);
     modules.push(Module { file, path: PathBuf::from("<builtin>"), name: "<builtin>".into(), ast, imports: HashMap::default(), builtin: true, std: true, entry: false, npm: None });
+    link_namespaces(&mut modules, &mut interner);
 
     Ok(Loaded { sm, interner, modules, diags })
+}
+
+/// `import { N } from "./m"` of a `namespace N` m exports: its members imported too, by their
+/// item names (`N$$x`), and the module's `N.x` (values and types) read as those.
+fn link_namespaces(modules: &mut [Module], interner: &mut Interner) {
+    use crate::ast::{ExprKind, ItemKind, TypeExprKind};
+    // (module, namespace, members) of the exported namespaces
+    let exported: Vec<(u32, Sym, Vec<(Sym, Sym)>)> = modules
+        .iter()
+        .enumerate()
+        .flat_map(|(mi, m)| m.ast.namespaces.iter().filter(|n| n.exported).map(move |n| (mi as u32, n.name, n.members.clone())))
+        .collect();
+    if exported.is_empty() {
+        return;
+    }
+    let _ = interner;
+    // (each module's exported item names: a namespace can share its name with a function)
+    let modules_names: Vec<Vec<Sym>> = modules
+        .iter()
+        .map(|m| {
+            m.ast
+                .items
+                .iter()
+                .filter(|it| it.exported)
+                .filter_map(|it| match &it.kind {
+                    ItemKind::Function(f) => Some(f.name),
+                    ItemKind::Class(c) => Some(c.name),
+                    ItemKind::TypeAlias { name, .. } | ItemKind::Interface { name, .. } | ItemKind::Const { name, .. } => Some(*name),
+                    _ => None,
+                })
+                .collect()
+        })
+        .collect();
+    fn exports_item(names: &[Sym], n: Sym) -> bool {
+        names.contains(&n)
+    }
+    for mi in 0..modules.len() {
+        // (local name of the namespace here, its members)
+        let mut found: Vec<(Sym, Vec<(Sym, Sym)>)> = Vec::new();
+        let imports: Vec<(u32, u32)> = modules[mi].imports.iter().map(|(&i, &t)| (i, t)).collect();
+        for (ii, t) in imports {
+            let ItemKind::Import(imp) = &mut modules[mi].ast.items[ii as usize].kind else { continue };
+            if imp.reexport {
+                continue;
+            }
+            let mut extra: Vec<((Sym, Span), Sym)> = Vec::new();
+            for (k, &(orig, span)) in imp.names.iter().enumerate() {
+                if let Some((_, _, members)) = exported.iter().find(|e| e.0 == t && e.1 == orig) {
+                    let local = imp.locals[k];
+                    for &(_, mangled) in members {
+                        extra.push(((mangled, span), mangled));
+                    }
+                    found.push((local, members.clone()));
+                }
+            }
+            // (the namespace itself binds nothing: what reads it reads its members)
+            let real: Vec<Sym> = imp.names.iter().map(|x| x.0).filter(|&n| exports_item(&modules_names[t as usize], n)).collect();
+            let mut k = 0;
+            while k < imp.names.len() {
+                if exported.iter().any(|e| e.0 == t && e.1 == imp.names[k].0) && !real.contains(&imp.names[k].0) {
+                    imp.names.remove(k);
+                    imp.locals.remove(k);
+                } else {
+                    k += 1;
+                }
+            }
+            for (n, l) in extra {
+                if !imp.names.iter().any(|x| x.0 == n.0) {
+                    imp.names.push(n);
+                    imp.locals.push(l);
+                }
+            }
+        }
+        if found.is_empty() {
+            continue;
+        }
+        let ast = &mut modules[mi].ast;
+        for e in 0..ast.exprs.len() {
+            let ExprKind::Member { obj, name, optional: false, .. } = ast.exprs[e].kind else { continue };
+            let ExprKind::Ident(o) = ast.exprs[obj as usize].kind else { continue };
+            if let Some(m) = found.iter().find(|f| f.0 == o).and_then(|f| f.1.iter().find(|m| m.0 == name)) {
+                ast.exprs[e].kind = ExprKind::Ident(m.1);
+            }
+        }
+        for t in &mut ast.types {
+            if let TypeExprKind::Named { ns, name, .. } = &mut t.kind
+                && let Some((o, _)) = *ns
+                && let Some(m) = found.iter().find(|f| f.0 == o).and_then(|f| f.1.iter().find(|m| m.0 == *name))
+            {
+                *ns = None;
+                *name = m.1;
+            }
+        }
+    }
 }
 
 type Parsed = (SourceFile, Ast, Vec<Diagnostic>);

@@ -6,7 +6,7 @@ use crate::ast::{Arg, ExprKind};
 
 pub(super) const BUILTIN_TYPES: &[&str] = &[
     "int", "i64", "f64", "number", "f32", "i8", "i16", "i32", "u8", "u16", "u32", "u64", "bool", "boolean", "string", "never", "unknown", "Js", "undefined", "void", "Array", "Map",
-    "Set", "ReadonlyArray", "ReadonlyMap", "ReadonlySet", "WeakMap", "WeakSet", "Promise", "Record", "ReturnType", "Awaited", "NonNullable", "Readonly", "Partial", "Required", "Pick", "Omit", "bigint", "decimal", "Uint8Array", "Int8Array", "Uint16Array", "Int16Array", "Uint32Array", "Int32Array", "Float32Array", "Float64Array",
+    "Set", "ReadonlyArray", "ReadonlyMap", "ReadonlySet", "WeakMap", "WeakSet", "Promise", "Record", "ReturnType", "Parameters", "Awaited", "NonNullable", "Readonly", "Partial", "Required", "Pick", "Omit", "bigint", "decimal", "Uint8Array", "Int8Array", "Uint16Array", "Int16Array", "Uint32Array", "Int32Array", "Float32Array", "Float64Array",
 ];
 
 /// JavaScript's typed arrays: Tov arrays of the element type (a number stored wraps into it).

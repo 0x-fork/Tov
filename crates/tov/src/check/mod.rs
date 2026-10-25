@@ -251,6 +251,8 @@ struct FnCtx {
     /// ...except that a local holding only references (class instances, promises, functions) keeps
     /// its narrowing unless a closure assigns it: changing an object doesn't change its class.
     closure_assigned: HashSet<Sym>,
+    /// Locals a closure assigns, narrowed (see `narrow`): back to their declared types at a call.
+    closure_narrowed: Vec<LocalId>,
     /// `routes` handlers' request parameters and their route (`"/users/:id"`): `req.params`
     /// is typed from the route.
     route_locals: Vec<(LocalId, Sym)>,
@@ -846,7 +848,7 @@ impl<'a> Checker<'a> {
     }
 
     pub(crate) fn show(&self, ty: TyId) -> String {
-        Display {
+        let shown = Display {
             types: &self.types,
             interner: self.interner,
             param_names: (&self.param_names_base, &self.param_names),
@@ -855,7 +857,26 @@ impl<'a> Checker<'a> {
             class_names: &self.class_names,
             module_names: &self.module_names,
         }
-        .show(ty)
+        .show(ty);
+        // (names a module made: a namespace's `N$$x` as `N.x`, a local class's `C$$3` as `C`)
+        if !shown.contains("$$") {
+            return shown;
+        }
+        let mut out = String::new();
+        let mut rest = shown.as_str();
+        while let Some(i) = rest.find("$$") {
+            out.push_str(&rest[..i]);
+            let after = &rest[i + 2..];
+            let digits = after.chars().take_while(|c| c.is_ascii_digit()).count();
+            if digits > 0 && !after[digits..].starts_with(|c: char| c.is_alphanumeric() || c == '_') {
+                rest = &after[digits..];
+            } else {
+                out.push('.');
+                rest = after;
+            }
+        }
+        out.push_str(rest);
+        out
     }
 
     /// The type of a parameter with a default value and no type (`b = CURVE.P`): the default's,
@@ -1028,7 +1049,7 @@ impl<'a> Checker<'a> {
                             cyclic: cd.cyclic,
                             resolved: false,
                         });
-                        Arc::make_mut(&mut self.class_names).push(self.interner.get(cd.name).split('#').next().unwrap_or("").to_string());
+                        Arc::make_mut(&mut self.class_names).push(shown_class_name(self.interner.get(cd.name)));
                         let decl = Decl::Class(self.classes.len() as u32 - 1);
                         // A class is both a type and a value (`new C()`, `C.staticMember`).
                         if builtins::is_builtin_type(self.interner.get(cd.name)) {
@@ -2537,8 +2558,22 @@ impl<'a> Checker<'a> {
         if t == ERROR {
             return ERROR;
         }
+        // (of a type parameter, a generic alias's body seen as written: its keys, strings; each use
+        // is the alias with its arguments, see `type_level`)
+        if self.types.has_param(t) {
+            return STR;
+        }
         if matches!(self.types.get(t), Ty::Map(..)) {
             return STR;
+        }
+        // (a class's: its public fields and methods)
+        if let Ty::Class(c, _) = *self.types.get(t) {
+            self.resolve_class(c);
+            let info = &self.classes[c as usize];
+            let names: Vec<Sym> = info.fields.iter().filter(|f| f.vis == ast::Visibility::Public).map(|f| f.name).chain(info.methods.iter().filter(|m| m.vis == ast::Visibility::Public).map(|m| m.name)).collect();
+            let names: Vec<Sym> = names.into_iter().filter(|&n| !self.name(n).starts_with('#')).collect();
+            let lits: Vec<TyId> = names.into_iter().map(|n| self.types.str_lit(n)).collect();
+            return if lits.is_empty() { NEVER } else { self.types.union(&lits) };
         }
         match self.type_fields(t) {
             Some(fs) => {
@@ -2557,6 +2592,9 @@ impl<'a> Checker<'a> {
     fn access_type(&mut self, t: TyId, k: TyId, span: Span) -> TyId {
         if t == ERROR || k == ERROR {
             return ERROR;
+        }
+        if self.types.has_param(t) || self.types.has_param(k) {
+            return UNKNOWN;
         }
         if self.types.is_numeric(k)
             && let Ty::Array(e) = *self.types.get(t)
@@ -2577,7 +2615,16 @@ impl<'a> Checker<'a> {
                 self.report(Diagnostic::new("X0016", span, format!("can't index a type with `{shown}`")).note("supported", "`T[\"field\"]`, a union of field names, `T[number]` for arrays"));
                 return ERROR;
             };
-            match self.field_of(t, name) {
+            // (a class's method: its function type)
+            let method = if matches!(self.types.get(t), Ty::Class(..)) {
+                match self.class_member(t, name) {
+                    Some(mr @ super::check::class::ClassMemberRef::Method(_)) => Some(self.member_type(&mr)),
+                    _ => None,
+                }
+            } else {
+                None
+            };
+            match method.or_else(|| self.field_of(t, name)) {
                 Some(ft) => out.push(ft),
                 None => {
                     let (shown, n) = (self.show(t), self.name(name).to_string());
@@ -2637,6 +2684,101 @@ impl<'a> Checker<'a> {
                 let t = self.resolve_type(*t, tscope);
                 self.keyof_type(t, span)
             }
+            TypeExprKind::Mapped { param, src, value, optional } => {
+                let (param, src, value, optional) = (*param, *src, *value, *optional);
+                // (`{ [K in keyof T]: ... }`: T's fields' optionality kept, as TypeScript's)
+                let homomorphic = match &self.ast().ty(src).kind {
+                    TypeExprKind::Keyof(t) => Some(*t),
+                    _ => None,
+                };
+                let from = homomorphic.map(|t| self.resolve_type(t, tscope));
+                let keys = self.resolve_type(src, tscope);
+                if keys == ERROR {
+                    return ERROR;
+                }
+                let members = self.flat_members(keys);
+                if members.iter().any(|&m| m == STR || self.types.has_param(m)) || keys == STR {
+                    let mut scope = tscope.to_vec();
+                    scope.push((param, STR));
+                    let v = self.resolve_type(value, &scope);
+                    return self.types.intern(Ty::Map(STR, v));
+                }
+                let mut out = Vec::new();
+                for m in members {
+                    let Ty::StrLit(name) = *self.types.get(m) else {
+                        let shown = self.show(keys);
+                        self.report(Diagnostic::new("X0016", span, format!("a mapped type over `{shown}`: only string keys are supported")));
+                        return ERROR;
+                    };
+                    let mut scope = tscope.to_vec();
+                    scope.push((param, m));
+                    let v = self.resolve_type(value, &scope);
+                    let was_optional = from.and_then(|f| self.type_fields(f)).and_then(|fs| fs.iter().find(|x| x.name == name).map(|x| x.optional)).unwrap_or(false);
+                    let opt = match optional {
+                        Some(o) => o,
+                        None => was_optional,
+                    };
+                    let v = if opt { self.types.optional(v) } else if optional == Some(false) { self.types.without_undefined(v) } else { v };
+                    out.push(Field { name, ty: v, optional: opt });
+                }
+                let order: Vec<Sym> = out.iter().map(|f| f.name).collect();
+                let t = self.types.record(out);
+                self.types.note_field_order(t, order);
+                t
+            }
+            TypeExprKind::Cond { check, ext, yes, no } => {
+                let (check, ext, yes, no) = (*check, *ext, *yes, *no);
+                let c = self.resolve_type(check, tscope);
+                if c == ERROR {
+                    return ERROR;
+                }
+                // (a type parameter still: undecided, either branch)
+                if self.types.has_param(c) {
+                    let mut infers = Vec::new();
+                    collect_infers(self.ast(), ext, &mut infers);
+                    let mut scope = tscope.to_vec();
+                    scope.extend(infers.into_iter().map(|x| (x, UNKNOWN)));
+                    let y = self.resolve_type(yes, &scope);
+                    let n = self.resolve_type(no, tscope);
+                    return self.types.union(&[y, n]);
+                }
+                // (`T extends U ? ...` of a union given for T: each member's answer)
+                let naked = matches!(&self.ast().ty(check).kind, TypeExprKind::Named { ns: None, name, args, .. } if args.is_empty() && tscope.iter().any(|(s, _)| s == name));
+                let parts = if naked { self.flat_members(c) } else { vec![c] };
+                let mut out = Vec::new();
+                for part in parts {
+                    let mut infers = Vec::new();
+                    collect_infers(self.ast(), ext, &mut infers);
+                    let mut scope = tscope.to_vec();
+                    let mut ids = Vec::new();
+                    for &x in &infers {
+                        let id = self.new_gparam(x, None);
+                        ids.push(id);
+                        scope.push((x, self.types.intern(Ty::Param(id))));
+                    }
+                    let e = self.resolve_type(ext, &scope);
+                    let mut map: HashMap<u32, TyId> = HashMap::default();
+                    if !ids.is_empty() {
+                        self.unify(e, part, &ids, &mut map);
+                    }
+                    let e2 = if map.is_empty() { e } else { self.types.subst(e, &map) };
+                    let fits = !self.types.has_param(e2) && self.assignable(part, e2);
+                    let mut branch_scope = tscope.to_vec();
+                    for (k, &x) in infers.iter().enumerate() {
+                        branch_scope.push((x, map.get(&ids[k]).copied().unwrap_or(UNKNOWN)));
+                    }
+                    out.push(if fits { self.resolve_type(yes, &branch_scope) } else { self.resolve_type(no, tscope) });
+                }
+                if out.is_empty() { NEVER } else { self.types.union(&out) }
+            }
+            TypeExprKind::Infer(x) => match tscope.iter().rev().find(|(s, _)| s == x) {
+                Some(&(_, t)) => t,
+                None => {
+                    let n = self.name(*x).to_string();
+                    self.report(Diagnostic::new("P0003", span, format!("`infer {n}` belongs in a conditional type's `extends` clause")));
+                    ERROR
+                }
+            },
             TypeExprKind::Access(t, k) => {
                 let (t, k) = (*t, *k);
                 let t = self.resolve_type(t, tscope);
@@ -2817,6 +2959,16 @@ impl<'a> Checker<'a> {
                     // Stays nominal; the body is resolved on demand, which allows self-reference.
                     return self.types.rec(a, &targs);
                 }
+                // (`type R<T> = T extends string ? number : boolean`: its body made with these
+                // arguments, the type-level operators evaluated on them)
+                if !targs.is_empty()
+                    && let Some((_, _, tparams, body_te)) = alias_item(&self.modules[am as usize].ast.items[ai as usize].kind)
+                    && type_level(&self.modules[am as usize].ast, body_te)
+                {
+                    let body_te = body_te;
+                    let scope: Vec<(Sym, TyId)> = tparams.iter().map(|tp| tp.name).zip(targs.iter().copied()).collect();
+                    return self.with_module(am, |c| c.resolve_type(body_te, &scope));
+                }
                 let body = self.alias_body(a);
                 let params = self.aliases[a as usize].params.clone();
                 if params.len() != targs.len() {
@@ -2995,7 +3147,7 @@ impl<'a> Checker<'a> {
                 }
                 Some(self.types.union(&out))
             }
-            "ReturnType" | "Awaited" | "NonNullable" | "Readonly" | "Partial" | "Required" => {
+            "ReturnType" | "Parameters" | "Awaited" | "NonNullable" | "Readonly" | "Partial" | "Required" => {
                 if !arity(self, 1) {
                     return Some(ERROR);
                 }
@@ -3004,8 +3156,21 @@ impl<'a> Checker<'a> {
                     return Some(ERROR);
                 }
                 Some(match text {
+                    "Parameters" => match *self.types.get(t) {
+                        Ty::Func(ps, _, _) => {
+                            let tys: Vec<TyId> = self.types.params(ps).iter().map(|p| p.ty).collect();
+                            self.tuple_ty(&tys)
+                        }
+                        _ if self.types.has_param(t) => UNKNOWN,
+                        _ => {
+                            let shown = self.show(t);
+                            self.report(Diagnostic::new("T0010", span, format!("`Parameters` takes a function type, found `{shown}`")));
+                            ERROR
+                        }
+                    },
                     "ReturnType" => match *self.types.get(t) {
                         Ty::Func(_, r, _) => r,
+                        _ if self.types.has_param(t) => UNKNOWN,
                         _ => {
                             let shown = self.show(t);
                             self.report(Diagnostic::new("T0010", span, format!("`ReturnType` takes a function type, found `{shown}`")));
@@ -3536,10 +3701,18 @@ impl<'a> Checker<'a> {
     fn narrow(&mut self, local: LocalId, ty: TyId) {
         let fcx = self.fcx.last_mut().unwrap();
         let (name, declared) = (fcx.locals[local].name, fcx.locals[local].ty);
-        let changed = fcx.closure_assigned.contains(&name) || fcx.closure_mutated.contains(&name) && !self.references_only(declared);
+        let assigned_by_closure = fcx.closure_assigned.contains(&name);
+        let mutated_by_closure = fcx.closure_mutated.contains(&name);
+        let changed = assigned_by_closure || mutated_by_closure && !self.references_only(declared);
+        // (a TypeScript module's `let` a closure assigns narrows as TypeScript's does, until the
+        // next call, which could run the closure: see `invalidate_heap`)
+        let ts_narrows = assigned_by_closure && self.ts_module();
         let fcx = self.fcx.last_mut().unwrap();
-        if changed && ty != declared {
+        if changed && ty != declared && !ts_narrows {
             return;
+        }
+        if ts_narrows && ty != declared && !fcx.closure_narrowed.contains(&local) {
+            fcx.closure_narrowed.push(local);
         }
         // (where another local of the same name hides it, as a closure's parameter hides a
         // script variable: beneath that one, right after its own latest entry)
@@ -3733,6 +3906,50 @@ pub(crate) fn returns_value(ast: &Ast, s: StmtId) -> bool {
         StmtKind::If(_, t, e) => returns_value(ast, *t) || e.map(|e| returns_value(ast, e)).unwrap_or(false),
         StmtKind::While(_, b) | StmtKind::DoWhile(b, _) | StmtKind::ForOf { body: b, .. } | StmtKind::For { body: b, .. } => returns_value(ast, *b),
         StmtKind::Switch(_, cases) => cases.iter().any(|c| c.body.iter().any(|&x| returns_value(ast, x))),
+        _ => false,
+    }
+}
+
+/// A class's name as written: a local class's (`C$$3`, see the parser's `lift_classes`) or a
+/// namespace's (`N$$C`) without what made it the module's own.
+fn shown_class_name(n: &str) -> String {
+    match n.rsplit_once("$$") {
+        Some((a, b)) if b.chars().all(|c| c.is_ascii_digit()) => a.to_string(),
+        Some((_, b)) => b.to_string(),
+        None => n.to_string(),
+    }
+}
+
+/// The `infer X` names in a type.
+fn collect_infers(ast: &ast::Ast, te: ast::TypeId, out: &mut Vec<Sym>) {
+    match &ast.ty(te).kind {
+        TypeExprKind::Infer(x) => out.push(*x),
+        TypeExprKind::Named { args, .. } => args.iter().for_each(|&a| collect_infers(ast, a, out)),
+        TypeExprKind::Array(e) | TypeExprKind::Keyof(e) => collect_infers(ast, *e, out),
+        TypeExprKind::Union(ms) | TypeExprKind::Intersection(ms) => ms.iter().for_each(|&m| collect_infers(ast, m, out)),
+        TypeExprKind::Record(fs) => fs.iter().for_each(|f| collect_infers(ast, f.ty, out)),
+        TypeExprKind::Func(ps, r, _) => {
+            ps.iter().filter_map(|p| p.ty).for_each(|t| collect_infers(ast, t, out));
+            collect_infers(ast, *r, out);
+        }
+        TypeExprKind::Access(a, b) => {
+            collect_infers(ast, *a, out);
+            collect_infers(ast, *b, out);
+        }
+        _ => {}
+    }
+}
+
+/// A type written with type-level operators (conditional, mapped, `keyof`, indexed): a generic
+/// alias of one is made again for each use, with its arguments (see `resolve_named`).
+pub(crate) fn type_level(ast: &ast::Ast, te: ast::TypeId) -> bool {
+    match &ast.ty(te).kind {
+        TypeExprKind::Cond { .. } | TypeExprKind::Mapped { .. } | TypeExprKind::Keyof(_) | TypeExprKind::Access(..) | TypeExprKind::Infer(_) => true,
+        TypeExprKind::Named { args, .. } => args.iter().any(|&a| type_level(ast, a)),
+        TypeExprKind::Array(e) => type_level(ast, *e),
+        TypeExprKind::Union(ms) | TypeExprKind::Intersection(ms) => ms.iter().any(|&m| type_level(ast, m)),
+        TypeExprKind::Record(fs) => fs.iter().any(|f| type_level(ast, f.ty)),
+        TypeExprKind::Func(ps, r, _) => ps.iter().filter_map(|p| p.ty).any(|t| type_level(ast, t)) || type_level(ast, *r),
         _ => false,
     }
 }

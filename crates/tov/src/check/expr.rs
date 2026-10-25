@@ -327,6 +327,16 @@ impl<'a> Checker<'a> {
                 let t = self.call(e, *callee, type_args, args, *optional, exp, span);
                 // The callee may change class instances through any reference.
                 self.invalidate_heap();
+                // (and run closures, unless it's a built-in method given none: `xs.at(-1)`)
+                let builtin = matches!(self.facts_mut().and_then(|f| f.calls.get(&e)).map(|c| &c.callee), Some(Callee::Method(_)) | Some(Callee::Builtin { .. }));
+                let arg_tys: Vec<TyId> = match self.facts_mut() {
+                    Some(f) => args.iter().map(|a| f.expr_ty[a.expr as usize]).collect(),
+                    None => Vec::new(),
+                };
+                let given_fn = args.iter().any(|a| matches!(self.ast().expr(a.expr).kind, ExprKind::Arrow(_))) || arg_tys.iter().any(|&t| matches!(self.types.get(t), Ty::Func(..)));
+                if !builtin || given_fn {
+                    self.forget_closure_narrowings();
+                }
                 if let Some(f) = self.facts_mut()
                     && let Some(c) = f.calls.get_mut(&e)
                 {
@@ -352,6 +362,7 @@ impl<'a> Checker<'a> {
             ExprKind::New { callee, type_args, args } => {
                 let t = self.new_expr(e, *callee, type_args, args, exp, span);
                 self.invalidate_heap();
+                self.forget_closure_narrowings();
                 t
             }
             ExprKind::Member { obj, name, name_span, optional } => {
@@ -533,6 +544,12 @@ impl<'a> Checker<'a> {
                     self.blame(&sites);
                 }
                 if src == ERROR || target == ERROR || src == UNKNOWN || self.assignable(src, target) || self.assignable(target, src) {
+                    return target;
+                }
+                // (`out as R` of a type parameter with no bound, or from one: any type may be it,
+                // as TypeScript allows; each instance casts its own types)
+                let free = |c: &Self, t: TyId| matches!(*c.types.get(t), Ty::Param(p) if c.gparam(p).bound.is_none() && c.gparam(p).ctor.is_none());
+                if free(self, target) || free(self, src) {
                     return target;
                 }
                 // `user as typeof user & { missing?: string }`: the record with the fields it
@@ -4480,6 +4497,11 @@ impl<'a> Checker<'a> {
                 let is_field = self.flat_members(base).iter().all(|&m| self.field_of(m, name).is_some());
                 let result = if is_field {
                     let ft = self.member_of(base, name, name_span, span, obj).unwrap_or(ERROR);
+                    // (`o.cb ? o.cb(x) : ...`: the field as narrowed there)
+                    let ft = match self.target_of(callee).map(|(_, t)| t) {
+                        Some(n) if n != ft && self.assignable(n, ft) => n,
+                        _ => ft,
+                    };
                     if let Some(f) = self.facts_mut() {
                         f.expr_ty[callee as usize] = ft;
                     }
@@ -5604,6 +5626,8 @@ impl<'a> Checker<'a> {
         let ast = self.ast();
         match &ast.expr(e).kind {
             ExprKind::Paren(x) => self.narrowings(*x, positive),
+            // `if (token = next())`: the variable, as just assigned, tested
+            ExprKind::Assign(AssignOp::Assign, t, _) if matches!(ast.expr(*t).kind, ExprKind::Ident(_)) => self.narrowings(*t, positive),
             ExprKind::Unary(UnOp::Not, x) => self.narrowings(*x, !positive),
             ExprKind::Binary(BinOp::And, l, r) if positive => {
                 let mut v = self.narrowings(*l, true);

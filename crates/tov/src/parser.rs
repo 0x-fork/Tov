@@ -20,7 +20,7 @@ pub fn parse(src: &str, file: FileId, interner: &mut Interner) -> (Ast, Vec<Diag
             lexed.tokens[i].kind = Tok::Ident;
         }
     }
-    let mut p = Parser { src, toks: lexed.tokens, strings: lexed.strings, pos: 0, file, interner, ast: Ast::default(), diags, script_stmts: Vec::new(), defaults: Vec::new(), more_stmts: Vec::new(), hidden: 0, prologue: Vec::new(), index_sig: None, call_sig: None, local_fns: Vec::new(), prop_defaults: false, var_frames: Vec::new(), extra_members: Vec::new(), generic_arrows: Vec::new(), local_types: Vec::new(), local_type_items: Vec::new(), local_classes: Vec::new(), runtime_tests: false, chai: false, lifted: Vec::new(), classes: Vec::new() };
+    let mut p = Parser { src, toks: lexed.tokens, strings: lexed.strings, pos: 0, file, interner, ast: Ast::default(), diags, script_stmts: Vec::new(), defaults: Vec::new(), more_stmts: Vec::new(), hidden: 0, prologue: Vec::new(), index_sig: None, mapped: None, const_strs: Vec::new(), call_sig: None, local_fns: Vec::new(), prop_defaults: false, var_frames: Vec::new(), extra_members: Vec::new(), generic_arrows: Vec::new(), local_types: Vec::new(), local_type_items: Vec::new(), local_classes: Vec::new(), runtime_tests: false, chai: false, lifted: Vec::new(), classes: Vec::new() };
     p.ast.iterator_sym = Some(p.interner.intern("__iterator"));
     // (`// @ts-expect-error`: the next line's start)
     let mut at = 0usize;
@@ -32,6 +32,7 @@ pub fn parse(src: &str, file: FileId, interner: &mut Interner) -> (Ast, Vec<Diag
         at += line.len();
     }
     p.module();
+    p.resolve_namespaces();
     p.lift_functions();
     p.lift_classes();
     p.runtime_tests();
@@ -325,6 +326,10 @@ struct Parser<'a> {
     prologue: Vec<StmtId>,
     /// The index signature `[k: K]: V` of the object type just parsed.
     index_sig: Option<(TypeId, TypeId, Span)>,
+    /// `{ [K in U]: V }`: the mapped type of the record type just parsed (see `record_fields`).
+    mapped: Option<(Sym, TypeId, TypeId, Option<bool>)>,
+    /// Top-level `const NAME = "text"` so far: a type literal's `[NAME]: T` key is that text.
+    const_strs: Vec<(Sym, Sym)>,
     /// `{ (x: number): string }`: a call signature seen in the record type being read, the
     /// function type it is.
     call_sig: Option<(TypeId, Span)>,
@@ -965,9 +970,10 @@ impl<'a> Parser<'a> {
                 self.class_decl(start, exported, true);
             }
             Tok::Enum => self.enum_decl(start, exported),
+            Tok::Namespace if self.nth(1) == Tok::Ident && self.nth(2) == Tok::LBrace => self.namespace_decl(start, exported),
             Tok::Namespace => {
                 let span = self.cur_span();
-                self.push(Diagnostic::new("X0006", span, "namespaces are not supported").note("instead", "use one module (file) per namespace"));
+                self.push(Diagnostic::new("X0006", span, "this namespace is not supported").note("supported", "`namespace N { ... }` of declarations"));
                 self.skip_decl();
             }
             Tok::Declare => {
@@ -1399,6 +1405,16 @@ impl<'a> Parser<'a> {
     fn params(&mut self) -> Vec<Param> {
         let mut out = Vec::new();
         self.expect(Tok::LParen, "to start the parameter list");
+        // (`this: T` first: what `this` is in the body, as TypeScript checks it; not a parameter)
+        if self.at(Tok::This) && self.nth(1) == Tok::Colon {
+            self.bump();
+            self.bump();
+            self.ty();
+            if !self.eat(Tok::Comma) && !self.at(Tok::RParen) {
+                let span = self.cur_span();
+                self.err("P0001", span, "expected `,` or `)` after the `this` parameter");
+            }
+        }
         while !self.at(Tok::RParen) && !self.at(Tok::Eof) {
             let rest = self.eat(Tok::DotDotDot);
             if self.at(Tok::LBrace) || self.at(Tok::LBracket) {
@@ -1814,6 +1830,11 @@ impl<'a> Parser<'a> {
             let more = self.eat(Tok::Comma);
             if !more {
                 self.terminator();
+            }
+            if !mutable
+                && let ExprKind::Str(text) = self.ast.exprs[init as usize].kind
+            {
+                self.const_strs.push((name, text));
             }
             let span = start.to(self.prev_span());
             // `const f = (n: number): number => ...`, `const id = <T>(x: T): T => x`: the function
@@ -2701,6 +2722,23 @@ impl<'a> Parser<'a> {
             let span = start.to(self.prev_span());
             return self.mk_ty(TypeExprKind::Predicate(name, t), span);
         }
+        let check = self.union_ty();
+        // `C extends E ? Y : N`: a conditional type
+        if self.at(Tok::Extends) && !self.tok().nl_before {
+            self.bump();
+            let ext = self.union_ty();
+            self.expect(Tok::Question, "in the conditional type");
+            let yes = self.ty();
+            self.expect(Tok::Colon, "in the conditional type");
+            let no = self.ty();
+            let span = start.to(self.prev_span());
+            return self.mk_ty(TypeExprKind::Cond { check, ext, yes, no }, span);
+        }
+        check
+    }
+
+    fn union_ty(&mut self) -> TypeId {
+        let start = self.cur_span();
         self.eat(Tok::Pipe);
         let first = self.intersection_ty();
         if !self.at(Tok::Pipe) {
@@ -2767,8 +2805,17 @@ impl<'a> Parser<'a> {
             Tok::LBrace => {
                 let saved = self.index_sig.take();
                 let saved_call = self.call_sig.take();
+                let saved_mapped = self.mapped.take();
                 let fields = self.record_fields();
                 let span = start.to(self.prev_span());
+                if let Some((param, src, value, optional)) = std::mem::replace(&mut self.mapped, saved_mapped) {
+                    if !fields.is_empty() {
+                        self.err("P0001", span, "a mapped type has no other members");
+                    }
+                    self.index_sig = saved;
+                    self.call_sig = saved_call;
+                    return self.mk_ty(TypeExprKind::Mapped { param, src, value, optional }, span);
+                }
                 let sig = std::mem::replace(&mut self.index_sig, saved);
                 if let Some((f, cspan)) = std::mem::replace(&mut self.call_sig, saved_call) {
                     if !fields.is_empty() || sig.is_some() {
@@ -2898,6 +2945,13 @@ impl<'a> Parser<'a> {
                 let span = start.to(self.prev_span());
                 self.mk_ty(TypeExprKind::Record(fields), span)
             }
+            // `infer X` (in a conditional type's `extends` clause)
+            Tok::Ident if self.text(self.tok()) == "infer" && self.nth(1) == Tok::Ident => {
+                self.bump();
+                let (name, _) = self.ident("a type name").unwrap();
+                let span = start.to(self.prev_span());
+                self.mk_ty(TypeExprKind::Infer(name), span)
+            }
             Tok::Ident => {
                 let t = self.bump();
                 let word = self.text(t);
@@ -2957,6 +3011,62 @@ impl<'a> Parser<'a> {
             let start = self.cur_span();
             if self.at_word("readonly") && self.nth(1) != Tok::Colon && self.nth(1) != Tok::Question {
                 self.bump(); // values are copied, so `readonly` adds nothing; accept it for familiarity
+            }
+            // `{ [K in U]?: V }`, `{ readonly [K in keyof T]-?: T[K] }`: a mapped type
+            let mod_readonly = (self.at(Tok::Plus) || self.at(Tok::Minus)) && self.nth(1) == Tok::Ident && self.text(self.toks[self.pos + 1]) == "readonly";
+            if mod_readonly {
+                self.bump();
+                self.bump();
+            }
+            if self.at(Tok::LBracket) && self.nth(1) == Tok::Ident && self.nth(2) == Tok::In {
+                self.bump();
+                let (param, _) = self.ident("a key name").unwrap();
+                self.bump(); // in
+                let src = self.ty();
+                if self.at_word("as") {
+                    let span = self.cur_span();
+                    self.err("U0011", span, "a mapped type's `as` clause is not supported yet");
+                    self.bump();
+                    self.ty();
+                }
+                self.expect(Tok::RBracket, "to close the mapped type's key");
+                let optional = if self.eat(Tok::Question) {
+                    Some(true)
+                } else if self.at(Tok::Minus) && self.nth(1) == Tok::Question {
+                    self.bump();
+                    self.bump();
+                    Some(false)
+                } else if self.at(Tok::Plus) && self.nth(1) == Tok::Question {
+                    self.bump();
+                    self.bump();
+                    Some(true)
+                } else {
+                    None
+                };
+                self.expect(Tok::Colon, "before the mapped type's value");
+                let value = self.ty();
+                self.mapped = Some((param, src, value, optional));
+                self.eat(Tok::Semi);
+                self.eat(Tok::Comma);
+                continue;
+            }
+            // `{ [KING]: boolean }` of a `const KING = "k"`: the field `k`
+            if self.at(Tok::LBracket) && self.nth(1) == Tok::Ident && self.nth(2) == Tok::RBracket {
+                let key = self.interner.intern(self.text(self.toks[self.pos + 1]));
+                if let Some(&(_, text)) = self.const_strs.iter().rev().find(|c| c.0 == key) {
+                    let name_span = self.span_of(self.toks[self.pos + 1]);
+                    self.bump();
+                    self.bump();
+                    self.bump();
+                    let optional = self.eat(Tok::Question);
+                    self.expect(Tok::Colon, "after the key");
+                    let ty = self.ty();
+                    fields.push(FieldTy { name: text, name_span, optional, ty });
+                    if !self.eat(Tok::Semi) {
+                        self.eat(Tok::Comma);
+                    }
+                    continue;
+                }
             }
             if self.at(Tok::LBracket) {
                 // `{ [k: string]: V }`: a `Record<string, V>` (a map)
@@ -3215,6 +3325,81 @@ impl<'a> Parser<'a> {
                     if matches!(e.kind, ExprKind::Ident(x) if x == n) && within(e.span, outer) {
                         e.kind = ExprKind::Ident(hidden);
                     }
+                }
+            }
+        }
+    }
+
+    /// `namespace N { ... }`: its declarations, module items named `N$$x` (a name sources don't
+    /// write, that C takes as is), found from inside by their own names and from outside as `N.x` (see
+    /// `resolve_namespaces`); exported ones are the module's exports of those names when N is.
+    fn namespace_decl(&mut self, start: Span, exported: bool) {
+        self.bump(); // namespace
+        let Some((name, _)) = self.ident("a namespace name") else { return };
+        self.expect(Tok::LBrace, "to start the namespace");
+        let first = self.ast.items.len();
+        while !self.at(Tok::RBrace) && !self.at(Tok::Eof) {
+            let p = self.pos;
+            self.item();
+            if self.pos == p {
+                self.bump();
+            }
+        }
+        self.expect(Tok::RBrace, "to close the namespace");
+        let prefix = self.interner.get(name).to_string();
+        let mut members = Vec::new();
+        for ii in first..self.ast.items.len() {
+            let item = &mut self.ast.items[ii];
+            let slot = match &mut item.kind {
+                ItemKind::Function(f) => Some(&mut f.name),
+                ItemKind::Class(c) => Some(&mut c.name),
+                ItemKind::TypeAlias { name, .. } | ItemKind::Interface { name, .. } | ItemKind::Const { name, .. } => Some(name),
+                _ => None,
+            };
+            let Some(slot) = slot else { continue };
+            let own = *slot;
+            let mangled = self.interner.intern(&format!("{prefix}$${}", self.interner.get(own)));
+            *slot = mangled;
+            item.exported = item.exported && exported;
+            members.push((own, mangled));
+        }
+        let span = start.to(self.prev_span());
+        self.ast.namespaces.push(crate::ast::Namespace { name, span, members, exported });
+    }
+
+    /// References to namespaces' members: `N.x` (a value or a type) anywhere in the module, and
+    /// `x` inside N, become the member's item name.
+    fn resolve_namespaces(&mut self) {
+        let nss: Vec<(Sym, Span, Vec<(Sym, Sym)>)> = self.ast.namespaces.iter().map(|n| (n.name, n.span, n.members.clone())).collect();
+        if nss.is_empty() {
+            return;
+        }
+        let within = |s: Span, outer: Span| s.file == outer.file && s.start >= outer.start && s.end <= outer.end;
+        let n = self.ast.exprs.len();
+        for e in 0..n {
+            let (kind, span) = (&self.ast.exprs[e].kind, self.ast.exprs[e].span);
+            let new = match kind {
+                ExprKind::Member { obj, name, optional: false, .. } => match self.ast.exprs[*obj as usize].kind {
+                    ExprKind::Ident(o) => nss.iter().find(|ns| ns.0 == o).and_then(|ns| ns.2.iter().find(|m| m.0 == *name)).map(|m| m.1),
+                    _ => None,
+                },
+                ExprKind::Ident(x) => nss.iter().find(|ns| within(span, ns.1)).and_then(|ns| ns.2.iter().find(|m| m.0 == *x)).map(|m| m.1),
+                _ => None,
+            };
+            if let Some(m) = new {
+                self.ast.exprs[e].kind = ExprKind::Ident(m);
+            }
+        }
+        for t in &mut self.ast.types {
+            let span = t.span;
+            if let TypeExprKind::Named { ns, name, .. } = &mut t.kind {
+                let m = match *ns {
+                    Some((o, _)) => nss.iter().find(|n| n.0 == o).and_then(|n| n.2.iter().find(|m| m.0 == *name)).map(|m| m.1),
+                    None => nss.iter().find(|n| within(span, n.1)).and_then(|n| n.2.iter().find(|m| m.0 == *name)).map(|m| m.1),
+                };
+                if let Some(m) = m {
+                    *ns = None;
+                    *name = m;
                 }
             }
         }
@@ -3496,7 +3681,7 @@ impl<'a> Parser<'a> {
                 let at = if self.at(Tok::Abstract) { 2 } else { 1 };
                 let name = self.interner.intern(self.text(self.toks[self.pos + at]));
                 let n = self.local_type_items.len();
-                let hidden = self.interner.intern(&format!("{}#{n}", self.interner.get(name)));
+                let hidden = self.interner.intern(&format!("{}$${n}", self.interner.get(name)));
                 self.local_types.push((name, hidden));
                 self.local_type_items.push((name, hidden));
                 let items = self.ast.items.len();
@@ -4429,12 +4614,23 @@ impl<'a> Parser<'a> {
                                 break;
                             }
                         }
-                        if !p.eat(Tok::Gt) || !p.at(Tok::LParen) {
+                        if !p.eat(Tok::Gt) {
                             return None;
                         }
-                        Some(out)
+                        // (`f<A, B>` not called, an instantiation expression: as `f`, the context
+                        // fixing its type arguments)
+                        if p.at(Tok::LParen) {
+                            Some((out, true))
+                        } else if matches!(p.kind(), Tok::RParen | Tok::Comma | Tok::Semi | Tok::Colon | Tok::RBracket | Tok::RBrace | Tok::Eof) {
+                            Some((out, false))
+                        } else {
+                            None
+                        }
                     });
-                    let Some(type_args) = targs else { return e };
+                    let Some((type_args, called)) = targs else { return e };
+                    if !called {
+                        continue;
+                    }
                     let args = self.args();
                     let span = start.to(self.prev_span());
                     e = self.call_or_new(e, type_args, args, span);
@@ -4762,11 +4958,18 @@ impl<'a> Parser<'a> {
             }
             Tok::New => {
                 self.bump();
-                let callee = if let Some((name, span)) = self.ident("a type name after `new`") {
+                let mut callee = if let Some((name, span)) = self.ident("a type name after `new`") {
                     self.mk_expr(ExprKind::Ident(name), span)
                 } else {
                     return self.mk_expr(ExprKind::Error, start);
                 };
+                // (`new ns.C()`, `new N.Box()`)
+                while self.at(Tok::Dot) && self.nth(1) == Tok::Ident {
+                    self.bump();
+                    let (name, name_span) = self.ident("a name").unwrap();
+                    let span = self.ast.exprs[callee as usize].span.to(name_span);
+                    callee = self.mk_expr(ExprKind::Member { obj: callee, name, name_span, optional: false }, span);
+                }
                 let mut type_args = Vec::new();
                 if self.at(Tok::Lt) {
                     self.bump();

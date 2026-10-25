@@ -909,6 +909,17 @@ impl<'a> Checker<'a> {
 
     /// Forgets what a call may have changed: every narrowing of a path through a class
     /// instance, and every narrowing of a mutable global (any callee can reassign one).
+    /// A call that may run a closure: the locals closures assign, narrowed, are as declared again.
+    pub(super) fn forget_closure_narrowings(&mut self) {
+        if self.fcx.is_empty() {
+            return;
+        }
+        for id in std::mem::take(&mut self.fcx().closure_narrowed) {
+            let declared = self.local(id).ty;
+            self.narrow(id, declared);
+        }
+    }
+
     pub(super) fn invalidate_heap(&mut self) {
         let paths = std::mem::take(&mut self.fcx().heap_paths);
         // (TypeScript keeps them, `if (this.head) { log(); this.head.value }`: so does a
