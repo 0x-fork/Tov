@@ -36,6 +36,9 @@ pub struct Rewrites {
     pub(crate) tuple_places: Vec<(u32, ExprId, crate::intern::Sym)>,
     /// `g.next().value` where a value must be: `g.next().value!` (module, expression).
     pub(crate) nonnulls: Vec<(u32, ExprId)>,
+    /// A callback's value where a `boolean` is wanted (`xs.filter(o => o.note)`): `!!(x)`, its
+    /// truthiness, as JavaScript tests it (module, the arrow's body).
+    pub(crate) truthy: Vec<(u32, ExprId)>,
     /// `m as { a: T, b?: U }` of a `Record<string, V>`: (module, the cast, `m`, each field and
     /// whether it may be absent).
     pub(crate) record_casts: Vec<(u32, ExprId, ExprId, Vec<(crate::intern::Sym, bool)>)>,
@@ -77,7 +80,7 @@ pub struct Rewrites {
 
 impl Rewrites {
     pub fn is_empty(&self) -> bool {
-        self.args.is_empty() && self.prims.is_empty() && self.tuple_places.is_empty() && self.nonnulls.is_empty() && self.record_casts.is_empty() && self.records.is_empty() && self.fn_values.is_empty() && self.enum_names.is_empty() && self.rests.is_empty() && self.setters.is_empty() && self.static_calls.is_empty() && self.logical.is_empty() && self.widen_casts.is_empty() && self.assigns.is_empty() && self.identities.is_empty() && self.keyed_places.is_empty() && self.iterators.is_empty() && self.consts.is_empty() && self.items.is_empty() && self.awaits.is_empty() && self.calls.is_empty() && self.elems.is_empty() && self.keys.is_empty() && self.spreads.is_empty() && self.keyed.is_empty()
+        self.args.is_empty() && self.truthy.is_empty() && self.prims.is_empty() && self.tuple_places.is_empty() && self.nonnulls.is_empty() && self.record_casts.is_empty() && self.records.is_empty() && self.fn_values.is_empty() && self.enum_names.is_empty() && self.rests.is_empty() && self.setters.is_empty() && self.static_calls.is_empty() && self.logical.is_empty() && self.widen_casts.is_empty() && self.assigns.is_empty() && self.identities.is_empty() && self.keyed_places.is_empty() && self.iterators.is_empty() && self.consts.is_empty() && self.items.is_empty() && self.awaits.is_empty() && self.calls.is_empty() && self.elems.is_empty() && self.keys.is_empty() && self.spreads.is_empty() && self.keyed.is_empty()
     }
 
     pub(crate) fn extend(&mut self, o: Rewrites) {
@@ -93,6 +96,7 @@ impl Rewrites {
         self.prims.extend(o.prims);
         self.tuple_places.extend(o.tuple_places);
         self.nonnulls.extend(o.nonnulls);
+        self.truthy.extend(o.truthy);
         self.record_casts.extend(o.record_casts);
         self.records.extend(o.records);
         self.fn_values.extend(o.fn_values);
@@ -503,6 +507,18 @@ pub fn apply(modules: &mut [Module], rw: &Rewrites) -> bool {
             ast.exprs[x as usize].kind = ExprKind::Member { obj, name: field, name_span, optional: false };
             changed = true;
         }
+    }
+    for &(m, x) in &rw.truthy {
+        // `o => o.note` → `o => !!(o.note)`: the body's node becomes the double negation of a copy
+        let ast = &mut modules[m as usize].ast;
+        let span = ast.exprs[x as usize].span;
+        let inner = crate::ast::Expr { kind: std::mem::replace(&mut ast.exprs[x as usize].kind, ExprKind::Error), span };
+        ast.exprs.push(inner);
+        let copy = ast.exprs.len() as ExprId - 1;
+        ast.exprs.push(crate::ast::Expr { kind: ExprKind::Unary(crate::ast::UnOp::Not, copy), span });
+        let not = ast.exprs.len() as ExprId - 1;
+        ast.exprs[x as usize].kind = ExprKind::Unary(crate::ast::UnOp::Not, not);
+        changed = true;
     }
     for &(m, x, method) in &rw.prims {
         // `Number(x)` → `Number(x.valueOf())`: the node becomes the call, on a copy of itself

@@ -3533,7 +3533,13 @@ impl<'a> Checker<'a> {
                 } else {
                     t
                 };
-                if let Some(r) = declared_ret {
+                // (a value where a `boolean` is wanted, a predicate `o => o.note`: its truthiness)
+                let truthy = declared_ret.is_none() && exp_ret == Some(BOOL) && !matches!(self.types.get(t), Ty::Bool | Ty::BoolLit(_) | Ty::Error | Ty::Void | Ty::Never) && self.printable(t);
+                if truthy {
+                    let m = self.cur;
+                    self.rewrites.truthy.push((m, *x));
+                    BOOL
+                } else if let Some(r) = declared_ret {
                     let s = self.ast().expr(*x).span;
                     self.flow(ret_sites, |c| c.expect_assignable(t, r, s, None));
                     r
