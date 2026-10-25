@@ -44,6 +44,7 @@ typedef struct tv_re {
      * the expression compiled sticky; NULL when it can start with anything. */
     uint8_t *bc1;
     bool anchored;
+    bool afirst;         /* anchored, and `first` holds the bytes a match can start with */
     int lead;            /* the one byte `first` holds, or -1 */
     int simple_one;      /* the one byte `set` holds, or -1 */
     tv_arr names;        /* reNames' answer, made once (p NULL until then) */
@@ -371,51 +372,103 @@ static void tv_re_skip_branch(const char *src, size_t n, size_t *ip) {
 
 /* The bytes the alternatives at src[*i] can start with, into set (*i past them: at the `)` that
  * ends them, or the end); false when one can be empty or start with something not known here. */
+/* Past a quantifier at src[*ip] (`?`, `*`, `+`, `{m}`, `{m,}`, `{m,n}`, each lazy too): whether
+ * it lets its atom match nothing; no quantifier: false. */
+static bool tv_re_skip_quant(const char *src, size_t n, size_t *ip) {
+    size_t i = *ip;
+    bool nullable = false;
+    if (i < n && (src[i] == '?' || src[i] == '*')) {
+        nullable = true;
+        i++;
+    } else if (i < n && src[i] == '+') {
+        i++;
+    } else if (i < n && src[i] == '{') {
+        size_t j = i + 1;
+        if (j < n && src[j] >= '0' && src[j] <= '9') {
+            bool zero = src[j] == '0';
+            while (j < n && src[j] >= '0' && src[j] <= '9') { if (src[j] != '0') zero = false; j++; }
+            if (j < n && src[j] == ',') { j++; while (j < n && src[j] >= '0' && src[j] <= '9') j++; }
+            if (j < n && src[j] == '}') {
+                nullable = zero;
+                i = j + 1;
+            }
+        }
+    } else {
+        return false;
+    }
+    if (i < n && src[i] == '?') i++;
+    *ip = i;
+    return nullable;
+}
+
+/* The bytes the alternatives at src[*i] can start with, into set (*i past them: at the `)` that
+ * ends them, or the end); false when one can be empty or start with something not known here.
+ * Within a branch, an item that may match nothing (`a?`, ` {0,3}`, a lookaround, `\b`) adds its
+ * bytes and the next item's. */
 static bool tv_re_first_alts(const tv_re *r, const char *src, size_t n, size_t *ip, bool set[128], int depth) {
     if (depth > 8) return false;
     size_t i = *ip;
     for (;;) {
-        bool atom[128] = {0};
-        if (i >= n || src[i] == '|' || src[i] == ')') return false; /* (an empty branch) */
-        unsigned char c = (unsigned char)src[i];
-        if (c >= 128) return false;
-        if (c == '(') {
-            if (i + 2 < n && src[i + 1] == '?') {
-                if (src[i + 2] == ':') i += 3;
-                else if (src[i + 2] == '<' && i + 3 < n && src[i + 3] != '=' && src[i + 3] != '!') {
-                    const char *e = memchr(src + i, '>', n - i);
-                    if (!e) return false;
-                    i = (size_t)(e - src) + 1;
+        for (;;) {
+            bool atom[128] = {0};
+            if (i >= n || src[i] == '|' || src[i] == ')') return false; /* (a branch that can be empty) */
+            unsigned char c = (unsigned char)src[i];
+            if (c >= 128) return false;
+            bool zero_width = false;
+            if (c == '(') {
+                if (i + 2 < n && src[i + 1] == '?' && (src[i + 2] == '=' || src[i + 2] == '!' || (src[i + 2] == '<' && i + 3 < n && (src[i + 3] == '=' || src[i + 3] == '!')))) {
+                    /* (a lookaround: matches no characters; what follows starts the match) */
+                    size_t j = i + 1;
+                    tv_re_skip_branch(src, n, &j);
+                    while (j < n && src[j] == '|') { j++; tv_re_skip_branch(src, n, &j); }
+                    if (j >= n || src[j] != ')') return false;
+                    i = j + 1;
+                    zero_width = true;
                 } else {
-                    return false; /* (lookarounds) */
+                    if (i + 2 < n && src[i + 1] == '?') {
+                        if (src[i + 2] == ':') i += 3;
+                        else if (src[i + 2] == '<') {
+                            const char *e = memchr(src + i, '>', n - i);
+                            if (!e) return false;
+                            i = (size_t)(e - src) + 1;
+                        } else {
+                            return false;
+                        }
+                    } else {
+                        i++;
+                    }
+                    if (!tv_re_first_alts(r, src, n, &i, atom, depth + 1)) return false;
+                    if (i >= n || src[i] != ')') return false;
+                    i++;
                 }
+            } else if (c == '[') {
+                if (!tv_re_class_at(r, src, n, &i, atom)) return false;
+            } else if (c == '\\') {
+                if (i + 1 >= n) return false;
+                if (src[i + 1] == 'b' || src[i + 1] == 'B') {
+                    i += 2;
+                    zero_width = true;
+                } else {
+                    if (!tv_re_class_escape(src[i + 1], atom)) {
+                        int e = tv_re_escaped_char(src[i + 1]);
+                        if (e < 0) return false; /* (back references, \u, \x, \p, ...) */
+                        atom[e] = true;
+                    }
+                    i += 2;
+                }
+            } else if (strchr(".^$*+?{}|)]", (char)c)) {
+                return false;
             } else {
+                atom[c] = true;
                 i++;
             }
-            if (!tv_re_first_alts(r, src, n, &i, atom, depth + 1)) return false;
-            if (i >= n || src[i] != ')') return false;
-            i++;
-        } else if (c == '[') {
-            if (!tv_re_class_at(r, src, n, &i, atom)) return false;
-        } else if (c == '\\') {
-            if (i + 1 >= n) return false;
-            if (!tv_re_class_escape(src[i + 1], atom)) {
-                int e = tv_re_escaped_char(src[i + 1]);
-                if (e < 0) return false; /* (\b, back references, \u, \x, \p, ...) */
-                atom[e] = true;
-            }
-            i += 2;
-        } else if (strchr(".^$*+?{}|)]", (char)c)) {
-            return false;
-        } else {
-            atom[c] = true;
-            i++;
+            if (zero_width) continue;
+            bool nullable = tv_re_skip_quant(src, n, &i);
+            if (r->flags & LRE_FLAG_IGNORECASE)
+                for (int k = 'a'; k <= 'z'; k++) if (atom[k] || atom[k - 32]) atom[k] = atom[k - 32] = true;
+            for (int k = 0; k < 128; k++) set[k] |= atom[k];
+            if (!nullable) break;
         }
-        /* (a quantifier that lets the atom match nothing: the next atom could start the match) */
-        if (i < n && (src[i] == '?' || src[i] == '*' || (src[i] == '{' && i + 1 < n && src[i + 1] == '0'))) return false;
-        if (r->flags & LRE_FLAG_IGNORECASE)
-            for (int k = 'a'; k <= 'z'; k++) if (atom[k] || atom[k - 32]) atom[k] = atom[k - 32] = true;
-        for (int k = 0; k < 128; k++) set[k] |= atom[k];
         tv_re_skip_branch(src, n, &i);
         if (i < n && src[i] == '|') {
             i++;
@@ -434,15 +487,29 @@ static bool tv_re_first_parse(tv_re *r, const char *src, size_t n) {
     if (n > 0 && src[0] == '^') {
         /* (`^a|^b`: every alternative anchored; `^a|b` isn't) */
         size_t i = 0;
+        char *rest = malloc(n + 1);
+        size_t rn = 0;
         for (;;) {
-            if (i >= n || src[i] != '^') return false;
+            if (i >= n || src[i] != '^') { free(rest); return false; }
             i++;
+            size_t b = i;
             tv_re_skip_branch(src, n, &i);
+            memcpy(rest + rn, src + b, i - b);
+            rn += i - b;
             if (i >= n) break;
-            if (src[i] != '|') return false;
+            if (src[i] != '|') { free(rest); return false; }
+            rest[rn++] = '|';
             i++;
         }
         r->anchored = true;
+        /* (and what the alternatives after their `^` can start with: a start that can't, no try) */
+        bool set[128] = {0};
+        size_t j = 0;
+        if (!(r->flags & LRE_FLAG_MULTILINE) && tv_re_first_alts(r, rest, rn, &j, set, 0) && j == rn) {
+            memcpy(r->first, set, sizeof set);
+            r->afirst = true;
+        }
+        free(rest);
         return true;
     }
     bool set[128] = {0};
@@ -483,6 +550,9 @@ static bool tv_re_find(const tv_re *r, uint8_t **cap, const uint8_t *buf, tv_int
         bool ml = r->flags & LRE_FLAG_MULTILINE;
         for (tv_int i = from; i <= n; i++) {
             if (r->anchored) {
+                if (r->afirst && i == 0) {
+                    if (i < n && !r->first[buf[i]]) return false;
+                }
                 if (i > 0 && !(ml && (buf[i - 1] == '\n' || buf[i - 1] == '\r'))) {
                     if (!ml) return false;
                     const uint8_t *nl = memchr(buf + i, '\n', (size_t)(n - i)), *cr = memchr(buf + i, '\r', (size_t)(n - i));
@@ -627,6 +697,7 @@ tv_int tv_native_reCompile(tv_str source, tv_str flags) {
     r->bc1 = NULL;
     r->names = (tv_arr){NULL};
     r->anchored = false;
+    r->afirst = false;
     r->lead = -1;
     r->lin = NULL;
     if (!r->simple) {

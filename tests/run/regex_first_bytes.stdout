@@ -1,0 +1,14 @@
+^ {0,3}#{1,6}  "   ## title" [ 0, '   ## ' ]
+^ {0,3}#{1,6}  "    ## code" null
+^(?:\*+|_+)x "**x" [ 0, '**x' ]
+^<!--|^<\/[a-z]+>|^<[a-z]+> "</div> rest" [ 0, '</div>' ]
+^<!--|^<\/[a-z]+>|^<[a-z]+> "text <b>" null
+a?b "xxab" [ 2, 'ab' ]
+(?=\w)\d+ "ab 12" [ 3, '12' ]
+\bfoo "xfoo foo" [ 5, 'foo' ]
+c{0,2}d "ccd" [ 0, 'ccd' ]
+(?:ab)*c "ababc" [ 0, 'ababc' ]
+x*?y "zzxxy" [ 2, 'xxy' ]
+^ *([^\n ].*)\n "  head\nnext" [ 0, '  head\n' ]
+^(?!\s)[a-z]+ " no" null
+^(?!\s)[a-z]+ "yes" [ 0, 'yes' ]
