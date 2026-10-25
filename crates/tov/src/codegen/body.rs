@@ -6667,17 +6667,35 @@ impl<'c, 'a> Gen<'c, 'a> {
         let (le, re) = (strip(self, l), strip(self, r));
         // (`s[i] === s[i - 1]` past either end: `undefined`, equal to nothing but another such read)
         if matches!(op, BinOp::Eq | BinOp::Ne) {
-            let str_read = |c: &Self, e: ExprId| -> Option<(ExprId, ExprId)> {
+            // (a string's character, or an element of an array of strings, `toks[i] === "*"`)
+            let str_read = |c: &Self, e: ExprId| -> Option<(ExprId, ExprId, bool)> {
                 let ExprKind::Index { obj, index, optional: false } = c.ast(m).expr(e).kind else { return None };
                 let ot = c.facts(m).expr_ty.get(obj as usize).copied().unwrap_or(ERROR);
-                (matches!(c.c.types.get(ot), Ty::Str | Ty::StrLit(_)) && c.harmless(obj)).then_some((obj, index))
+                if !c.harmless(obj) {
+                    return None;
+                }
+                match *c.c.types.get(ot) {
+                    Ty::Str | Ty::StrLit(_) => Some((obj, index, false)),
+                    Ty::Array(et) if et == STR => Some((obj, index, true)),
+                    _ => None,
+                }
             };
             let is_str = |c: &Self, e: ExprId| c.c.types.is_string(c.facts(m).expr_ty.get(e as usize).copied().unwrap_or(ERROR));
             let (rl, rr) = (str_read(self, le), str_read(self, re));
             if (rl.is_some() || rr.is_some()) && is_str(self, le) && is_str(self, re) {
-                let side = |c: &mut Self, read: Option<(ExprId, ExprId)>, e: ExprId| -> (String, Val) {
+                let side = |c: &mut Self, read: Option<(ExprId, ExprId, bool)>, e: ExprId| -> (String, Val) {
                     match read {
-                        Some((obj, index)) => {
+                        Some((obj, index, true)) => {
+                            let av = c.expr(obj);
+                            let i = c.expr(index);
+                            let i = c.int_code(i);
+                            let (iv, ok) = (c.fresh("ix"), c.fresh("in"));
+                            c.line(format!("tv_int {iv} = {i}; bool {ok} = (uint64_t){iv} < (uint64_t)tv_arr_len({});", av.code));
+                            let ev = c.fresh("e");
+                            c.line(format!("tv_str {ev} = {ok} ? ((tv_str *)tv_arr_data({}))[{iv}] : TV_EMPTY_STR;", av.code));
+                            (ok, Val::plain(ev, STR))
+                        }
+                        Some((obj, index, false)) => {
                             let sv = c.expr(obj);
                             let sv = c.coerce(sv, STR);
                             let i = c.expr(index);

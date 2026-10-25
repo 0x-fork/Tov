@@ -336,7 +336,12 @@ impl<'c, 'a> Gen<'c, 'a> {
             return None;
         }
         let it = self.itab_type(v.ty);
-        let r = self.tmp(members[k].ty, &format!("((const {it} *)({0}).t)->m{k}(({0}).p)", v.code), true);
+        let ft = members[k].ty;
+        let r = self.tmp(ft, &format!("((const {it} *)({0}).t)->m{k}(({0}).p)", v.code), true);
+        // (narrowed, `if (n.ch !== undefined) n.ch`: the member of its union, as for a record's field)
+        if self.c.assignable_pub(ty, ft) && ty != ft && !self.c.assignable_pub(ft, ty) {
+            return Some(self.project(r, ty));
+        }
         Some(self.coerce(r, ty))
     }
 
