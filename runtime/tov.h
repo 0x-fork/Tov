@@ -304,7 +304,7 @@ static inline tv_int tv_str_char_code_at(tv_str s, tv_int i) {
     return tv_str_char_code_at_slow(s, i);
 }
 tv_int tv_str_code_point_at(tv_str s, tv_int i);            /* -1 out of range */
-bool tv_str_next_char(tv_str s, tv_int *pos, tv_str *out);   /* for...of: the next code point, owned */
+bool tv_str_next_char_slow(tv_str s, tv_int *pos, tv_str *out); /* for...of: the next code point, owned (see tv_str_next_char) */
 tv_str tv_str_unit_at_slow(tv_str s, tv_int i);
 tv_str tv_str_char_at(tv_str s, tv_int i);                  /* charAt: "" out of range */
 tv_str tv_str_from_char_code(tv_int c);                     /* String.fromCharCode(c) */
@@ -385,6 +385,19 @@ static inline tv_str tv_str_unit_at(tv_str s, tv_int i) {
         if (c - 32u < 96u) return tv_ascii_str(c);
     }
     return tv_str_unit_at_slow(s, i);
+}
+/* for...of: the next code point, owned; a printable ASCII one inline (the shared string). */
+static inline bool tv_str_next_char(tv_str s, tv_int *pos, tv_str *out) {
+    tv_int i = *pos;
+    if (__builtin_expect(i < (tv_int)s.p->len, 1)) {
+        unsigned char c = (unsigned char)s.p->data[i];
+        if (__builtin_expect(c - 32u < 96u, 1)) {
+            *out = tv_ascii_str(c);
+            *pos = i + 1;
+            return true;
+        }
+    }
+    return tv_str_next_char_slow(s, pos, out);
 }
 static inline tv_str tv_str_substring(tv_str s, tv_int start, tv_int end, bool has_end) {
     /* (one ASCII character, `s.substring(i, i + 1)`: the shared one-character string) */

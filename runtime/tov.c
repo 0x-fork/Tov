@@ -2018,7 +2018,7 @@ static tv_arrbuf *tv_arrbuf_new(size_t esize, int64_t cap);
 
 /* `for (const ch of s)`: the code point at byte *pos as a string, *pos moved past it; false at
  * the end. (No array of them: printable ASCII characters are immortal strings.) */
-bool tv_str_next_char(tv_str s, tv_int *pos, tv_str *out) {
+bool tv_str_next_char_slow(tv_str s, tv_int *pos, tv_str *out) {
     size_t n = (size_t)s.p->len, i = (size_t)*pos;
     if (i >= n) return false;
     const char *d = s.p->data;
@@ -3162,10 +3162,12 @@ static inline double tv_canon_f64(double x) {
     return x;
 }
 
-static inline uint64_t tv_key_hash(const tv_type *kt, const void *key) {
+static inline __attribute__((always_inline)) uint64_t tv_key_hash(const tv_type *kt, const void *key) {
     if (kt == &tv_type_int) return tv_mix64(*(const uint64_t *)key) | TV_LIVE_BIT;
     if (kt == &tv_type_str) { /* (the common key: hashed here, not through the table) */
         const tv_strbuf *b = ((const tv_str *)key)->p;
+        /* (a one-character key, `counts.get(ch)`: its byte mixed, without the general hash) */
+        if (b->len == 1) return tv_mix64((unsigned char)b->data[0] ^ UINT64_C(0x9e3779b97f4a7c15)) | TV_LIVE_BIT;
         return tv_hash_bytes(b->data, (size_t)b->len) | TV_LIVE_BIT;
     }
     /* (the high bits folded down: an object key's hash is its address times a constant, whose
