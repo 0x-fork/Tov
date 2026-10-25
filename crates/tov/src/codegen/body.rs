@@ -1243,7 +1243,9 @@ impl<'c, 'a> Gen<'c, 'a> {
                     None => ("0".to_string(), "false"),
                 };
                 let loc = self.loc(self.expr_span(call));
+                // (a local narrowed to the map, `if (!m) m = new Map()`: its map, not the union it's kept in)
                 let mp = self.place(mobj);
+                let mp = self.project_place(mp, mt);
                 let lv = self.place_lvalue(&mp);
                 self.line(format!("bool {ins}; {vct} *{slot} = ({vct} *)tv_map_slot_slice(&{lv}, {vd}, {}, {a}, {b}, {has_end}, {loc}, &{ins});", sv.code));
             }
@@ -1256,6 +1258,7 @@ impl<'c, 'a> Gen<'c, 'a> {
                 let key = self.fresh("key");
                 self.line(format!("{kct} {key} = {kc};"));
                 let mp = self.place(mobj);
+                let mp = self.project_place(mp, mt);
                 let lv = self.place_lvalue(&mp);
                 self.line(format!("bool {ins}; {vct} *{slot} = ({vct} *)tv_map_slot(&{lv}, {kd}, {vd}, &{key}, &{ins});"));
             }
@@ -6662,6 +6665,42 @@ impl<'c, 'a> Gen<'c, 'a> {
             e
         };
         let (le, re) = (strip(self, l), strip(self, r));
+        // (`s[i] === s[i - 1]` past either end: `undefined`, equal to nothing but another such read)
+        if matches!(op, BinOp::Eq | BinOp::Ne) {
+            let str_read = |c: &Self, e: ExprId| -> Option<(ExprId, ExprId)> {
+                let ExprKind::Index { obj, index, optional: false } = c.ast(m).expr(e).kind else { return None };
+                let ot = c.facts(m).expr_ty.get(obj as usize).copied().unwrap_or(ERROR);
+                (matches!(c.c.types.get(ot), Ty::Str | Ty::StrLit(_)) && c.harmless(obj)).then_some((obj, index))
+            };
+            let is_str = |c: &Self, e: ExprId| c.c.types.is_string(c.facts(m).expr_ty.get(e as usize).copied().unwrap_or(ERROR));
+            let (rl, rr) = (str_read(self, le), str_read(self, re));
+            if (rl.is_some() || rr.is_some()) && is_str(self, le) && is_str(self, re) {
+                let side = |c: &mut Self, read: Option<(ExprId, ExprId)>, e: ExprId| -> (String, Val) {
+                    match read {
+                        Some((obj, index)) => {
+                            let sv = c.expr(obj);
+                            let sv = c.coerce(sv, STR);
+                            let i = c.expr(index);
+                            let i = c.int_code(i);
+                            let (iv, ok) = (c.fresh("ix"), c.fresh("in"));
+                            c.line(format!("tv_int {iv} = {i}; bool {ok} = (uint64_t){iv} < (uint64_t)tv_str_length({});", sv.code));
+                            let v = c.tmp(STR, &format!("({ok} ? tv_str_unit_at({}, {iv}) : TV_EMPTY_STR)", sv.code), true);
+                            (ok, v)
+                        }
+                        None => {
+                            let v = c.expr(e);
+                            let v = c.coerce(v, STR);
+                            let v = c.own(v);
+                            ("true".to_string(), v)
+                        }
+                    }
+                };
+                let (okl, lv) = side(self, rl, l);
+                let (okr, rv) = side(self, rr, r);
+                let eq = format!("((({okl}) && ({okr}) && tv_str_eq({}, {})) || (!({okl}) && !({okr})))", lv.code, rv.code);
+                return Some(Val::plain(if op == BinOp::Eq { eq } else { format!("(!{eq})") }, BOOL));
+            }
+        }
         let read = |c: &Self, e: ExprId| -> Option<(ExprId, ExprId, TyId)> {
             let ExprKind::Index { obj, index, .. } = c.ast(m).expr(e).kind else { return None };
             let ot = c.facts(m).expr_ty.get(obj as usize).copied().unwrap_or(ERROR);
@@ -7250,7 +7289,10 @@ impl<'c, 'a> Gen<'c, 'a> {
         };
         if let Some((obj, index, k, v)) = map_target {
             let (kd, vd, kct, vct) = (self.desc(k), self.desc(v), self.ctype(k), self.ctype(v));
+            // (a local narrowed to the map: its map, not the union it's kept in)
             let mp = self.place(obj);
+            let mt = self.c.types.intern(Ty::Map(k, v));
+            let mp = self.project_place(mp, mt);
             let kv = self.expr(index);
             let kv = self.coerce(kv, k);
             let kv = self.own(kv);
