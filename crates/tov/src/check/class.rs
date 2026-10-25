@@ -756,7 +756,10 @@ impl<'a> Checker<'a> {
             let (b0, o0) = (self.types.without_undefined(b.ty), self.types.without_undefined(o.ty));
             let (bi, oi) = (self.types.is_int(b0), self.types.is_int(o0));
             let (bf, of) = (self.types.is_float(b0), self.types.is_float(o0));
-            if !(bi && of || bf && oi) {
+            // (or numbers inside them, `Map<string, number>` read one way and the other: every
+            // number in both is blamed, rather than giving up on integers everywhere)
+            let nested = b0 != o0 && !self.assignable(b.ty, o.ty) && self.has_number(b0) && self.has_number(o0);
+            if !(bi && of || bf && oi || nested) {
                 continue;
             }
             let mut sites = Vec::new();
@@ -771,7 +774,58 @@ impl<'a> Checker<'a> {
                 blamed = true;
             }
         }
+        // (and the results: an override's `number` result read as the other kind)
+        if let (Some(br), Some(or)) = (base.ret, over.ret) {
+            let (b0, o0) = (self.types.without_undefined(br), self.types.without_undefined(or));
+            let kinds = self.types.is_int(b0) && self.types.is_float(o0) || self.types.is_float(b0) && self.types.is_int(o0);
+            let nested = b0 != o0 && !self.assignable(or, br) && self.has_number(b0) && self.has_number(o0);
+            if kinds || nested {
+                let rte = |c: &Self, mm: &CMethod| -> Option<ast::TypeId> {
+                    match &c.class_decl(mm.owner).members[mm.member as usize].kind {
+                        MemberKind::Method(f) | MemberKind::Getter(f) => f.ret,
+                        _ => None,
+                    }
+                };
+                let mut sites = Vec::new();
+                if let Some(t) = rte(self, base) {
+                    sites.extend(self.type_sites(bm, t));
+                }
+                if let Some(t) = rte(self, over) {
+                    sites.extend(self.type_sites(om, t));
+                }
+                if !sites.is_empty() {
+                    self.blame(&sites);
+                    blamed = true;
+                }
+            }
+        }
         blamed
+    }
+
+    /// A number somewhere in type `t` (an element, an argument, a field, a member).
+    fn has_number(&mut self, t: TyId) -> bool {
+        fn walk(c: &mut Checker, t: TyId, depth: u32) -> bool {
+            if depth > 8 {
+                return false;
+            }
+            if c.types.is_int(t) || c.types.is_float(t) {
+                return true;
+            }
+            match *c.types.get(t) {
+                Ty::Array(e) | Ty::Set(e) => walk(c, e, depth + 1),
+                Ty::Map(k, v) => walk(c, k, depth + 1) || walk(c, v, depth + 1),
+                Ty::Union(ms) => {
+                    let ms = c.types.tys(ms).to_vec();
+                    ms.into_iter().any(|m| walk(c, m, depth + 1))
+                }
+                Ty::Record(fs) => {
+                    let tys: Vec<TyId> = c.types.fields(fs).iter().map(|f| f.ty).collect();
+                    tys.into_iter().any(|x| walk(c, x, depth + 1))
+                }
+                _ => false,
+            }
+        }
+        walk(self, t, 0)
     }
 
     fn method_desc(&mut self, mm: &CMethod, n: &str) -> String {
@@ -1092,6 +1146,31 @@ impl<'a> Checker<'a> {
             }
             let (bret, oret) = (self.method_ret(&base), self.method_ret(&over));
             if !(oret == ERROR || bret == ERROR || bret == VOID || self.assignable(oret, bret)) {
+                // (`number` read as an integer in one and a float in the other: the written
+                // results become floats, next round)
+                if self.spec.on {
+                    let (b0, o0) = (self.types.without_undefined(bret), self.types.without_undefined(oret));
+                    if self.has_number(b0) && self.has_number(o0) {
+                        let rte = |c: &Self, mm: &CMethod| -> Option<ast::TypeId> {
+                            match &c.class_decl(mm.owner).members[mm.member as usize].kind {
+                                MemberKind::Method(f) | MemberKind::Getter(f) => f.ret,
+                                _ => None,
+                            }
+                        };
+                        let (bm, om) = (self.classes[base.owner as usize].module, self.classes[over.owner as usize].module);
+                        let mut sites = Vec::new();
+                        if let Some(t) = rte(self, &base) {
+                            sites.extend(self.type_sites(bm, t));
+                        }
+                        if let Some(t) = rte(self, &over) {
+                            sites.extend(self.type_sites(om, t));
+                        }
+                        if !sites.is_empty() {
+                            self.blame(&sites);
+                            continue;
+                        }
+                    }
+                }
                 let n = self.name(over.name).to_string();
                 let (bs, os) = (self.show(bret), self.show(oret));
                 self.done.push(Diagnostic::new("T0807", over.span, format!("`{n}` returns `{os}`, but the method it overrides returns `{bs}`")));
