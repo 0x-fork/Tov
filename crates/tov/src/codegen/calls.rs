@@ -271,7 +271,20 @@ impl<'c, 'a> Gen<'c, 'a> {
                 let v = self.expr(*obj);
                 let v = self.own(v);
                 let v = self.project(v, recv);
-                let argv = self.args_rest(e, args, &params);
+                let has_rest = self.facts(self.cur_m()).calls.get(&e).is_some_and(|f| f.rest.is_some());
+                // (each argument once, as the widest signature takes it; then as each member does)
+                let (argv, held): (Vec<String>, Vec<Val>) = if has_rest {
+                    (self.args_rest(e, args, &params), Vec::new())
+                } else {
+                    let mut held = Vec::new();
+                    for (a, p) in args.iter().zip(&params) {
+                        let x = self.expr(a.expr);
+                        let x = self.coerce(x, p.ty);
+                        let x = self.own(x);
+                        held.push(x);
+                    }
+                    (Vec::new(), held)
+                };
                 let ms = self.members(recv);
                 let tag = self.u_tag(&v.code, recv);
                 let res = self.fresh("um");
@@ -286,7 +299,24 @@ impl<'c, 'a> Gen<'c, 'a> {
                         Some(crate::check::class::ClassMemberRef::Method(mm)) => self.c.method_ret(&mm),
                         _ => VOID,
                     };
-                    let code = self.method_call_code(&payload, mt, name, false, argv.clone());
+                    let mine = if has_rest {
+                        argv.clone()
+                    } else {
+                        let mps = match self.c.class_member(mt, name) {
+                            Some(crate::check::class::ClassMemberRef::Method(mm)) => mm.params.clone(),
+                            _ => Vec::new(),
+                        };
+                        let mut out = Vec::new();
+                        for (k, p) in mps.iter().enumerate() {
+                            let x = match held.get(k) {
+                                Some(h) => self.coerce(Val { owned: false, ..h.clone() }, p.ty),
+                                None => self.coerce(Val::plain("0", UNDEFINED), p.ty),
+                            };
+                            out.push(x.code);
+                        }
+                        out
+                    };
+                    let code = self.method_call_code(&payload, mt, name, false, mine);
                     let r = self.finish_call_pub(&code, ret, if ty == VOID { VOID } else { ty });
                     if ty != VOID && ty != NEVER {
                         let r = self.own(r);
@@ -3477,6 +3507,7 @@ impl<'c, 'a> Gen<'c, 'a> {
                         let sct = self.ctype(se);
                         let i = self.fresh("i");
                         self.open(&format!("for (tv_int {i} = 0; {i} < tv_arr_len({}); {i}++) {{", src.code));
+                        self.push_temps();
                         let v = Val::plain(format!("((({sct} *)tv_arr_data({}))[{i}])", src.code), se);
                         let v = self.coerce(v, et);
                         let n = self.fresh("e");
@@ -3486,6 +3517,7 @@ impl<'c, 'a> Gen<'c, 'a> {
                             self.line(format!("{r};"));
                         }
                         self.line(format!("tv_arr_push(&{}, {d}, &{n});", arr.code));
+                        self.pop_temps();
                         self.close("}");
                         continue;
                     };
@@ -3691,6 +3723,17 @@ impl<'c, 'a> Gen<'c, 'a> {
     pub(crate) fn spread_array(&mut self, x: ExprId) -> Val {
         let v = self.expr(x);
         let base = self.c.types.without_undefined(v.ty);
+        // (an `any`: what it holds, a string's characters or an array's elements, as `any`s)
+        if base == ANY {
+            self.any_used();
+            let arr = self.c.types.array(ANY);
+            let loc = self.any_loc();
+            let (d, n, i) = (self.fresh("ad"), self.fresh("n"), self.fresh("i"));
+            self.line(format!("tv_dyn {d} = {}; tv_int {n} = tvg_any_len({d}); if ({n} < 0) tv_trap(\"TypeError: this value is not iterable\", {loc});", v.code));
+            let r = self.tmp(arr, &format!("tv_arr_with_capacity(&tv_type_dyn, {n})"), true);
+            self.line(format!("for (tv_int {i} = 0; {i} < {n}; {i}++) {{ tv_dyn k_ = tv_dyn_box(&tv_type_int, &{i}); tv_dyn e_ = tvg_any_at({d}, k_, {loc}); tv_dyn_release(k_); tv_arr_push(&{}, &tv_type_dyn, &e_); }}", r.code));
+            return r;
+        }
         match self.tget(base) {
             Ty::Set(e) => {
                 let arr = self.c.types.array(e);

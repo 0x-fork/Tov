@@ -746,6 +746,20 @@ function __reGroup(s: string, p: int[], n: int, k: int): string {
   return 2 * k < n && p[2 * k]! >= 0 ? s.slice(p[2 * k]!, p[2 * k + 1]!) : ""
 }
 
+/** `s.replace(p, r)` (`replaceAll`, `split`) of a pattern that's a string or a RegExp: by what it is. */
+export function __replaceSR(s: string, pat: string | RegExp, rep: string): string {
+  if (typeof pat === "string") return s.replace(pat, rep)
+  return __reReplace(s, pat, rep)
+}
+export function __replaceAllSR(s: string, pat: string | RegExp, rep: string): string {
+  if (typeof pat === "string") return s.replaceAll(pat, rep)
+  return __reReplace(s, pat, rep)
+}
+export function __splitSR(s: string, pat: string | RegExp): string[] {
+  if (typeof pat === "string") return s.split(pat)
+  return __reSplit(s, pat)
+}
+
 /** `s.split(re)`: the parts between matches, with the groups of each match between them. */
 export function __reSplit(s: string, re: RegExp, limit?: int): string[] {
   const max = limit ?? 4294967295

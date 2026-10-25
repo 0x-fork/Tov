@@ -1,0 +1,12 @@
+const u = new Uint8Array(4);
+u[10] = 5;
+u[-1] = 3;
+u[2] = 300;
+console.log(u.length, Array.from(u).join(","));
+const i = new Int32Array(3);
+for (let k = -2; k < 6; k++) i[k] = k * 10;
+console.log(i.length, Array.from(i).join(","));
+const f = new Float32Array(2);
+f[1] = 1.5;
+f[9] = 2;
+console.log(f.length, Array.from(f).join(","));

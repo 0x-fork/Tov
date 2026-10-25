@@ -2220,7 +2220,13 @@ impl<'c, 'a> Gen<'c, 'a> {
             // A script initializes its own variables where they're declared.
             if self.script_module != Some(m) {
                 let rank = self.init_rank(m, item, 0);
-                self.const_init.push((rank, format!("    {gname} = {fname}();\n")));
+                let mut line = format!("    {gname} = {fname}();\n");
+                // (an error it throws is uncaught, as JavaScript's module evaluation leaves it)
+                if code.contains("tvg_err") {
+                    line.push_str("    if (tvg_err) { tvg_uncaught(); return 1; }\n");
+                    self.needs_uncaught = true;
+                }
+                self.const_init.push((rank, line));
             }
         }
         Val::plain(gname, ty)

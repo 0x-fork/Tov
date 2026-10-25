@@ -5353,6 +5353,64 @@ impl<'c, 'a> Gen<'c, 'a> {
                 return if owned { self.tmp(to, &res, true) } else { Val::plain(res, to) };
             }
         }
+        // (a match as `string[]`: its elements, a group that took no part as "" where the array
+        // can't hold `undefined`)
+        if let (Ty::Class(..), Ty::Array(te)) = (tf, tt)
+            && self.c.interner.lookup("items").is_some_and(|items| self.class_field(from, items).is_some())
+            && let teb = self.c.types.without_undefined(te)
+            && self.c.types.is_string(teb)
+            && self.c.class_names.get(match tf { Ty::Class(d, _) => d as usize, _ => 0 }).is_some_and(|n| n == "RegExpExecArray")
+        {
+            let items = self.c.interner.lookup("items").unwrap();
+            let span = self.stmt_span.unwrap_or(crate::source::Span::new(crate::source::FileId(0), 0, 0));
+            let it = self.class_field(from, items).unwrap().ty;
+            let iv = self.class_field_read(v, items, it, span);
+            if self.c.assignable_pub(it, to) {
+                return self.coerce(iv, to);
+            }
+            let Ty::Array(ie) = self.tget(it) else { return iv };
+            let (ict, ed) = (self.ctype(ie), self.desc(te));
+            let res = self.tmp(to, &format!("tv_arr_with_capacity({ed}, tv_arr_len({}))", iv.code), true);
+            let i = self.fresh("i");
+            self.open(&format!("for (tv_int {i} = 0; {i} < tv_arr_len({}); {i}++) {{", iv.code));
+            let e = Val::plain(format!("(({ict} *)tv_arr_data({}))[{i}]", iv.code), ie);
+            let undef = self.tag_of(ie, UNDEFINED).map(|k| self.u_is(&e.code, ie, k)).unwrap_or_else(|| "false".into());
+            let s = self.project(e, STR);
+            self.line(format!("tv_str s_ = ({undef}) ? TV_EMPTY_STR : {}; tv_str_retain(s_); TVG_PUSH(tv_str, &{}, {ed}, s_);", s.code, res.code));
+            self.close("}");
+            return res;
+        }
+        // (a union where one of its members' type is wanted, each member convertible to it:
+        // `Opts<any> | Opts<string>` as `Opts<string>`: the member it holds, converted)
+        if let Ty::Union(fms) = tf
+            && !matches!(tt, Ty::Union(_))
+            && self.niche(from).is_none()
+        {
+            let fms = self.c.types.tys(fms).to_vec();
+            if fms.iter().all(|&m| m != UNDEFINED && m != NULL && self.c.assignable_pub(m, to)) {
+                let v = self.own(v);
+                let ct = self.ctype(to);
+                let res = self.fresh("cu");
+                self.line(format!("{ct} {res};"));
+                self.open(&format!("switch (({}).tag) {{", v.code));
+                for (i, &fm) in fms.iter().enumerate() {
+                    self.open(&format!("case {i}: {{"));
+                    self.push_temps();
+                    let payload = Val { code: self.u_payload(&v.code, from, i), ty: fm, owned: false };
+                    let cv = self.coerce(payload, to);
+                    let cv = self.own(cv);
+                    let c = self.consume(cv);
+                    self.line(format!("{res} = {c};"));
+                    self.pop_temps();
+                    self.line("break;");
+                    self.close("}");
+                }
+                let dv = self.default_value(to);
+                self.line(format!("default: {res} = {dv}; break;"));
+                self.close("}");
+                return self.tmp(to, &res, true);
+            }
+        }
         // Structural conversions between records / arrays with assignable parts.
         match (tf, tt) {
             (Ty::Record(ffs), Ty::Record(tfs)) => {
@@ -7186,19 +7244,26 @@ impl<'c, 'a> Gen<'c, 'a> {
     /// index signature that lacks the field: the value stored in each member's field (in `$rest`
     /// where a member has none).
     fn record_member_assign(&mut self, op: AssignOp, obj: ExprId, name: crate::intern::Sym, value: ExprId, nt: TyId, span: Span) -> Val {
-        let p = self.place(obj);
-        let p = self.project_place(p, nt);
+        let raw = self.place(obj);
         let v = self.expr(value);
         let v = self.own(v);
         let key = self.sym(name).to_string();
-        if let Ty::Union(_) = self.tget(nt) {
-            let ms = self.members(nt);
-            let tag = self.u_tag(&p.lv, nt);
+        // (a union held as a wider one, narrowed: its storage's members, those the narrowing
+        // leaves out never holding it)
+        let storage = if matches!(self.tget(raw.ty), Ty::Union(_)) && matches!(self.tget(nt), Ty::Union(_)) { raw.ty } else { nt };
+        let p = if storage == raw.ty { raw } else { self.project_place(raw, nt) };
+        if let Ty::Union(_) = self.tget(storage) {
+            let ms = self.members(storage);
+            let keep = self.members(nt);
+            let tag = self.u_tag(&p.lv, storage);
             self.open(&format!("switch ({tag}) {{"));
             for (i, &mt) in ms.iter().enumerate() {
+                if !keep.contains(&mt) {
+                    continue;
+                }
                 self.open(&format!("case {i}: {{"));
                 self.push_temps();
-                let mp = self.project_place(Place { lv: p.lv.clone(), ty: nt, weak: false }, mt);
+                let mp = self.project_place(Place { lv: p.lv.clone(), ty: storage, weak: false }, mt);
                 self.member_store(&mp, name, &key, op, &v, span);
                 self.pop_temps();
                 self.line("break;");
@@ -7879,13 +7944,13 @@ impl<'c, 'a> Gen<'c, 'a> {
         if !self.b().versioned.is_empty()
             && let Some(lv) = self.versioned_index(obj, index, span)
         {
-            return Some(self.coerce(Val::plain(lv, et), ty));
+            return Some(self.narrowed_to(Val::plain(lv, et), ty));
         }
         if let Some(lv) = self.row_index(obj, index, span) {
-            return Some(self.coerce(Val::plain(lv, et), ty));
+            return Some(self.narrowed_to(Val::plain(lv, et), ty));
         }
         if let Some(lv) = self.cached_index(obj, index, span) {
-            return Some(self.coerce(Val::plain(lv, et), ty));
+            return Some(self.narrowed_to(Val::plain(lv, et), ty));
         }
         let in_bounds = match (self.ident_fact(m, obj), self.ident_fact(m, index)) {
             (Some(IdentFact::Local(xk)), Some(IdentFact::Local(ik))) => self.b().in_bounds.contains(&(ik, xk)),
@@ -7898,11 +7963,58 @@ impl<'c, 'a> Gen<'c, 'a> {
         if in_bounds {
             // `xs[i]` in `for (let i = 0; i < xs.length; i++)`: always in bounds.
             let v = Val::plain(format!("((({ect} *)tv_arr_data({}))[{i}])", a.code), et);
-            return Some(self.coerce(v, ty));
+            return Some(self.narrowed_to(v, ty));
         }
         let loc = self.loc(span);
         let v = Val::plain(format!("(*({ect} *)tv_arr_at({}, sizeof({ect}), {i}, {loc}))", a.code), et);
-        Some(self.coerce(v, ty))
+        Some(self.narrowed_to(v, ty))
+    }
+
+    /// `u.name` as a place, `u` a union of records (place `p`) whose fields `name` are all of
+    /// one C type: the field of the member it holds; `want` the type the place is read as.
+    fn union_field_place(&mut self, p: &Place, name: crate::intern::Sym, n: &str, want: TyId, narrowed: TyId) -> Option<Place> {
+        let ms = self.members(p.ty);
+        let keep = self.members(narrowed);
+        let mut parts = Vec::new();
+        let mut cts = Vec::new();
+        let mut tys = Vec::new();
+        for (i, &mt) in ms.iter().enumerate() {
+            if !keep.contains(&mt) {
+                continue;
+            }
+            let Ty::Record(fs) = self.tget(mt) else { return None };
+            let f = self.c.types.fields(fs).iter().find(|f| f.name == name).copied()?;
+            cts.push(self.ctype(f.ty));
+            tys.push(f.ty);
+            let payload = self.u_payload(&p.lv, p.ty, i);
+            parts.push((i, self.fld(mt, &payload, n)));
+        }
+        if parts.len() < 2 || cts.windows(2).any(|w| w[0] != w[1]) {
+            return None;
+        }
+        let ty = if tys.windows(2).all(|w| w[0] == w[1]) {
+            tys[0]
+        } else if self.ctype(want) == cts[0] {
+            want
+        } else {
+            return None;
+        };
+        let tag = self.u_tag(&p.lv, p.ty);
+        let (_, last) = parts.last().cloned()?;
+        let mut e = format!("&({last})");
+        for (i, lv) in parts[..parts.len() - 1].iter().rev() {
+            e = format!("({tag} == {i} ? &({lv}) : {e})");
+        }
+        Some(Place { lv: format!("(*{e})"), ty, weak: false })
+    }
+
+    /// `v` as `ty`: projected when `ty` is a narrowing of it (`xs[0]` after `"k" in xs[0]`), else
+    /// converted.
+    fn narrowed_to(&mut self, v: Val, ty: TyId) -> Val {
+        if ty != v.ty && self.c.assignable_pub(ty, v.ty) && !self.c.assignable_pub(v.ty, ty) {
+            return self.project(v, ty);
+        }
+        self.coerce(v, ty)
     }
 
     /// `cond ? v : undefined` as a temporary of the optional type `ty` (`v` is computed only
@@ -7991,8 +8103,18 @@ impl<'c, 'a> Gen<'c, 'a> {
                     self.unsupported(span, "assigning to this member");
                     return Place { lv: "tv__dummy".into(), ty: ERROR, weak: false };
                 }
-                let p = self.place(*obj);
-                let p = self.project_place(p, narrowed);
+                let raw = self.place(*obj);
+                let n = self.sym(*name).to_string();
+                // (a field of a union of records, each member's of one C type: through a pointer
+                // to the member's it holds, `*(tag == 0 ? &a.f : &b.f)`; the members the
+                // narrowing leaves out never hold it)
+                let want = self.ty(e);
+                if let Ty::Union(_) = self.tget(raw.ty)
+                    && let Some(pl) = self.union_field_place(&raw, *name, &n, want, narrowed)
+                {
+                    return pl;
+                }
+                let p = self.project_place(raw, narrowed);
                 // Through a recursive alias: unbox to reach the record.
                 let p = if matches!(self.tget(p.ty), Ty::Rec(..)) {
                     let inner = self.c.unfold(p.ty);
@@ -8000,7 +8122,6 @@ impl<'c, 'a> Gen<'c, 'a> {
                 } else {
                     p
                 };
-                let n = self.sym(*name).to_string();
                 let ft = match self.tget(p.ty) {
                     Ty::Record(fs) => self.c.types.fields(fs).iter().find(|f| f.name == *name).map(|f| f.ty),
                     _ => None,
@@ -8571,6 +8692,21 @@ impl<'c, 'a> Gen<'c, 'a> {
                     Some(IdentFact::Local(k)) => self.b().push_caps.get(&k).cloned(),
                     _ => None,
                 };
+                // (a typed array's, in TypeScript: a store past either end is dropped, as
+                // JavaScript drops it; its length never changes)
+                if matches!(self.tget(et), Ty::I8 | Ty::U8 | Ty::U8C | Ty::I16 | Ty::U16 | Ty::I32 | Ty::U32 | Ty::F32) && self.js_ints(m) {
+                    let (i, a) = (self.fresh("i"), ap.lv.clone());
+                    self.line(format!("tv_int {i} = {iv};"));
+                    self.open(&format!("if (__builtin_expect((uint64_t){i} < (uint64_t)tv_arr_len({a}), 1)) {{"));
+                    if !unique {
+                        self.line(format!("tvg_make_unique(&{a}, {d});"));
+                    }
+                    let store = self.store(target, et, &format!("((({ect} *)tv_arr_data({a}))[{i}])"), &nv);
+                    self.line(store);
+                    self.close("}");
+                    let _ = (&loc, &cap);
+                    return Val::plain(nv, et);
+                }
                 if !self.is_rc(et) {
                     // (plain data: the append is the bounds check's slow path)
                     let (i, a) = (self.fresh("i"), ap.lv.clone());

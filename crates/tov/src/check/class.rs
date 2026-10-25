@@ -163,6 +163,7 @@ impl<'a> Checker<'a> {
             tscope.push((this, this_ty));
         }
         let class_name = self.name(cd.name).to_string();
+        let outer_class = self.building_class.replace(c);
         let mut info = ClassInfo {
             module,
             item,
@@ -449,6 +450,7 @@ impl<'a> Checker<'a> {
         }
         // Fields declared in a base class after parameter properties keep the inherited-first order.
         let _ = inherited_fields;
+        self.building_class = outer_class;
         info
     }
 
@@ -664,12 +666,32 @@ impl<'a> Checker<'a> {
         }
     }
 
+    /// A parameter whose default is `this.f`: `f`'s written type (from the class's declaration,
+    /// which is being resolved).
+    fn this_field_default(&mut self, param_span: Span, scope: &[(Sym, TyId)]) -> Option<TyId> {
+        let e = *self.ast().param_defaults.get(&param_span.start)?;
+        let ExprKind::Member { obj, name, .. } = self.ast().expr(e).kind else { return None };
+        if !matches!(self.ast().expr(obj).kind, ExprKind::This) {
+            return None;
+        }
+        let c = self.building_class?;
+        let cd = self.class_decl(c);
+        let te = cd.members.iter().find_map(|m| match &m.kind {
+            MemberKind::Field { ty: Some(t), .. } if m.name == name && !m.is_static => Some(*t),
+            _ => None,
+        })?;
+        let t = self.resolve_type(te, scope);
+        (t != ERROR).then_some(t)
+    }
+
     fn member_params(&mut self, f: &FnDecl, scope: &[(Sym, TyId)]) -> (Vec<FnParam>, Vec<Sym>) {
         let mut ps = Vec::new();
         let mut names = Vec::new();
         for p in &f.params {
             let ty = match p.ty {
                 Some(t) => self.resolve_type(t, scope),
+                // (`block = this.block`: the field's written type)
+                None if let Some(t) = self.this_field_default(p.span, scope) => t,
                 None if let Some(t) = self.default_param_type(p.span) => t,
                 None => {
                     let n = self.name(p.name).to_string();
@@ -1108,6 +1130,13 @@ impl<'a> Checker<'a> {
         }
         let ast = self.ast();
         let mut bad: Option<Span> = None;
+        // (`this.renderer.parser = this` in TypeScript: storing `this` reads none of its fields;
+        // only what the target reads counts)
+        let ts = matches!(self.modules[self.cur as usize].path.extension().and_then(|x| x.to_str()), Some("ts" | "tsx" | "mts" | "cts"));
+        let e = match &ast.expr(e).kind {
+            ExprKind::Assign(crate::ast::AssignOp::Assign, t, v) if ts && matches!(ast.expr(*v).kind, ExprKind::This) => *t,
+            _ => e,
+        };
         walk_this(ast, e, None, &mut |span, member| {
             let ok = matches!(member, Some(n) if assigned.contains(&n));
             if !ok && bad.is_none() {
@@ -1389,11 +1418,56 @@ impl<'a> Checker<'a> {
 
     /// Class-to-class assignability: nominal, through the base chain, with invariant arguments.
     pub(crate) fn class_assignable(&mut self, src: TyId, dst: TyId) -> bool {
-        let Some((dc, _)) = self.class_of(dst) else { return false };
+        let Some((dc, dargs)) = self.class_of(dst) else { return false };
         match self.upcast_to(src, dc) {
-            Some(up) => up == dst,
+            Some(up) if up == dst => true,
+            // (in a generic body, `C<P>` where `C<string>` is wanted: each instance compiles it
+            // with its own types, where they're the same)
+            Some(up) => match self.class_of(up) {
+                Some((_, uargs)) => uargs.len() == dargs.len() && uargs.iter().zip(&dargs).all(|(&a, &b)| a == b || a == ANY || b == ANY || matches!(self.types.get(a), Ty::Param(_)) || matches!(self.types.get(b), Ty::Param(_))),
+                None => false,
+            },
             None => false,
         }
+    }
+
+    /// A class's public instance members as fields, from its declaration (`want`: those to make),
+    /// for a type made of it while it's being resolved (`Omit<C, "options">` inside a member of
+    /// `C`'s): each member's written types, `unknown` where none is written.
+    pub(super) fn class_decl_members(&mut self, c: u32, args: &[TyId], want: &dyn Fn(Sym) -> bool) -> Vec<Field> {
+        let m = self.classes[c as usize].module;
+        let cd = self.class_decl(c);
+        let tscope: Vec<(Sym, TyId)> = cd.tparams.iter().zip(args.iter()).map(|(tp, &a)| (tp.name, a)).collect();
+        let mut out = Vec::new();
+        for mem in &cd.members {
+            if mem.is_static || mem.vis != Visibility::Public || !want(mem.name) || self.name(mem.name).starts_with('#') {
+                continue;
+            }
+            let ty = match &mem.kind {
+                MemberKind::Field { ty: Some(t), optional, .. } => {
+                    let t = self.with_module(m, |ck| ck.resolve_type(*t, &tscope));
+                    if *optional { self.types.optional(t) } else { t }
+                }
+                MemberKind::Field { ty: None, .. } => UNKNOWN,
+                MemberKind::Method(f) | MemberKind::Getter(f) => {
+                    let mut scope = tscope.clone();
+                    scope.extend(f.tparams.iter().map(|tp| (tp.name, UNKNOWN)));
+                    let ps: Vec<FnParam> = f
+                        .params
+                        .iter()
+                        .map(|p| {
+                            let t = p.ty.map(|t| self.with_module(m, |ck| ck.resolve_type(t, &scope))).unwrap_or(UNKNOWN);
+                            FnParam { ty: if p.optional { self.types.optional(t) } else { t }, inout: p.inout, optional: p.optional }
+                        })
+                        .collect();
+                    let ret = f.ret.map(|t| self.with_module(m, |ck| ck.resolve_type(t, &scope))).unwrap_or(UNKNOWN);
+                    if matches!(mem.kind, MemberKind::Getter(_)) { ret } else { self.types.func_throws(ps, ret, NEVER) }
+                }
+                MemberKind::Constructor(_) => continue,
+            };
+            out.push(Field { name: mem.name, ty, optional: false });
+        }
+        out
     }
 
     /// Fields, getters and methods of a class as interface-style fields (for `implements` and interface assignability).

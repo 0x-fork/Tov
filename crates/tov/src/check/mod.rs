@@ -198,11 +198,14 @@ struct Frame {
     /// A generator: what it yields, as declared (`Generator<T>`; `None` to infer from `yields`).
     generator: Option<Option<TyId>>,
     yields: Vec<TyId>,
+    /// How many scopes there were when it began: a narrowing in a scope from there on was made
+    /// in this function itself (trusted even of an enclosing function's `let`).
+    scope_base: usize,
 }
 
 impl Frame {
     fn new(ret: Option<TyId>, name: Option<Sym>, can_throw: bool, throws_decl: Option<TyId>) -> Frame {
-        Frame { ret, ret_sites: Vec::new(), returns: Vec::new(), loops: 0, switches: 0, labels: Vec::new(), name, can_throw, throws_decl, thrown: Vec::new(), try_frames: Vec::new(), try_expr: 0, module_init: false, is_async: false, exp_fn: None, generator: None, yields: Vec::new() }
+        Frame { ret, ret_sites: Vec::new(), returns: Vec::new(), loops: 0, switches: 0, labels: Vec::new(), name, can_throw, throws_decl, thrown: Vec::new(), try_frames: Vec::new(), try_expr: 0, module_init: false, is_async: false, exp_fn: None, generator: None, yields: Vec::new(), scope_base: 0 }
     }
 }
 
@@ -324,6 +327,8 @@ pub struct Checker<'a> {
     checked_members_base: Arc<HashSet<(u32, u32)>>,
     checked_members: HashSet<(u32, u32)>,
     class_resolving: HashSet<u32>,
+    /// The class whose members are being resolved (see `this_field_default`).
+    building_class: Option<u32>,
     /// Fields written with no type (TypeScript's `any`) typed by what they're given: (class,
     /// field). A map's `get` reads its value where one must be, as `any`'s would.
     untyped_fields: HashSet<(u32, Sym)>,
@@ -468,6 +473,7 @@ fn new_checker<'a>(modules: &'a [Module], interner: &'a Interner, sm: &'a Source
         checked_members_base: Arc::default(),
         checked_members: HashSet::default(),
         class_resolving: HashSet::default(),
+            building_class: None,
         untyped_fields: HashSet::default(),
         lenient_new: None,
         any_types: HashMap::default(),
@@ -733,6 +739,7 @@ impl<'a> Checker<'a> {
             checked_members_base: self.checked_members_base.clone(),
             checked_members: HashSet::default(),
             class_resolving: HashSet::default(),
+            building_class: None,
             untyped_fields: self.untyped_fields.clone(),
             lenient_new: None,
             any_types: self.any_types.clone(),
@@ -2037,6 +2044,37 @@ impl<'a> Checker<'a> {
         result
     }
 
+    /// `const obj = { replace: (...) => { ...; return obj }, ... }` first checked with `obj` an
+    /// `any` (`t`): its type as a recursive one `R` (a hidden alias), the methods that returned the
+    /// `any` returning `R`; `None` if none does.
+    pub(super) fn self_ref_type(&mut self, t: TyId, name: Sym) -> Option<TyId> {
+        let Ty::Record(_) = *self.types.get(t) else { return None };
+        let fields = self.types.fields_in_order(t);
+        if !fields.iter().any(|f| matches!(*self.types.get(f.ty), Ty::Func(_, r, _) if r == ANY)) {
+            return None;
+        }
+        let a = self.aliases.len() as u32;
+        Arc::make_mut(&mut self.aliases).push(AliasInfo { module: self.cur, item: u32::MAX, params: Vec::new(), recursive: true, body: Some(ERROR), resolving: false });
+        let n = format!("typeof {}", self.name(name));
+        Arc::make_mut(&mut self.alias_names).push(n);
+        let r = self.types.rec(a, &[]);
+        let fs: Vec<Field> = fields
+            .into_iter()
+            .map(|f| match *self.types.get(f.ty) {
+                Ty::Func(ps, ret, th) if ret == ANY => {
+                    let ps = self.types.params(ps).to_vec();
+                    Field { ty: self.types.func_throws(ps, r, th), ..f }
+                }
+                _ => f,
+            })
+            .collect();
+        let order: Vec<Sym> = fs.iter().map(|f| f.name).collect();
+        let body = self.types.record(fs);
+        self.types.note_field_order(body, order);
+        Arc::make_mut(&mut self.aliases)[a as usize].body = Some(body);
+        Some(r)
+    }
+
     /// `infer_recursive`'s result as a recursive type `R` (a hidden alias): the body checked
     /// with its calls to itself giving `R`, `R` then what the body returns; checked again with it.
     #[allow(clippy::too_many_arguments)]
@@ -2549,12 +2587,32 @@ impl<'a> Checker<'a> {
                 let args = self.types.tys(args).to_vec();
                 Some(self.iface_fields_inst(i, &args))
             }
-            Ty::Class(c, _) => {
-                self.resolve_class(c);
-                let fs = self.classes[c as usize].fields.clone();
-                Some(fs.iter().filter(|f| f.vis == ast::Visibility::Public).map(|f| Field { name: f.name, ty: f.ty, optional: f.optional }).collect())
+            Ty::Class(..) => self.type_fields_where(t, &|_| true),
+            // (a recursive alias: what it unfolds to)
+            Ty::Rec(..) => {
+                let u = self.unfold(t);
+                if u == t { None } else { self.type_fields(u) }
             }
             _ => None,
+        }
+    }
+
+    /// `type_fields` of the fields `want` names: a class's public members (fields, getters and
+    /// methods, as TypeScript's `Pick`/`Omit`/`keyof` see them), from its declaration while it's
+    /// being resolved (the members a field's type is made of may name the class itself).
+    fn type_fields_where(&mut self, t: TyId, want: &dyn Fn(Sym) -> bool) -> Option<Vec<Field>> {
+        match *self.types.get(t) {
+            Ty::Class(c, args) => {
+                let args = self.types.tys(args).to_vec();
+                // (not resolved yet: its written members, as resolving it, and inferring its
+                // methods' results, may need the type being made)
+                if self.class_resolving.contains(&c) || !self.classes[c as usize].resolved {
+                    return Some(self.class_decl_members(c, &args, want));
+                }
+                let fs = self.class_as_fields(t);
+                Some(fs.into_iter().filter(|f| want(f.name) && !self.name(f.name).starts_with('#')).collect())
+            }
+            _ => self.type_fields(t).map(|fs| fs.into_iter().filter(|f| want(f.name)).collect()),
         }
     }
 
@@ -2572,6 +2630,13 @@ impl<'a> Checker<'a> {
             return STR;
         }
         // (a class's: its public fields and methods)
+        if let Ty::Class(c, _) = *self.types.get(t)
+            && (self.class_resolving.contains(&c) || !self.classes[c as usize].resolved)
+        {
+            let fs = self.type_fields_where(t, &|_| true).unwrap_or_default();
+            let lits: Vec<TyId> = fs.iter().map(|f| self.types.str_lit(f.name)).collect();
+            return if lits.is_empty() { NEVER } else { self.types.union(&lits) };
+        }
         if let Ty::Class(c, _) = *self.types.get(t) {
             self.resolve_class(c);
             let info = &self.classes[c as usize];
@@ -2672,6 +2737,22 @@ impl<'a> Checker<'a> {
                     _ => false,
                 }
         })
+    }
+
+    /// The type arguments a generic alias or interface (module `m`, item `i`) isn't given: its
+    /// parameters' defaults (`<P = string>`), each seeing the ones before it. Left short if one
+    /// has none.
+    fn default_targs(&mut self, m: u32, i: u32, targs: &mut Vec<TyId>) {
+        let tps = match &self.modules[m as usize].ast.items[i as usize].kind {
+            ItemKind::TypeAlias { tparams, .. } | ItemKind::Interface { tparams, .. } => tparams,
+            _ => return,
+        };
+        for k in targs.len()..tps.len() {
+            let Some(d) = tps[k].default else { return };
+            let scope: Vec<(Sym, TyId)> = tps[..k].iter().zip(targs.iter()).map(|(tp, &t)| (tp.name, t)).collect();
+            let t = self.with_module(m, |c| c.resolve_type(d, &scope));
+            targs.push(t);
+        }
     }
 
     /// Whether a written type mentions `any` (`any`, `any[]`, `Record<string, any>`).
@@ -3010,6 +3091,11 @@ impl<'a> Checker<'a> {
                 }
                 let body = self.alias_body(a);
                 let params = self.aliases[a as usize].params.clone();
+                let mut targs = targs;
+                if targs.len() < params.len() {
+                    let (am, ai) = (self.aliases[a as usize].module, self.aliases[a as usize].item);
+                    self.default_targs(am, ai, &mut targs);
+                }
                 if params.len() != targs.len() {
                     self.report(Diagnostic::new(
                         "T0010",
@@ -3049,11 +3135,29 @@ impl<'a> Checker<'a> {
                     self.report(Diagnostic::new("T0010", span, format!("`{text}` takes {arity} type argument{}, found {}", if arity == 1 { "" } else { "s" }, targs.len())));
                     return ERROR;
                 }
+                // (`C<any>`: a class's instance is one compiled type, so `any` there is the
+                // parameter's default, `<P = string>`, where it has one)
+                if targs.contains(&ANY) {
+                    let cm = self.classes[c as usize].module;
+                    let defaults: Vec<Option<crate::ast::TypeId>> = self.class_decl(c).tparams.iter().map(|tp| tp.default).collect();
+                    for (k, d) in defaults.into_iter().enumerate() {
+                        if targs[k] == ANY
+                            && let Some(d) = d
+                        {
+                            targs[k] = self.with_module(cm, |c| c.resolve_type(d, &[]));
+                        }
+                    }
+                }
                 self.types.class(c, &targs)
             }
             Some(Decl::Iface(i)) => {
                 self.iface_fields(i);
                 let params = self.ifaces[i as usize].params.len();
+                let mut targs = targs;
+                if targs.len() < params {
+                    let (im, ii) = (self.ifaces[i as usize].module, self.ifaces[i as usize].item);
+                    self.default_targs(im, ii, &mut targs);
+                }
                 if params != targs.len() {
                     self.report(Diagnostic::new("T0010", span, format!("`{text}` takes {params} type argument(s), found {}", targs.len())));
                     return ERROR;
@@ -3201,7 +3305,9 @@ impl<'a> Checker<'a> {
                             let tys: Vec<TyId> = self.types.params(ps).iter().map(|p| p.ty).collect();
                             self.tuple_ty(&tys)
                         }
-                        _ if self.types.has_param(t) => UNKNOWN,
+                        // (of a type made of type parameters, before an instance fixes it: any
+                        // arguments)
+                        _ if self.types.has_param(t) || t == UNKNOWN || t == ANY => self.types.array(if t == ANY { ANY } else { UNKNOWN }),
                         _ => {
                             let shown = self.show(t);
                             self.report(Diagnostic::new("T0010", span, format!("`Parameters` takes a function type, found `{shown}`")));
@@ -3210,7 +3316,8 @@ impl<'a> Checker<'a> {
                     },
                     "ReturnType" => match *self.types.get(t) {
                         Ty::Func(_, r, _) => r,
-                        _ if self.types.has_param(t) => UNKNOWN,
+                        // (of a type made of type parameters, before an instance fixes it)
+                        _ if self.types.has_param(t) || t == UNKNOWN || t == ANY => if t == ANY { ANY } else { UNKNOWN },
                         _ => {
                             let shown = self.show(t);
                             self.report(Diagnostic::new("T0010", span, format!("`ReturnType` takes a function type, found `{shown}`")));
@@ -3259,13 +3366,37 @@ impl<'a> Checker<'a> {
                     Ty::StrLit(s) => Some(s),
                     _ => None,
                 }).collect();
-                let Some(fs) = self.type_fields(t) else {
+                let keep = text == "Pick";
+                let want = |n: Sym| keys.contains(&n) == keep;
+                // (of a union: the keys they all have, each the union of their types)
+                let fs = if matches!(self.types.get(t), Ty::Union(_)) {
+                    let ms = self.flat_members(t);
+                    let mut all: Option<Vec<Field>> = None;
+                    for m in ms {
+                        let Some(mf) = self.type_fields_where(m, &want) else {
+                            all = None;
+                            break;
+                        };
+                        all = Some(match all {
+                            None => mf,
+                            Some(prev) => prev
+                                .into_iter()
+                                .filter_map(|f| mf.iter().find(|g| g.name == f.name).map(|g| (f, *g)))
+                                .collect::<Vec<_>>()
+                                .into_iter()
+                                .map(|(f, g)| Field { ty: self.types.union(&[f.ty, g.ty]), optional: f.optional || g.optional, ..f })
+                                .collect(),
+                        });
+                    }
+                    all
+                } else {
+                    self.type_fields_where(t, &want)
+                };
+                let Some(fs) = fs else {
                     let shown = self.show(t);
                     self.report(Diagnostic::new("T0010", span, format!("`{text}` takes a record or interface type, found `{shown}`")));
                     return Some(ERROR);
                 };
-                let keep = text == "Pick";
-                let fs: Vec<Field> = fs.into_iter().filter(|f| keys.contains(&f.name) == keep).collect();
                 let order: Vec<Sym> = fs.iter().map(|f| f.name).collect();
                 let r = self.types.record(fs);
                 self.types.note_field_order(r, order);
@@ -3349,6 +3480,16 @@ impl<'a> Checker<'a> {
         }
         // (`any` goes anywhere, and anything into one: converted, and checked, when it runs)
         if src == ANY || dst == ANY {
+            return true;
+        }
+        // (a match where `string[]` is wanted: its elements, as TypeScript's RegExpExecArray is
+        // an array of strings)
+        if let Ty::Array(e) = *self.types.get(dst)
+            && let eb = self.types.without_undefined(e)
+            && self.types.is_string(eb)
+            && matches!(self.types.get(src), Ty::Class(..))
+            && src == self.builtin_class("RegExpExecArray")
+        {
             return true;
         }
         if assuming.contains(&(src, dst)) {
@@ -3533,7 +3674,8 @@ impl<'a> Checker<'a> {
         // (the interfaces whose members are a record's fields, or whose recursive alias it is)
         let mut shapes: Vec<(u32, Vec<Sym>, u32, u32)> = Vec::new();
         for (a, info) in self.aliases.iter().enumerate() {
-            if let ItemKind::Interface { members, .. } = &self.modules[info.module as usize].ast.items[info.item as usize].kind {
+            // (hidden aliases, made for recursive results, have no item)
+            if let Some(ItemKind::Interface { members, .. }) = self.modules[info.module as usize].ast.items.get(info.item as usize).map(|it| &it.kind) {
                 let mut names: Vec<Sym> = members.iter().map(|f| f.name).collect();
                 names.sort();
                 shapes.push((a as u32, names, info.module, info.item));
@@ -3759,13 +3901,15 @@ impl<'a> Checker<'a> {
     fn lookup(&self, name: Sym) -> Option<(LocalId, TyId)> {
         let fcx = self.fcx.last()?;
         let cur_frame = fcx.frames.len().saturating_sub(1);
-        for scope in fcx.scopes.iter().rev() {
+        let base = fcx.frames.last().map_or(0, |f| f.scope_base);
+        for (si, scope) in fcx.scopes.iter().enumerate().rev() {
             for &(s, id, narrowed) in scope.iter().rev() {
                 if s == name {
                     let local = &fcx.locals[id];
-                    // Narrowing of a mutable variable from an enclosing function isn't trusted inside a closure.
+                    // Narrowing of a mutable variable from an enclosing function isn't trusted
+                    // inside a closure (unless the closure made it: `if (t = f()) t.x`).
                     let ty = match narrowed {
-                        Some(t) if !(local.frame < cur_frame && local.kind == LocalKind::Let) => t,
+                        Some(t) if !(local.frame < cur_frame && local.kind == LocalKind::Let) || si >= base && base > 0 => t,
                         _ => local.ty,
                     };
                     return Some((id, ty));
@@ -3858,6 +4002,14 @@ impl<'a> Checker<'a> {
             return;
         }
         fcx.path_table.push((local, path, ty));
+        let idx = fcx.path_table.len() - 1;
+        fcx.scopes.last_mut().unwrap().push((PATH_SYM, idx, None));
+    }
+
+    /// `narrow_path` of a narrowing kept even where closures change the local.
+    fn narrow_path_always(&mut self, local: LocalId, path: Vec<Sym>, ty: TyId) {
+        let fcx = self.fcx.last_mut().unwrap();
+        fcx.path_table.push((local, path, Some(ty)));
         let idx = fcx.path_table.len() - 1;
         fcx.scopes.last_mut().unwrap().push((PATH_SYM, idx, None));
     }

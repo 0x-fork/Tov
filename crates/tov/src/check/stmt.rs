@@ -391,6 +391,30 @@ impl<'a> Checker<'a> {
                         self.lenient_hit = false;
                         let mut found = match self.recursive_arrow(*name, *name_span, *i, kind) {
                             Some(t) => t,
+                            // (`const obj = { replace: () => { ...; return obj } }`: in its own
+                            // initializer it's TypeScript's `any`; its cell exists first, the value
+                            // stored into it after)
+                            // (its methods returning it: its type a recursive one, see `self_ref_type`)
+                            None if matches!(self.ast().expr(*i).kind, ExprKind::Object(_)) && self.closure_refers(*i, *name) && self.ts_module() => {
+                                let (marks, saved) = (self.diags.len(), self.rewrites.clone());
+                                let id = self.declare(*name, ANY, kind, *name_span, None, false);
+                                if let Some(f) = self.facts_mut() {
+                                    f.self_init.insert(name_span.start);
+                                }
+                                let t0 = self.expr(*i, None);
+                                match self.self_ref_type(t0, *name) {
+                                    Some(r) => {
+                                        self.diags.truncate(marks);
+                                        self.rewrites = saved;
+                                        self.fcx().locals[id].ty = r;
+                                        let t = self.expr(*i, Some(r));
+                                        let ispan = self.ast().expr(*i).span;
+                                        self.expect_assignable(t, r, ispan, None);
+                                        r
+                                    }
+                                    None => t0,
+                                }
+                            }
                             None => self.expr(*i, evolved_class),
                         };
                         self.lenient_new = None;
@@ -947,9 +971,12 @@ impl<'a> Checker<'a> {
         // TypeScript module, each later read checked at run time, trapping if the call did
         // change it)
         let ts = self.ts_module();
-        for (l, p) in paths {
-            let keep = if ts { self.lookup_path(l, &p) } else { None };
-            self.narrow_path(l, p.clone(), None);
+        // (what each is first: forgetting `x.a` forgets `x.a.b` with it)
+        let keeps: Vec<Option<TyId>> = paths.iter().map(|(l, p)| if ts { self.lookup_path(*l, p) } else { None }).collect();
+        for (l, p) in &paths {
+            self.narrow_path(*l, p.clone(), None);
+        }
+        for ((l, p), keep) in paths.into_iter().zip(keeps) {
             if let Some(t) = keep {
                 self.narrow_path(l, p.clone(), Some(t));
                 let fcx = self.fcx();

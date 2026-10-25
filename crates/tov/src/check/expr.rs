@@ -340,16 +340,17 @@ impl<'a> Checker<'a> {
             }
             ExprKind::Call { callee, type_args, args, optional } => {
                 let t = self.call(e, *callee, type_args, args, *optional, exp, span);
-                // The callee may change class instances through any reference.
-                self.invalidate_heap();
-                // (and run closures, unless it's a built-in method given none: `xs.at(-1)`)
+                // (a built-in method given no function, `src.slice(1)`, runs none of the program's
+                // code: it changes no class instance, and runs no closure)
                 let builtin = matches!(self.facts_mut().and_then(|f| f.calls.get(&e)).map(|c| &c.callee), Some(Callee::Method(_)) | Some(Callee::Builtin { .. }));
                 let arg_tys: Vec<TyId> = match self.facts_mut() {
                     Some(f) => args.iter().map(|a| f.expr_ty[a.expr as usize]).collect(),
                     None => Vec::new(),
                 };
-                let given_fn = args.iter().any(|a| matches!(self.ast().expr(a.expr).kind, ExprKind::Arrow(_))) || arg_tys.iter().any(|&t| matches!(self.types.get(t), Ty::Func(..)));
+                let given_fn = args.iter().any(|a| matches!(self.ast().expr(a.expr).kind, ExprKind::Arrow(_))) || arg_tys.iter().any(|&t| matches!(self.types.get(t), Ty::Func(..) | Ty::Class(..) | Ty::Interface(..) | Ty::Any | Ty::Unknown));
                 if !builtin || given_fn {
+                    // The callee may change class instances through any reference.
+                    self.invalidate_heap();
                     self.forget_closure_narrowings();
                 }
                 if let Some(f) = self.facts_mut()
@@ -1164,6 +1165,11 @@ impl<'a> Checker<'a> {
                         return F64;
                     }
                 }
+                // (`(a >>> 0) * (b >>> 0)` in TypeScript: two unsigned 32-bit numbers, whose
+                // product may pass the integer range: a float, as JavaScript computes it)
+                if op == Mul && tl == INT && tr == INT && self.ts_module() && (self.is_ushr(l) || self.is_ushr(r)) && self.is_wide32(l) && self.is_wide32(r) {
+                    return F64;
+                }
                 self.arith(op, tl, tr, span)
             }
             Div => {
@@ -1304,6 +1310,13 @@ impl<'a> Checker<'a> {
         }
         let (can_throw, decl, module_init) = (frame.can_throw, frame.throws_decl, frame.module_init);
         let shown = self.show(t);
+        // (in TypeScript, a module's initializer that throws: uncaught, as JavaScript leaves it)
+        if !can_throw && module_init && matches!(self.modules[cur].path.extension().and_then(|e| e.to_str()), Some("ts" | "tsx" | "mts" | "cts")) {
+            if let (Some(c), Some(f)) = (call, self.facts.as_mut()) {
+                f[cur].throwing.insert(c);
+            }
+            return;
+        }
         if !can_throw && module_init {
             let what = callee.map(|c| format!("`{c}` can throw `{shown}`")).unwrap_or_else(|| format!("this throws `{shown}`"));
             self.report(
@@ -1417,6 +1430,20 @@ impl<'a> Checker<'a> {
             let hint = if self.types.is_num_like(tl) { Some(hint_of(tl)) } else { None };
             let tr = self.expr(r, hint);
             (tl, tr)
+        }
+    }
+
+    /// A number that may reach 2^31 or more: `x >>> k`, or an integer literal that large.
+    fn is_wide32(&self, e: ExprId) -> bool {
+        self.is_ushr(e) || self.const_int(e).is_some_and(|v| v.abs() >= 1 << 31)
+    }
+
+    /// `x >>> k` (in parentheses or not): an unsigned 32-bit number.
+    fn is_ushr(&self, e: ExprId) -> bool {
+        match self.ast().expr(e).kind {
+            ExprKind::Paren(x) => self.is_ushr(x),
+            ExprKind::Binary(BinOp::UShr, _, _) => true,
+            _ => false,
         }
     }
 
@@ -2273,7 +2300,7 @@ impl<'a> Checker<'a> {
                     // `m[2] = s` of a match: its element (`m.items[2]`, rewritten so)
                     Ty::Class(..) if let Some((items, el)) = match_items => {
                         self.index_type(*index);
-                        self.rewrites.elems.push((self.cur, e, items, false));
+                        self.rewrites.elems.push((self.cur, e, items, 0));
                         el
                     }
                     // `edge[1] += w`: the tuple's element, a field (`edge.1`, rewritten so)
@@ -2387,6 +2414,21 @@ impl<'a> Checker<'a> {
     }
 
     fn index(&mut self, e: ExprId, obj: ExprId, index: ExprId, optional: bool, absent: bool, span: Span) -> TyId {
+        let t = self.index_inner(e, obj, index, optional, absent, span);
+        // (`xs[0]` narrowed, `if ("tokens" in xs[0]) xs[0].tokens`: what the test learned)
+        if !optional
+            && let ExprKind::Int(_) = self.ast().expr(index).kind
+            && t != ERROR
+            && let Some((target, _)) = self.target_of(e)
+            && let Some(nt) = self.lookup_path(target.local, &target.path)
+            && self.assignable(nt, t)
+        {
+            return nt;
+        }
+        t
+    }
+
+    fn index_inner(&mut self, e: ExprId, obj: ExprId, index: ExprId, optional: bool, absent: bool, span: Span) -> TyId {
         // `Direction[d]`: a numeric enum's member names (rewritten as `["Up", "Down"][d]`)
         if let ExprKind::Ident(sym) = self.ast().expr(obj).kind
             && let Some(names) = self.enum_names(sym)
@@ -2446,10 +2488,13 @@ impl<'a> Checker<'a> {
         // `m[1]` on a match: `m.items[1]`
         if matches!(*self.types.get(base), Ty::Class(..)) && base == self.builtin_class("RegExpExecArray") {
             self.index_type(index);
+            // (in TypeScript a match's elements are strings: a group that took no part reads as
+            // "", which tests as JavaScript's `undefined` does, `if (m[2])`, `m[2] || d`)
+            let ts = self.ts_module() && !optional;
             if let Some(items) = self.interner.lookup("items") {
-                self.rewrites.elems.push((self.cur, e, items, !absent));
+                self.rewrites.elems.push((self.cur, e, items, if ts { 2 } else { !absent as u8 }));
             }
-            return if absent { self.types.optional(STR) } else { STR };
+            return if absent && !ts { self.types.optional(STR) } else { STR };
         }
         let rest_v = if matches!(self.types.get(base), Ty::Record(_)) { self.rest_value(base) } else { None };
         let str_field = match self.ast().expr(index).kind {
@@ -3121,6 +3166,22 @@ impl<'a> Checker<'a> {
                 );
             }
         }
+        // (`{ type: c ? "image" : "link", ... }` where variants are wanted: one literal for each,
+        // `c ? { type: "image", ... } : { type: "link", ... }`, rewritten so)
+        if let Some(e) = exp
+            && let Some(k) = self.split_discriminant(fields, e)
+        {
+            self.rewrites.split_lits.push((self.cur, lit_expr, k));
+            let ExprKind::Cond(_, a, b) = self.ast().expr(fields[k].value).kind else { unreachable!() };
+            self.expr(fields[k].value, None);
+            for (i, f) in fields.iter().enumerate() {
+                if i != k {
+                    self.expr(f.value, None);
+                }
+            }
+            let _ = (a, b);
+            return e;
+        }
         let target = exp.and_then(|e| self.pick_record(fields, e, span));
         if let Some((ERROR, _)) = target {
             return ERROR;
@@ -3490,6 +3551,34 @@ impl<'a> Checker<'a> {
         Some(self.types.intern(Ty::Map(STR, v)))
     }
 
+    /// The field of an object literal whose value is `c ? "a" : "b"`, both a discriminant of a
+    /// variant of `exp`, a union of records.
+    fn split_discriminant(&mut self, fields: &[crate::ast::ObjField], exp: TyId) -> Option<usize> {
+        let members = self.flat_members(exp);
+        let records: Vec<Vec<Field>> = members.iter().filter_map(|&m| match *self.types.get(m) {
+            Ty::Record(fs) => Some(self.types.fields(fs).to_vec()),
+            Ty::Interface(i, args) => {
+                let args = self.types.tys(args).to_vec();
+                Some(self.iface_fields_inst(i, &args))
+            }
+            _ => None,
+        }).collect();
+        if records.len() < 2 {
+            return None;
+        }
+        for (k, f) in fields.iter().enumerate() {
+            let ExprKind::Cond(_, a, b) = self.ast().expr(f.value).kind else { continue };
+            let (ExprKind::Str(x), ExprKind::Str(y)) = (&self.ast().expr(a).kind, &self.ast().expr(b).kind) else { continue };
+            let (x, y) = (*x, *y);
+            let (lx, ly) = (self.types.str_lit(x), self.types.str_lit(y));
+            let has = |l: TyId| records.iter().any(|fs| fs.iter().any(|g| g.name == f.name && g.ty == l));
+            if has(lx) && has(ly) {
+                return Some(k);
+            }
+        }
+        None
+    }
+
     /// Chooses the record type an object literal should be checked against.
     fn pick_record(&mut self, fields: &[crate::ast::ObjField], exp: TyId, span: Span) -> Option<(TyId, Vec<Field>)> {
         let members = self.flat_members(exp);
@@ -3778,6 +3867,7 @@ impl<'a> Checker<'a> {
             Ty::Map(k, v) => self.tuple_ty(&[k, v]),
             Ty::Js => JS,
             Ty::Error => ERROR,
+            Ty::Any => ANY,
             _ if let Some(e) = self.iterator_of(base) => {
                 self.rewrites.iterators.push((self.cur, x));
                 e
@@ -3925,6 +4015,7 @@ impl<'a> Checker<'a> {
         let mut frame = Frame::new(declared_ret, None, can_throw, decl);
         frame.is_async = is_async;
         frame.exp_fn = exp_fn_ty;
+        frame.scope_base = fcx.scopes.len();
         fcx.frames.push(frame);
         fcx.scopes.push(Vec::new());
         // (an unannotated parameter or result takes the sites of the context's function type)
@@ -4584,6 +4675,27 @@ impl<'a> Checker<'a> {
                     };
                     recv_hint = Some(self.types.array(vt));
                 }
+                // `x.m.call(t, a)` / `x?.m?.apply(t, xs)` of a class's method: `x.m(a)` (`this`
+                // is `x`, as the method has it; rewritten so)
+                if matches!(mtext.as_str(), "call" | "apply")
+                    && let ExprKind::Member { obj: x, name: m, optional: o1, .. } = self.ast().expr(obj).kind
+                    && let Some(xt) = {
+                        // (its type, quietly: the call is checked again once rewritten)
+                        let marks = self.diags.len();
+                        let t = self.expr(x, None);
+                        self.diags.truncate(marks);
+                        Some(t)
+                    }
+                    && let xb = self.types.without_nullish(xt)
+                    && self.class_of(xb).is_some()
+                    && let Some(super::class::ClassMemberRef::Method(_)) = self.class_member(xb, m)
+                {
+                    self.rewrites.method_values.push((self.cur, e, (mtext == "apply") as u8, o1 || mopt, callee));
+                    for a in args {
+                        self.expr(a.expr, None);
+                    }
+                    return ERROR;
+                }
                 self.want_optional = mopt;
                 let recv = self.expr(obj, recv_hint);
                 if recv == ERROR {
@@ -4614,7 +4726,7 @@ impl<'a> Checker<'a> {
                         "apply" => 1,
                         _ => 2,
                     };
-                    self.rewrites.fn_methods.push((self.cur, e, kind));
+                    self.rewrites.fn_methods.push((self.cur, e, kind, callee));
                     return if kind == 2 { recv } else { ret };
                 }
                 let base = if mopt {
@@ -4733,12 +4845,40 @@ impl<'a> Checker<'a> {
                     let marks = self.diags.len();
                     let re = self.builtin_class("RegExp");
                     let t = self.expr(a0.expr, None);
+                    // (a pattern that's a string or a RegExp: the prelude's `__replaceSR` and so on,
+                    // which test which it is)
+                    if re != ERROR
+                        && let Ty::Union(ms) = *self.types.get(t)
+                        && self.types.tys(ms).contains(&re)
+                        && self.types.tys(ms).iter().all(|&m| m == re || self.types.is_stringish(m))
+                        && let Some(target) = match mtext.as_str() {
+                            "replace" if args.len() == 2 => Some("__replaceSR"),
+                            "replaceAll" if args.len() == 2 => Some("__replaceAllSR"),
+                            "split" if args.len() == 1 => Some("__splitSR"),
+                            _ => None,
+                        }
+                        && let Some(f) = self.interner.lookup(target)
+                    {
+                        self.rewrites.calls.push((self.cur, e, f));
+                        for a in &args[1..] {
+                            self.expr(a.expr, Some(STR));
+                        }
+                        return if mtext == "split" { self.types.array(STR) } else { STR };
+                    }
                     if re != ERROR && self.types.without_undefined(t) == re {
                         let is_fn = args.get(1).is_some_and(|a| match self.ast().expr(a.expr).kind {
                             ExprKind::Arrow(_) => true,
                             ExprKind::Ident(s) => match self.lookup(s) {
                                 Some(l) => matches!(*self.types.get(l.1), Ty::Func(..)),
-                                None => matches!(self.scopes[self.cur as usize].values.get(&s).map(|d| d.0), Some(Decl::Fn(..))),
+                                None => match self.scopes[self.cur as usize].values.get(&s).map(|d| d.0) {
+                                    Some(Decl::Fn(..)) => true,
+                                    // (`const fix = (ch: string) => ...`, a module's)
+                                    Some(Decl::Const(m, i)) => {
+                                        let t = self.const_type(m, i);
+                                        matches!(*self.types.get(t), Ty::Func(..))
+                                    }
+                                    _ => false,
+                                },
                             },
                             _ => false,
                         });
@@ -4862,12 +5002,27 @@ impl<'a> Checker<'a> {
                     }).collect();
                     if mms.iter().all(|x| x.is_some()) {
                         let mms: Vec<_> = mms.into_iter().flatten().collect();
-                        let first = mms[0].clone();
+                        // (the one taking the most arguments says what's passed; the others must
+                        // take those, `br()` beside `br(token)`, `text(t: A | B)` beside `text(t: A)`)
+                        let most = mms.iter().map(|mm| self.method_call_params(mm).0.len()).max().unwrap_or(0);
+                        let mut pick = None;
+                        for k in 0..mms.len() {
+                            let (params, rest) = self.method_call_params(&mms[k]);
+                            if params.len() != most {
+                                continue;
+                            }
+                            let fits = mms.iter().all(|mm| {
+                                let (ps, r) = self.method_call_params(mm);
+                                r == rest && (rest.is_none() || ps.len() == params.len()) && ps.len() <= params.len() && ps.iter().zip(&params).all(|(a, b)| a.inout == b.inout && !a.inout && self.assignable(b.ty, a.ty))
+                            });
+                            if fits {
+                                pick = Some(k);
+                                break;
+                            }
+                        }
+                        let same = pick.is_some();
+                        let first = mms[pick.unwrap_or(0)].clone();
                         let (params, rest) = self.method_call_params(&first);
-                        let same = mms.iter().skip(1).all(|mm| {
-                            let (ps, r) = self.method_call_params(mm);
-                            ps.len() == params.len() && r == rest && ps.iter().zip(&params).all(|(a, b)| a.ty == b.ty && a.inout == b.inout && a.optional == b.optional)
-                        });
                         if same {
                             for mm in &mms {
                                 self.check_visible(mm.owner, mm.vis, name, name_span);
@@ -6074,7 +6229,13 @@ impl<'a> Checker<'a> {
                 Narrowing::Local(l, t) => self.narrow(*l, *t),
                 Narrowing::Global(key, t) => self.narrow_global(*key, *t),
                 Narrowing::Path(l, p, t, heap) => {
-                    self.narrow_path(*l, p.clone(), Some(*t));
+                    // (through a class instance, in TypeScript: kept even where a closure changes
+                    // it, as TypeScript does; reads after a call are checked when they run)
+                    if *heap && self.ts_module() {
+                        self.narrow_path_always(*l, p.clone(), *t);
+                    } else {
+                        self.narrow_path(*l, p.clone(), Some(*t));
+                    }
                     if *heap {
                         self.fcx().heap_paths.push((*l, p.clone()));
                     }
@@ -6313,9 +6474,11 @@ impl<'a> Checker<'a> {
             ExprKind::Member { obj, name, optional: false, .. } if self.bool_discriminant(*obj, *name) => self.bool_field_narrowing(*obj, *name, positive),
             // `const { done, value } = it.next(); if (done) break`: `value` is what it yields
             ExprKind::Ident(x) if let Some(v) = self.linked_narrowing(*x, positive) => v,
+            // `if (o.ext?.renderers?.[k])`: every link before a `?.` is there
+            ExprKind::Index { optional: true, .. } if positive => self.chain_narrowings(e),
             // `if (m?.groups)`: `m` is there, and its `groups`
             ExprKind::Member { obj, optional: true, .. } if positive => {
-                let mut v = Vec::new();
+                let mut v = self.chain_narrowings(*obj);
                 if let Some((target, ty)) = self.target_of(*obj)
                     && self.types.has_nullish(ty)
                 {
@@ -6354,6 +6517,28 @@ impl<'a> Checker<'a> {
     }
 
     /// `x.name` where x is a union of records, some with `name` a `true` or `false`.
+    /// An optional chain found truthy: each link before a `?.` (or `?.[]`) isn't nullish.
+    fn chain_narrowings(&mut self, e: ExprId) -> Vec<Narrowing> {
+        let mut v = Vec::new();
+        let mut cur = e;
+        loop {
+            let (obj, optional) = match self.ast().expr(cur).kind {
+                ExprKind::Member { obj, optional, .. } | ExprKind::Index { obj, optional, .. } => (obj, optional),
+                ExprKind::Paren(x) | ExprKind::NonNull(x) => (x, false),
+                _ => break,
+            };
+            if optional
+                && let Some((target, ty)) = self.target_of(obj)
+                && self.types.has_nullish(ty)
+            {
+                let t = self.types.without_nullish(ty);
+                v.push(target.with(t));
+            }
+            cur = obj;
+        }
+        v
+    }
+
     fn bool_discriminant(&mut self, obj: ExprId, name: Sym) -> bool {
         let Some((_, ty)) = self.target_of(obj) else { return false };
         let members = self.flat_members(ty);
@@ -6462,6 +6647,22 @@ impl<'a> Checker<'a> {
             ExprKind::Paren(x) => self.target_of(*x),
             // `(m = re.exec(s)) !== null`: the variable, as just assigned
             ExprKind::Assign(crate::ast::AssignOp::Assign, l, _) if matches!(self.ast().expr(*l).kind, ExprKind::Ident(_)) => self.target_of(*l),
+            // `xs[0]` (a literal index of an array): its element, under the index's digit
+            ExprKind::Index { obj, index, optional: false } if let ExprKind::Int(k) = self.ast().expr(*index).kind && k < 16 => {
+                let (mut target, base) = self.target_of(*obj)?;
+                if target.global.is_some() {
+                    return None;
+                }
+                let base = self.types.without_undefined(base);
+                let Ty::Array(el) = *self.types.get(base) else { return None };
+                target.path.push(self.syms.digits[k as usize]);
+                // (arrays are shared: other references, and calls, can change it)
+                target.heap = true;
+                if let Some(t) = self.lookup_path(target.local, &target.path) {
+                    return Some((target, t));
+                }
+                Some((target, el))
+            }
             ExprKind::Member { obj, name, optional, .. } => {
                 let (mut target, base) = self.target_of(*obj)?;
                 // (a module constant's contents can change under it: only its own value narrows)
@@ -6504,6 +6705,11 @@ impl<'a> Checker<'a> {
                 ExprKind::Paren(x) | ExprKind::NonNull(x) => cur = *x,
                 ExprKind::Member { obj, name, .. } => {
                     path.push(*name);
+                    cur = *obj;
+                }
+                // (`xs[0].f = v`: under that element, as `target_of` names it)
+                ExprKind::Index { obj, index, .. } if let ExprKind::Int(k) = self.ast().expr(*index).kind && k < 16 => {
+                    path.push(self.syms.digits[k as usize]);
                     cur = *obj;
                 }
                 ExprKind::Index { obj, .. } => {
