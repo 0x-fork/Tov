@@ -4689,7 +4689,7 @@ impl<'a> Parser<'a> {
                     let value = self.assign();
                     fields.push(ObjField { name, name_span, value, quoted: true });
                 }
-            } else if self.at(Tok::Async) && matches!(self.nth(1), Tok::Ident) && self.nth(2) == Tok::LParen {
+            } else if self.at(Tok::Async) && (matches!(self.nth(1), Tok::Ident) || self.nth(1).is_keyword()) && self.nth(2) == Tok::LParen {
                 // `async name(params) { ... }`
                 self.bump();
                 if let Some(f) = self.object_method(fstart, true) {

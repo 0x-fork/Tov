@@ -499,10 +499,46 @@ impl<'c, 'a> Gen<'c, 'a> {
             };
             return Callback { direct: Some((info.cname, env)), value: String::new(), params, ret, throws };
         }
+        // (a `const` arrow capturing nothing, `xs.map(identity)`: its C function, called directly)
+        if let Some(cname) = self.const_arrow_fn(arg, &params, ret) {
+            return Callback { direct: Some((cname, "NULL".into())), value: String::new(), params, ret, throws };
+        }
         let v = self.expr(arg);
         let fvn = self.fresh("cb");
         self.line(format!("tv_fn {fvn} = {};", v.code));
         Callback { direct: None, value: fvn, params, ret, throws }
+    }
+
+    /// `f` a local `const f = (...) => ...` whose arrow captures nothing and was made as one C
+    /// function of this type: that function.
+    fn const_arrow_fn(&mut self, f: ExprId, params: &[FnParam], ret: TyId) -> Option<String> {
+        let m = self.cur_m();
+        if !matches!(self.ast(m).expr(f).kind, ExprKind::Ident(_)) {
+            return None;
+        }
+        let Some(crate::check::IdentFact::Local(k)) = self.ident_fact(m, f) else { return None };
+        if !self.const_arrows.contains_key(&m) {
+            let ast = self.ast(m);
+            let mut all = FxMap::default();
+            for st in ast.stmts.iter() {
+                if let crate::ast::StmtKind::Let { mutable: false, name_span, init: Some(i), .. } = &st.kind
+                    && matches!(&ast.expr(*i).kind, ExprKind::Arrow(a) if !a.is_async)
+                {
+                    all.insert(name_span.start, *i);
+                }
+            }
+            self.const_arrows.insert(m, all);
+        }
+        let ae = *self.const_arrows[&m].get(&k)?;
+        if !crate::codegen::body::arrow_captures(self.ast(m), self.facts(m), ae).is_empty() {
+            return None;
+        }
+        let fns = self.arrow_fns.get(&(m, ae))?.clone();
+        let want = self.fn_ptr_type(params, ret);
+        match fns.as_slice() {
+            [(cname, cast)] if *cast == want => Some(cname.clone()),
+            _ => None,
+        }
     }
 
     /// Calls a prepared callback with (borrowed) arguments; extra arguments are dropped.
@@ -793,6 +829,25 @@ impl<'c, 'a> Gen<'c, 'a> {
 
     // ------------------------------------------------------------ built-in methods
 
+    /// `xs` is a local made as a `Float64Array` (`new Float64Array(n)`, `Float64Array.from(...)`),
+    /// which Tov holds as an `f64[]`.
+    fn float64_array(&self, obj: ExprId) -> bool {
+        let m = self.cur_m();
+        let ast = self.ast(m);
+        let Some(crate::check::IdentFact::Local(k)) = self.ident_fact(m, obj) else { return false };
+        let is_f64 = |e: ExprId| match &ast.expr(e).kind {
+            ExprKind::New { callee, .. } => matches!(ast.expr(*callee).kind, ExprKind::Ident(n) if self.sym(n) == "Float64Array"),
+            ExprKind::Call { callee, .. } => matches!(&ast.expr(*callee).kind, ExprKind::Member { obj, .. } if matches!(ast.expr(*obj).kind, ExprKind::Ident(n) if self.sym(n) == "Float64Array")),
+            _ => false,
+        };
+        ast.stmts.iter().any(|st| match &st.kind {
+            crate::ast::StmtKind::Let { name_span, init: Some(i), ty, .. } if name_span.start == k => {
+                is_f64(*i) || ty.is_some_and(|t| matches!(&ast.ty(t).kind, crate::ast::TypeExprKind::Named { name, .. } if self.sym(*name) == "Float64Array"))
+            }
+            _ => false,
+        })
+    }
+
     /// A built-in method call. `given` is an already-evaluated receiver (for `x?.m()`).
     #[allow(clippy::too_many_arguments)]
     fn method_on(&mut self, given: Option<Val>, obj: ExprId, recv: TyId, name: &str, args: &[Arg], params: &[FnParam], ty: TyId, span: Span) -> Val {
@@ -819,6 +874,28 @@ impl<'c, 'a> Gen<'c, 'a> {
             } else {
                 p.lv
             };
+            // (a typed array's `sort()`: by number, not as text)
+            if name == "sort"
+                && args.is_empty()
+                && let Ty::Array(et) = self.tget(recv)
+                && let Some(kind) = match self.tget(et) {
+                    Ty::I8 => Some(0),
+                    Ty::U8 | Ty::U8C => Some(1),
+                    Ty::I16 => Some(2),
+                    Ty::U16 => Some(3),
+                    Ty::I32 => Some(4),
+                    Ty::U32 => Some(5),
+                    Ty::F32 => Some(6),
+                    Ty::F64 if self.float64_array(obj) => Some(7),
+                    _ => None,
+                }
+            {
+                let d = self.desc(et);
+                self.line(format!("tvg_make_unique(&{lv}, {d}); tv_sort_typed(tv_arr_data({lv}), tv_arr_len({lv}), {kind});"));
+                let v = Val::plain(lv, recv);
+                let v = self.own(v);
+                return self.coerce(v, ty);
+            }
             return self.mutating_method(&lv, recv, name, args, params, ty, span);
         }
         // `(a / b).round(k, "mode")` on decimals: rounded once, straight to k places (see
@@ -1547,6 +1624,26 @@ impl<'c, 'a> Gen<'c, 'a> {
         match name {
             "map" | "flatMap" | "filter" | "forEach" | "some" | "every" | "find" | "findIndex" => {
                 let cb = self.prepare_callback(args[0].expr);
+                // (`map` by a callback that can't throw: each result written in place, the
+                // length set once at the end, so the C compiler keeps the count in a register)
+                if name == "map"
+                    && !cb.throws
+                    && let Ty::Array(rt) = self.tget(ty)
+                {
+                    let (rd, rct) = (self.desc(rt), self.ctype(rt));
+                    let (n, w, i) = (self.fresh("n"), self.fresh("w"), self.fresh("i"));
+                    self.line(format!("tv_int {n} = tv_arr_len({});", arr.code));
+                    let res = self.tmp(ty, &format!("tv_arr_with_capacity({rd}, {n})"), true);
+                    self.line(format!("{rct} *{w} = ({rct} *)tv_arr_data({}); tv_int {i} = 0;", res.code));
+                    self.open_block(&format!("for (; {i} < {n} && {i} < tv_arr_len({}); {i}++) {{", arr.code));
+                    let r = self.invoke(&cb, vec![elem(&i), Val::plain(i.clone(), INT)]);
+                    let v = self.coerce(r, rt);
+                    let code = self.consume(v);
+                    self.line(format!("{w}[{i}] = {code};"));
+                    self.close_block("}");
+                    self.line(format!("if ({i}) {}.p->len = {i};", res.code));
+                    return res;
+                }
                 let (res, res_ty) = match name {
                     "map" | "flatMap" => {
                         let Ty::Array(rt) = self.tget(ty) else { return Val::plain("0", ty) };
@@ -1681,12 +1778,8 @@ impl<'c, 'a> Gen<'c, 'a> {
                 let f = if name == "lastIndexOf" { "tv_arr_last_index_of" } else { "tv_arr_index_of" };
                 Val::plain(format!("{f}({}, {d}, &{xn})", arr.code), INT)
             }
-            "toString" => {
-                let sep = self.lit(b",");
-                self.tmp(STR, &format!("tv_arr_join({}, {d}, {sep})", arr.code), true)
-            }
-            "join" => {
-                let sep = match args.first() {
+            "join" | "toString" => {
+                let sep = match args.first().filter(|_| name == "join") {
                     Some(a) => {
                         let v = self.expr(a.expr);
                         self.coerce(v, STR).code
@@ -1739,9 +1832,31 @@ impl<'c, 'a> Gen<'c, 'a> {
                 self.tmp(ty, &format!("tv_arr_slice({}, {d}, {s}, {e2}, {hs}, {he})", arr.code), true)
             }
             "concat" => {
-                let o = self.expr(args[0].expr);
-                let o = self.coerce(o, ty);
-                self.tmp(ty, &format!("tv_arr_concat({}, {}, {d})", arr.code, o.code), true)
+                // (one array: copied once with it; else each array's elements or each value, appended)
+                let first_ty = args.first().map(|a| self.ty(a.expr));
+                if let [a0] = args
+                    && first_ty.is_some_and(|t| matches!(self.tget(t), Ty::Array(_)))
+                {
+                    let o = self.expr(a0.expr);
+                    let o = self.coerce(o, ty);
+                    return self.tmp(ty, &format!("tv_arr_concat({}, {}, {d})", arr.code, o.code), true);
+                }
+                let res = self.tmp(ty, &format!("tv_arr_slice({}, {d}, 0, 0, false, false)", arr.code), true);
+                for a in args {
+                    let at = self.ty(a.expr);
+                    let v = self.expr(a.expr);
+                    if matches!(self.tget(at), Ty::Array(_)) {
+                        let v = self.coerce(v, ty);
+                        self.line(format!("tv_arr_extend(&{}, {d}, {});", res.code, v.code));
+                    } else {
+                        let v = self.coerce(v, et);
+                        let code = self.consume(v);
+                        let n = self.fresh("e");
+                        self.line(format!("{ect} {n} = {code};"));
+                        self.line(format!("tv_arr_push(&{}, {d}, &{n});", res.code));
+                    }
+                }
+                res
             }
             "flat" => {
                 // one level: each nested array's elements, in order
@@ -3086,6 +3201,53 @@ impl<'c, 'a> Gen<'c, 'a> {
         let Ty::Array(et) = self.tget(ty) else { return Val::plain("TV_EMPTY_ARR", ty) };
         let d = self.desc(et);
         let ect = self.ctype(et);
+        // (no spreads, `Array.of(1, 2, 3)`: its length known, allocated once and written)
+        if !elems.is_empty() && !elems.iter().any(|&x| matches!(self.ast(self.cur_m()).expr(x).kind, ExprKind::Spread(_))) {
+            let mut codes = Vec::new();
+            for &x in elems {
+                let v = self.expr(x);
+                let v = self.coerce(v, et);
+                let code = self.consume(v);
+                let n = self.fresh("e");
+                self.line(format!("{ect} {n} = {code};"));
+                codes.push(n);
+            }
+            let arr = self.tmp(ty, &format!("tv_arr_new_len(sizeof({ect}), {})", codes.len()), true);
+            let w = self.fresh("w");
+            self.line(format!("{ect} *{w} = ({ect} *)tv_arr_data({});", arr.code));
+            for (i, c) in codes.iter().enumerate() {
+                self.line(format!("{w}[{i}] = {c};"));
+            }
+            return arr;
+        }
+        // (`[...set]`, `[...xs]`: the set's keys as they're made, or one copy of the array)
+        if let [x] = elems
+            && let ExprKind::Spread(inner) = self.ast(self.cur_m()).expr(*x).kind
+        {
+            let src = self.spread_array(inner);
+            if matches!(self.tget(src.ty), Ty::Array(e) if e == et) {
+                if src.owned {
+                    return src;
+                }
+                return self.tmp(ty, &format!("tv_arr_slice({}, {d}, 0, 0, false, false)", src.code), true);
+            }
+            let arr = self.tmp(ty, "tv_arr_fresh()", true);
+            let Ty::Array(se) = self.tget(src.ty) else { return arr };
+            let sct = self.ctype(se);
+            let i = self.fresh("i");
+            self.open(&format!("for (tv_int {i} = 0; {i} < tv_arr_len({}); {i}++) {{", src.code));
+            let v = Val::plain(format!("((({sct} *)tv_arr_data({}))[{i}])", src.code), se);
+            let v = self.coerce(v, et);
+            let n = self.fresh("e");
+            self.line(format!("{ect} {n} = {};", v.code));
+            let r = self.retain_code(et, &n);
+            if !r.is_empty() {
+                self.line(format!("{r};"));
+            }
+            self.line(format!("tv_arr_push(&{}, {d}, &{n});", arr.code));
+            self.close("}");
+            return arr;
+        }
         let arr = self.tmp(ty, "tv_arr_fresh()", true);
         for &x in elems {
             match self.ast(self.cur_m()).expr(x).kind {

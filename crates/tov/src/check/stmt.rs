@@ -397,6 +397,15 @@ impl<'a> Checker<'a> {
                         let ispan = self.ast().expr(*i).span;
                         let t = self.check_inferred_binding(found, ispan);
                         let t = if *mutable { self.types.widen(t) } else { t };
+                        // (`let p = Promise.resolve()`, later `p = p.then(f)`: a promise that may
+                        // reject, as TypeScript's `Promise<T>` covers both)
+                        let t = match *self.types.get(t) {
+                            Ty::Promise(v, NEVER) if *mutable => {
+                                let err = self.error_class();
+                                self.types.promise(v, err)
+                            }
+                            _ => t,
+                        };
                         // (in TypeScript, any `let` of an integer: `let min = INF` may take a float
                         // later, its one `number`)
                         let promotable = *mutable && t == INT && (self.is_int_literal(*i) || self.ts_module());
@@ -730,6 +739,16 @@ impl<'a> Checker<'a> {
                     }
                     (None, Some(x)) => {
                         let t = self.expr(*x, None);
+                        // (an async function returning a promise, its result inferred: the
+                        // promise's value, as `return await p`)
+                        let t = match *self.types.get(t) {
+                            Ty::Promise(v, _) if is_async => {
+                                let m = self.cur;
+                                self.rewrites.awaits.push((m, *x));
+                                v
+                            }
+                            _ => t,
+                        };
                         self.fcx().frames[frame_idx].returns.push(t);
                     }
                     (None, None) => {

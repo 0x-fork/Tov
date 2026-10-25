@@ -309,6 +309,8 @@ pub(crate) struct Gen<'c, 'a> {
     /// the calls through class fields that test for them (see `devirt_helpers`): the helper's
     /// name, the arrows, its pointer type, result and parameter C types.
     pub(crate) arrow_fns: FxMap<(u32, crate::ast::ExprId), Vec<(String, String)>>,
+    /// Each module's `const f = (...) => ...` locals: by key, the arrow (see `const_arrow`).
+    pub(crate) const_arrows: FxMap<u32, FxMap<u32, crate::ast::ExprId>>,
     pub(crate) devirt: Vec<(String, Vec<(u32, crate::ast::ExprId)>, String, String, Vec<String>)>,
     pub(crate) arrow_protos: FxMap<String, String>,
     /// Array types given a free function of their own (see `arr_free_fn`).
@@ -451,6 +453,7 @@ impl<'c, 'a> Gen<'c, 'a> {
             field_arrows: Vec::new(),
             subst_used: false,
             arrow_fns: FxMap::default(),
+            const_arrows: FxMap::default(),
             devirt: Vec::new(),
             arrow_protos: FxMap::default(),
             arr_frees: FxSet::default(),
@@ -1684,6 +1687,30 @@ impl<'c, 'a> Gen<'c, 'a> {
             Ty::Bool => format!("tv_sb_push_cstr(sb, ({place}) ? \"true\" : \"false\")"),
             Ty::Undefined | Ty::Void | Ty::Never => "tv_sb_push_cstr(sb, \"undefined\")".into(),
             Ty::Null => "tv_sb_push_cstr(sb, \"null\")".into(),
+            // (`String([1, null, undefined])` is "1,,": an empty element, as `join`'s)
+            Ty::Array(e)
+                if matches!(self.tget(e), Ty::Union(_))
+                    && (self.c.types.has_undefined(e) || self.members(e).contains(&NULL))
+                    && self.members(e).iter().all(|&m| matches!(self.tget(m), Ty::Undefined | Ty::Null | Ty::Str | Ty::StrLit(_) | Ty::Bool | Ty::BoolLit(_)) || self.c.types.is_numeric(m)) =>
+            {
+                let ect = self.ctype(e);
+                let (a, i, x) = (self.fresh("sa"), self.fresh("si"), self.fresh("sx"));
+                let xv = format!("(*{x})");
+                let absent = match self.niche(e) {
+                    Some(_) => format!("!({})", self.niche_there(&xv, e)),
+                    None => {
+                        let mut parts = Vec::new();
+                        for m in [UNDEFINED, NULL] {
+                            if let Some(k) = self.tag_of(e, m) {
+                                parts.push(self.u_is(&xv, e, k));
+                            }
+                        }
+                        format!("({})", parts.join(" || "))
+                    }
+                };
+                let inner = self.string_code(e, &xv);
+                format!("({{ tv_arr {a} = {place}; for (tv_int {i} = 0; {i} < tv_arr_len({a}); {i}++) {{ if ({i}) tv_sb_push_cstr(sb, \",\"); {ect} *{x} = &(({ect} *)tv_arr_data({a}))[{i}]; if (!{absent}) {inner}; }} }})")
+            }
             Ty::Array(e) => {
                 let d = self.desc(e);
                 format!("tv_to_str_arr(sb, {place}, {d})")

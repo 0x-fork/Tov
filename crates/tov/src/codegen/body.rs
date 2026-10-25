@@ -3182,7 +3182,9 @@ impl<'c, 'a> Gen<'c, 'a> {
         let ct = self.ctype(ty);
         let name = format!("C{}", ty.0);
         if self.helpers_cell_done(ty) {
-            let _ = writeln!(self.typedefs, "typedef struct {name} {{ int64_t rc; {ct} v; }} {name};");
+            // (holding the value by value: defined after every value struct, as environments are)
+            let _ = writeln!(self.typedefs, "typedef struct {name} {name};");
+            let _ = writeln!(self.env_structs, "struct {name} {{ int64_t rc; {ct} v; }};");
         }
         name
     }

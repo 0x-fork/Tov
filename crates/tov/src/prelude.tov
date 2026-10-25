@@ -272,6 +272,97 @@ export function __toReversed<T>(xs: T[]): T[] {
   return c
 }
 
+export class URIError extends Error {
+  constructor(message?: string) {
+    super(message)
+    this.name = "URIError"
+  }
+}
+
+/** encodeURIComponent / encodeURI: each character outside the unreserved set (and `keep`) as the
+ * %XX of its UTF-8 bytes. */
+function __uriEncode(s: string, keep: string): string {
+  const hex = "0123456789ABCDEF"
+  let out = ""
+  for (const ch of s) {
+    const cp = ch.codePointAt(0) ?? 0
+    if (cp < 128 && ((cp >= 48 && cp <= 57) || (cp >= 65 && cp <= 90) || (cp >= 97 && cp <= 122) || "-_.!~*'()".includes(ch) || keep.includes(ch))) {
+      out += ch
+      continue
+    }
+    const bytes: int[] = cp < 0x80 ? [cp] : cp < 0x800 ? [0xc0 | (cp >> 6), 0x80 | (cp & 63)] : cp < 0x10000 ? [0xe0 | (cp >> 12), 0x80 | ((cp >> 6) & 63), 0x80 | (cp & 63)] : [0xf0 | (cp >> 18), 0x80 | ((cp >> 12) & 63), 0x80 | ((cp >> 6) & 63), 0x80 | (cp & 63)]
+    for (const b of bytes) out += "%" + hex[b >> 4] + hex[b & 15]
+  }
+  return out
+}
+
+function __hexVal(c: int): int {
+  if (c >= 48 && c <= 57) return c - 48
+  if (c >= 65 && c <= 70) return c - 55
+  if (c >= 97 && c <= 102) return c - 87
+  return -1
+}
+
+/** decodeURIComponent / decodeURI: %XX sequences as UTF-8 bytes (a malformed one throws
+ * `URIError`); decodeURI keeps the escapes of the reserved characters in `keep`. */
+function __uriDecode(s: string, keep: string): string {
+  let out = ""
+  let i = 0
+  const n = s.length
+  while (i < n) {
+    const c = s.charCodeAt(i)
+    if (c !== 37) {
+      out += s[i]
+      i++
+      continue
+    }
+    if (i + 2 >= n) throw new URIError("URI malformed")
+    const h = __hexVal(s.charCodeAt(i + 1)), l = __hexVal(s.charCodeAt(i + 2))
+    if (h < 0 || l < 0) throw new URIError("URI malformed")
+    const b = h * 16 + l
+    if (b < 0x80) {
+      const ch = String.fromCharCode(b)
+      out += keep.includes(ch) ? s.substring(i, i + 3) : ch
+      i += 3
+      continue
+    }
+    const count = b >= 0xf0 && b < 0xf8 ? 3 : b >= 0xe0 ? 2 : b >= 0xc0 ? 1 : -1
+    if (count < 0 || b >= 0xf8) throw new URIError("URI malformed")
+    let cp = b & (count === 1 ? 0x1f : count === 2 ? 0x0f : 0x07)
+    let j = i + 3
+    for (let k = 0; k < count; k++) {
+      if (j + 2 >= n || s.charCodeAt(j) !== 37) throw new URIError("URI malformed")
+      const h2 = __hexVal(s.charCodeAt(j + 1)), l2 = __hexVal(s.charCodeAt(j + 2))
+      if (h2 < 0 || l2 < 0) throw new URIError("URI malformed")
+      const cb = h2 * 16 + l2
+      if ((cb & 0xc0) !== 0x80) throw new URIError("URI malformed")
+      cp = (cp << 6) | (cb & 0x3f)
+      j += 3
+    }
+    const min = count === 1 ? 0x80 : count === 2 ? 0x800 : 0x10000
+    if (cp < min || cp > 0x10ffff || (cp >= 0xd800 && cp < 0xe000)) throw new URIError("URI malformed")
+    out += String.fromCodePoint(cp)
+    i = j
+  }
+  return out
+}
+
+export function encodeURIComponent(s: string): string {
+  return __uriEncode(s, "")
+}
+
+export function encodeURI(s: string): string {
+  return __uriEncode(s, ";,/?:@&=+$#")
+}
+
+export function decodeURIComponent(s: string): string {
+  return __uriDecode(s, "")
+}
+
+export function decodeURI(s: string): string {
+  return __uriDecode(s, ";,/?:@&=+$#")
+}
+
 /** `xs.with(i, v)`: a copy with element i (from the end when negative) replaced. */
 export function __with<T>(xs: T[], i: int, v: T): T[] {
   const n = xs.length
@@ -722,6 +813,16 @@ export async function __then2<T, R>(p: Promise<T, Error>, f: (v: T) => R throws 
     return g(e)
   }
   return f(await p)
+}
+
+/** `Promise.all(xs)` of plain values: a copy of them. */
+export async function __allValues<T>(xs: T[]): Promise<T[]> {
+  return xs.slice()
+}
+
+/** `Promise.race(xs)` of plain values: the first. */
+export async function __raceValues<T>(xs: T[]): Promise<T> {
+  return xs[0]
 }
 
 /** One outcome of `Promise.allSettled`. */

@@ -397,7 +397,12 @@ pub(super) fn method(c: &mut Checker, base: TyId, name: &str) -> Option<MethodSi
                     let (a, b) = (opt(c, INT), opt(c, INT));
                     mk(sig(vec![(a, "start"), (b, "end")], arr), false)
                 }
-                "concat" => mk(sig(vec![(p(arr), "other")], arr), false),
+                // (`xs.concat(ys, x, zs)`: arrays' elements and values, as TypeScript's
+                // `...items: (T | ConcatArray<T>)[]`)
+                "concat" => {
+                    let item = c.types.union(&[e, arr]);
+                    mk(CallSig { tparams: Vec::new(), params: Vec::new(), names: Vec::new(), rest: Some(item), ret: arr, throws: NEVER }, false)
+                }
                 "reverse" => mk(sig(vec![], arr), true),
                 "sort" => {
                     let cmp = c.types.func(vec![p(e), p(e)], F64);
@@ -778,6 +783,15 @@ impl<'a> Checker<'a> {
                     }
                     return ERROR;
                 };
+                // (`Promise.all([1, 2])`: plain values, as JavaScript resolves each; rewritten as
+                // the prelude's `__allValues(xs)` / `__raceValues(xs)`)
+                if !self.flat_members(elem).iter().any(|&m| matches!(self.types.get(m), Ty::Promise(..) | Ty::Error))
+                    && let Some(call) = self.pending_call.take()
+                    && let Some(f) = self.interner.lookup(if name == "all" { "__allValues" } else { "__raceValues" })
+                {
+                    self.rewrites.static_calls.push((self.cur, call, f));
+                    return ERROR;
+                }
                 let (mut values, mut errors) = (Vec::new(), Vec::new());
                 for m in self.flat_members(elem) {
                     match *self.types.get(m) {
@@ -953,6 +967,21 @@ impl<'a> Checker<'a> {
                     self.rewrites.assigns.push((self.cur, call, fields));
                 }
                 t
+            }
+            // `Object.hasOwn(o, k)` of a record, a dictionary or an unknown value: `k in o` (a
+            // class's methods aren't its own, so not a class instance)
+            "Object" if name == "hasOwn" && args.len() == 2 && let Some(call) = self.pending_call => {
+                let ot = self.expr(args[0].expr, None);
+                let ot = self.types.without_nullish(ot);
+                if !matches!(self.types.get(ot), Ty::Record(_) | Ty::Map(..) | Ty::Unknown | Ty::Rec(..) | Ty::Error) {
+                    let shown = self.show(ot);
+                    self.check_args_loose(&args[1..]);
+                    self.report(Diagnostic::new("U0011", span, format!("`Object.hasOwn` of a `{shown}` is not supported yet")).note("supported", "a record, a `Record<string, V>` or an `unknown`"));
+                    return ERROR;
+                }
+                self.pending_call = None;
+                self.rewrites.has_own.push((self.cur, call, args[0].expr, args[1].expr));
+                ERROR
             }
             "Object" => {
                 // `Object.keys/values/entries(m)` of a `Record<string, V>` (a map), or of a record

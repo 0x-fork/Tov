@@ -160,6 +160,7 @@ void tv_sb_free(tv_sb *sb);
  * xs.sort((a, b) => a - b) (or b - a) on f64[], in place. */
 void tv_radix64(uint64_t *keys, int64_t *idx, tv_int n);
 void tv_sort_f64(double *a, tv_int n, bool desc);
+void tv_sort_typed(void *data, tv_int n, int kind);   /* a typed array's sort(): by number */
 
 /* ------------------------------------------------------------------ type descriptors */
 
@@ -372,8 +373,6 @@ struct tv_arr tv_str_chars(tv_str s);           /* one string per Unicode scalar
 tv_int tv_str_char_count(tv_str s);
 tv_str tv_str_slice(tv_str s, tv_int start, tv_int end, bool has_end, const char *loc);
 bool tv_str_includes(tv_str s, tv_str needle);
-bool tv_str_starts_with(tv_str s, tv_str prefix);
-bool tv_str_ends_with(tv_str s, tv_str suffix);
 tv_str tv_str_substring_slow(tv_str s, tv_int start, tv_int end, bool has_end);
 /* Immortal one-character strings for printable ASCII (32..127). */
 typedef struct { int32_t rc; int32_t len; char data[4]; } tv_small_strbuf;
@@ -401,13 +400,29 @@ static inline bool tv_str_next_char(tv_str s, tv_int *pos, tv_str *out) {
     }
     return tv_str_next_char_slow(s, pos, out);
 }
+tv_str tv_str_ascii_slice(tv_str s, int64_t a, int64_t b);  /* bytes a..b of an ASCII string */
 static inline tv_str tv_str_substring(tv_str s, tv_int start, tv_int end, bool has_end) {
     /* (one ASCII character, `s.substring(i, i + 1)`: the shared one-character string) */
     if (has_end && end == start + 1 && (uint64_t)start < (uint64_t)s.p->len && tv_str_is_ascii(s)) {
         unsigned char c = (unsigned char)s.p->data[start];
         if (c - 32u < 96u) return tv_ascii_str(c);
     }
+    /* (an ASCII string: its unit indexes are byte indexes) */
+    if (tv_str_is_ascii(s)) {
+        int64_t len = s.p->len;
+        int64_t a = start < 0 ? 0 : start > len ? len : start;
+        int64_t b = !has_end ? len : end < 0 ? 0 : end > len ? len : end;
+        return a <= b ? tv_str_ascii_slice(s, a, b) : tv_str_ascii_slice(s, b, a);
+    }
     return tv_str_substring_slow(s, start, end, has_end);
+}
+/* (inline: against a literal, whose length and bytes are constants, a length test and a word
+ * compare) */
+static inline bool tv_str_starts_with(tv_str s, tv_str prefix) {
+    return prefix.p->len <= s.p->len && memcmp(s.p->data, prefix.p->data, (size_t)prefix.p->len) == 0;
+}
+static inline bool tv_str_ends_with(tv_str s, tv_str suffix) {
+    return suffix.p->len <= s.p->len && memcmp(s.p->data + s.p->len - suffix.p->len, suffix.p->data, (size_t)suffix.p->len) == 0;
 }
 tv_str tv_str_substr(tv_str s, tv_int start, tv_int count, bool has_count);
 tv_int tv_str_index_of(tv_str s, tv_str needle);            /* unit index or -1 */

@@ -4287,6 +4287,14 @@ impl<'a> Checker<'a> {
                     self.report(Diagnostic::new("U0011", span, "`flat` takes a literal depth (a number, or `Infinity`)"));
                     return ERROR;
                 }
+                // `o.hasOwnProperty(k)` of a record or a dictionary: `k in o`
+                if mtext == "hasOwnProperty"
+                    && args.len() == 1
+                    && matches!(self.types.get(base), Ty::Record(_) | Ty::Map(..) | Ty::Unknown | Ty::Rec(..))
+                {
+                    self.rewrites.has_own.push((self.cur, e, obj, args[0].expr));
+                    return ERROR;
+                }
                 // `p.then(f)`, `p.catch(g)`, `p.finally(h)`: the prelude's `__then(p, f)` and so on
                 if let Ty::Promise(v, _) = *self.types.get(base)
                     && matches!(mtext.as_str(), "then" | "catch" | "finally")

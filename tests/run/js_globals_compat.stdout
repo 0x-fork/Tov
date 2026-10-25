@@ -1,0 +1,11 @@
+[ 1, 2, 3, 4, 5 ] [
+  1, 2, 3, 6,
+  7, 8, 9
+] [ 1, 2, 3 ] [ 1, 2, 3, 10 ] [ 'x', 'y', 'z' ]
+a%20b%26c%3Dd%2F%C3%A9%F0%9F%98%80%3F a b&c=d/é😀? http://x.com/a%20b?q=1&r=%C3%A9#h http://x.com/a b%3Fc a@
+URIError URI malformed
+URIError
+true true false true false
+5
+2 6 4
+[ 1, 2 ] 7

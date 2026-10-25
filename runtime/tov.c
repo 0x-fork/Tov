@@ -522,6 +522,54 @@ void tv_sort_f64(double *a, tv_int n, bool desc) {
     if (zs) tv_free(zs);
 }
 
+/* A typed array's `sort()` with no comparator: by number (as JavaScript's: -0 before +0, NaN
+ * last). kind: 0 i8, 1 u8, 2 i16, 3 u16, 4 i32, 5 u32, 6 f32, 7 f64. */
+void tv_sort_typed(void *data, tv_int n, int kind) {
+    if (n < 2) return;
+    uint64_t *k = tv_alloc((size_t)n * sizeof(uint64_t));
+    for (tv_int i = 0; i < n; i++) {
+        uint64_t key;
+        switch (kind) {
+        case 0: key = (uint64_t)(int64_t)((int8_t *)data)[i] ^ 0x8000000000000000ull; break;
+        case 1: key = ((uint8_t *)data)[i]; break;
+        case 2: key = (uint64_t)(int64_t)((int16_t *)data)[i] ^ 0x8000000000000000ull; break;
+        case 3: key = ((uint16_t *)data)[i]; break;
+        case 4: key = (uint64_t)(int64_t)((int32_t *)data)[i] ^ 0x8000000000000000ull; break;
+        case 5: key = ((uint32_t *)data)[i]; break;
+        default: {
+            double x = kind == 6 ? (double)((float *)data)[i] : ((double *)data)[i];
+            key = x != x ? UINT64_MAX : x == 0 && signbit(x) ? 0x7FFFFFFFFFFFFFFFull : tv_f64_key(x);
+        }
+        }
+        k[i] = key;
+    }
+    tv_rx_tmp tmp = { NULL, 0 };
+    tv_radix_inplace(k, (size_t)n, &tmp);
+    free(tmp.p);
+    for (tv_int i = 0; i < n; i++) {
+        uint64_t key = k[i];
+        switch (kind) {
+        case 0: ((int8_t *)data)[i] = (int8_t)(int64_t)(key ^ 0x8000000000000000ull); break;
+        case 1: ((uint8_t *)data)[i] = (uint8_t)key; break;
+        case 2: ((int16_t *)data)[i] = (int16_t)(int64_t)(key ^ 0x8000000000000000ull); break;
+        case 3: ((uint16_t *)data)[i] = (uint16_t)key; break;
+        case 4: ((int32_t *)data)[i] = (int32_t)(int64_t)(key ^ 0x8000000000000000ull); break;
+        case 5: ((uint32_t *)data)[i] = (uint32_t)key; break;
+        default: {
+            double x;
+            if (key == UINT64_MAX) x = NAN;
+            else {
+                uint64_t u = (key >> 63) ? (key ^ 0x8000000000000000ull) : ~key;
+                memcpy(&x, &u, 8);
+            }
+            if (kind == 6) ((float *)data)[i] = (float)x;
+            else ((double *)data)[i] = x;
+        }
+        }
+    }
+    tv_free(k);
+}
+
 void tv_f64_index_trap(double d, const char *loc) {
     char msg[96];
     snprintf(msg, sizeof msg, "array index %.17g is not a whole number", d);
@@ -627,10 +675,37 @@ static inline void tv_small_free(void *p, size_t size) {
 }
 static inline size_t tv_strbuf_size(size_t n) { return TV_STR_HDR + n + 1; }
 
+/* (the last few medium strings' storage, freed: a string made and dropped again and again,
+ * `JSON.parse(text)` of a long one in a loop, reuses it rather than the system allocator handing
+ * the pages back each time; Tov's values live on one thread) */
+#define TV_STR_KEEP_MAX ((size_t)1 << 20)
+static struct { void *p; size_t size; } tv_str_kept[4];
+static unsigned tv_str_kept_next;
+
+static void *tv_str_take(size_t size) {
+    for (int i = 0; i < 4; i++) {
+        size_t k = tv_str_kept[i].size;
+        if (tv_str_kept[i].p && k >= size && k - size <= size / 4) {
+            void *p = tv_str_kept[i].p;
+            tv_str_kept[i].p = NULL;
+            return p;
+        }
+    }
+    return tv_alloc(size);
+}
+
+static void tv_str_keep(void *p, size_t size) {
+    if (size > TV_STR_KEEP_MAX) { free(p); return; }
+    unsigned i = tv_str_kept_next++ & 3;
+    if (tv_str_kept[i].p) free(tv_str_kept[i].p);
+    tv_str_kept[i].p = p;
+    tv_str_kept[i].size = size;
+}
+
 static tv_strbuf *tv_strbuf_new(size_t n) {
     size_t size = tv_size_mul_add(n, 1, TV_STR_HDR + 1);
     if (n > INT32_MAX) tv_trap("string too long", NULL);
-    tv_strbuf *b = (tv_strbuf *)(size <= TV_SMALL_MAX ? tv_small_alloc(size) : tv_alloc(size));
+    tv_strbuf *b = (tv_strbuf *)(size <= TV_SMALL_MAX ? tv_small_alloc(size) : size <= TV_STR_KEEP_MAX ? tv_str_take(size) : tv_alloc(size));
     b->rc = 1;
     b->len = (int32_t)n;
     b->data[n] = 0;
@@ -648,7 +723,7 @@ void tv_str_release_slow(tv_str s) {
         tv_sb_unmap((char *)s.p, (size + page - 1) & ~(page - 1));
     }
 #endif
-    else free(s.p);
+    else tv_str_keep(s.p, size);
 }
 
 tv_str tv_str_alloc(size_t n, char **data) {
@@ -4090,6 +4165,14 @@ tv_str tv_str_slice(tv_str s, tv_int start, tv_int end, bool has_end, const char
     return tv_str_units(s, a, b);
 }
 
+tv_str tv_str_ascii_slice(tv_str s, int64_t a, int64_t b) {
+    if (a >= b) return TV_EMPTY_STR;
+    if (a == 0 && b == s.p->len) { tv_str_retain(s); return s; }
+    tv_str r = tv_str_from(s.p->data + a, (size_t)(b - a));
+    tv_str_mark(r, true);
+    return r;
+}
+
 tv_str tv_str_substring_slow(tv_str s, tv_int start, tv_int end, bool has_end) {
     int64_t len = tv_str_length(s);
     int64_t a = tv_clamp0(start, len), b = has_end ? tv_clamp0(end, len) : len;
@@ -4182,14 +4265,6 @@ bool tv_str_ends_with_at(tv_str s, tv_str suffix, tv_int end) {
     return nn <= e && memcmp(s.p->data + e - nn, suffix.p->data, nn) == 0;
 }
 
-bool tv_str_starts_with(tv_str s, tv_str prefix) {
-    return prefix.p->len <= s.p->len && memcmp(s.p->data, prefix.p->data, (size_t)prefix.p->len) == 0;
-}
-
-bool tv_str_ends_with(tv_str s, tv_str suffix) {
-    return suffix.p->len <= s.p->len &&
-           memcmp(s.p->data + s.p->len - suffix.p->len, suffix.p->data, (size_t)suffix.p->len) == 0;
-}
 
 tv_int tv_str_index_of(tv_str s, tv_str needle) {
     int64_t pos = tv_find(s.p->data, (size_t)s.p->len, needle.p->data, (size_t)needle.p->len, 0);
@@ -4740,7 +4815,11 @@ static void tv_copy_retain(unsigned char *dst, const unsigned char *src, int64_t
     size_t es = t->size;
     if (!es || n <= 0) return;
     memcpy(dst, src, (size_t)n * es);
-    if (t->retain)
+    if (t == &tv_type_str) {
+        /* (strings retained here, not through calls: an immortal literal's is a test) */
+        const tv_str *xs = (const tv_str *)(const void *)dst;
+        for (int64_t i = 0; i < n; i++) tv_str_retain(xs[i]);
+    } else if (t->retain)
         for (int64_t i = 0; i < n; i++) t->retain(dst + (size_t)i * es);
 }
 
@@ -4748,7 +4827,11 @@ void tv_arrbuf_release_slow(tv_arrbuf *TV_NOESCAPE p, const tv_type *t) {
     if (t && t->release && t->size) {
         size_t es = t->size;
         unsigned char *d = tv_arrbuf_data(p);
-        if (es == sizeof(void *)) {
+        if (t == &tv_type_str) {
+            tv_str *xs = (tv_str *)(void *)d;
+            for (int64_t i = 0; i < p->len; i++)
+                if (xs[i].p) tv_str_release(xs[i]);
+        } else if (es == sizeof(void *)) {
             /* (a word of zeros, `null`/`undefined` of a reference type: nothing to release) */
             for (int64_t i = 0; i < p->len; i++)
                 if (((void **)(void *)d)[i]) t->release(d + (size_t)i * es);
@@ -5225,41 +5308,44 @@ void tv_arr_sort(tv_arr *a, const tv_type *t, double (*cmp)(void *ctx, const voi
     free(keys);
 }
 
-tv_int tv_arr_index_of(tv_arr a, const tv_type *t, const void *elem) {
+/* indexOf / lastIndexOf: the common elements compared here, not through the descriptor (a loop
+ * the C compiler can unroll and vectorize; a string by its length before its bytes); integers
+ * of every width by value, floats by == (NaN is never found, -0 finds 0). */
+#define TV_FIND(T, EQ) do { \
+        T x_; memcpy(&x_, elem, sizeof x_); const T *p_ = (const T *)(const void *)d; \
+        if (last) { for (int64_t i = n - 1; i >= 0; i--) if (EQ(p_[i], x_)) return i; } \
+        else { for (int64_t i = 0; i < n; i++) if (EQ(p_[i], x_)) return i; } \
+        return -1; } while (0)
+#define TV_EQ_PLAIN(a, b) ((a) == (b))
+#define TV_EQ_STR(a, b) ((a).p == (b).p || ((a).p->len == (b).p->len && memcmp((a).p->data, (b).p->data, (size_t)(b).p->len) == 0))
+static tv_int tv_arr_find(tv_arr a, const tv_type *t, const void *elem, bool last) {
     int64_t n = tv_arr_len(a);
     size_t es = t->size;
     const unsigned char *d = n ? tv_arrbuf_data(a.p) : NULL;
-    /* (the common elements compared here, not through the descriptor: a loop the C compiler can
-     * unroll; a string by its length before its bytes) */
-    if (t == &tv_type_int) {
-        int64_t x;
-        memcpy(&x, elem, 8);
-        const int64_t *p = (const int64_t *)(const void *)d;
-        for (int64_t i = 0; i < n; i++) if (p[i] == x) return i;
-        return -1;
+    if (!n) return -1;
+    if (t == &tv_type_int || t == &tv_type_u64) TV_FIND(int64_t, TV_EQ_PLAIN);
+    if (t == &tv_type_f64) TV_FIND(double, TV_EQ_PLAIN);
+    if (t == &tv_type_str) TV_FIND(tv_str, TV_EQ_STR);
+    if (t == &tv_type_i32) TV_FIND(int32_t, TV_EQ_PLAIN);
+    if (t == &tv_type_u32) TV_FIND(uint32_t, TV_EQ_PLAIN);
+    if (t == &tv_type_f32) TV_FIND(float, TV_EQ_PLAIN);
+    if (t == &tv_type_i16) TV_FIND(int16_t, TV_EQ_PLAIN);
+    if (t == &tv_type_u16) TV_FIND(uint16_t, TV_EQ_PLAIN);
+    if (t == &tv_type_i8) TV_FIND(int8_t, TV_EQ_PLAIN);
+    if (t == &tv_type_u8 || t == &tv_type_bool) TV_FIND(uint8_t, TV_EQ_PLAIN);
+    if (last) {
+        for (int64_t i = n - 1; i >= 0; i--)
+            if (t->eq(d + (size_t)i * es, elem)) return i;
+    } else {
+        for (int64_t i = 0; i < n; i++)
+            if (t->eq(d + (size_t)i * es, elem)) return i;
     }
-    if (t == &tv_type_f64) {
-        double x;
-        memcpy(&x, elem, 8);
-        const double *p = (const double *)(const void *)d;
-        for (int64_t i = 0; i < n; i++) if (p[i] == x) return i;
-        return -1;
-    }
-    if (t == &tv_type_str) {
-        tv_str x;
-        memcpy(&x, elem, sizeof x);
-        const tv_str *p = (const tv_str *)(const void *)d;
-        int32_t xl = x.p->len;
-        for (int64_t i = 0; i < n; i++) {
-            const tv_strbuf *b = p[i].p;
-            if (b == x.p || (b->len == xl && memcmp(b->data, x.p->data, (size_t)xl) == 0)) return i;
-        }
-        return -1;
-    }
-    for (int64_t i = 0; i < n; i++)
-        if (t->eq(d + (size_t)i * es, elem)) return i;
     return -1;
 }
+
+tv_int tv_arr_index_of(tv_arr a, const tv_type *t, const void *elem) { return tv_arr_find(a, t, elem, false); }
+
+tv_int tv_arr_last_index_of(tv_arr a, const tv_type *t, const void *elem) { return tv_arr_find(a, t, elem, true); }
 
 bool tv_arr_includes(tv_arr a, const tv_type *t, const void *elem) {
     /* (SameValueZero: NaN is found, as it isn't by indexOf) */
@@ -5278,12 +5364,6 @@ bool tv_arr_includes(tv_arr a, const tv_type *t, const void *elem) {
     return tv_arr_index_of(a, t, elem) >= 0;
 }
 
-tv_int tv_arr_last_index_of(tv_arr a, const tv_type *t, const void *elem) {
-    size_t es = t->size;
-    for (int64_t i = tv_arr_len(a) - 1; i >= 0; i--)
-        if (t->eq(tv_arrbuf_data(a.p) + (size_t)i * es, elem)) return i;
-    return -1;
-}
 
 static void tv_join_into(tv_sb *sb, tv_arr a, const tv_type *t, const char *sep, size_t sep_len) {
     int64_t n = tv_arr_len(a);
@@ -5798,6 +5878,20 @@ static tv_arr tv_map_column(tv_map mm, const tv_type *kt, const tv_type *vt, boo
     size_t off = values ? L.voff : 8, es = t->size;
     tv_arrbuf *b = tv_arrbuf_new(es, m->count);
     int64_t j = 0;
+    /* (a word each, a string's or a number's: copied and retained here, not through calls) */
+    if (es == 8 && (t == &tv_type_str || !t->retain)) {
+        uint64_t *out = (uint64_t *)(void *)tv_arrbuf_data(b);
+        bool str = t == &tv_type_str;
+        for (int64_t i = 0; i < m->used; i++) {
+            unsigned char *e = tv_entry(m, L, i);
+            if (!tv_entry_hash(e)) continue;
+            uint64_t w;
+            memcpy(&w, e + off, 8);
+            out[j++] = w;
+            if (str) tv_str_retain(*(tv_str *)(void *)&w);
+        }
+        return tv_arr_of(b, j);
+    }
     for (int64_t i = 0; i < m->used; i++) {
         unsigned char *e = tv_entry(m, L, i);
         if (!tv_entry_hash(e)) continue;
@@ -7377,8 +7471,24 @@ bool tv_jp_string(tv_jp *p, tv_str *out) {
     if (tv_jp_peek(p) != '"') return tv_jp_fail(p, "a string");
     p->i++;
     size_t start = p->i;
-    /* Fast path: no escapes. */
-    while (p->i < p->n && p->s[p->i] != '"' && p->s[p->i] != '\\' && p->s[p->i] >= 0x20) p->i++;
+    /* Fast path: no escapes. (8 bytes at a time: none a quote, a backslash or a control) */
+    {
+        const unsigned char *s = p->s;
+        size_t i = p->i, n = p->n;
+        typedef unsigned char tv_v16 __attribute__((vector_size(16)));
+        while (n - i >= 16) {
+            tv_v16 v;
+            memcpy(&v, s + i, 16);
+            tv_v16 hit = (tv_v16)((v == (unsigned char)'"') | (v == (unsigned char)'\\') | (v < (unsigned char)0x20));
+            uint64_t lo, hi;
+            memcpy(&lo, &hit, 8);
+            memcpy(&hi, (const char *)&hit + 8, 8);
+            if (lo | hi) break;
+            i += 16;
+        }
+        while (i < n && s[i] != '"' && s[i] != '\\' && s[i] >= 0x20) i++;
+        p->i = i;
+    }
     if (p->i < p->n && p->s[p->i] == '"') {
         *out = tv_str_from((const char *)p->s + start, p->i - start);
         p->i++;
