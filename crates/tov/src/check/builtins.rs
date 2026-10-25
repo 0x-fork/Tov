@@ -44,6 +44,7 @@ pub(super) fn native_sig(types: &mut Types, name: &str) -> Option<(Vec<TyId>, Ty
         "trap" => (vec![STR], NEVER),
         "reFlags" => (vec![INT], STR),
         "reExec" => (vec![INT, STR, INT], types.array(INT)),
+        "reMatchAll" => (vec![INT, STR], types.array(STR)),
         "reTest" => (vec![INT, STR, INT], INT),
         "reExecInto" => (vec![INT, STR, INT, types.array(INT)], types.array(INT)),
         "reNames" => (vec![INT], str_arr.clone()),

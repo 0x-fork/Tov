@@ -885,6 +885,30 @@ void tv_re_iter_done(tv_re_iter *it) {
     if (it->cap != it->on_stack) tv_free(it->cap);
 }
 
+/* `s.match(re)` of a global re: every match's text (none: an empty array), in one pass. */
+tv_arr tv_native_reMatchAll(tv_int h, tv_str s) {
+    tv_re_iter it;
+    tv_re_iter_init(&it, h, s);
+    /* (gathered first, then one array of exactly their number: no regrowing) */
+    tv_str on_stack[64], *found = on_stack;
+    tv_int n = 0, cap = 64, pos[2];
+    while (tv_re_iter_next(&it, pos)) {
+        if (n == cap) {
+            tv_str *more = tv_alloc((size_t)cap * 2 * sizeof(tv_str));
+            memcpy(more, found, (size_t)n * sizeof(tv_str));
+            if (found != on_stack) tv_free(found);
+            found = more;
+            cap *= 2;
+        }
+        found[n++] = tv_re_iter_group(&it, s, 0);
+    }
+    tv_re_iter_done(&it);
+    tv_arr out = tv_arr_new_len(sizeof(tv_str), n);
+    if (n) memcpy(tv_arr_data(out), found, (size_t)n * sizeof(tv_str));
+    if (found != on_stack) tv_free(found);
+    return out;
+}
+
 /* Units a..b of s (UTF-16 positions) onto sb. */
 static void tv_re_push_units(tv_sb *sb, tv_str s, const tv_re_text *t, tv_int a, tv_int b) {
     if (b <= a) return;

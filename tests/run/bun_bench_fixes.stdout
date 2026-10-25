@@ -19,4 +19,23 @@ Uint8Array(5) [ 0, 3, 50, 200, 255 ] Float32Array(3) [ -2.25, 0.5, 1.5 ] Int16Ar
 33 67 68 66
 64 129 130 128
 control character rejected
+[ 'he', 'quick', 'brown', 'fox', 'jumps' ] [ 'he', 'quick', 'brown', 'fox', 'jumps' ] [ 'x' ] [ 'aaa', '' ] [ '1', '22' ] [ 'a', 'bb' ]
+100 0
+Float64Array(3) [ 3, -1, 2.5 ] Float64Array(3) [ -1, 2.5, 3 ] Float64Array(2) [ 1, 9 ]
+[ 'he', 'quick', 'fox' ] [ 'ab', 'a', 'b', index: 0, input: 'abc', groups: undefined ] [
+  'quick brown',
+  'brown',
+  index: 4,
+  input: 'The quick brown fox',
+  groups: undefined
+]
+[
+  '2024-05',
+  '2024',
+  '05',
+  index: 3,
+  input: 'on 2024-05-01 we went to the very long sentence here',
+  groups: [Object: null prototype] { y: '2024', m: '05' }
+]
+[ 'z', undefined, index: 0, input: 'zz', groups: undefined ]
 1 4 0

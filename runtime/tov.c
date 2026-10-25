@@ -6282,6 +6282,46 @@ static bool tv_is_number_type(const tv_type *t) {
 
 void tv_inspect_arr(tv_sb *sb, tv_arr a, const tv_type *t, int depth) { tv_inspect_typed_arr(sb, a, t, depth, NULL); }
 
+/* A regular expression's match as Node shows it: its groups, then `index`, `input` and `groups`
+ * (`[ 'ab', 'b', index: 0, input: 'abc', groups: undefined ]`; one entry a line when long). A
+ * global match's (index < 0) is its strings only. */
+void tv_inspect_match(tv_sb *sb, tv_arr items, const tv_type *it, tv_int index, tv_str input, const void *groups, const tv_type *gt, int depth) {
+    if (index < 0) { tv_inspect_arr(sb, items, it, depth); return; }
+    int64_t n = tv_arr_len(items);
+    tv_sb *parts = tv_alloc((size_t)(n + 3) * sizeof(tv_sb));
+    memset(parts, 0, (size_t)(n + 3) * sizeof(tv_sb));
+    for (int64_t i = 0; i < n; i++) tv_inspect_value(&parts[i], it, tv_arrbuf_data(items.p) + (size_t)i * it->size, depth + 1);
+    tv_sb_push_cstr(&parts[n], "index: ");
+    tv_sb_push_int(&parts[n], index);
+    tv_sb_push_cstr(&parts[n + 1], "input: ");
+    tv_inspect_value(&parts[n + 1], &tv_type_str, &input, depth + 1);
+    tv_sb_push_cstr(&parts[n + 2], "groups: ");
+    {
+        /* (named groups: an object of no prototype, as Node says) */
+        tv_sb g = {0};
+        tv_inspect_value(&g, gt, groups, depth + 1);
+        if (g.len && g.data[0] == '{') tv_sb_push_cstr(&parts[n + 2], "[Object: null prototype] ");
+        tv_sb_push(&parts[n + 2], g.data, g.len);
+        tv_sb_free(&g);
+    }
+    size_t total = 4;
+    bool nl = false;
+    for (int64_t i = 0; i < n + 3; i++) {
+        total += parts[i].len + 2;
+        nl |= memchr(parts[i].data, '\n', parts[i].len) != NULL;
+    }
+    bool one_line = !nl && total <= 76;
+    tv_sb_push_cstr(sb, one_line ? "[ " : "[\n");
+    for (int64_t i = 0; i < n + 3; i++) {
+        if (!one_line) tv_sb_push_cstr(sb, "  ");
+        tv_sb_push(sb, parts[i].data, parts[i].len);
+        if (i + 1 < n + 3) tv_sb_push_cstr(sb, one_line ? ", " : ",\n");
+        tv_sb_free(&parts[i]);
+    }
+    tv_sb_push_cstr(sb, one_line ? " ]" : "\n]");
+    tv_free(parts);
+}
+
 void tv_inspect_typed_arr(tv_sb *sb, tv_arr a, const tv_type *t, int depth, const char *name) {
     int64_t n = tv_arr_len(a);
     char open[48] = "[";

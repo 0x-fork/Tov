@@ -744,6 +744,11 @@ export function __reSplit(s: string, re: RegExp, limit?: int): string[] {
 /** `s.match(/re/g)`: every match's text (JavaScript's array of strings), or `null`. */
 export function __reMatchGlobal(s: string, re: RegExp): string[] | null {
   const h = re.__id()
+  if (!re.sticky) {
+    const found = __native.reMatchAll(h, s)
+    re.lastIndex = 0
+    return found.length === 0 ? null : found
+  }
   const all: string[] = []
   let from = 0
   while (from <= s.length) {
@@ -759,6 +764,13 @@ export function __reMatchGlobal(s: string, re: RegExp): string[] | null {
 export function __reMatch(s: string, re: RegExp): RegExpExecArray | null {
   if (!re.global) return re.exec(s)
   const h = re.__id()
+  if (!re.sticky) {
+    const found = __native.reMatchAll(h, s)
+    re.lastIndex = 0
+    if (found.length === 0) return null
+    const items: (string | undefined)[] = found
+    return new RegExpExecArray(items, -1, s, undefined)
+  }
   const all: (string | undefined)[] = []
   let from = 0
   while (from <= s.length) {

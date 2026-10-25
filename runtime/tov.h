@@ -356,6 +356,7 @@ void tv_re_iter_init(tv_re_iter *it, tv_int h, tv_str s);
 bool tv_re_iter_next(tv_re_iter *it, tv_int pos[2]);
 tv_str tv_re_iter_group(const tv_re_iter *it, tv_str s, int k); /* group k of the last match ("" when it took no part; past them its offset as text, then s) */
 void tv_re_iter_done(tv_re_iter *it);
+struct tv_arr tv_native_reMatchAll(tv_int h, tv_str s);           /* a global match's strings */
 void tv_sb_push_units(tv_sb *sb, tv_str s, tv_int a, tv_int b);   /* units a..b of s */
 struct tv_arr tv_native_reExecInto(tv_int h, tv_str s, tv_int from, struct tv_arr p);
 struct tv_arr tv_native_reNames(tv_int h);
@@ -698,6 +699,7 @@ void tv_set_inspect(tv_sb *sb, tv_map m, const tv_type *kt, int depth);         
  * argument; containers pass depth + 1 to their elements' inspect callbacks. */
 void tv_inspect_str(tv_sb *sb, tv_str s, int depth);   /* depth 0 = top level: unquoted */
 void tv_inspect_arr(tv_sb *sb, tv_arr a, const tv_type *t, int depth);
+void tv_inspect_match(tv_sb *sb, tv_arr items, const tv_type *it, tv_int index, tv_str input, const void *groups, const tv_type *gt, int depth);
 void tv_inspect_typed_arr(tv_sb *sb, tv_arr a, const tv_type *t, int depth, const char *name); /* name: a typed array's, NULL for an array */
 /* console.log formatting of a record: fields in declaration order. */
 void tv_inspect_record(tv_sb *sb, int depth, size_t n, const char *const *names, const tv_type *const *types, const void *const *fields);

@@ -834,6 +834,22 @@ impl<'c, 'a> Gen<'c, 'a> {
     fn float64_array(&self, obj: ExprId) -> bool {
         let m = self.cur_m();
         let ast = self.ast(m);
+        let made = |e: ExprId| match &ast.expr(e).kind {
+            ExprKind::New { callee, .. } => matches!(ast.expr(*callee).kind, ExprKind::Ident(n) if self.sym(n) == "Float64Array"),
+            ExprKind::Call { callee, .. } => matches!(&ast.expr(*callee).kind, ExprKind::Member { obj, .. } if matches!(ast.expr(*obj).kind, ExprKind::Ident(n) if self.sym(n) == "Float64Array")),
+            _ => false,
+        };
+        match &ast.expr(obj).kind {
+            ExprKind::Paren(x) => return self.float64_array(*x),
+            // (`xs.slice()` and the like of one: one too)
+            ExprKind::Call { callee, .. } if let ExprKind::Member { obj: inner, name, .. } = &ast.expr(*callee).kind
+                && matches!(self.sym(*name), "slice" | "subarray" | "map" | "filter" | "reverse" | "sort" | "fill") =>
+            {
+                return self.float64_array(*inner);
+            }
+            _ if made(obj) => return true,
+            _ => {}
+        }
         let Some(crate::check::IdentFact::Local(k)) = self.ident_fact(m, obj) else { return false };
         let is_f64 = |e: ExprId| match &ast.expr(e).kind {
             ExprKind::New { callee, .. } => matches!(ast.expr(*callee).kind, ExprKind::Ident(n) if self.sym(n) == "Float64Array"),
@@ -2396,6 +2412,13 @@ impl<'c, 'a> Gen<'c, 'a> {
                     if i > 0 {
                         self.line("tv_sb_push_char(sb, ' ');");
                     }
+                    // (a local made as a `Float64Array`, held as an `f64[]`: printed as one)
+                    if v.ty == self.c.types.array(F64) && arg_exprs.get(i).is_some_and(|&x| self.float64_array(x)) {
+                        let d = self.desc(F64);
+                        self.uses_inspect = true;
+                        self.line(format!("tv_inspect_typed_arr(sb, {}, {d}, 0, \"Float64Array\");", v.code));
+                        continue;
+                    }
                     let c = self.inspect_root(v.ty, &v.code, "0");
                     self.line(format!("{c};"));
                 }
@@ -2430,7 +2453,7 @@ impl<'c, 'a> Gen<'c, 'a> {
                 Val::plain("0", VOID)
             }
             (Some("__native"), _) => {
-                if name.starts_with("re") && matches!(name, "reCompile" | "reFlags" | "reExec" | "reExecInto" | "reTest" | "reNames" | "reSplit" | "reReplace") {
+                if name.starts_with("re") && matches!(name, "reCompile" | "reFlags" | "reExec" | "reExecInto" | "reTest" | "reNames" | "reSplit" | "reReplace" | "reMatchAll") {
                     self.uses_regexp = true;
                 }
                 let (ps, ret) = crate::check::native_sig_pub(&mut self.c.types, name).unwrap_or((Vec::new(), VOID));

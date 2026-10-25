@@ -59,3 +59,15 @@ try {
 } catch (e) {
   console.log("control character rejected");
 }
+
+const words = /[a-z]+/g;
+const sentence = "The quick brown fox jumps";
+console.log(sentence.match(words), sentence.match(/[a-z]+/g), "x".match(words), "aaa".match(/a*/g), "a1b22".match(/\d+/g), "😀a😀bb".match(/[a-z]+/g));
+const many = "ab ".repeat(100);
+console.log(many.match(/b/g)!.length, words.lastIndex);
+const fa = new Float64Array([3, -1, 2.5]);
+console.log(fa, fa.slice().sort(), Float64Array.from([9, 1]).sort());
+const re = /[a-z]+/g;
+console.log("The quick fox".match(re), "abc".match(/(a)(b)?/), "The quick brown fox".match(/quick (\w+)/));
+console.log(/(?<y>\d{4})-(?<m>\d\d)/.exec("on 2024-05-01 we went to the very long sentence here"));
+console.log("zz".match(/(q)?z/));
