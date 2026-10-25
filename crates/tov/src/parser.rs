@@ -1826,7 +1826,12 @@ impl<'a> Parser<'a> {
                 self.recover_line();
                 return;
             };
-            let ty = if self.eat(Tok::Colon) { Some(self.ty()) } else { None };
+            let mut ty = if self.eat(Tok::Colon) { Some(self.ty()) } else { None };
+            // (`let x;` with neither: TypeScript's `any`, as it is until something's assigned)
+            if mutable && ty.is_none() && !self.at(Tok::Eq) {
+                let any = self.interner.intern("any");
+                ty = Some(self.mk_ty(TypeExprKind::Named { ns: None, name: any, name_span, args: Vec::new() }, name_span));
+            }
             // `let m: T | null`: `undefined` to start with (`null` if that's the type's absent value)
             let init = if mutable && ty.is_some() && !self.at(Tok::Eq) {
                 let te = ty.unwrap();

@@ -4524,6 +4524,19 @@ impl<'c, 'a> Gen<'c, 'a> {
                     return self.any_update(*target, *inc, *prefix, span);
                 }
                 let p = self.place(*target);
+                // (a variable held as a union, narrowed to a number: stepped as that number)
+                let nt = ty;
+                if p.ty != nt && matches!(self.tget(p.ty), Ty::Union(_)) && self.c.types.is_numeric(nt) && !p.weak {
+                    let lv = self.place_lvalue(&p);
+                    let cur = self.project(Val::plain(lv.clone(), p.ty), nt);
+                    let nct = self.ctype(nt);
+                    let (old, new) = (self.fresh("o"), self.fresh("n"));
+                    let delta = if *inc { "+ 1" } else { "- 1" };
+                    self.line(format!("{nct} {old} = {}; {nct} {new} = {old} {delta};", cur.code));
+                    let stored = self.coerce(Val::plain(new.clone(), nt), p.ty);
+                    self.line(format!("{lv} = {};", stored.code));
+                    return Val::plain(if *prefix { new } else { old }, nt);
+                }
                 let ct = self.ctype(p.ty);
                 let loc = self.loc(span);
                 let lv = self.place_lvalue(&p);
@@ -5877,6 +5890,10 @@ impl<'c, 'a> Gen<'c, 'a> {
     }
 
     pub(crate) fn int_code(&mut self, v: Val) -> String {
+        if v.ty == ANY {
+            // (an `any`'s number, as JavaScript's ToIntegerOrInfinity reads it)
+            return format!("tv_f64_to_int_js(tv_any_num({}))", v.code);
+        }
         if v.ty == INT {
             v.code
         } else if self.c.types.is_float(v.ty) {

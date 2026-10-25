@@ -29,6 +29,11 @@ pub struct Rewrites {
     /// `xs.at(k)` written through (`xs.at(-1)!.src = s`): (module, the call, `xs`, `k`, `length`),
     /// as `xs[k]` / `xs[xs.length - k]`.
     pub(crate) at_places: Vec<(u32, ExprId, ExprId, i64, crate::intern::Sym)>,
+    /// `f.call(t, ...)` (0), `f.apply(t, xs)` (1), `f.bind(t)` (2) of a function: (module, the call,
+    /// which), as `f(...)`, `f(...xs)`, `f`.
+    pub(crate) fn_methods: Vec<(u32, ExprId, u8)>,
+    /// `Object.create(null)`: (module, the call), as `{}`.
+    pub(crate) empty_objects: Vec<(u32, ExprId)>,
     /// `r["field"]` in TypeScript: (module, the index, the field), as `r.field`.
     pub(crate) str_members: Vec<(u32, ExprId, crate::intern::Sym)>,
     /// `m[i]` on a match: (module, the index expression, `items`, assert present), as `m.items[i]` (`!`).
@@ -101,7 +106,7 @@ pub struct Rewrites {
 
 impl Rewrites {
     pub fn is_empty(&self) -> bool {
-        self.args.is_empty() && self.truthy.is_empty() && self.has_own.is_empty() && self.ns_calls.is_empty() && self.flat_chains.is_empty() && self.elem_methods.is_empty() && self.prims.is_empty() && self.tuple_places.is_empty() && self.nonnulls.is_empty() && self.record_casts.is_empty() && self.records.is_empty() && self.fn_values.is_empty() && self.enum_names.is_empty() && self.rests.is_empty() && self.setters.is_empty() && self.static_calls.is_empty() && self.logical.is_empty() && self.widen_casts.is_empty() && self.assigns.is_empty() && self.identities.is_empty() && self.keyed_places.is_empty() && self.iterators.is_empty() && self.consts.is_empty() && self.items.is_empty() && self.awaits.is_empty() && self.calls.is_empty() && self.elems.is_empty() && self.rest_lits.is_empty() && self.rest_indexes.is_empty() && self.str_members.is_empty() && self.at_places.is_empty() && self.keys.is_empty() && self.spreads.is_empty() && self.keyed.is_empty()
+        self.args.is_empty() && self.truthy.is_empty() && self.has_own.is_empty() && self.ns_calls.is_empty() && self.flat_chains.is_empty() && self.elem_methods.is_empty() && self.prims.is_empty() && self.tuple_places.is_empty() && self.nonnulls.is_empty() && self.record_casts.is_empty() && self.records.is_empty() && self.fn_values.is_empty() && self.enum_names.is_empty() && self.rests.is_empty() && self.setters.is_empty() && self.static_calls.is_empty() && self.logical.is_empty() && self.widen_casts.is_empty() && self.assigns.is_empty() && self.identities.is_empty() && self.keyed_places.is_empty() && self.iterators.is_empty() && self.consts.is_empty() && self.items.is_empty() && self.awaits.is_empty() && self.calls.is_empty() && self.elems.is_empty() && self.rest_lits.is_empty() && self.rest_indexes.is_empty() && self.str_members.is_empty() && self.at_places.is_empty() && self.fn_methods.is_empty() && self.empty_objects.is_empty() && self.keys.is_empty() && self.spreads.is_empty() && self.keyed.is_empty()
     }
 
     pub(crate) fn extend(&mut self, o: Rewrites) {
@@ -115,6 +120,8 @@ impl Rewrites {
         self.rest_indexes.extend(o.rest_indexes);
         self.str_members.extend(o.str_members);
         self.at_places.extend(o.at_places);
+        self.fn_methods.extend(o.fn_methods);
+        self.empty_objects.extend(o.empty_objects);
         self.keys.extend(o.keys);
         self.spreads.extend(o.spreads);
         self.keyed.extend(o.keyed);
@@ -308,6 +315,37 @@ pub fn apply(modules: &mut [Module], rw: &Rewrites) -> bool {
         if let ExprKind::Call { callee, .. } = &mut ast.exprs[call as usize].kind {
             *callee = fe;
         }
+        changed = true;
+    }
+    for &(m, at) in &rw.empty_objects {
+        let ast = &mut modules[m as usize].ast;
+        if matches!(ast.exprs[at as usize].kind, ExprKind::Call { .. }) {
+            ast.exprs[at as usize].kind = ExprKind::Object(Vec::new());
+            changed = true;
+        }
+    }
+    for &(m, at, kind) in &rw.fn_methods {
+        let ast = &mut modules[m as usize].ast;
+        let ExprKind::Call { callee, args, .. } = &ast.exprs[at as usize].kind else { continue };
+        let ExprKind::Member { obj: f, .. } = ast.exprs[*callee as usize].kind else { continue };
+        let span = ast.exprs[at as usize].span;
+        let rest: Vec<Arg> = args.iter().skip(1).map(|a| Arg { expr: a.expr, by_ref: a.by_ref }).collect();
+        ast.exprs[at as usize].kind = match kind {
+            0 => ExprKind::Call { callee: f, type_args: Vec::new(), args: rest, optional: false },
+            1 => {
+                let args = match rest.first() {
+                    // (`f.apply(t, [a, b])`: `f(a, b)`)
+                    Some(a) if let ExprKind::Array(xs) = &ast.exprs[a.expr as usize].kind => xs.iter().map(|&x| Arg { expr: x, by_ref: None }).collect(),
+                    Some(a) => {
+                        ast.exprs.push(crate::ast::Expr { kind: ExprKind::Spread(a.expr), span });
+                        vec![Arg { expr: ast.exprs.len() as ExprId - 1, by_ref: None }]
+                    }
+                    None => Vec::new(),
+                };
+                ExprKind::Call { callee: f, type_args: Vec::new(), args, optional: false }
+            }
+            _ => ExprKind::Paren(f),
+        };
         changed = true;
     }
     for &(m, at, arr, k, length) in &rw.at_places {

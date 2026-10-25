@@ -324,6 +324,14 @@ impl<'a> Checker<'a> {
                     return t;
                 }
                 let Some(place) = self.place(*target, false) else { return ERROR };
+                // (a variable narrowed to a number, `let i; ... i = 0; ... i++`: that number)
+                if let ExprKind::Ident(n) = self.ast().expr(*target).kind
+                    && let Some((_, cur)) = self.lookup(n)
+                    && cur != place.ty
+                    && self.types.is_num_like(cur)
+                {
+                    return cur;
+                }
                 if !self.types.is_num_like(place.ty) && place.ty != ERROR && place.ty != BIGINT && place.ty != ANY {
                     let msg = format!("`++`/`--` need a number, found `{}`", self.show(place.ty));
                     self.report(Diagnostic::new("T0501", span, msg));
@@ -2366,7 +2374,7 @@ impl<'a> Checker<'a> {
     fn index_type(&mut self, index: ExprId) {
         let ti = self.expr(index, Some(INT));
         // (a float index must be a whole number: checked when it's used)
-        if ti == ERROR || self.types.is_int(ti) || self.types.is_float(ti) {
+        if ti == ERROR || ti == ANY || self.types.is_int(ti) || self.types.is_float(ti) {
             return;
         }
         let span = self.ast().expr(index).span;
@@ -4590,6 +4598,24 @@ impl<'a> Checker<'a> {
                 }
                 if recv == ANY {
                     return self.any_call(e, Some(name), args, span);
+                }
+                // `f.call(t, a)`, `f.apply(t, xs)`, `f.bind(t)` of a function: `f(a)`, `f(...xs)`, `f`
+                // (Tov's functions have no `this` of their own to bind; rewritten so)
+                let recv_base = self.types.without_undefined(recv);
+                if let Ty::Func(_, ret, _) = *self.types.get(recv_base)
+                    && matches!(mtext.as_str(), "call" | "apply" | "bind")
+                    && !mopt
+                {
+                    for a in args {
+                        self.expr(a.expr, None);
+                    }
+                    let kind = match mtext.as_str() {
+                        "call" => 0,
+                        "apply" => 1,
+                        _ => 2,
+                    };
+                    self.rewrites.fn_methods.push((self.cur, e, kind));
+                    return if kind == 2 { recv } else { ret };
                 }
                 let base = if mopt {
                     self.types.without_nullish(recv)

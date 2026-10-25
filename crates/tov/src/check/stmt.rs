@@ -528,7 +528,7 @@ impl<'a> Checker<'a> {
                     // `let x: number;` read before anything is assigned to it
                     if let StmtKind::Let { mutable: true, ty: Some(_), init: None, name, .. } = &ast.stmt(st).kind
                         && let Some((_, t)) = self.lookup(*name)
-                        && !matches!(t, ERROR | UNKNOWN | JS | VOID)
+                        && !matches!(t, ERROR | UNKNOWN | JS | VOID | ANY)
                         && !self.types.has_undefined(t)
                     {
                         let n = self.name(*name).to_string();
@@ -1005,23 +1005,47 @@ impl<'a> Checker<'a> {
     fn reset_assigned(&mut self, body: StmtId) {
         let mut names = Vec::new();
         collect_assigned_stmt(self.ast(), body, &mut names);
-        self.reset_names(&names);
+        let region = self.ast().stmt(body).span;
+        self.reset_names_in(&names, Some(region));
     }
 
     fn reset_assigned_expr(&mut self, e: ExprId) {
         let mut names = Vec::new();
         collect_assigned_expr(self.ast(), e, &mut names);
-        self.reset_names(&names);
+        let region = self.ast().expr(e).span;
+        self.reset_names_in(&names, Some(region));
     }
 
-    fn reset_names(&mut self, names: &[Sym]) {
+    /// (`region`: where the loop changes them; a number there only stepped, `i++`, `i += 2`,
+    /// stays the number it is, as `let i; for (i = 0; ...; i++)` has it)
+    fn reset_names_in(&mut self, names: &[Sym], region: Option<Span>) {
         for &n in names {
-            if let Some((id, _)) = self.lookup(n) {
+            if let Some((id, cur)) = self.lookup(n) {
+                if let Some(r) = region
+                    && self.types.is_numeric(cur)
+                    && !self.plainly_assigned(n, r)
+                {
+                    continue;
+                }
                 let declared = self.local(id).ty;
                 self.narrow(id, declared);
                 self.narrow_path(id, Vec::new(), None);
             }
         }
+    }
+
+    /// `n = v` somewhere in `region` (not a step: `n++`, `n += 2`).
+    fn plainly_assigned(&self, n: Sym, region: Span) -> bool {
+        let ast = self.ast();
+        ast.exprs.iter().any(|x| {
+            x.span.file == region.file
+                && x.span.start >= region.start
+                && x.span.end <= region.end
+                && match x.kind {
+                    ExprKind::Assign(op, t, v) => matches!(ast.expr(t).kind, ExprKind::Ident(m) if m == n) && !(matches!(op, AssignOp::Op(BinOp::Add | BinOp::Sub)) && matches!(ast.expr(v).kind, ExprKind::Int(_))),
+                    _ => false,
+                }
+        })
     }
 
     fn switch_mode(&mut self, disc: ExprId, dt: TyId) -> SwitchMode {

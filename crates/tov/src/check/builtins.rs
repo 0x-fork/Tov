@@ -987,6 +987,13 @@ impl<'a> Checker<'a> {
                 self.rewrites.has_own.push((self.cur, call, args[0].expr, args[1].expr));
                 ERROR
             }
+            // `Object.create(null)`: an empty object (rewritten as `{}`, typed by what's wanted)
+            "Object" if name == "create" && args.len() == 1 && matches!(self.ast().expr(args[0].expr).kind, ExprKind::Null | ExprKind::Undefined) => {
+                if let Some(call) = self.pending_call.take() {
+                    self.rewrites.empty_objects.push((self.cur, call));
+                }
+                exp.unwrap_or(ERROR)
+            }
             "Object" => {
                 // `Object.keys/values/entries(m)` of a `Record<string, V>` (a map), or of a record
                 if !matches!(name, "keys" | "values" | "entries") || args.len() != 1 {
