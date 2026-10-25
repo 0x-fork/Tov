@@ -12,6 +12,7 @@ pub(super) struct CallSig {
     pub throws: TyId,
 }
 
+#[derive(Clone)]
 pub(super) struct Place {
     pub ty: TyId,
     /// The place is exactly this local (`x = ...`).
@@ -100,6 +101,7 @@ impl<'a> Checker<'a> {
         if let Some(x) = exp
             && x != ERROR
             && x != UNKNOWN
+            && x != BOOL
             && !self.types.has_undefined(x)
             && self.types.has_undefined(t)
             && let ExprKind::Ident(s) = self.ast().expr(e).kind
@@ -618,6 +620,11 @@ impl<'a> Checker<'a> {
                     }
                     return target;
                 }
+                // (`chars as string[]` of a `TokenT[]` in a generic body: what each instance
+                // makes it, a cast checked there, as TypeScript lets types that may overlap be)
+                if self.types.has_param(src) && !self.types.has_param(target) {
+                    return target;
+                }
                 let (ss, ts) = (self.show(src), self.show(target));
                 let text = self.src(self.ast().expr(*x).span).to_string();
                 let mut d = Diagnostic::new("T0601", span, format!("can't cast `{ss}` to `{ts}`"))
@@ -1052,9 +1059,29 @@ impl<'a> Checker<'a> {
                 if want_bool && matches!(self.ast().expr(r).kind, ExprKind::Index { .. }) {
                     self.want_optional = true;
                 }
-                let tr = self.expr(r, if tl == BOOL && hint.is_none() { Some(BOOL) } else { hint });
+                // (`xs || []`, `s.match(re) || []`: the empty array is the left's kind, a match's
+                // strings)
+                let is_match = |c: &Self, k: u32| c.class_names.get(k as usize).is_some_and(|n| n == "RegExpExecArray");
+                let left_kind = {
+                    let t = self.truthy_part(tl);
+                    match *self.types.get(t) {
+                        Ty::Array(_) => Some(t),
+                        Ty::Class(c, _) if is_match(self, c) => Some(self.types.array(STR)),
+                        _ => None,
+                    }
+                };
+                let empty_right = matches!(&self.ast().expr(r).kind, ExprKind::Array(xs) if xs.is_empty());
+                let rhint = if hint.is_none() && op == Or && empty_right { left_kind } else { None };
+                let tr = self.expr(r, if tl == BOOL && hint.is_none() { Some(BOOL) } else { rhint.or(hint) });
                 self.pop_scope();
                 self.apply_effects(&fx, entry, &[]);
+                // (a match or `[]`: the match's strings, an array of them either way)
+                if let Some(k) = rhint
+                    && tr == k
+                    && { let tp = self.truthy_part(tl); !matches!(*self.types.get(tp), Ty::Array(_)) }
+                {
+                    return k;
+                }
                 if want_bool || (tl == BOOL && tr == BOOL) || tl == ERROR || tr == ERROR {
                     return BOOL;
                 }
@@ -1720,6 +1747,16 @@ impl<'a> Checker<'a> {
                 // (a typed array's element takes any number, wrapped or clamped: `bytes[i] = 300`
                 // is a number, not a `u8` literal that doesn't fit)
                 let hint = if wrap && self.types.is_int(place.ty) && promoted(place.ty) == INT { INT } else { place.ty };
+                // (`x = xs[i]` of a `T[]` into a `T | undefined`: a `T`, read as any `xs[i]` is,
+                // as TypeScript types it, not one made to give `undefined` past the end)
+                let hint = match self.ast().expr(value).kind {
+                    ExprKind::Index { obj, optional: false, .. }
+                        if self.types.has_undefined(hint) && self.expr_type_peek(obj).is_some_and(|ot| matches!(self.types.get(ot), Ty::Array(el) if !self.types.has_undefined(*el))) =>
+                    {
+                        self.types.without_undefined(hint)
+                    }
+                    _ => hint,
+                };
                 let tv = self.flow(place.sites.clone(), |c| c.expr(value, Some(hint)));
                 if !self.try_promote(&place, tv) {
                     self.flow(place.sites.clone(), |c| {
@@ -1774,10 +1811,26 @@ impl<'a> Checker<'a> {
                 self.expr(value, None);
             }
             AssignOp::Op(bop) => {
+                // (a local narrowed, `let i; i = 0; i += 1`: what it holds now, the operand)
+                let narrowed_now = place.local.and_then(|l| {
+                    let n = self.local(l).name;
+                    self.lookup(n).filter(|&(id, _)| id == l).map(|(_, t)| t)
+                });
+                let declared_ty = place.ty;
+                let place = match narrowed_now {
+                    Some(t) if t != place.ty && t != ERROR && matches!(self.types.get(place.ty), Ty::Union(_)) && self.assignable(t, place.ty) => Place { ty: t, ..place.clone() },
+                    _ => place.clone(),
+                };
                 // (a typed array's element: as for `=`, the operand is a number)
                 let elem_ty = if self.is_elem_place(target) && self.types.is_int(place.ty) && promoted(place.ty) == INT { INT } else { place.ty };
                 let hint = if self.types.is_num_like(place.ty) { Some(elem_ty) } else { None };
                 let tv = self.expr(value, hint);
+                // (`total += it.price * 2` of an `any`: computed by what it holds, stored as the
+                // target's type, checked)
+                if tv == ANY && !matches!(bop, BinOp::Nullish | BinOp::And | BinOp::Or) && place.ty != ANY {
+                    let _ = self.any_binary(bop, place.ty, tv);
+                    return declared_ty;
+                }
                 let result = if place.ty == DECIMAL || (tv == DECIMAL && !self.types.is_string(place.ty)) {
                     self.decimal_arith(bop, target, value, place.ty, tv, span)
                 } else if place.ty == BIGINT || (tv == BIGINT && !self.types.is_string(place.ty)) {
@@ -1809,8 +1862,17 @@ impl<'a> Checker<'a> {
                     if bop == BinOp::Div && r != ERROR { if r == F32 { F32 } else { F64 } } else { r }
                 };
                 self.wrap_store = self.is_elem_place(target);
-                let fits = self.assignable(result, place.ty);
+                let fits = self.assignable(result, declared_ty) || self.assignable(result, place.ty);
                 self.wrap_store = false;
+                if place.ty != declared_ty
+                    && let Some(l) = place.local
+                    && result != ERROR
+                    && self.assignable(result, declared_ty)
+                {
+                    let w = self.types.widen(result);
+                    self.narrow(l, w);
+                    return w;
+                }
                 if !self.try_promote(&place, result)
                     && result != ERROR && !fits {
                         self.blame(&place.sites);
@@ -2483,7 +2545,7 @@ impl<'a> Checker<'a> {
         let base = if optional {
             self.types.without_nullish(t)
         } else {
-            if self.types.has_nullish(t) {
+            if self.types.has_nullish(t) && !self.loose_deref(obj) {
                 let d = self.possibly_undefined(obj, span);
                 self.report(d);
             }
@@ -2604,6 +2666,18 @@ impl<'a> Checker<'a> {
             }
         };
         if optional { self.types.optional(result) } else { result }
+    }
+
+    /// `x.f` of a loose local (see `FnCtx::loose`): `x!.f`, checked to be there.
+    fn loose_deref(&mut self, obj: ExprId) -> bool {
+        let ExprKind::Ident(s) = self.ast().expr(obj).kind else { return false };
+        let Some((id, _)) = self.lookup(s) else { return false };
+        let Some(f) = self.fcx.last() else { return false };
+        if !f.loose.contains(&f.locals[id].span.start) {
+            return false;
+        }
+        self.rewrites.nonnulls.push((self.cur, obj));
+        true
     }
 
     pub(super) fn possibly_undefined(&mut self, obj: ExprId, span: Span) -> Diagnostic {
@@ -2750,7 +2824,7 @@ impl<'a> Checker<'a> {
         let base = if optional {
             self.types.without_nullish(t)
         } else {
-            if self.types.has_nullish(t) {
+            if self.types.has_nullish(t) && !self.loose_deref(obj) {
                 let d = self.possibly_undefined(obj, span);
                 self.report(d);
                 // (nothing but `undefined`: that's the error)
@@ -4496,6 +4570,14 @@ impl<'a> Checker<'a> {
                     Some(el) if n == "Array" && (el == UNKNOWN || self.types.without_undefined(el) != el) => self.types.array(el),
                     // (filled as it's made, `Array(n).fill(null)`: no hole is seen)
                     Some(el) if n == "Array" && args.len() == 1 && self.filled_at_once(e) => self.types.array(el),
+                    // (in TypeScript, of objects: its holes, never filled, null pointers that
+                    // test false, as JavaScript's `undefined` would)
+                    Some(el) if n == "Array" && args.len() == 1 && self.ts_module() && matches!(self.types.get(el), Ty::Class(..) | Ty::Interface(..) | Ty::Rec(..) | Ty::Record(_)) && self.tuple_of(el).is_none() => {
+                        if matches!(self.types.get(el), Ty::Record(_)) {
+                            self.hole_records.insert(el);
+                        }
+                        self.types.array(el)
+                    }
                     Some(el) if n == "Array" && args.len() == 1 && super::stmt::filled_by_next_loop(self.ast(), e) => {
                         if let Some(f) = self.facts_mut() {
                             f.filled_arrays.insert(e);
@@ -4695,6 +4777,23 @@ impl<'a> Checker<'a> {
                         }
                     };
                     recv_hint = Some(self.types.array(vt));
+                }
+                // `Object.prototype.hasOwnProperty.call(o, k)`: `Object.hasOwn(o, k)`, `k in o`
+                if mtext == "call"
+                    && args.len() == 2
+                    && let ExprKind::Member { obj: h, name: hn, .. } = self.ast().expr(obj).kind
+                    && self.name(hn) == "hasOwnProperty"
+                    && let ExprKind::Member { obj: pr, name: pn, .. } = self.ast().expr(h).kind
+                    && self.name(pn) == "prototype"
+                    && matches!(self.ast().expr(pr).kind, ExprKind::Ident(o) if self.name(o) == "Object" && self.lookup(o).is_none())
+                {
+                    let ot = self.expr(args[0].expr, None);
+                    let ot = self.types.without_nullish(ot);
+                    if matches!(self.types.get(ot), Ty::Record(_) | Ty::Map(..) | Ty::Unknown | Ty::Rec(..) | Ty::Any) {
+                        self.expr(args[1].expr, None);
+                        self.rewrites.has_own.push((self.cur, e, args[0].expr, args[1].expr));
+                        return BOOL;
+                    }
                 }
                 // `x.m.call(t, a)` / `x?.m?.apply(t, xs)` of a class's method: `x.m(a)` (`this`
                 // is `x`, as the method has it; rewritten so)
@@ -5417,6 +5516,43 @@ impl<'a> Checker<'a> {
     }
 
     fn call_value(&mut self, t: TyId, desc: &str, args: &[Arg], exp: Option<TyId>, span: Span) -> TyId {
+        // (a union of functions, `cb: ((r: T[]) => void) | ((r: T[] | undefined) => void)`: what
+        // each takes, the narrowest at each place, as TypeScript calls it; each called as it is)
+        if let Ty::Union(ms) = *self.types.get(t)
+            && self.types.tys(ms).iter().all(|&m| matches!(self.types.get(m), Ty::Func(..)))
+        {
+            let sigs: Vec<(Vec<FnParam>, TyId, TyId)> = self
+                .types
+                .tys(ms)
+                .to_vec()
+                .into_iter()
+                .filter_map(|m| match *self.types.get(m) {
+                    Ty::Func(p, r, th) => Some((self.types.params(p).to_vec(), r, th)),
+                    _ => None,
+                })
+                .collect();
+            let n = sigs.iter().map(|s| s.0.len()).max().unwrap_or(0);
+            let mut params = Vec::new();
+            let mut ok = true;
+            for i in 0..n {
+                let cands: Vec<FnParam> = sigs.iter().filter_map(|s| s.0.get(i).copied()).collect();
+                let pick = cands.iter().copied().find(|c| cands.iter().all(|o| !c.inout && !o.inout && self.assignable(c.ty, o.ty)));
+                let Some(p) = pick else {
+                    ok = false;
+                    break;
+                };
+                let optional = sigs.iter().all(|s| s.0.get(i).is_none_or(|q| q.optional));
+                params.push(FnParam { optional, ..p });
+            }
+            if ok {
+                let rets: Vec<TyId> = sigs.iter().map(|s| s.1).collect();
+                let ret = self.types.union(&rets);
+                let throws: Vec<TyId> = sigs.iter().map(|s| s.2).filter(|&x| x != NEVER).collect();
+                let throws = if throws.is_empty() { NEVER } else { self.types.union(&throws) };
+                let one = self.types.func_throws(params, ret, throws);
+                return self.call_value(one, desc, args, exp, span);
+            }
+        }
         match *self.types.get(t) {
             Ty::Func(params, ret, throws) => {
                 let mut params = self.types.params(params).to_vec();
@@ -5522,7 +5658,7 @@ impl<'a> Checker<'a> {
 
     /// The type of `e` if it's a plain name (a local, or an npm import): enough to tell a
     /// JavaScript object without checking `e` twice. Other expressions: `None` (checked normally).
-    fn expr_type_peek(&mut self, e: ExprId) -> Option<TyId> {
+    pub(super) fn expr_type_peek(&mut self, e: ExprId) -> Option<TyId> {
         match self.ast().expr(e).kind {
             ExprKind::Ident(s) => match self.lookup(s) {
                 Some((_, t)) => Some(self.types.without_undefined(t)),
@@ -6542,6 +6678,20 @@ impl<'a> Checker<'a> {
                     let t = self.types.without_nullish(ty);
                     v.push(target.with(t));
                 }
+                v
+            }
+            // (a constant holding a condition: the condition's, of what's constant too)
+            ExprKind::Ident(s)
+                if let Some((id, t)) = self.lookup(*s)
+                    && (t == BOOL || matches!(self.types.get(t), Ty::BoolLit(_)))
+                    && let Some(&(_, init)) = self.fcx.last().and_then(|f| f.cond_aliases.iter().find(|(l, _)| *l == id)) =>
+            {
+                let mut v = self.narrowings(init, positive);
+                let fcx = self.fcx.last().unwrap();
+                v.retain(|n| match n {
+                    Narrowing::Local(l, _) | Narrowing::Path(l, ..) => fcx.locals[*l].kind == LocalKind::Const,
+                    Narrowing::Global(..) => false,
+                });
                 v
             }
             ExprKind::Ident(_) | ExprKind::Member { optional: false, .. } => {

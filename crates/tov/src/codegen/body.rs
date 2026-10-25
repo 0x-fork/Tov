@@ -4513,7 +4513,10 @@ impl<'c, 'a> Gen<'c, 'a> {
             ExprKind::Unary(op, x) => self.unary(*op, *x, ty, span),
             ExprKind::Binary(op @ (BinOp::Add | BinOp::Sub), l, r) if ty == F64 && let Some(v) = self.exact_half_sum(e, *op, *l, *r) => v,
             ExprKind::Binary(op, l, r) => self.binary(*op, *l, *r, ty, span),
-            ExprKind::Assign(op, t, v) => self.assign(*op, *t, *v, span),
+            ExprKind::Assign(op, t, v) => {
+                self.assign_ty = Some(ty);
+                self.assign(*op, *t, *v, span)
+            }
             ExprKind::Update { inc, prefix, target } => {
                 // (`o.n++` of an `any`, `x++` of one: a number, stored as an `any`)
                 let any_obj = match ast.expr(*target).kind {
@@ -5279,7 +5282,14 @@ impl<'c, 'a> Gen<'c, 'a> {
             // Union → union: retag each member.
             if let Ty::Union(fms) = tf {
                 let fms = self.c.types.tys(fms).to_vec();
-                if fms.iter().all(|&fm| members.contains(&fm) || self.member_target(to, fm).is_some()) {
+                // (a member that's a union of its own, `Marked` of `Token`: its members, each to
+                // its own, see `retag`)
+                if fms.iter().all(|&fm| {
+                    members.contains(&fm) || self.member_target(to, fm).is_some() || {
+                        let u = self.c.unfold(fm);
+                        matches!(self.tget(u), Ty::Union(_))
+                    }
+                }) {
                     return self.retag(v, &fms, to);
                 }
             }
@@ -5466,11 +5476,29 @@ impl<'c, 'a> Gen<'c, 'a> {
         match (tf, tt) {
             (Ty::Record(ffs), Ty::Record(tfs)) => {
                 let (ffs, tfs) = (self.c.types.fields(ffs).to_vec(), self.c.types.fields(tfs).to_vec());
+                // (into one with an index signature, fields it doesn't name: kept in its `$rest`)
+                let rest = self.c.interner.lookup("$rest");
+                if rest.is_some_and(|r| tfs.iter().any(|f| f.name == r) && !ffs.iter().any(|f| f.name == r))
+                    && ffs.iter().any(|ff| !tfs.iter().any(|tf| tf.name == ff.name))
+                {
+                    let v = self.own(v);
+                    return self.reopen_as(&Val { owned: false, ..v }, to, None, None);
+                }
                 let mut parts = Vec::new();
-                for (ff, tfld) in ffs.iter().zip(&tfs) {
-                    let fv = Val { code: self.fld(v.ty, &v.code, self.sym(ff.name)), ty: ff.ty, owned: false };
-                    let cv = self.coerce(fv, tfld.ty);
-                    let code = self.consume(cv);
+                // (by name: a record with more fields is one with fewer, as TypeScript's are;
+                // one it lacks is `undefined`)
+                for tfld in &tfs {
+                    let code = match ffs.iter().find(|ff| ff.name == tfld.name) {
+                        Some(ff) => {
+                            let fv = Val { code: self.fld(v.ty, &v.code, self.sym(ff.name)), ty: ff.ty, owned: false };
+                            let cv = self.coerce(fv, tfld.ty);
+                            self.consume(cv)
+                        }
+                        None => {
+                            let cv = self.coerce(Val::plain("0", UNDEFINED), tfld.ty);
+                            self.consume(cv)
+                        }
+                    };
                     parts.push(format!(".f_{} = {code}", self.sym(tfld.name)));
                 }
                 let lit = self.rec_lit(to, &parts.join(", "));
@@ -5700,7 +5728,26 @@ impl<'c, 'a> Gen<'c, 'a> {
         if members.contains(&from) {
             return Some(from);
         }
-        members.into_iter().find(|&mt| mt != UNDEFINED && self.c.assignable_pub(from, mt))
+        // (a union, a recursive alias of one: its members, each to its own, not all to one)
+        let uf0 = self.c.unfold(from);
+        if matches!(self.tget(uf0), Ty::Union(_)) {
+            return None;
+        }
+        // (a member holding it, `Marked` of `Marked | Generic` for a `Blockquote`, before one it
+        // only fits: an open record, `Generic`, takes any with more fields, last)
+        let uf = self.c.unfold(from);
+        if let Some(mt) = members.iter().copied().find(|&mt| mt != UNDEFINED && { let um = self.c.unfold(mt); matches!(self.tget(um), Ty::Union(_)) } && {
+            let fl = self.c.flat_members(mt);
+            fl.contains(&from) || fl.contains(&uf)
+        }) {
+            return Some(mt);
+        }
+        let open = |g: &mut Self, t: TyId| g.c.interner.lookup("$rest").is_some_and(|r| {
+            let u = g.c.unfold(t);
+            matches!(g.tget(u), Ty::Record(fs) if g.c.types.fields(fs).iter().any(|f| f.name == r))
+        });
+        let closed = members.iter().copied().find(|&mt| mt != UNDEFINED && !open(self, mt) && self.c.assignable_pub(from, mt));
+        closed.or_else(|| members.into_iter().find(|&mt| mt != UNDEFINED && self.c.assignable_pub(from, mt)))
     }
 
     /// Converts a union value to another union whose members accept every source member.
@@ -6096,6 +6143,15 @@ impl<'c, 'a> Gen<'c, 'a> {
         }
         if v.ty == ANY {
             return format!("tv_dyn_truthy({})", v.code);
+        }
+        // (in TypeScript, an object read from a hole, `new Array(n)`'s: none, false)
+        if self.js_ints(self.cur_m()) {
+            match self.tget(v.ty) {
+                Ty::Class(..) | Ty::Rec(..) => return format!("(({}) != NULL)", v.code),
+                Ty::Interface(..) => return format!("(({}).p != NULL)", v.code),
+                Ty::Record(_) if self.c.hole_records.contains(&v.ty) => return format!("(({}) != NULL)", v.code),
+                _ => {}
+            }
         }
         let v = if matches!(self.tget(v.ty), Ty::Rec(..)) { return "true".into() } else { v };
         // (present: neither `undefined` nor `null`)
@@ -8774,6 +8830,7 @@ impl<'c, 'a> Gen<'c, 'a> {
     }
 
     fn assign(&mut self, op: AssignOp, target: ExprId, value: ExprId, span: Span) -> Val {
+        let assign_ty = self.assign_ty.take();
         // a JavaScript property: assigned in JavaScript
         let m = self.cur_m();
         // (a property of what an `any` holds)
@@ -9233,6 +9290,23 @@ impl<'c, 'a> Gen<'c, 'a> {
             AssignOp::Op(bop) => {
                 let p = self.place(target);
                 let lv = self.place_lvalue(&p);
+                // (`let i; i = 0; i += 1`: kept as `number | undefined`, narrowed to the number:
+                // computed as that, then kept as the union again)
+                let narrowed = assign_ty.unwrap_or(p.ty);
+                if matches!(self.tget(p.ty), Ty::Union(_))
+                    && narrowed != p.ty
+                    && self.c.types.is_numeric(narrowed)
+                    && self.tag_of(p.ty, narrowed).is_some()
+                    && !matches!(bop, BinOp::Nullish | BinOp::And | BinOp::Or)
+                {
+                    let cur = self.project(Val::plain(lv.clone(), p.ty), narrowed);
+                    let rhs = self.expr(value);
+                    let r = self.compound_val(bop, cur, rhs, narrowed, span);
+                    let r = self.tmp(narrowed, &r.code, false);
+                    let u = self.coerce(r.clone(), p.ty);
+                    self.line(format!("{lv} = {};", u.code));
+                    return r;
+                }
                 let cur = Val::plain(lv.clone(), p.ty);
                 // `x += await f()` reads `x` before it waits, as JavaScript does.
                 let cur = if self.awaits_in(value) { self.snapshot(cur) } else { cur };

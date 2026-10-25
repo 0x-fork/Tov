@@ -696,6 +696,75 @@ impl<'c, 'a> Gen<'c, 'a> {
 
     /// A call of function value `fv`; `known`: the arrows it can be (see `devirt_helpers`).
     fn call_fn_value_known(&mut self, fv: Val, fty: TyId, args: &[Arg], ty: TyId, span: Span, known: Option<Vec<(u32, ExprId)>>) -> Val {
+        // (a union of functions: the arguments once, then the one it holds called with them, as
+        // its parameters take them)
+        if let Ty::Union(ms) = self.tget(fty)
+            && self.c.types.tys(ms).iter().all(|&m| matches!(self.tget(m), Ty::Func(..)))
+            && niche_free(self, fty)
+        {
+            let ms = self.c.types.tys(ms).to_vec();
+            let fv = self.own(fv);
+            let held: Vec<Val> = args
+                .iter()
+                .map(|a| {
+                    let v = self.expr(a.expr);
+                    self.own(v)
+                })
+                .collect();
+            let ct = self.ctype(ty);
+            let res = self.fresh("uc");
+            if ty != VOID {
+                self.line(format!("{ct} {res};"));
+            }
+            let tag = self.u_tag(&fv.code, fty);
+            self.open(&format!("switch ({tag}) {{"));
+            for (i, &m) in ms.iter().enumerate() {
+                let Ty::Func(mps, mret, _) = self.tget(m) else { continue };
+                let mps = self.c.types.params(mps).to_vec();
+                self.open(&format!("case {i}: {{"));
+                self.push_temps();
+                let f = Val::plain(self.u_payload(&fv.code, fty, i), m);
+                let mut argv = Vec::new();
+                for (k, p) in mps.iter().enumerate() {
+                    let code = match held.get(k) {
+                        Some(h) => {
+                            let cv = self.coerce(Val { owned: false, ..h.clone() }, p.ty);
+                            cv.code
+                        }
+                        None => self.coerce(Val::plain("0", UNDEFINED), p.ty).code,
+                    };
+                    argv.push(code);
+                }
+                let cast = self.fn_ptr_type(&mps, mret);
+                let fvn = self.fresh("fn");
+                self.line(format!("tv_fn {fvn} = {};", f.code));
+                let mut all = vec![format!("{fvn}.env")];
+                all.extend(argv);
+                let r = self.finish_call(&format!("(({cast}){fvn}.fn)({})", all.join(", ")), mret, if ty == VOID { VOID } else { ty });
+                if ty != VOID {
+                    let r = self.coerce(r, ty);
+                    let r = self.own(r);
+                    let code = self.consume(r);
+                    self.line(format!("{res} = {code};"));
+                } else if !r.code.is_empty() && r.code != "0" {
+                    self.line(format!("(void)({});", r.code));
+                }
+                self.pop_temps();
+                self.line("break;");
+                self.close("}");
+            }
+            if ty != VOID {
+                let dv = self.default_value(ty);
+                self.line(format!("default: {res} = {dv}; break;"));
+            } else {
+                self.line("default: break;");
+            }
+            self.close("}");
+            if ty == VOID {
+                return Val::plain("0", VOID);
+            }
+            return self.tmp(ty, &res, true);
+        }
         let Ty::Func(ps, ret, _) = self.tget(fty) else {
             self.unsupported(span, "calling this value");
             return Val::plain("0", ty);
@@ -3591,6 +3660,8 @@ impl<'c, 'a> Gen<'c, 'a> {
                 let i = ms.iter().position(|&m| m == UNDEFINED).unwrap_or(0);
                 i == 0 && (self.is_unit(ms[0]) || !self.is_rc(ms[0]) && self.zero_default(ms[0]))
             }
+            // (an object's hole: no pointer)
+            Ty::Class(..) | Ty::Interface(..) | Ty::Rec(..) => true,
             _ => false,
         }
     }
@@ -4056,4 +4127,9 @@ impl Gen<'_, '_> {
             _ => false,
         }
     }
+}
+
+/// `t` is held as a tagged union (not a pointer whose null is one member).
+fn niche_free(g: &Gen<'_, '_>, t: TyId) -> bool {
+    g.niche(t).is_none()
 }

@@ -240,6 +240,9 @@ struct FnCtx {
     /// `const { done, value } = r`'s locals (`const done = $t.done`): (the local, the `$t` read, the
     /// field). Testing one of a discriminated union narrows `$t`, and so the others.
     field_aliases: Vec<(LocalId, ExprId, Sym)>,
+    /// `const canAdd = addPath && ...`: what testing the constant tells, its condition's
+    /// narrowings (of constants), as TypeScript's aliased conditions do.
+    cond_aliases: Vec<(LocalId, ExprId)>,
     /// A non-exhaustive `switch` was reported; "missing return" would only repeat it.
     reported_nonexhaustive: bool,
     /// Narrowings of field paths (`t.left`): (local, path, narrowed type or `None` = invalidated).
@@ -441,6 +444,9 @@ pub struct Checker<'a> {
     /// compared by identity): objects on the heap, every reference seeing every change. Records
     /// never changed or compared stay values, which nothing can tell apart (see `find_objects`).
     pub(crate) objects: HashSet<TyId>,
+    /// Records `new Array(n)` makes arrays of in TypeScript, holes and all: objects (pointers),
+    /// a hole none.
+    pub(crate) hole_records: HashSet<TyId>,
     /// Record types changed in place: objects unless nothing shares their values (see
     /// `objects.rs`).
     mutated: HashSet<TyId>,
@@ -535,6 +541,7 @@ fn new_checker<'a>(modules: &'a [Module], interner: &'a Interner, sm: &'a Source
         arrow_guards: Default::default(),
         test_callback: false,
         objects: HashSet::default(),
+        hole_records: HashSet::default(),
         mutated: HashSet::default(),
         object_fields: HashSet::default(),
         object_shapes: HashSet::default(),
@@ -802,6 +809,7 @@ impl<'a> Checker<'a> {
         arrow_guards: Default::default(),
         test_callback: false,
         objects: HashSet::default(),
+        hole_records: HashSet::default(),
         mutated: HashSet::default(),
         object_fields: HashSet::default(),
         object_shapes: HashSet::default(),
@@ -2460,6 +2468,26 @@ impl<'a> Checker<'a> {
     /// `A & B`: one record with the fields of each (a field in both has the narrower type, and is
     /// optional only if it is in both).
     fn intersection(&mut self, tys: &[TyId], span: Span) -> TyId {
+        // (`A & (B | C)`: `(A & B) | (A & C)`, as TypeScript distributes it, over a union of
+        // records and interfaces)
+        if let Some(k) = tys.iter().position(|&t| {
+            matches!(self.types.get(t), Ty::Union(_)) && self.types.members(t).iter().all(|&m| matches!(self.types.get(m), Ty::Record(_) | Ty::Interface(..)))
+        }) {
+            let parts: Vec<TyId> = self.types.members(tys[k]);
+            if parts.len() <= 8 {
+                let mut out = Vec::new();
+                for p in parts {
+                    let mut each = tys.to_vec();
+                    each[k] = p;
+                    let t = self.intersection(&each, span);
+                    if t == ERROR {
+                        return ERROR;
+                    }
+                    out.push(t);
+                }
+                return self.types.union(&out);
+            }
+        }
         // (`T[] & { links: L }`: the array, its properties its own, as JavaScript's arrays are
         // objects: see `array_props`)
         if let Some(&arr) = tys.iter().find(|&&t| matches!(self.types.get(t), Ty::Array(_))) {
@@ -3182,9 +3210,12 @@ impl<'a> Checker<'a> {
                 if targs.len() < arity {
                     let cm = self.classes[c as usize].module;
                     let defaults: Vec<Option<crate::ast::TypeId>> = self.class_decl(c).tparams[targs.len()..].iter().map(|tp| tp.default).collect();
+                    let names: Vec<Sym> = self.class_decl(c).tparams.iter().map(|tp| tp.name).collect();
                     if defaults.iter().all(|d| d.is_some()) {
                         for d in defaults.into_iter().flatten() {
-                            let t = self.with_module(cm, |c| c.resolve_type(d, &[]));
+                            // (`<T, V = T[]>`: the parameters before it, as given)
+                            let scope: Vec<(Sym, TyId)> = names.iter().copied().zip(targs.iter().copied()).collect();
+                            let t = self.with_module(cm, |c| c.resolve_type(d, &scope));
                             targs.push(t);
                         }
                     }
@@ -3198,11 +3229,13 @@ impl<'a> Checker<'a> {
                 if targs.contains(&ANY) {
                     let cm = self.classes[c as usize].module;
                     let defaults: Vec<Option<crate::ast::TypeId>> = self.class_decl(c).tparams.iter().map(|tp| tp.default).collect();
+                    let names: Vec<Sym> = self.class_decl(c).tparams.iter().map(|tp| tp.name).collect();
                     for (k, d) in defaults.into_iter().enumerate() {
                         if targs[k] == ANY
                             && let Some(d) = d
                         {
-                            targs[k] = self.with_module(cm, |c| c.resolve_type(d, &[]));
+                            let scope: Vec<(Sym, TyId)> = names[..k].iter().copied().zip(targs[..k].iter().copied()).collect();
+                            targs[k] = self.with_module(cm, |c| c.resolve_type(d, &scope));
                         }
                     }
                 }
@@ -3603,9 +3636,17 @@ impl<'a> Checker<'a> {
             (Ty::Map(k1, v1), Ty::Map(k2, v2)) => k1 == k2 && self.assignable_in(v1, v2, false, assuming),
             (Ty::Record(a), Ty::Record(b)) => {
                 let (a, b) = (self.types.fields(a).to_vec(), self.types.fields(b).to_vec());
-                a.len() == b.len()
-                    && a.iter().zip(&b).all(|(fa, fb)| fa.name == fb.name && fa.optional == fb.optional)
-                    && a.iter().zip(&b).all(|(fa, fb)| self.assignable_in(fa.ty, fb.ty, false, assuming))
+                if a.len() == b.len() && a.iter().zip(&b).all(|(fa, fb)| fa.name == fb.name && fa.optional == fb.optional) {
+                    return a.iter().zip(&b).all(|(fa, fb)| self.assignable_in(fa.ty, fb.ty, false, assuming));
+                }
+                // (a record with more fields is one with fewer, as TypeScript's are, `opts` given
+                // where the options it extends are wanted: each of the wanted fields it has, or
+                // may leave out)
+                b.iter().all(|fb| match a.iter().find(|fa| fa.name == fb.name) {
+                        Some(fa) => (fb.optional || !fa.optional) && self.assignable_in(fa.ty, fb.ty, false, assuming),
+                        None => fb.optional,
+                    })
+                    && b.iter().any(|fb| a.iter().any(|fa| fa.name == fb.name))
             }
             (Ty::Func(pa, ra, ta), Ty::Func(pb, rb, tb)) => {
                 // A function that can throw can't stand in for one that can't.
@@ -3803,6 +3844,7 @@ impl<'a> Checker<'a> {
                 _ => {}
             }
         }
+        found.extend(self.hole_records.iter().copied());
         for t in found {
             self.note_object(t);
         }

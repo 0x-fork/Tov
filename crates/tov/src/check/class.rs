@@ -737,7 +737,7 @@ impl<'a> Checker<'a> {
         // leave them `undefined`; or fewer, as TypeScript allows: it ignores the rest)
         let ok_params = (base.params.len() <= over.params.len() && over.params[base.params.len()..].iter().all(|p| p.optional && !p.inout)
             || over.params.len() < base.params.len() && base.params[over.params.len()..].iter().all(|p| !p.inout))
-            && base.params.iter().zip(&over.params).all(|(b, o)| b.inout == o.inout && b.optional == o.optional && self.assignable(b.ty, o.ty));
+            && base.params.iter().zip(&over.params).all(|(b, o)| b.inout == o.inout && (b.optional == o.optional || o.optional) && self.assignable(b.ty, o.ty));
         // Inferred return types are compared once the class is resolved (see `check_class_interface`).
         let (Some(bret), Some(oret)) = (base.ret, over.ret) else {
             if ok_params {

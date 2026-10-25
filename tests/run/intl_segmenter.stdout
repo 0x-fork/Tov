@@ -1,0 +1,6 @@
+[["Hello",0,true],[",",5,false],[" ",6,false],["world",7,true],["!",12,false],["  ",13,false],["It's",15,true],[" ",19,false],["3.14",20,true],[" ",24,false],["here",25,true]]
+[["foo_bar",0,true],[" ",7,false],["baz",8,true],["-",11,false],["qux",12,true]]
+[["a",0,true],["\n",1,false],["b",2,true],["\t",3,false],["c",4,true]]
+[["don't",0,true],[" ",5,false],["stop",6,true]]
+[["x",0,true],["  ",1,false],["y",3,true]]
+["a","b","c"] word

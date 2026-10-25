@@ -1326,3 +1326,83 @@ export class Deno {
     return Deno.readTextFileSync(path)
   }
 }
+// `Intl.Segmenter` (word, grapheme and sentence granularity), as ICU's rules split common text:
+// runs of letters, digits and `_` (a `'` or `.` between letters, a `.` or `,` between digits,
+// within one), runs of spaces, and each other character alone.
+export namespace Intl {
+  export interface SegmentData { segment: string; index: number; input: string; isWordLike?: boolean }
+  export interface SegmenterOptions { granularity?: string; localeMatcher?: string }
+  export interface ResolvedSegmenterOptions { locale: string; granularity: string }
+  export class Segmenter {
+    locale: string
+    granularity: string
+    constructor(locale?: string | string[], options?: SegmenterOptions) {
+      this.locale = typeof locale === "string" ? locale : "en"
+      this.granularity = options?.granularity ?? "grapheme"
+    }
+    resolvedOptions(): ResolvedSegmenterOptions {
+      return { locale: this.locale, granularity: this.granularity }
+    }
+    segment(input: string): SegmentData[] {
+      const out: SegmentData[] = []
+      const n = input.length
+      let i = 0
+      if (this.granularity === "grapheme") {
+        while (i < n) {
+          const c = input.codePointAt(i) ?? 0
+          const w = c > 0xffff ? 2 : 1
+          out.push({ segment: input.slice(i, i + w), index: i, input })
+          i += w
+        }
+        return out
+      }
+      if (this.granularity === "sentence") {
+        let start = 0
+        while (i < n) {
+          const ch = input[i]
+          i++
+          if (ch === "." || ch === "!" || ch === "?") {
+            while (i < n && (input[i] === "." || input[i] === "!" || input[i] === "?")) i++
+            while (i < n && (input[i] === " " || input[i] === "\n")) i++
+            out.push({ segment: input.slice(start, i), index: start, input })
+            start = i
+          }
+        }
+        if (start < n) out.push({ segment: input.slice(start), index: start, input })
+        return out
+      }
+      while (i < n) {
+        const ch = input[i]
+        if (__segWord(ch)) {
+          let j = i + 1
+          while (j < n) {
+            if (__segWord(input[j])) { j++; continue }
+            if (j + 1 < n && __segMid(input[j - 1], input[j], input[j + 1])) { j += 2; continue }
+            break
+          }
+          out.push({ segment: input.slice(i, j), index: i, input, isWordLike: true })
+          i = j
+        } else if (ch === " ") {
+          let j = i + 1
+          while (j < n && input[j] === " ") j++
+          out.push({ segment: input.slice(i, j), index: i, input, isWordLike: false })
+          i = j
+        } else {
+          const c = input.codePointAt(i) ?? 0
+          const w = c > 0xffff ? 2 : 1
+          out.push({ segment: input.slice(i, i + w), index: i, input, isWordLike: false })
+          i += w
+        }
+      }
+      return out
+    }
+  }
+}
+function __segLetter(ch: string): boolean { return /^\p{L}$/u.test(ch) }
+function __segDigit(ch: string): boolean { return ch >= "0" && ch <= "9" }
+function __segWord(ch: string): boolean { return __segDigit(ch) || ch === "_" || __segLetter(ch) }
+function __segMid(a: string, m: string, b: string): boolean {
+  if (__segLetter(a) && __segLetter(b)) return m === "'" || m === "." || m === ":" || m === "’" || m === "·"
+  if (__segDigit(a) && __segDigit(b)) return m === "." || m === "," || m === ";" || m === "'"
+  return false
+}

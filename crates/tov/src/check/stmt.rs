@@ -495,6 +495,14 @@ impl<'a> Checker<'a> {
                 {
                     self.fcx().field_aliases.push((id, obj, field));
                 }
+                // (`const canRemove = removePath && removePath.oldPos < n`: a condition, which
+                // `if (canRemove)` tests again)
+                if !*mutable
+                    && let Some(i) = init
+                    && matches!(self.ast().expr(*i).kind, ExprKind::Binary(BinOp::And | BinOp::Or | BinOp::Eq | BinOp::Ne | BinOp::LooseEq | BinOp::LooseNe, ..) | ExprKind::Unary(crate::ast::UnOp::Not, _))
+                {
+                    self.fcx().cond_aliases.push((id, *i));
+                }
                 if self.spec.on {
                     let sites = match (ty, init) {
                         (Some(te), _) => self.type_sites(self.cur, *te),
@@ -530,11 +538,17 @@ impl<'a> Checker<'a> {
                     }
                     // `const u = db[id]` tested later (`if (u)`, `u ?? d`): the read may find
                     // nothing, `undefined`, as in JavaScript (rather than trapping)
-                    if let StmtKind::Let { ty: None, init: Some(x), name, .. } = &ast.stmt(st).kind
+                    // (in TypeScript, used unguarded elsewhere, where TypeScript has it a `T`:
+                    // checked to be there, as `x!`, JavaScript's TypeError if not)
+                    let mut soft = None;
+                    if let StmtKind::Let { ty: None, init: Some(x), name, name_span, .. } = &ast.stmt(st).kind
                         && matches!(ast.expr(*x).kind, ExprKind::Index { .. })
                         && tested(ast, *name, &stmts[i + 1..])
                     {
                         self.want_optional = true;
+                        if self.ts_module() {
+                            soft = Some(name_span.start);
+                        }
                     }
                     // `const peek = () => toks[pos]` whose results are tested (`const t = peek();
                     // if (t ...)`): the read may find nothing too
@@ -547,6 +561,9 @@ impl<'a> Checker<'a> {
                     {
                         let m = self.cur;
                         self.absent_reads.insert((m, body));
+                    }
+                    if let Some(k) = soft {
+                        self.fcx().loose.insert(k);
                     }
                     self.stmt(st);
                     // `let x: number;` read before anything is assigned to it
@@ -679,6 +696,19 @@ impl<'a> Checker<'a> {
                 if let Some(i) = init {
                     self.stmt(*i);
                 }
+                // (`for (i = 0; ...; i += 1)` of a number declared before: only stepped in the
+                // loop, still a number after it)
+                let bspan = self.ast().stmt(*body).span;
+                let first = cond.map(|c| self.ast().expr(c).span).or(step.map(|st| self.ast().expr(st).span)).unwrap_or(bspan);
+                let region = first.to(bspan);
+                let names = fx.assigned.clone();
+                let stepped: Vec<(LocalId, TyId)> = names
+                    .into_iter()
+                    .filter_map(|n| {
+                        let (id, t) = self.lookup(n)?;
+                        (id < entry && self.types.is_numeric(t) && !self.plainly_assigned(n, region)).then_some((id, t))
+                    })
+                    .collect();
                 self.reset_assigned(*body);
                 if let Some(st) = step {
                     self.reset_assigned_expr(*st);
@@ -693,7 +723,7 @@ impl<'a> Checker<'a> {
                     self.expr(*st, None);
                 }
                 self.pop_scope();
-                self.apply_effects(&fx, entry, &[]);
+                self.apply_effects(&fx, entry, &stepped);
             }
             StmtKind::ForOf { mutable, name, name_span, iter, body } => {
                 let t = self.expr(*iter, None);

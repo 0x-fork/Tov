@@ -1270,6 +1270,7 @@ impl<'c, 'a> Gen<'c, 'a> {
                 }
                 // (an override's extra optional parameters: `undefined`)
                 let mut args = args.clone();
+                let mut converts = Vec::new();
                 if let Some(ClassMemberRef::Method(om)) = self.c.class_member(t, method) {
                     for p in om.params.iter().skip(params.len()) {
                         let pt = self.c.types.subst(p.ty, &ci.subst);
@@ -1277,9 +1278,39 @@ impl<'c, 'a> Gen<'c, 'a> {
                     }
                     // (or fewer: the rest aren't passed)
                     args.truncate(om.params.len());
+                    // (one taking another type, `o: Opts | { c: boolean } = {}` over `o: Opts`:
+                    // what's given, converted)
+                    for (k, (bp, op)) in params.iter().zip(&om.params).enumerate() {
+                        let ot = self.c.types.subst(op.ty, &ci.subst);
+                        if !bp.inout && !op.inout && bp.ty != ot && self.ctype(bp.ty) != self.ctype(ot) {
+                            converts.push((k, bp.ty, ot));
+                        }
+                    }
                 }
-                let call = self.method_call_code(&format!("(({} *)self_)", ci.name), t, method, true, args);
-                let _ = writeln!(cases, "    case {}: {}{call};{}", ci.cid, if ret == VOID { "" } else { "return " }, if ret == VOID { " return;" } else { "" });
+                if converts.is_empty() {
+                    let call = self.method_call_code(&format!("(({} *)self_)", ci.name), t, method, true, args);
+                    let _ = writeln!(cases, "    case {}: {}{call};{}", ci.cid, if ret == VOID { "" } else { "return " }, if ret == VOID { " return;" } else { "" });
+                } else {
+                    let module = self.c.classes[ci.decl as usize].module;
+                    self.begin_scratch(module);
+                    for (k, from, to) in converts {
+                        let cv = self.coerce(Val { code: format!("p{k}"), ty: from, owned: false }, to);
+                        args[k] = cv.code;
+                    }
+                    let call = self.method_call_code(&format!("(({} *)self_)", ci.name), t, method, true, args);
+                    if ret == VOID {
+                        self.line(format!("{call};"));
+                        self.release_all_temps();
+                        self.line("return;");
+                    } else {
+                        let rct = self.ctype(ret);
+                        self.line(format!("{rct} r_ = {call};"));
+                        self.release_all_temps();
+                        self.line("return r_;");
+                    }
+                    let body = self.end_scratch();
+                    let _ = writeln!(cases, "    case {}: {{\n{body}    }}", ci.cid);
+                }
             }
             let proto = self.self_proto(&dname, &self.class_insts[&recv].name.clone(), &params, ret);
             let _ = writeln!(bodies, "static {proto} {{\n    switch (((tvg_obj *)self_)->cid) {{\n{cases}    default: tv_trap(\"internal error: method dispatch\", {});\n    }}\n}}", c_string(b"dispatch"));

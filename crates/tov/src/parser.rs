@@ -20,7 +20,7 @@ pub fn parse(src: &str, file: FileId, interner: &mut Interner) -> (Ast, Vec<Diag
             lexed.tokens[i].kind = Tok::Ident;
         }
     }
-    let mut p = Parser { src, toks: lexed.tokens, strings: lexed.strings, pos: 0, file, interner, ast: Ast::default(), diags, script_stmts: Vec::new(), defaults: Vec::new(), more_stmts: Vec::new(), hidden: 0, prologue: Vec::new(), index_sig: None, mapped: None, const_strs: Vec::new(), call_sig: None, local_fns: Vec::new(), prop_defaults: false, var_frames: Vec::new(), extra_members: Vec::new(), generic_arrows: Vec::new(), local_types: Vec::new(), local_type_items: Vec::new(), local_classes: Vec::new(), runtime_tests: false, chai: false, lifted: Vec::new(), classes: Vec::new(), overload_rets: Vec::new() };
+    let mut p = Parser { src, toks: lexed.tokens, strings: lexed.strings, pos: 0, file, interner, ast: Ast::default(), diags, script_stmts: Vec::new(), defaults: Vec::new(), more_stmts: Vec::new(), hidden: 0, prologue: Vec::new(), index_sig: None, mapped: None, const_strs: Vec::new(), call_sig: None, local_fns: Vec::new(), prop_defaults: false, var_frames: Vec::new(), extra_members: Vec::new(), generic_arrows: Vec::new(), local_types: Vec::new(), local_type_items: Vec::new(), local_classes: Vec::new(), runtime_tests: false, chai: false, lifted: Vec::new(), classes: Vec::new(), overload_rets: Vec::new(), fn_exprs: Vec::new() };
     p.ast.iterator_sym = Some(p.interner.intern("__iterator"));
     // (`// @ts-expect-error`: the next line's start)
     let mut at = 0usize;
@@ -343,6 +343,9 @@ struct Parser<'a> {
     chai: bool,
     /// Function declarations in bodies, as `const`s (to hoist).
     local_fns: Vec<StmtId>,
+    /// Named function expressions that call themselves, `(function exec() { ... exec() })()`:
+    /// each a local function declared before the statement it's in (see `block`).
+    fn_exprs: Vec<StmtId>,
     /// The classes being parsed, innermost last: a `#name` is its class's own (see `private_name`).
     classes: Vec<Sym>,
     /// Nested generators and generic functions, made module functions (see `lift_functions`): the
@@ -3211,7 +3214,10 @@ impl<'a> Parser<'a> {
         let mut stmts = Vec::new();
         while !self.at(Tok::RBrace) && !self.at(Tok::Eof) {
             let before = self.pos;
-            stmts.push(self.stmt());
+            let fe = self.fn_exprs.len();
+            let st = self.stmt();
+            stmts.extend(self.fn_exprs.drain(fe..));
+            stmts.push(st);
             stmts.append(&mut self.more_stmts);
             if self.pos == before {
                 self.bump();
@@ -3435,7 +3441,20 @@ impl<'a> Parser<'a> {
     /// References to namespaces' members: `N.x` (a value or a type) anywhere in the module, and
     /// `x` inside N, become the member's item name.
     fn resolve_namespaces(&mut self) {
-        let nss: Vec<(Sym, Span, Vec<(Sym, Sym)>)> = self.ast.namespaces.iter().map(|n| (n.name, n.span, n.members.clone())).collect();
+        let mut nss: Vec<(Sym, Span, Vec<(Sym, Sym)>)> = self.ast.namespaces.iter().map(|n| (n.name, n.span, n.members.clone())).collect();
+        // (the prelude's, `Intl.Segmenter`, where the module has none of the name: its members,
+        // as the prelude names them)
+        if let Some(intl) = self.interner.lookup("Intl")
+            && !nss.iter().any(|n| n.0 == intl)
+            && self.ast.exprs.iter().any(|e| matches!(e.kind, ExprKind::Ident(x) if x == intl))
+                | self.ast.types.iter().any(|t| matches!(t.kind, TypeExprKind::Named { ns: Some((o, _)), .. } if o == intl))
+        {
+            let members: Vec<(Sym, Sym)> = ["Segmenter", "SegmentData", "SegmenterOptions", "ResolvedSegmenterOptions"]
+                .iter()
+                .map(|m| (self.interner.intern(m), self.interner.intern(&format!("Intl$${m}"))))
+                .collect();
+            nss.push((intl, Span::new(crate::source::FileId(u32::MAX), 0, 0), members));
+        }
         if nss.is_empty() {
             return;
         }
@@ -5035,10 +5054,21 @@ impl<'a> Parser<'a> {
             // `function (x) { }`: an arrow function (`this` and `arguments` aren't supported)
             Tok::Function if matches!(self.nth(1), Tok::LParen | Tok::Ident) && !(self.nth(1) == Tok::Ident && self.nth(2) == Tok::Lt) => {
                 self.bump();
-                let (name, name_span) = if self.at(Tok::Ident) { self.ident("a function name").unwrap() } else { (self.interner.intern(""), start) };
+                let named = self.at(Tok::Ident);
+                let (name, name_span) = if named { self.ident("a function name").unwrap() } else { (self.interner.intern(""), start) };
                 let Some(f) = self.function_rest(name, name_span) else { return self.mk_expr(ExprKind::Error, start) };
                 let span = start.to(self.prev_span());
-                self.arrow_of(f, false, span)
+                // (one that calls itself by its name: a local function of that name, declared
+                // just before, the expression naming it)
+                let calls_itself = named && !self.var_frames.is_empty() && self.ast.exprs.iter().any(|e| matches!(e.kind, ExprKind::Ident(n) if n == name) && e.span.file == span.file && e.span.start > name_span.end && e.span.end <= span.end);
+                let init = self.arrow_of(f, false, span);
+                if calls_itself {
+                    let st = self.mk_stmt(StmtKind::Let { mutable: false, name, name_span, ty: None, init: Some(init) }, span);
+                    self.local_fns.push(st);
+                    self.fn_exprs.push(st);
+                    return self.mk_expr(ExprKind::Ident(name), span);
+                }
+                init
             }
             // `function* () { ... }`: a module function of its own (see `lift_functions`)
             Tok::Function if self.nth(1) == Tok::Star => {

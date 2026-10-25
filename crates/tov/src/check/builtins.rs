@@ -1957,6 +1957,9 @@ impl<'a> Checker<'a> {
                 Ty::Array(e) | Ty::Set(e) | Ty::Gen(e) => e,
                 Ty::Str | Ty::StrLit(_) => STR,
                 Ty::Error => return ERROR,
+                // (a type parameter `V extends Iterable<T>`: its elements are `T`s, whatever it's
+                // made)
+                Ty::Param(p) if let Some(b) = self.gparam(p).bound && let Ty::Gen(e) = *self.types.get(b) => e,
                 _ if let Some(e) = self.iterator_of(base) => {
                     self.rewrites.iterators.push((self.cur, src));
                     e

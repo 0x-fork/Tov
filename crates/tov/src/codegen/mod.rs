@@ -292,6 +292,8 @@ pub(crate) struct Gen<'c, 'a> {
     pub(crate) coerce_stack: Vec<(TyId, TyId)>,
     /// Interface values being unwrapped into unions (see `coerce_inner`): (interface, union).
     pub(crate) unwrapping: Vec<(TyId, TyId)>,
+    /// The type of the assignment expression being generated (see `assign`).
+    pub(crate) assign_ty: Option<TyId>,
     /// Recursive aliases for arrays, held as the array (see `flatten_recs`).
     pub(crate) rec_flat: FxMap<TyId, TyId>,
     /// A script's static fields whose initializers can throw.
@@ -459,6 +461,7 @@ impl<'c, 'a> Gen<'c, 'a> {
             fn_adapters: FxMap::default(),
             coerce_stack: Vec::new(),
             unwrapping: Vec::new(),
+            assign_ty: None,
             rec_flat: FxMap::default(),
             static_throws: FxSet::default(),
             quiet_memo: FxMap::default(),
