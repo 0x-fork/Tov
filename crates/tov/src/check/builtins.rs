@@ -406,9 +406,16 @@ pub(super) fn method(c: &mut Checker, base: TyId, name: &str) -> Option<MethodSi
                 }
                 "at" => mk(sig(vec![(p(INT), "index")], opt_e), false),
                 "flat" => {
-                    // one level of nested arrays
+                    // one level of nested arrays (of a union, its arrays' elements and the rest)
                     let inner = match *c.types.get(e) {
                         Ty::Array(x) => x,
+                        Ty::Union(_) if c.types.members(e).iter().any(|&m| matches!(c.types.get(m), Ty::Array(_))) => {
+                            let ms: Vec<TyId> = c.types.members(e).into_iter().map(|m| match *c.types.get(m) {
+                                Ty::Array(x) => x,
+                                _ => m,
+                            }).collect();
+                            c.types.union(&ms)
+                        }
                         _ => e,
                     };
                     let a = c.types.array(inner);
@@ -846,6 +853,24 @@ impl<'a> Checker<'a> {
                 self.array_lit(&elems, exp, span)
             }
             "Array" if name == "from" => self.array_from(args, exp, span),
+            // `Object.fromEntries(pairs or a map)`, `Object.groupBy(xs, f)`: the prelude's
+            "Object" if matches!(name, "fromEntries" | "groupBy") && !args.is_empty() => {
+                let call = self.pending_call.take();
+                let t = self.expr(args[0].expr, None);
+                let tb = self.types.without_undefined(t);
+                let target = match name {
+                    "fromEntries" if matches!(*self.types.get(tb), Ty::Map(..)) => "__fromEntriesMap",
+                    "fromEntries" => "__fromEntries",
+                    _ => "__groupBy",
+                };
+                for a in &args[1..] {
+                    self.expr(a.expr, None);
+                }
+                if let (Some(c), Some(f)) = (call, self.interner.lookup(target)) {
+                    self.rewrites.ns_calls.push((self.cur, c, f));
+                }
+                ERROR
+            }
             // `Float64Array.from(xs)`, `Uint8Array.of(1, 2)`: as `new Float64Array(xs)` / of those numbers
             n if typed_array_elem(n).is_some() && matches!(name, "from" | "of") => {
                 let el = typed_array_elem(n).unwrap();

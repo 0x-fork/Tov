@@ -1706,8 +1706,44 @@ impl<'c, 'a> Gen<'c, 'a> {
                 let out = self.tmp(ty, "tv_arr_fresh()", true);
                 let i = self.fresh("i");
                 self.open(&format!("for (tv_int {i} = 0; {i} < tv_arr_len({}); {i}++) {{", arr.code));
-                if matches!(self.tget(et), Ty::Array(_)) {
+                if matches!(self.tget(et), Ty::Array(_)) && self.held(et) == self.held(ty) {
                     self.line(format!("tv_arr_extend(&{}, {rd}, {});", out.code, elem(&i).code));
+                } else if let Ty::Union(ms) = self.tget(et)
+                    && self.niche(et).is_none()
+                {
+                    // (a union of arrays and more: each array's elements, the rest as they are)
+                    let ms = self.c.types.tys(ms).to_vec();
+                    let rct = self.ctype(rt);
+                    let ev = elem(&i).code;
+                    let tag = self.u_tag(&ev, et);
+                    self.open(&format!("switch ({tag}) {{"));
+                    for (k, &m) in ms.iter().enumerate() {
+                        self.open(&format!("case {k}: {{"));
+                        self.push_temps();
+                        let payload = if self.is_unit(m) { Val::plain("0", m) } else { Val::plain(self.u_payload(&ev, et, k), m) };
+                        if let Ty::Array(me) = self.tget(m) {
+                            let (mct, j) = (self.ctype(me), self.fresh("j"));
+                            self.open(&format!("for (tv_int {j} = 0; {j} < tv_arr_len({}); {j}++) {{", payload.code));
+                            self.push_temps();
+                            let x = Val::plain(format!("((({mct} *)tv_arr_data({}))[{j}])", payload.code), me);
+                            let x = self.coerce(x, rt);
+                            let x = self.own(x);
+                            let c = self.consume(x);
+                            self.line(format!("TVG_PUSH({rct}, &{}, {rd}, {c});", out.code));
+                            self.pop_temps();
+                            self.close("}");
+                        } else {
+                            let x = self.coerce(payload, rt);
+                            let x = self.own(x);
+                            let c = self.consume(x);
+                            self.line(format!("TVG_PUSH({rct}, &{}, {rd}, {c});", out.code));
+                        }
+                        self.pop_temps();
+                        self.line("break;");
+                        self.close("}");
+                    }
+                    self.line("default: break;");
+                    self.close("}");
                 } else {
                     let x = self.fresh("x");
                     let r = self.retain_code(et, &x);

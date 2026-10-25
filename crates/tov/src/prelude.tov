@@ -257,6 +257,134 @@ function __reNext(s: string, p: int[], unicode: bool): int {
 }
 
 /** `s.replace(re, replacement)` (every match with the `g` flag). */
+/** `xs.toSorted(cmp)`: a sorted copy, `xs` left as it is. */
+export function __toSorted<T>(xs: T[], cmp?: (a: T, b: T) => number): T[] {
+  const c = xs.slice()
+  if (cmp === undefined) c.sort()
+  else c.sort(cmp)
+  return c
+}
+
+/** `xs.toReversed()`: a reversed copy. */
+export function __toReversed<T>(xs: T[]): T[] {
+  const c = xs.slice()
+  c.reverse()
+  return c
+}
+
+/** `xs.with(i, v)`: a copy with element i (from the end when negative) replaced. */
+export function __with<T>(xs: T[], i: int, v: T): T[] {
+  const n = xs.length
+  const k = i < 0 ? n + i : i
+  if (k < 0 || k >= n) throw new RangeError("Invalid index : " + String(i))
+  const c = xs.slice()
+  c[k] = v
+  return c
+}
+
+/** `xs.findLast(f)`: the last element f accepts. */
+export function __findLast<T>(xs: T[], f: (x: T, i: int) => bool): T | undefined {
+  for (let i = xs.length - 1; i >= 0; i--) if (f(xs[i]!, i)) return xs[i]!
+  return undefined
+}
+
+/** `xs.findLastIndex(f)`: the index of the last element f accepts, or -1. */
+export function __findLastIndex<T>(xs: T[], f: (x: T, i: int) => bool): int {
+  for (let i = xs.length - 1; i >= 0; i--) if (f(xs[i]!, i)) return i
+  return -1
+}
+
+/** `xs.reduceRight(f, init)`: folded from the end. */
+export function __reduceRight<T, A>(xs: T[], f: (a: A, x: T, i: int) => A, init: A): A {
+  let a = init
+  for (let i = xs.length - 1; i >= 0; i--) a = f(a, xs[i]!, i)
+  return a
+}
+
+/** `xs.reduceRight(f)`: folded from the end, starting from the last element. */
+export function __reduceRight1<T>(xs: T[], f: (a: T, x: T, i: int) => T): T {
+  if (xs.length === 0) throw new TypeError("Reduce of empty array with no initial value")
+  let a = xs[xs.length - 1]!
+  for (let i = xs.length - 2; i >= 0; i--) a = f(a, xs[i]!, i)
+  return a
+}
+
+/** `Object.fromEntries(pairs)`: a record of the pairs, a later key replacing an earlier one. */
+export function __fromEntries<V>(es: [string, V][]): Record<string, V> {
+  const r: Record<string, V> = {}
+  for (const [k, v] of es) r[k] = v
+  return r
+}
+
+/** `Object.fromEntries(map)`. */
+export function __fromEntriesMap<V>(m: Map<string, V>): Record<string, V> {
+  const r: Record<string, V> = {}
+  for (const [k, v] of m) r[k] = v
+  return r
+}
+
+/** `Object.groupBy(xs, f)`: the elements by the key f gives them, in order. */
+export function __groupBy<T>(xs: T[], f: (x: T, i: int) => string): Record<string, T[]> {
+  const r: Record<string, T[]> = {}
+  for (let i = 0; i < xs.length; i++) {
+    const x = xs[i]!
+    const k = f(x, i)
+    const g = r[k]
+    if (g === undefined) r[k] = [x]
+    else g.push(x)
+  }
+  return r
+}
+
+/** `Map.groupBy(xs, f)`. */
+export function __mapGroupBy<T, K>(xs: T[], f: (x: T, i: int) => K): Map<K, T[]> {
+  const r = new Map<K, T[]>()
+  for (let i = 0; i < xs.length; i++) {
+    const x = xs[i]!
+    const k = f(x, i)
+    const g = r.get(k)
+    if (g === undefined) r.set(k, [x])
+    else g.push(x)
+  }
+  return r
+}
+
+/** The set methods of ES2025: `a.union(b)` and the rest. */
+export function __setUnion<T>(a: Set<T>, b: Set<T>): Set<T> {
+  const r = new Set<T>()
+  for (const x of a) r.add(x)
+  for (const x of b) r.add(x)
+  return r
+}
+export function __setIntersection<T>(a: Set<T>, b: Set<T>): Set<T> {
+  const r = new Set<T>()
+  for (const x of a) if (b.has(x)) r.add(x)
+  return r
+}
+export function __setDifference<T>(a: Set<T>, b: Set<T>): Set<T> {
+  const r = new Set<T>()
+  for (const x of a) if (!b.has(x)) r.add(x)
+  return r
+}
+export function __setSymmetricDifference<T>(a: Set<T>, b: Set<T>): Set<T> {
+  const r = new Set<T>()
+  for (const x of a) if (!b.has(x)) r.add(x)
+  for (const x of b) if (!a.has(x)) r.add(x)
+  return r
+}
+export function __setIsSubsetOf<T>(a: Set<T>, b: Set<T>): bool {
+  for (const x of a) if (!b.has(x)) return false
+  return true
+}
+export function __setIsSupersetOf<T>(a: Set<T>, b: Set<T>): bool {
+  for (const x of b) if (!a.has(x)) return false
+  return true
+}
+export function __setIsDisjointFrom<T>(a: Set<T>, b: Set<T>): bool {
+  for (const x of a) if (b.has(x)) return false
+  return true
+}
+
 export function __reReplace(s: string, re: RegExp, rep: string): string {
   return __reReplaceWith(s, re, rep, undefined)
 }

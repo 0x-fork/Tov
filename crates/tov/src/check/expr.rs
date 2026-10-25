@@ -3310,13 +3310,22 @@ impl<'a> Checker<'a> {
             && !elems.iter().any(|&x| matches!(self.ast().expr(x).kind, ExprKind::Spread(_)))
         {
             let fields = self.tuple_of(t).unwrap();
+            // (a field the hint leaves open, a type argument still to infer: the element's own type)
+            let mut tys = Vec::new();
+            let mut open = false;
             for (&x, f) in elems.iter().zip(&fields) {
                 let ft = f.ty;
-                let et = self.expr(x, Some(ft));
+                let et = self.expr(x, if ft == ERROR { None } else { Some(ft) });
                 let s = self.ast().expr(x).span;
-                self.expect_assignable(et, ft, s, None);
+                if ft == ERROR {
+                    open = true;
+                    tys.push(self.types.widen(et));
+                } else {
+                    self.expect_assignable(et, ft, s, None);
+                    tys.push(ft);
+                }
             }
-            return t;
+            return if open { self.tuple_ty(&tys) } else { t };
         }
         let elem_exp = exp.and_then(|e| {
             self.flat_members(e).into_iter().find_map(|m| match self.types.get(m) {
@@ -3325,13 +3334,24 @@ impl<'a> Checker<'a> {
             })
         });
         if let Some(et) = elem_exp {
+            // (an element hint with an open part, a type argument still to infer: the elements' own)
+            let open = et != ERROR && self.types.mentions_error(et);
+            let mut tys = Vec::new();
             for &x in elems {
                 let s = self.ast().expr(x).span;
                 let t = match self.ast().expr(x).kind {
                     ExprKind::Spread(inner) => self.spread_elem(inner, Some(et)),
                     _ => self.expr(x, Some(et)),
                 };
-                self.expect_assignable(t, et, s, None);
+                if open {
+                    tys.push(t);
+                } else {
+                    self.expect_assignable(t, et, s, None);
+                }
+            }
+            if open {
+                let u = self.types.union(&tys);
+                return self.types.array(u);
             }
             return self.types.array(et);
         }
@@ -4181,6 +4201,67 @@ impl<'a> Checker<'a> {
                     }
                     self.types.without_undefined(recv)
                 };
+                // `xs.toSorted()`, `xs.findLast(f)`, `a.union(b)` (ES2023, ES2025): the prelude's
+                // `__toSorted(xs)` and so on
+                let prelude_method = match (*self.types.get(base), mtext.as_str(), args.len()) {
+                    (Ty::Array(_), "toSorted", 0 | 1) => Some("__toSorted"),
+                    (Ty::Array(_), "toReversed", 0) => Some("__toReversed"),
+                    (Ty::Array(_), "with", 2) => Some("__with"),
+                    (Ty::Array(_), "findLast", 1) => Some("__findLast"),
+                    (Ty::Array(_), "findLastIndex", 1) => Some("__findLastIndex"),
+                    (Ty::Array(_), "reduceRight", 2) => Some("__reduceRight"),
+                    (Ty::Array(_), "reduceRight", 1) => Some("__reduceRight1"),
+                    (Ty::Set(_), "union", 1) => Some("__setUnion"),
+                    (Ty::Set(_), "intersection", 1) => Some("__setIntersection"),
+                    (Ty::Set(_), "difference", 1) => Some("__setDifference"),
+                    (Ty::Set(_), "symmetricDifference", 1) => Some("__setSymmetricDifference"),
+                    (Ty::Set(_), "isSubsetOf", 1) => Some("__setIsSubsetOf"),
+                    (Ty::Set(_), "isSupersetOf", 1) => Some("__setIsSupersetOf"),
+                    (Ty::Set(_), "isDisjointFrom", 1) => Some("__setIsDisjointFrom"),
+                    _ => None,
+                };
+                if let Some(target) = prelude_method
+                    && args.iter().all(|a| a.by_ref.is_none() && !matches!(self.ast().expr(a.expr).kind, ExprKind::Spread(_)))
+                    && let Some(f) = self.interner.lookup(target)
+                {
+                    self.rewrites.calls.push((self.cur, e, f));
+                    for a in args {
+                        self.expr(a.expr, None);
+                    }
+                    return ERROR;
+                }
+                // `xs.flat(2)`, `xs.flat(Infinity)`: `xs.flat().flat()`, as many levels as asked (or
+                // as its type has)
+                if let Ty::Array(_) = *self.types.get(base)
+                    && mtext == "flat"
+                    && args.len() == 1
+                {
+                    // (how deep its arrays go, through unions: `[1, [2, [3]]]`)
+                    fn depth(types: &Types, t: TyId, budget: u32) -> u32 {
+                        if budget == 0 {
+                            return 0;
+                        }
+                        match *types.get(t) {
+                            Ty::Array(x) => 1 + depth(types, x, budget - 1),
+                            Ty::Union(ms) => types.tys(ms).iter().map(|&m| depth(types, m, budget)).max().unwrap_or(0),
+                            _ => 0,
+                        }
+                    }
+                    let nested = depth(&self.types, base, 32).saturating_sub(1);
+                    let depth = match &self.ast().expr(args[0].expr).kind {
+                        ExprKind::Int(k) => Some((*k).min(nested as u64) as u32),
+                        ExprKind::Ident(i) if self.name(*i) == "Infinity" => Some(nested),
+                        _ => None,
+                    };
+                    if let Some(d) = depth
+                        && let (Some(flat), Some(slice)) = (self.interner.lookup("flat"), self.interner.lookup("slice"))
+                    {
+                        self.rewrites.flat_chains.push((self.cur, e, d, flat, slice));
+                        return ERROR;
+                    }
+                    self.report(Diagnostic::new("U0011", span, "`flat` takes a literal depth (a number, or `Infinity`)"));
+                    return ERROR;
+                }
                 // `p.then(f)`, `p.catch(g)`, `p.finally(h)`: the prelude's `__then(p, f)` and so on
                 if let Ty::Promise(v, _) = *self.types.get(base)
                     && matches!(mtext.as_str(), "then" | "catch" | "finally")
@@ -4999,6 +5080,14 @@ impl<'a> Checker<'a> {
                 // (`chunk([], 3)` for a `T[]`: an array of nothing, `T` `never`, as TypeScript's)
                 let hint = match hint {
                     None if matches!(&self.ast().expr(a.expr).kind, ExprKind::Array(xs) if xs.is_empty()) && matches!(self.types.get(pty), Ty::Array(_)) => Some(self.types.array(NEVER)),
+                    // (`fromEntries([["a", 1]])` for a `[string, V][]`: its shape, so the pairs are
+                    // tuples, `V` left to what they hold)
+                    None if matches!(&self.ast().expr(a.expr).kind, ExprKind::Array(xs) if !xs.is_empty() && xs.iter().all(|&x| matches!(self.ast().expr(x).kind, ExprKind::Array(_))))
+                        && matches!(self.types.get(pty), Ty::Array(el) if self.tuple_of(*el).is_some()) =>
+                    {
+                        let holes: HashMap<u32, TyId> = unhinted.iter().map(|&u| (u, ERROR)).collect();
+                        Some(self.types.subst(pty, &holes))
+                    }
                     h => h,
                 };
                 self.infer_free = still_free;
