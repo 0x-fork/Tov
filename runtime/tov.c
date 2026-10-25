@@ -4989,6 +4989,15 @@ void tv_arr_set_length(tv_arr *a, const tv_type *t, tv_int n, const char *loc) {
     if (n == len) return;
     if (n < 0 || n > len) {
         if (n < 0) tv_trap("invalid array length", loc);
+        /* (plain data, numbers and booleans: the new elements are zeros, as `new Array<number>(n)`
+         * makes them) */
+        if (!t->retain && !t->release) {
+            if (n > INT32_MAX) tv_trap("Invalid array length", loc);
+            void *w = tv_arr_reserve_tail(a, t, n - len);
+            memset(w, 0, (size_t)(n - len) * t->size);
+            a->p->len = n;
+            return;
+        }
         tv_trap("setting an array's length past its end (JavaScript would leave holes)", loc);
     }
     tv_arr_make_unique(a, t, 0);
@@ -5344,6 +5353,25 @@ void tv_arr_sort(tv_arr *a, const tv_type *t, double (*cmp)(void *ctx, const voi
         if (last) { for (int64_t i = n - 1; i >= 0; i--) if (EQ(p_[i], x_)) return i; } \
         else { for (int64_t i = 0; i < n; i++) if (EQ(p_[i], x_)) return i; } \
         return -1; } while (0)
+/* (numbers: eight at a time, the block's compares or-ed (vector compares), then the one found) */
+#define TV_FIND_NUM(T) do { \
+        T x_; memcpy(&x_, elem, sizeof x_); const T *p_ = (const T *)(const void *)d; \
+        if (last) { \
+            int64_t i = n; \
+            for (; i >= 8; i -= 8) { \
+                const T *b_ = p_ + i - 8; \
+                if ((b_[0] == x_) | (b_[1] == x_) | (b_[2] == x_) | (b_[3] == x_) | (b_[4] == x_) | (b_[5] == x_) | (b_[6] == x_) | (b_[7] == x_)) break; \
+            } \
+            for (int64_t j = i - 1; j >= 0; j--) if (p_[j] == x_) return j; \
+        } else { \
+            int64_t i = 0; \
+            for (; i + 8 <= n; i += 8) { \
+                const T *b_ = p_ + i; \
+                if ((b_[0] == x_) | (b_[1] == x_) | (b_[2] == x_) | (b_[3] == x_) | (b_[4] == x_) | (b_[5] == x_) | (b_[6] == x_) | (b_[7] == x_)) break; \
+            } \
+            for (; i < n; i++) if (p_[i] == x_) return i; \
+        } \
+        return -1; } while (0)
 #define TV_EQ_PLAIN(a, b) ((a) == (b))
 #define TV_EQ_STR(a, b) ((a).p == (b).p || ((a).p->len == (b).p->len && memcmp((a).p->data, (b).p->data, (size_t)(b).p->len) == 0))
 static tv_int tv_arr_find(tv_arr a, const tv_type *t, const void *elem, bool last) {
@@ -5351,16 +5379,16 @@ static tv_int tv_arr_find(tv_arr a, const tv_type *t, const void *elem, bool las
     size_t es = t->size;
     const unsigned char *d = n ? tv_arrbuf_data(a.p) : NULL;
     if (!n) return -1;
-    if (t == &tv_type_int || t == &tv_type_u64) TV_FIND(int64_t, TV_EQ_PLAIN);
-    if (t == &tv_type_f64) TV_FIND(double, TV_EQ_PLAIN);
+    if (t == &tv_type_int || t == &tv_type_u64) TV_FIND_NUM(int64_t);
+    if (t == &tv_type_f64) TV_FIND_NUM(double);
     if (t == &tv_type_str) TV_FIND(tv_str, TV_EQ_STR);
-    if (t == &tv_type_i32) TV_FIND(int32_t, TV_EQ_PLAIN);
-    if (t == &tv_type_u32) TV_FIND(uint32_t, TV_EQ_PLAIN);
-    if (t == &tv_type_f32) TV_FIND(float, TV_EQ_PLAIN);
-    if (t == &tv_type_i16) TV_FIND(int16_t, TV_EQ_PLAIN);
-    if (t == &tv_type_u16) TV_FIND(uint16_t, TV_EQ_PLAIN);
-    if (t == &tv_type_i8) TV_FIND(int8_t, TV_EQ_PLAIN);
-    if (t == &tv_type_u8 || t == &tv_type_bool) TV_FIND(uint8_t, TV_EQ_PLAIN);
+    if (t == &tv_type_i32) TV_FIND_NUM(int32_t);
+    if (t == &tv_type_u32) TV_FIND_NUM(uint32_t);
+    if (t == &tv_type_f32) TV_FIND_NUM(float);
+    if (t == &tv_type_i16) TV_FIND_NUM(int16_t);
+    if (t == &tv_type_u16) TV_FIND_NUM(uint16_t);
+    if (t == &tv_type_i8) TV_FIND_NUM(int8_t);
+    if (t == &tv_type_u8 || t == &tv_type_bool) TV_FIND_NUM(uint8_t);
     if (last) {
         for (int64_t i = n - 1; i >= 0; i--)
             if (t->eq(d + (size_t)i * es, elem)) return i;
@@ -6570,9 +6598,23 @@ const tv_type tv_type_null = {1, NULL, NULL, tv_undef_eq, tv_null_hash, tv_null_
 
 /* ================================================================== unknown */
 
+/* (a box is small and its size known from its type: from the small-object free lists, as an
+ * array's, without malloc) */
+static inline size_t tv_dynbox_size(const tv_type *t) { return (sizeof(tv_dynbox) + t->size + 15) & ~(size_t)15; }
+
 tv_dyn tv_dyn_box(const tv_type *t, const void *v) {
     if (t->size == 0 || t == &tv_type_null) return (tv_dyn){t, NULL};
-    tv_dynbox *b = (tv_dynbox *)tv_alloc(sizeof(tv_dynbox) + t->size);
+    size_t s = tv_dynbox_size(t);
+    tv_dynbox *b;
+#ifndef TV_ARRBUF_PLAIN
+    if (s <= TV_ARRBUF_SMALL) {
+        size_t c = s >> 3;
+        void **f = (void **)tv_small_bins[c];
+        if (__builtin_expect(f != NULL, 1)) { tv_small_bins[c] = *f; b = (tv_dynbox *)(void *)f; }
+        else b = (tv_dynbox *)tv_small_refill(c);
+    } else
+#endif
+        b = (tv_dynbox *)tv_alloc(s);
     b->rc = 1;
     memcpy(b->data, v, t->size);
     return (tv_dyn){t, b};
@@ -6581,6 +6623,15 @@ tv_dyn tv_dyn_box(const tv_type *t, const void *v) {
 void tv_dyn_release(tv_dyn d) {
     if (!d.b || --d.b->rc > 0) return;
     if (d.t->release) d.t->release(d.b->data);
+#ifndef TV_ARRBUF_PLAIN
+    size_t s = tv_dynbox_size(d.t);
+    if (s <= TV_ARRBUF_SMALL) {
+        size_t c = s >> 3;
+        *(void **)(void *)d.b = tv_small_bins[c];
+        tv_small_bins[c] = d.b;
+        return;
+    }
+#endif
     free(d.b);
 }
 
@@ -7412,7 +7463,16 @@ tv_str tv_native_dateZoneName(double t) {
 #ifndef __APPLE__
 static struct timespec tv_start_time;
 #endif
-#ifdef __APPLE__
+#if defined(__APPLE__) && defined(__aarch64__)
+uint64_t tv_perf_start;
+double tv_perf_ms_per_tick;
+void tv_perf_init(uint64_t t) {
+    uint64_t f;
+    __asm__ __volatile__("mrs %0, cntfrq_el0" : "=r"(f));
+    tv_perf_start = t;
+    tv_perf_ms_per_tick = 1e3 / (double)(f ? f : 24000000);
+}
+#elif defined(__APPLE__)
 #include <mach/mach_time.h>
 /* (mach_absolute_time reads the commpage, ~10 ns; CLOCK_MONOTONIC adds the boot time to it) */
 double tv_performance_now(void) {

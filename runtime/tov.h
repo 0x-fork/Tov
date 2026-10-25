@@ -1157,7 +1157,21 @@ tv_int tv_process_pid(void);
 _Noreturn void tv_process_exit(tv_int code);
 double tv_date_now(void);                              /* ms since the epoch */
 void tv_tz_changed(void);                               /* TZ was set: Date's offsets asked again */
+#if defined(__APPLE__) && defined(__aarch64__)
+/* ms since the program started: the system counter read here (what mach_absolute_time reads,
+ * without the call), scaled by its frequency */
+extern uint64_t tv_perf_start;
+extern double tv_perf_ms_per_tick;
+void tv_perf_init(uint64_t t);
+static inline double tv_performance_now(void) {
+    uint64_t t;
+    __asm__ __volatile__("mrs %0, cntvct_el0" : "=r"(t));
+    if (__builtin_expect(tv_perf_ms_per_tick == 0, 0)) tv_perf_init(t);
+    return (double)(t - tv_perf_start) * tv_perf_ms_per_tick;
+}
+#else
 double tv_performance_now(void);                       /* ms since the program started */
+#endif
 void tv_write_stdout(tv_str s);
 void tv_write_stderr(tv_str s);
 
