@@ -110,6 +110,9 @@ pub(crate) struct Body {
     /// (index local, array locals) of enclosing versioned loops' unchecked copies (see
     /// `version_plan`): `xs[i + k]` there is in bounds, and `i + k` can't overflow.
     pub versioned: Vec<(Vec<u32>, Vec<(u32, String, String)>)>,
+    /// Rows of arrays of arrays a counted loop's unchecked copy keeps in locals (see `row_plan`):
+    /// (array local, row index as (local, offset) or (none, literal), loop local, elements, length).
+    pub rows: Vec<(u32, (Option<u32>, i64), u32, String, String)>,
     /// Locals whose `++`/`--` can't overflow in the code being emitted (a two-pointer loop's
     /// unchecked copy: see `two_pointer_plan`).
     pub nowrap_locals: Vec<u32>,
@@ -141,6 +144,15 @@ pub(crate) struct Body {
 
 /// A `for` loop emitted twice (see `Gen::version_plan`): its index local, whether its test is
 /// `i <= n`, `n`, and each array it indexes at `i + k` with the least and greatest `k`.
+/// A counted loop's rows (see `row_plan`): the loop local, `<=`, its bound, and each row
+/// (array local, row index, written, smallest and largest offset of the loop local it's indexed at).
+pub(crate) struct RowPlan {
+    jk: u32,
+    le: bool,
+    hi: ExprId,
+    rows: Vec<(u32, (Option<u32>, i64), bool, i64, i64)>,
+}
+
 pub(crate) struct VersionPlan {
     ik: u32,
     le: bool,
@@ -313,6 +325,7 @@ impl<'c, 'a> Gen<'c, 'a> {
             nowrap_step: None,
             divs: FxMap::default(),
             versioned: Vec::new(),
+            rows: Vec::new(),
             nowrap_locals: Vec::new(),
             root: None,
             arrow_root: None,
@@ -524,6 +537,7 @@ impl<'c, 'a> Gen<'c, 'a> {
             nowrap_step: None,
             divs: FxMap::default(),
             versioned: Vec::new(),
+            rows: Vec::new(),
             nowrap_locals: Vec::new(),
             root: None,
             arrow_root: None,
@@ -1967,6 +1981,246 @@ impl<'c, 'a> Gen<'c, 'a> {
         Some((plan, step))
     }
 
+    /// `for (let j = a; j < n; j++)` over rows of arrays of plain values, `xs[i][j + k]` with `xs`
+    /// and `i` the same the whole loop (`i` a local it doesn't change, or a literal), its body
+    /// only arithmetic, comparisons, `Math` calls and such reads and writes (so nothing in it can
+    /// resize or replace an array): with every row there and long enough, a copy of the loop
+    /// reaches each row's elements from a local, unchecked at `j + k`.
+    fn row_plan(&mut self, init: Option<StmtId>, cond: Option<ExprId>, step: Option<ExprId>, body: StmtId) -> Option<RowPlan> {
+        let boxed = self.b().boxed.clone();
+        let m = self.cur_m();
+        let ast = self.ast(m);
+        let facts = self.facts(m);
+        let local = |e: ExprId| match (&ast.expr(e).kind, facts.idents.get(&e)) {
+            (ExprKind::Ident(_), Some(IdentFact::Local(k))) => Some(*k),
+            _ => None,
+        };
+        let init = init?;
+        let StmtKind::Let { name_span, .. } = &ast.stmt(init).kind else { return None };
+        if facts.bindings.get(&init).copied() != Some(INT) {
+            return None;
+        }
+        let jk = name_span.start;
+        if boxed.contains(&jk) {
+            return None;
+        }
+        let (le, hi) = match &ast.expr(cond?).kind {
+            ExprKind::Binary(BinOp::Lt, l, r) if local(*l) == Some(jk) => (false, *r),
+            ExprKind::Binary(BinOp::Le, l, r) if local(*l) == Some(jk) => (true, *r),
+            _ => return None,
+        };
+        if facts.expr_ty.get(hi as usize).copied() != Some(INT) {
+            return None;
+        }
+        match &ast.expr(step?).kind {
+            ExprKind::Update { target, inc: true, .. } if local(*target) == Some(jk) => {}
+            _ => return None,
+        }
+        // (only statements that can't leave the loop some other way or hold another loop)
+        fn plain(ast: &ast::Ast, s: StmtId) -> bool {
+            match &ast.stmt(s).kind {
+                StmtKind::Expr(_) | StmtKind::Let { .. } | StmtKind::Break(None) | StmtKind::Continue(None) => true,
+                StmtKind::If(_, t, e) => plain(ast, *t) && e.is_none_or(|e| plain(ast, e)),
+                StmtKind::Block(xs) => xs.iter().all(|&x| plain(ast, x)),
+                _ => false,
+            }
+        }
+        if !plain(ast, body) {
+            return None;
+        }
+        let mut all = Vec::new();
+        collect_exprs_stmt(ast, body, &mut all);
+        if all.len() > 400 {
+            return None;
+        }
+        let mut sides = Vec::new();
+        collect_exprs_expr(ast, hi, &mut sides);
+        // (`hi` the same the whole loop: literals and locals the body doesn't change)
+        let assigned = |k: u32| {
+            all.iter().any(|&e| match &ast.expr(e).kind {
+                ExprKind::Assign(_, t, _) | ExprKind::Update { target: t, .. } => local(*t) == Some(k),
+                _ => false,
+            })
+        };
+        for &e in &sides {
+            match &ast.expr(e).kind {
+                ExprKind::Int(_) | ExprKind::Paren(_) | ExprKind::Binary(BinOp::Add | BinOp::Sub, ..) => {}
+                ExprKind::Ident(_) if local(e).is_some_and(|k| !boxed.contains(&k) && !assigned(k)) => {}
+                _ => return None,
+            }
+        }
+        if assigned(jk) {
+            return None;
+        }
+        // what the body is made of
+        for &e in &all {
+            let ok = match &ast.expr(e).kind {
+                ExprKind::Int(_) | ExprKind::Float(_) | ExprKind::Bool(_) | ExprKind::Str(_) | ExprKind::Paren(_) | ExprKind::Binary(..) | ExprKind::Unary(..) | ExprKind::Cond(..) | ExprKind::Index { optional: false, .. } | ExprKind::NonNull(_) => true,
+                ExprKind::Ident(n) => local(e).is_some_and(|k| !boxed.contains(&k)) || self.sym(*n) == "Math" && !matches!(facts.idents.get(&e), Some(IdentFact::Local(_))),
+                ExprKind::Member { name, optional: false, .. } => matches!(self.sym(*name), "length" | "min" | "max" | "abs" | "floor" | "ceil" | "round" | "sqrt" | "trunc" | "sign" | "hypot" | "imul" | "pow"),
+                ExprKind::Call { callee, args, .. } => {
+                    args.iter().all(|a| a.by_ref.is_none() && !matches!(ast.expr(a.expr).kind, ExprKind::Spread(_)))
+                        && matches!(&ast.expr(*callee).kind, ExprKind::Member { obj, .. } if matches!(ast.expr(*obj).kind, ExprKind::Ident(n) if self.sym(n) == "Math"))
+                }
+                ExprKind::Assign(_, t, _) | ExprKind::Update { target: t, .. } => {
+                    let mut cur = *t;
+                    while let ExprKind::Paren(x) | ExprKind::NonNull(x) = &ast.expr(cur).kind {
+                        cur = *x;
+                    }
+                    match &ast.expr(cur).kind {
+                        ExprKind::Ident(_) => local(cur).is_some_and(|k| !boxed.contains(&k)) && self.c.types.is_numeric(facts.expr_ty[e as usize]),
+                        ExprKind::Index { .. } => self.c.types.is_numeric(facts.expr_ty[e as usize]),
+                        _ => false,
+                    }
+                }
+                _ => false,
+            };
+            if !ok {
+                return None;
+            }
+        }
+        // the rows: `xs[i]` as the array of `xs[i][...]` (or of `xs[i].length`)
+        let mut parent: FxMap<ExprId, ExprId> = FxMap::default();
+        for &e in &all {
+            match &ast.expr(e).kind {
+                ExprKind::Index { obj, index, .. } => {
+                    parent.insert(*obj, e);
+                    parent.insert(*index, e);
+                }
+                ExprKind::Member { obj, .. } => {
+                    parent.insert(*obj, e);
+                }
+                _ => {}
+            }
+        }
+        let mut targets: FxSet<ExprId> = FxSet::default();
+        for &e in &all {
+            if let ExprKind::Assign(_, t, _) | ExprKind::Update { target: t, .. } = &ast.expr(e).kind {
+                let mut cur = *t;
+                while let ExprKind::Paren(x) | ExprKind::NonNull(x) = &ast.expr(cur).kind {
+                    cur = *x;
+                }
+                targets.insert(cur);
+            }
+        }
+        let mut rows: Vec<(u32, (Option<u32>, i64), bool, i64, i64)> = Vec::new();
+        let mut row_bases: FxSet<ExprId> = FxSet::default();
+        for &e in &all {
+            let ExprKind::Index { obj, index, .. } = &ast.expr(e).kind else { continue };
+            let Some(xk) = local(*obj) else { continue };
+            let Ty::Array(row_t) = self.tget(facts.expr_ty[*obj as usize]) else { return None };
+            let Ty::Array(et) = self.tget(row_t) else { continue };
+            if !self.c.types.is_numeric(et) || boxed.contains(&xk) || assigned(xk) {
+                return None;
+            }
+            // (`xs[i]` used only as an array to index or measure)
+            let used = match parent.get(&e).map(|&p| (p, &ast.expr(p).kind)) {
+                Some((_, ExprKind::Index { obj: o, .. })) if *o == e => true,
+                Some((_, ExprKind::Member { obj: o, name, .. })) if *o == e && self.sym(*name) == "length" => true,
+                _ => false,
+            };
+            if !used {
+                return None;
+            }
+            let at = match ast.expr(*index).kind {
+                ExprKind::Int(v) if v < 1 << 30 => (None, v as i64),
+                _ => {
+                    let mut found = None;
+                    for &x in &all {
+                        if let Some(k) = local(x)
+                            && k != jk
+                            && !assigned(k)
+                            && facts.expr_ty.get(x as usize) == Some(&INT)
+                            && let Some(off) = self.index_offset(*index, k)
+                        {
+                            found = Some((Some(k), off));
+                            break;
+                        }
+                    }
+                    found?
+                }
+            };
+            if at.0 == Some(jk) {
+                return None;
+            }
+            row_bases.insert(*obj);
+            // (the offsets of `j` it's indexed at)
+            let (written, off) = match parent.get(&e).map(|&p| (p, &ast.expr(p).kind)) {
+                Some((p, ExprKind::Index { index: ji, .. })) => (targets.contains(&p), self.index_offset(*ji, jk)),
+                _ => (false, None),
+            };
+            // (a write elsewhere than `j + k` could append: no copy)
+            if written && off.is_none() {
+                return None;
+            }
+            match rows.iter_mut().find(|r| r.0 == xk && r.1 == at) {
+                Some(r) => {
+                    r.2 |= written;
+                    if let Some(k) = off {
+                        r.3 = r.3.min(k);
+                        r.4 = r.4.max(k);
+                    }
+                }
+                None => rows.push((xk, at, written, off.unwrap_or(i64::MAX), off.unwrap_or(i64::MIN))),
+            }
+        }
+        // (an array of rows used for nothing else)
+        for &e in &all {
+            if let Some(k) = local(e)
+                && rows.iter().any(|r| r.0 == k)
+                && !row_bases.contains(&e)
+            {
+                return None;
+            }
+        }
+        if rows.is_empty() || !rows.iter().any(|r| r.3 <= r.4) {
+            return None;
+        }
+        Some(RowPlan { jk, le, hi, rows })
+    }
+
+    /// `xs[i][...]` on a row a row plan's copy keeps in a local.
+    fn row_target(&self, target: ExprId) -> bool {
+        let Some(b) = self.bodies.last() else { return false };
+        if b.rows.is_empty() {
+            return false;
+        }
+        let m = self.cur_m();
+        let ExprKind::Index { obj, .. } = self.ast(m).expr(target).kind else { return false };
+        let ExprKind::Index { obj: xs, .. } = self.ast(m).expr(obj).kind else { return false };
+        matches!(self.ident_fact(m, xs), Some(IdentFact::Local(xk)) if b.rows.iter().any(|r| r.0 == xk))
+    }
+
+    /// `xs[i][index]` in a row plan's copy: the element's C lvalue, unchecked at `j + k`.
+    fn row_index(&mut self, obj: ExprId, index: ExprId, span: Span) -> Option<String> {
+        if self.b().rows.is_empty() {
+            return None;
+        }
+        let m = self.cur_m();
+        let ExprKind::Index { obj: xs, index: at, optional: false } = self.ast(m).expr(obj).kind else { return None };
+        let Some(IdentFact::Local(xk)) = self.ident_fact(m, xs) else { return None };
+        let rows = self.b().rows.clone();
+        let lit = match self.ast(m).expr(at).kind {
+            ExprKind::Int(v) => Some(v as i64),
+            _ => None,
+        };
+        let (_, _, jk, d, n) = rows.iter().find(|r| {
+            r.0 == xk
+                && match r.1 {
+                    (None, v) => lit == Some(v),
+                    (Some(ik), off) => self.index_offset(at, ik) == Some(off),
+                }
+        })?;
+        if let Some(k) = self.index_offset(index, *jk) {
+            let j = self.b().locals.get(jk)?.access.clone();
+            return Some(format!("({d}[{j} + {k}])"));
+        }
+        let i = self.expr(index);
+        let i = self.int_code(i);
+        let loc = self.loc(span);
+        Some(format!("({d}[TV_IDX({i}, {n}, {loc})])"))
+    }
+
     /// The rest of `version_plan`: loop variable `ik` up to `hi` (`le`: inclusive), its step
     /// (expressions `skip`) the only change to it in `body`.
     fn version_core(&mut self, ik: u32, le: bool, hi: ExprId, cond: ExprId, body: StmtId, skip: &FxSet<ExprId>) -> Option<VersionPlan> {
@@ -3309,6 +3563,57 @@ impl<'c, 'a> Gen<'c, 'a> {
                     self.b().versioned.push((vec![plan.ik], ptrs));
                     self.for_loop(*cond, *step, *body, &fast_cont, bounds, Some(plan.ik), None);
                     self.b().versioned.pop();
+                    self.close("} else {");
+                    self.b().indent += 1;
+                    self.for_loop(*cond, *step, *body, &cont, bounds, nowrap, None);
+                    self.close("}");
+                } else if iteration_binding.is_none()
+                    && let Some(rp) = self.row_plan(*init, *cond, *step, *body)
+                {
+                    // Every row there and long enough for every `j` the loop can reach: a copy
+                    // reaching their elements from locals, and the checked loop otherwise.
+                    let j = self.b().locals[&rp.jk].access.clone();
+                    self.push_temps();
+                    let n = self.expr(rp.hi);
+                    let n = self.int_code(n);
+                    self.pop_temps();
+                    let nv = self.fresh("rn");
+                    self.line(format!("tv_int {nv} = {n};"));
+                    let mut parts = Vec::new();
+                    let mut slots = Vec::new();
+                    for (xk, at, written, lo, hi) in &rp.rows {
+                        let x = self.b().locals[xk].access.clone();
+                        let xt = self.b().locals[xk].ty;
+                        let Ty::Array(row_t) = self.tget(xt) else { continue };
+                        let Ty::Array(et) = self.tget(row_t) else { continue };
+                        let i = match at {
+                            (None, v) => format!("{v}"),
+                            (Some(ik), off) => format!("({} + {off})", self.b().locals[ik].access),
+                        };
+                        let rp_ = self.fresh("rp");
+                        self.line(format!("tv_arr *{rp_} = (uint64_t){i} < (uint64_t)tv_arr_len({x}) ? &((tv_arr *)tv_arr_data({x}))[{i}] : NULL;"));
+                        if *written {
+                            let d = self.desc(et);
+                            self.line(format!("if ({rp_}) tvg_make_unique({rp_}, {d});"));
+                        }
+                        parts.push(format!("{rp_}"));
+                        if lo <= hi {
+                            parts.push(format!("{j} + {lo} >= 0 && {nv} + {} <= tv_arr_len(*{rp_})", hi + rp.le as i64));
+                        }
+                        slots.push((*xk, *at, rp_, et));
+                    }
+                    self.open(&format!("if ({}) {{", parts.join(" && ")));
+                    let mut rows = Vec::new();
+                    for (xk, at, rp_, et) in slots {
+                        let ect = self.ctype(et);
+                        let (d, n) = (self.fresh("rd"), self.fresh("rl"));
+                        self.line(format!("{ect} *{d} = ({ect} *)tv_arr_data(*{rp_}); tv_int {n} = tv_arr_len(*{rp_});"));
+                        rows.push((xk, at, rp.jk, d, n));
+                    }
+                    let saved = std::mem::replace(&mut self.b().rows, rows);
+                    let fast_cont = self.fresh("cont");
+                    self.for_loop(*cond, *step, *body, &fast_cont, bounds, nowrap, None);
+                    self.b().rows = saved;
                     self.close("} else {");
                     self.b().indent += 1;
                     self.for_loop(*cond, *step, *body, &cont, bounds, nowrap, None);
@@ -6886,6 +7191,37 @@ impl<'c, 'a> Gen<'c, 'a> {
             };
             let is_str = |c: &Self, e: ExprId| c.c.types.is_string(c.facts(m).expr_ty.get(e as usize).copied().unwrap_or(ERROR));
             let (rl, rr) = (str_read(self, le), str_read(self, re));
+            // (a string's unit against another's, or against a one-unit literal: the UTF-16 code
+            // units compared, no strings made)
+            let unit_lit = |c: &Self, e: ExprId| -> Option<u32> {
+                let t = c.facts(m).expr_ty.get(e as usize).copied().unwrap_or(ERROR);
+                let Ty::StrLit(sym) = *c.c.types.get(t) else { return None };
+                let mut it = c.c.interner.get(sym).chars();
+                let ch = it.next()?;
+                (it.next().is_none() && (ch as u32) < 0x10000).then_some(ch as u32)
+            };
+            let unit_side = |c: &Self, read: Option<(ExprId, ExprId, bool)>, e: ExprId| matches!(read, Some((_, _, false))) || unit_lit(c, e).is_some();
+            if (matches!(rl, Some((_, _, false))) || matches!(rr, Some((_, _, false)))) && unit_side(self, rl, le) && unit_side(self, rr, re) {
+                let side = |c: &mut Self, read: Option<(ExprId, ExprId, bool)>, e: ExprId| -> (String, String) {
+                    match read {
+                        Some((obj, index, _)) => {
+                            let sv = c.expr(obj);
+                            let sv = c.coerce(sv, STR);
+                            let sv = if c.changes_in(index) { c.snapshot(sv) } else { sv };
+                            let i = c.expr(index);
+                            let i = c.int_code(i);
+                            let (iv, ok, uv) = (c.fresh("ix"), c.fresh("in"), c.fresh("u"));
+                            c.line(format!("tv_int {iv} = {i}; tv_int {uv} = tv_str_char_code_at({}, {iv}); bool {ok} = {uv} >= 0;", sv.code));
+                            (ok, uv)
+                        }
+                        None => ("true".to_string(), format!("{}", unit_lit(c, e).unwrap())),
+                    }
+                };
+                let (okl, lu) = side(self, rl, le);
+                let (okr, ru) = side(self, rr, re);
+                let eq = format!("((({okl}) && ({okr}) && {lu} == {ru}) || (!({okl}) && !({okr})))");
+                return Some(Val::plain(if op == BinOp::Eq { eq } else { format!("(!{eq})") }, BOOL));
+            }
             if (rl.is_some() || rr.is_some()) && is_str(self, le) && is_str(self, re) {
                 let side = |c: &mut Self, read: Option<(ExprId, ExprId, bool)>, e: ExprId| -> (String, Val) {
                     match read {
@@ -6987,6 +7323,9 @@ impl<'c, 'a> Gen<'c, 'a> {
         if !self.b().versioned.is_empty()
             && let Some(lv) = self.versioned_index(obj, index, span)
         {
+            return Some(self.coerce(Val::plain(lv, et), ty));
+        }
+        if let Some(lv) = self.row_index(obj, index, span) {
             return Some(self.coerce(Val::plain(lv, et), ty));
         }
         if let Some(lv) = self.cached_index(obj, index, span) {
@@ -7139,6 +7478,9 @@ impl<'c, 'a> Gen<'c, 'a> {
                     && !self.b().versioned.is_empty()
                     && let Some(lv) = self.versioned_index(*obj, *index, span)
                 {
+                    return Place { lv, ty: et, weak: false };
+                }
+                if let Some(lv) = self.row_index(*obj, *index, span) {
                     return Place { lv, ty: et, weak: false };
                 }
                 if let Some(lv) = self.cached_index(*obj, *index, span) {
@@ -7595,7 +7937,7 @@ impl<'c, 'a> Gen<'c, 'a> {
                 v
             }
             // `xs[xs.length] = v`: appends, as in JavaScript (an index past that traps)
-            AssignOp::Assign if (self.b().versioned.is_empty() || self.cached_array(target)) && matches!(self.ast(m).expr(target).kind, ExprKind::Index { obj, optional: false, .. } if self.is_array(obj)) => {
+            AssignOp::Assign if (self.b().versioned.is_empty() || self.cached_array(target)) && !self.row_target(target) && matches!(self.ast(m).expr(target).kind, ExprKind::Index { obj, optional: false, .. } if self.is_array(obj)) => {
                 let ExprKind::Index { obj, index, .. } = self.ast(m).expr(target).kind else { unreachable!() };
                 let v = self.expr(value);
                 let ap = self.place(obj);
@@ -8155,6 +8497,7 @@ impl<'c, 'a> Gen<'c, 'a> {
             nowrap_step: None,
             divs: FxMap::default(),
             versioned: Vec::new(),
+            rows: Vec::new(),
             nowrap_locals: Vec::new(),
             root: None,
             arrow_root: None,
