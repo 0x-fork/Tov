@@ -1253,6 +1253,8 @@ impl<'c, 'a> Gen<'c, 'a> {
                         let pt = self.c.types.subst(p.ty, &ci.subst);
                         args.push(self.default_value(pt));
                     }
+                    // (or fewer: the rest aren't passed)
+                    args.truncate(om.params.len());
                 }
                 let call = self.method_call_code(&format!("(({} *)self_)", ci.name), t, method, true, args);
                 let _ = writeln!(cases, "    case {}: {}{call};{}", ci.cid, if ret == VOID { "" } else { "return " }, if ret == VOID { " return;" } else { "" });
