@@ -147,6 +147,10 @@ export class RegExpExecArray {
   slice(start?: int, end?: int): (string | undefined)[] {
     return this.items.slice(start ?? 0, end ?? this.items.length)
   }
+  /** `[...m]`, `for (const g of m)`: the groups in order */
+  *[Symbol.iterator](): Generator<string | undefined> {
+    for (const x of this.items) yield x
+  }
 }
 
 /** (a regular expression literal: JavaScript checks its pattern before the program runs, so
