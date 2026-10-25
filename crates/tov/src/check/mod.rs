@@ -3125,7 +3125,7 @@ impl<'a> Checker<'a> {
             "Generator" | "IterableIterator" | "Iterator" | "Iterable" if !targs.is_empty() => Some(self.types.intern(Ty::Gen(targs[0]))),
             // (without its `T`: of anything, as TypeScript's `AsyncGenerator` is of `any`)
             "AsyncGenerator" | "AsyncIterableIterator" | "AsyncIterator" | "AsyncIterable" => Some(self.types.intern(Ty::AsyncGen(targs.first().copied().unwrap_or(UNKNOWN)))),
-            "any" if self.ts_module() => Some(ANY),
+            "any" if self.ts_module() || self.modules[self.cur as usize].builtin => Some(ANY),
             "any" => {
                 self.report(
                     Diagnostic::new("X0001", name_span, "`any` is not supported")

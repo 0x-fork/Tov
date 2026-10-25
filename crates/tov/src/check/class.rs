@@ -1081,6 +1081,26 @@ impl<'a> Checker<'a> {
         exprs.iter().any(|&e| any_expr(ast, e, &|k| matches!(k, ExprKind::Call { callee, .. } if matches!(ast.expr(*callee).kind, ExprKind::Super))))
     }
 
+    /// A field of type `t` that's read before it's assigned reads as its type's default, no
+    /// worse than JavaScript's `undefined`: numbers, strings, booleans, collections, optional
+    /// values, and records of these.
+    fn default_safe(&mut self, t: TyId, depth: u32) -> bool {
+        if depth > 6 {
+            return false;
+        }
+        if self.types.has_undefined(t) || self.types.is_numeric(t) || self.types.is_string(t) || self.types.is_bool(t) || t == ANY || t == UNKNOWN {
+            return true;
+        }
+        match *self.types.get(t) {
+            Ty::Array(_) | Ty::Map(..) | Ty::Set(_) => true,
+            Ty::Record(fs) => {
+                let fs = self.types.fields(fs).to_vec();
+                fs.iter().all(|f| f.optional || self.default_safe(f.ty, depth + 1))
+            }
+            _ => false,
+        }
+    }
+
     /// Reports uses of `this` other than reading already-assigned fields while fields are pending.
     fn check_this_uses(&mut self, c: u32, e: ExprId, assigned: &[Sym], pending: &[Sym]) {
         if pending.is_empty() {
@@ -1099,12 +1119,7 @@ impl<'a> Checker<'a> {
         if bad.is_some() && matches!(self.modules[self.cur as usize].path.extension().and_then(|e| e.to_str()), Some("ts" | "tsx" | "mts" | "cts")) {
             let safe = {
                 let fields = self.classes[c as usize].fields.clone();
-                pending.iter().all(|n| {
-                    fields.iter().find(|f| f.name == *n).is_some_and(|f| {
-                        let t = f.ty;
-                        self.types.has_undefined(t) || self.types.is_numeric(t) || self.types.is_string(t) || t == BOOL || matches!(self.types.get(t), Ty::Array(_) | Ty::Map(..) | Ty::Set(_))
-                    })
-                })
+                pending.iter().all(|n| fields.iter().find(|f| f.name == *n).is_some_and(|f| self.default_safe(f.ty, 0)))
             };
             if safe {
                 return;

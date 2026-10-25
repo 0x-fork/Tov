@@ -5481,6 +5481,7 @@ impl<'c, 'a> Gen<'c, 'a> {
                     let tct = g.ctype(to);
                     let w = g.fresh("rw");
                     g.line(format!("{tct} {w};"));
+                    let u = if g.c.types.has_undefined(to) || to == ANY || to == UNKNOWN { g.coerce(Val::plain("0", UNDEFINED), to).code } else { g.default_value(to) };
                     g.open(&format!("if ({k} < tv_arr_len({arr})) {{"));
                     g.push_temps();
                     let el = g.coerce(Val::plain(format!("(({ect} *)tv_arr_data({arr}))[{k}]"), e), to);
@@ -5488,7 +5489,6 @@ impl<'c, 'a> Gen<'c, 'a> {
                     let c = g.consume(el);
                     g.line(format!("{w} = {c};"));
                     g.pop_temps();
-                    let u = if g.c.types.has_undefined(to) { g.coerce(Val::plain("0", UNDEFINED), to).code } else { g.default_value(to) };
                     g.close(&format!("}} else {w} = {u};"));
                     let owned = g.is_rc(to);
                     if owned {

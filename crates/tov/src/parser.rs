@@ -1431,8 +1431,9 @@ impl<'a> Parser<'a> {
                     init = self.defaulted(init, d, pspan);
                     optional = true;
                 }
+                // (its names are variables, as parameters are: `href = clean(href)`)
                 let mut stmts = Vec::new();
-                self.destructure(&pat, false, None, init, &mut stmts);
+                self.destructure(&pat, true, None, init, &mut stmts);
                 self.prologue.extend(stmts);
                 out.push(Param { name: tmp, span: pspan, ty, inout: false, optional, prop: None, rest });
                 if !self.eat(Tok::Comma) {

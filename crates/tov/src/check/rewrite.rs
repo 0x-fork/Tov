@@ -26,6 +26,9 @@ pub struct Rewrites {
     pub(crate) rest_lits: Vec<(u32, ExprId, crate::intern::Sym, Vec<crate::intern::Sym>, crate::intern::Sym)>,
     /// `g[k]` of a record with an index signature: (module, the index, `$rest`), as `g.$rest?.[k]`.
     pub(crate) rest_indexes: Vec<(u32, ExprId, crate::intern::Sym)>,
+    /// `xs.at(k)` written through (`xs.at(-1)!.src = s`): (module, the call, `xs`, `k`, `length`),
+    /// as `xs[k]` / `xs[xs.length - k]`.
+    pub(crate) at_places: Vec<(u32, ExprId, ExprId, i64, crate::intern::Sym)>,
     /// `r["field"]` in TypeScript: (module, the index, the field), as `r.field`.
     pub(crate) str_members: Vec<(u32, ExprId, crate::intern::Sym)>,
     /// `m[i]` on a match: (module, the index expression, `items`, assert present), as `m.items[i]` (`!`).
@@ -98,7 +101,7 @@ pub struct Rewrites {
 
 impl Rewrites {
     pub fn is_empty(&self) -> bool {
-        self.args.is_empty() && self.truthy.is_empty() && self.has_own.is_empty() && self.ns_calls.is_empty() && self.flat_chains.is_empty() && self.elem_methods.is_empty() && self.prims.is_empty() && self.tuple_places.is_empty() && self.nonnulls.is_empty() && self.record_casts.is_empty() && self.records.is_empty() && self.fn_values.is_empty() && self.enum_names.is_empty() && self.rests.is_empty() && self.setters.is_empty() && self.static_calls.is_empty() && self.logical.is_empty() && self.widen_casts.is_empty() && self.assigns.is_empty() && self.identities.is_empty() && self.keyed_places.is_empty() && self.iterators.is_empty() && self.consts.is_empty() && self.items.is_empty() && self.awaits.is_empty() && self.calls.is_empty() && self.elems.is_empty() && self.rest_lits.is_empty() && self.rest_indexes.is_empty() && self.str_members.is_empty() && self.keys.is_empty() && self.spreads.is_empty() && self.keyed.is_empty()
+        self.args.is_empty() && self.truthy.is_empty() && self.has_own.is_empty() && self.ns_calls.is_empty() && self.flat_chains.is_empty() && self.elem_methods.is_empty() && self.prims.is_empty() && self.tuple_places.is_empty() && self.nonnulls.is_empty() && self.record_casts.is_empty() && self.records.is_empty() && self.fn_values.is_empty() && self.enum_names.is_empty() && self.rests.is_empty() && self.setters.is_empty() && self.static_calls.is_empty() && self.logical.is_empty() && self.widen_casts.is_empty() && self.assigns.is_empty() && self.identities.is_empty() && self.keyed_places.is_empty() && self.iterators.is_empty() && self.consts.is_empty() && self.items.is_empty() && self.awaits.is_empty() && self.calls.is_empty() && self.elems.is_empty() && self.rest_lits.is_empty() && self.rest_indexes.is_empty() && self.str_members.is_empty() && self.at_places.is_empty() && self.keys.is_empty() && self.spreads.is_empty() && self.keyed.is_empty()
     }
 
     pub(crate) fn extend(&mut self, o: Rewrites) {
@@ -111,6 +114,7 @@ impl Rewrites {
         self.rest_lits.extend(o.rest_lits);
         self.rest_indexes.extend(o.rest_indexes);
         self.str_members.extend(o.str_members);
+        self.at_places.extend(o.at_places);
         self.keys.extend(o.keys);
         self.spreads.extend(o.spreads);
         self.keyed.extend(o.keyed);
@@ -304,6 +308,26 @@ pub fn apply(modules: &mut [Module], rw: &Rewrites) -> bool {
         if let ExprKind::Call { callee, .. } = &mut ast.exprs[call as usize].kind {
             *callee = fe;
         }
+        changed = true;
+    }
+    for &(m, at, arr, k, length) in &rw.at_places {
+        let ast = &mut modules[m as usize].ast;
+        if !matches!(ast.exprs[at as usize].kind, ExprKind::Call { .. }) {
+            continue;
+        }
+        let span = ast.exprs[at as usize].span;
+        let index = if k >= 0 {
+            ast.exprs.push(crate::ast::Expr { kind: ExprKind::Int(k as u64), span });
+            ast.exprs.len() as ExprId - 1
+        } else {
+            ast.exprs.push(crate::ast::Expr { kind: ExprKind::Member { obj: arr, name: length, name_span: span, optional: false }, span });
+            let len = ast.exprs.len() as ExprId - 1;
+            ast.exprs.push(crate::ast::Expr { kind: ExprKind::Int((-k) as u64), span });
+            let n = ast.exprs.len() as ExprId - 1;
+            ast.exprs.push(crate::ast::Expr { kind: ExprKind::Binary(crate::ast::BinOp::Sub, len, n), span });
+            ast.exprs.len() as ExprId - 1
+        };
+        ast.exprs[at as usize].kind = ExprKind::Index { obj: arr, index, optional: false };
         changed = true;
     }
     for &(m, at, name) in &rw.str_members {

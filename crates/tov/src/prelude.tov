@@ -693,6 +693,46 @@ function __reReplaceWith(s: string, re: RegExp, rep: string, f: ((m: string, p1:
   return out
 }
 
+/** `s.replace(re, f)` of a regex whose groups aren't known here: `f` given each group (or
+ * `undefined`), the match's offset and the input, as `any`s, as JavaScript passes them. */
+export function __reReplaceFnA(s: string, re: RegExp, f: (m: string, ...args: any[]) => string): string {
+  const h = re.__id()
+  const global = re.global
+  const sticky = re.sticky
+  const unicode = re.unicode
+  let from = global ? 0 : sticky ? re.lastIndex : 0
+  let out = ""
+  let last = 0
+  let p: int[] = []
+  let found = false
+  while (from <= s.length) {
+    p = __native.reExecInto(h, s, from, p)
+    if (p.length === 0) {
+      if (global || sticky) re.lastIndex = 0
+      if (!found) return s
+      break
+    }
+    found = true
+    out += s.slice(last, p[0]!)
+    const args: any[] = []
+    for (let g = 2; g + 1 < p.length; g += 2) {
+      if (p[g]! < 0) args.push(undefined)
+      else args.push(s.slice(p[g]!, p[g + 1]!))
+    }
+    args.push(p[0]!)
+    args.push(s)
+    out += f(s.slice(p[0]!, p[1]!), ...args)
+    last = p[1]!
+    if (!global) {
+      if (sticky) re.lastIndex = p[1]!
+      break
+    }
+    from = __reNext(s, p, unicode)
+  }
+  out += s.slice(last)
+  return out
+}
+
 /** (a replace callback's argument k: a group, then past the groups the match's offset, as text
  * here, and the input, as JavaScript passes them) */
 function __reArg(s: string, p: int[], n: int, k: int): string {

@@ -62,6 +62,8 @@ pub enum Callee {
     JsNew,
     /// A call on an `any`: `f(...)`, or `obj.name(...)` (a method of what it holds).
     Any { method: Option<Sym> },
+    /// `obj.name(...)` on a union of class instances, each with the method: each member's.
+    UnionMethod { recv: TyId, name: Sym },
 }
 
 #[derive(Clone, Debug)]

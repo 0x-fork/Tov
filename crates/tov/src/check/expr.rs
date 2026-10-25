@@ -1814,6 +1814,8 @@ impl<'a> Checker<'a> {
             // `m.get(k)!.push(x)`: the value in the map, changed where it is
             ExprKind::Call { callee, args, .. } if args.len() == 1 => match &self.ast().expr(*callee).kind {
                 ExprKind::Member { obj, name, optional: false, .. } if self.name(*name) == "get" && self.is_map_expr(*obj) => self.root_of(*obj),
+                // (`xs.at(-1)!.f = v`: the element, as `xs[xs.length - 1]`, see `at_place`)
+                ExprKind::Member { obj, name, optional: false, .. } if self.name(*name) == "at" && self.at_index(args[0].expr).is_some() && super::rewrite::simple_path(self.ast(), *obj) => self.root_of(*obj),
                 _ => Root::Temp,
             },
             ExprKind::Ident(s) => match self.lookup(*s) {
@@ -2049,6 +2051,38 @@ impl<'a> Checker<'a> {
         }
     }
 
+    /// `xs.at(k)`'s literal index (`-1`), if it's one.
+    fn at_index(&self, a: ExprId) -> Option<i64> {
+        match self.ast().expr(a).kind {
+            ExprKind::Int(v) => Some(v as i64),
+            ExprKind::Unary(crate::ast::UnOp::Neg, x) => match self.ast().expr(x).kind {
+                ExprKind::Int(v) if v > 0 => Some(-(v as i64)),
+                _ => None,
+            },
+            _ => None,
+        }
+    }
+
+    /// A place through `xs.at(k)` (`xs.at(-1)!.src = s`) of an array path `xs`: the element,
+    /// rewritten as `xs[k]` / `xs[xs.length - k]`.
+    fn at_place(&mut self, obj: ExprId) {
+        let mut x = obj;
+        while let ExprKind::Paren(i) | ExprKind::NonNull(i) = self.ast().expr(x).kind {
+            x = i;
+        }
+        if let ExprKind::Call { callee, args, .. } = &self.ast().expr(x).kind
+            && args.len() == 1
+            && let ExprKind::Member { obj: arr, name, optional: false, .. } = self.ast().expr(*callee).kind
+            && self.name(name) == "at"
+            && let Some(k) = self.at_index(args[0].expr)
+            && super::rewrite::simple_path(self.ast(), arr)
+            && self.expr_type_peek(arr).is_some_and(|t| matches!(self.types.get(t), Ty::Array(_)))
+            && let Some(length) = self.interner.lookup("length")
+        {
+            self.rewrites.at_places.push((self.cur, x, arr, k, length));
+        }
+    }
+
     pub(super) fn place(&mut self, e: ExprId, _for_ref: bool) -> Option<Place> {
         let node = self.ast().expr(e);
         let span = node.span;
@@ -2139,6 +2173,7 @@ impl<'a> Checker<'a> {
                     self.report(Diagnostic::new("V0103", span, "can't assign through `?.`").note("instead", "narrow the value first: `if (x !== undefined) x.field = v`"));
                     return None;
                 }
+                self.at_place(*obj);
                 let n = self.name(*name).to_string();
                 // `C.NAME = v`: a static field (module state, as in TypeScript)
                 if let ExprKind::Ident(s) = self.ast().expr(*obj).kind
@@ -2759,7 +2794,24 @@ impl<'a> Checker<'a> {
             } else {
                 match self.member_exp.take() {
                     Some(want) => self.generic_value(e, ft, &sm.tparams, want),
-                    None => None,
+                    // (nothing wanted: its type parameters' defaults, or bounds)
+                    None => {
+                        let fixed: Option<HashMap<u32, TyId>> = sm.tparams.iter().map(|&p| {
+                            let g = self.gparam(p);
+                            g.default.or(g.bound).map(|t| (p, t))
+                        }).collect();
+                        match fixed {
+                            Some(map) => {
+                                let t = self.types.subst(ft, &map);
+                                let targs: Vec<(u32, TyId)> = sm.tparams.iter().map(|p| (*p, map[p])).collect();
+                                if let Some(f) = self.facts_mut() {
+                                    f.value_targs.insert(e, targs);
+                                }
+                                Some(t)
+                            }
+                            None => None,
+                        }
+                    }
                 }
             };
             if let Some(ft) = ft {
@@ -3743,6 +3795,24 @@ impl<'a> Checker<'a> {
                 _ => None,
             })
         });
+        // (a rest parameter wanted, `(m: string, ...args: any[]) => string`: the arrow's own
+        // parameters from there take its element type each, its rest parameter the array)
+        let exp_fn = exp_fn.map(|(mut ps, r)| {
+            if let Some(e) = ps.last().and_then(|p| self.types.rest_elem(p.ty)) {
+                let k = ps.len() - 1;
+                let spread = ps.pop().unwrap();
+                for (i, p) in f.params.iter().enumerate().skip(k) {
+                    if p.rest {
+                        ps.push(spread);
+                        break;
+                    }
+                    let _ = i;
+                    let et = self.types.optional(e);
+                    ps.push(FnParam { ty: if e == ANY || e == UNKNOWN { e } else { et }, inout: false, optional: true });
+                }
+            }
+            (ps, r)
+        });
         // A closure can throw when its context allows it (`(req) => Response throws Error`).
         let exp_throws = exp
             .and_then(|e| {
@@ -4665,6 +4735,8 @@ impl<'a> Checker<'a> {
                             ExprKind::Arrow(f) if !f.params.iter().any(|p| p.rest) => Some(f.params.len()),
                             _ => None,
                         });
+                        // (a parameter after the match written without a type: TypeScript's `any`)
+                        let untyped_params = args.get(1).is_some_and(|a| matches!(&self.ast().expr(a.expr).kind, ExprKind::Arrow(f) if f.params.iter().skip(1).any(|p| p.ty.is_none())));
                         let with_offset = match (lit_groups, arrow_params) {
                             (Some(k), Some(n)) if n > k + 1 && k <= 3 => Some(k),
                             _ => None,
@@ -4674,6 +4746,8 @@ impl<'a> Checker<'a> {
                             "match" if global_lit => "__reMatchGlobal",
                             "replace" | "replaceAll" if is_fn && offset_fn.is_some() => offset_fn.as_deref().unwrap(),
                             "replace" | "replaceAll" if is_fn && one_param => "__reReplaceFn1",
+                            // (groups this can't count: everything after the match as an `any`)
+                            "replace" | "replaceAll" if is_fn && lit_groups.is_none() && untyped_params => "__reReplaceFnA",
                             "replace" | "replaceAll" if is_fn => "__reReplaceFn",
                             "replace" | "replaceAll" => "__reReplace",
                             "split" => "__reSplit",
@@ -4753,6 +4827,39 @@ impl<'a> Checker<'a> {
                     return if mopt || optional { self.types.optional(r) } else { r };
                 }
                 let fm = self.flat_members(base);
+                // (a union of classes that each have the method, taking the same parameters: each
+                // one's, by what it holds)
+                if fm.len() > 1 {
+                    let mms: Vec<_> = fm.iter().map(|&m| match self.class_member(m, name) {
+                        Some(super::class::ClassMemberRef::Method(mm)) if self.class_of(m).is_some() && mm.tparams.is_empty() => Some(mm),
+                        _ => None,
+                    }).collect();
+                    if mms.iter().all(|x| x.is_some()) {
+                        let mms: Vec<_> = mms.into_iter().flatten().collect();
+                        let first = mms[0].clone();
+                        let (params, rest) = self.method_call_params(&first);
+                        let same = mms.iter().skip(1).all(|mm| {
+                            let (ps, r) = self.method_call_params(mm);
+                            ps.len() == params.len() && r == rest && ps.iter().zip(&params).all(|(a, b)| a.ty == b.ty && a.inout == b.inout && a.optional == b.optional)
+                        });
+                        if same {
+                            for mm in &mms {
+                                self.check_visible(mm.owner, mm.vis, name, name_span);
+                            }
+                            let rets: Vec<TyId> = mms.iter().map(|mm| self.method_ret(mm)).collect();
+                            let ret = self.types.union(&rets);
+                            let throws_all: Vec<TyId> = mms.iter().map(|mm| self.method_throws(mm)).collect();
+                            let throws = self.types.union(&throws_all);
+                            let names = first.param_names.iter().map(|&p| self.name(p).to_string()).collect();
+                            let cs = CallSig { tparams: Vec::new(), params, names, rest, ret, throws };
+                            self.rec_call(e, Callee::UnionMethod { recv: base, name });
+                            self.pending_call = Some(e);
+                            let shown = self.show(base);
+                            let r = self.call_sig(&cs, &format!("{shown}.{mtext}"), type_args, args, exp, span);
+                            return if mopt || optional { self.types.optional(r) } else { r };
+                        }
+                    }
+                }
                 if fm.len() > 1 && fm.iter().any(|&m| matches!(self.class_member(m, name), Some(super::class::ClassMemberRef::Method(_)))) {
                     let shown = self.show(base);
                     self.report(

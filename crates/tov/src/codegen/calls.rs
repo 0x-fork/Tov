@@ -262,6 +262,57 @@ impl<'c, 'a> Gen<'c, 'a> {
                 let f = self.js_callee(*callee);
                 self.js_call(f, None, args, true, ty)
             }
+            Callee::UnionMethod { recv, name } => {
+                let recv = self.inst(recv);
+                let ExprKind::Member { obj, .. } = &ast.expr(*callee).kind else {
+                    self.unsupported(span, "this method call");
+                    return Val::plain("0", ty);
+                };
+                let v = self.expr(*obj);
+                let v = self.own(v);
+                let v = self.project(v, recv);
+                let argv = self.args_rest(e, args, &params);
+                let ms = self.members(recv);
+                let tag = self.u_tag(&v.code, recv);
+                let res = self.fresh("um");
+                let ct = self.ctype(ty);
+                self.line(format!("{ct} {res};"));
+                self.open(&format!("switch ({tag}) {{"));
+                for (i, &mt) in ms.iter().enumerate() {
+                    self.open(&format!("case {i}: {{"));
+                    self.push_temps();
+                    let payload = self.u_payload(&v.code, recv, i);
+                    let ret = match self.c.class_member(mt, name) {
+                        Some(crate::check::class::ClassMemberRef::Method(mm)) => self.c.method_ret(&mm),
+                        _ => VOID,
+                    };
+                    let code = self.method_call_code(&payload, mt, name, false, argv.clone());
+                    let r = self.finish_call_pub(&code, ret, if ty == VOID { VOID } else { ty });
+                    if ty != VOID && ty != NEVER {
+                        let r = self.own(r);
+                        let c = self.consume(r);
+                        self.line(format!("{res} = {c};"));
+                    }
+                    self.pop_temps();
+                    self.line("break;");
+                    self.close("}");
+                }
+                let dv = self.default_value(ty);
+                if ty != VOID && ty != NEVER {
+                    self.line(format!("default: {res} = {dv}; break;"));
+                } else {
+                    self.line("default: break;");
+                }
+                self.close("}");
+                if ty == VOID || ty == NEVER {
+                    return Val::plain("0", VOID);
+                }
+                let owned = self.is_rc(ty);
+                if owned {
+                    self.b().temps.last_mut().unwrap().push((res.clone(), ty));
+                }
+                Val { code: res, ty, owned }
+            }
             Callee::Any { method } => {
                 let loc = self.loc(span);
                 match (&ast.expr(*callee).kind, method) {
