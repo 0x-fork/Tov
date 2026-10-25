@@ -1,0 +1,11 @@
+const m: Record<string, number> | undefined = Math.random() > 2 ? undefined : { a: 1 };
+const r: Record<string, number> = { ...m, b: 2 };
+console.log(JSON.stringify(r));
+const base: Record<string, string> = { x: "1", y: "2" };
+const over = { ...base, y: "two", z: "3" };
+console.log(JSON.stringify(over), Object.keys(over).length);
+const point = { px: 1, py: 2 };
+const merged: Record<string, number> = { ...point, ...r, pz: 3 };
+console.log(JSON.stringify(merged));
+const none: Record<string, number> | undefined = undefined;
+console.log(JSON.stringify({ ...none, only: 1 } as Record<string, number>));

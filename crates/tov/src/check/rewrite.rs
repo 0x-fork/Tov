@@ -20,6 +20,14 @@ pub struct Rewrites {
     /// `s.replace(re, x)` and the other string methods taking a RegExp: (module, the call, the
     /// prelude function), as `__reReplace(s, re, x)`.
     pub(crate) calls: Vec<(u32, ExprId, crate::intern::Sym)>,
+    /// `{ type: "x", extra: 1 }` of a record with an index signature: (module, the literal,
+    /// `$rest`, the other keys), as `{ type: "x", $rest: { extra: 1 } }`.
+    /// (and `...`, a spread field's name)
+    pub(crate) rest_lits: Vec<(u32, ExprId, crate::intern::Sym, Vec<crate::intern::Sym>, crate::intern::Sym)>,
+    /// `g[k]` of a record with an index signature: (module, the index, `$rest`), as `g.$rest?.[k]`.
+    pub(crate) rest_indexes: Vec<(u32, ExprId, crate::intern::Sym)>,
+    /// `r["field"]` in TypeScript: (module, the index, the field), as `r.field`.
+    pub(crate) str_members: Vec<(u32, ExprId, crate::intern::Sym)>,
     /// `m[i]` on a match: (module, the index expression, `items`, assert present), as `m.items[i]` (`!`).
     pub(crate) elems: Vec<(u32, ExprId, crate::intern::Sym, bool)>,
     /// `r.key` on a `Record<string, V>` (module, the member expression), as `r["key"]`.
@@ -90,7 +98,7 @@ pub struct Rewrites {
 
 impl Rewrites {
     pub fn is_empty(&self) -> bool {
-        self.args.is_empty() && self.truthy.is_empty() && self.has_own.is_empty() && self.ns_calls.is_empty() && self.flat_chains.is_empty() && self.elem_methods.is_empty() && self.prims.is_empty() && self.tuple_places.is_empty() && self.nonnulls.is_empty() && self.record_casts.is_empty() && self.records.is_empty() && self.fn_values.is_empty() && self.enum_names.is_empty() && self.rests.is_empty() && self.setters.is_empty() && self.static_calls.is_empty() && self.logical.is_empty() && self.widen_casts.is_empty() && self.assigns.is_empty() && self.identities.is_empty() && self.keyed_places.is_empty() && self.iterators.is_empty() && self.consts.is_empty() && self.items.is_empty() && self.awaits.is_empty() && self.calls.is_empty() && self.elems.is_empty() && self.keys.is_empty() && self.spreads.is_empty() && self.keyed.is_empty()
+        self.args.is_empty() && self.truthy.is_empty() && self.has_own.is_empty() && self.ns_calls.is_empty() && self.flat_chains.is_empty() && self.elem_methods.is_empty() && self.prims.is_empty() && self.tuple_places.is_empty() && self.nonnulls.is_empty() && self.record_casts.is_empty() && self.records.is_empty() && self.fn_values.is_empty() && self.enum_names.is_empty() && self.rests.is_empty() && self.setters.is_empty() && self.static_calls.is_empty() && self.logical.is_empty() && self.widen_casts.is_empty() && self.assigns.is_empty() && self.identities.is_empty() && self.keyed_places.is_empty() && self.iterators.is_empty() && self.consts.is_empty() && self.items.is_empty() && self.awaits.is_empty() && self.calls.is_empty() && self.elems.is_empty() && self.rest_lits.is_empty() && self.rest_indexes.is_empty() && self.str_members.is_empty() && self.keys.is_empty() && self.spreads.is_empty() && self.keyed.is_empty()
     }
 
     pub(crate) fn extend(&mut self, o: Rewrites) {
@@ -100,6 +108,9 @@ impl Rewrites {
         self.awaits.extend(o.awaits);
         self.calls.extend(o.calls);
         self.elems.extend(o.elems);
+        self.rest_lits.extend(o.rest_lits);
+        self.rest_indexes.extend(o.rest_indexes);
+        self.str_members.extend(o.str_members);
         self.keys.extend(o.keys);
         self.spreads.extend(o.spreads);
         self.keyed.extend(o.keyed);
@@ -292,6 +303,57 @@ pub fn apply(modules: &mut [Module], rw: &Rewrites) -> bool {
         let fe = ast.exprs.len() as ExprId - 1;
         if let ExprKind::Call { callee, .. } = &mut ast.exprs[call as usize].kind {
             *callee = fe;
+        }
+        changed = true;
+    }
+    for &(m, at, name) in &rw.str_members {
+        let ast = &mut modules[m as usize].ast;
+        let ExprKind::Index { obj, index, optional } = ast.exprs[at as usize].kind else { continue };
+        let name_span = ast.exprs[index as usize].span;
+        ast.exprs[at as usize].kind = ExprKind::Member { obj, name, name_span, optional };
+        changed = true;
+    }
+    for &(m, at, rest) in &rw.rest_indexes {
+        let ast = &mut modules[m as usize].ast;
+        let ExprKind::Index { obj, optional, .. } = ast.exprs[at as usize].kind else { continue };
+        if matches!(ast.exprs[obj as usize].kind, ExprKind::Member { name, .. } if name == rest) {
+            continue;
+        }
+        let span = ast.exprs[obj as usize].span;
+        ast.exprs.push(crate::ast::Expr { kind: ExprKind::Member { obj, name: rest, name_span: span, optional }, span });
+        let member = ast.exprs.len() as ExprId - 1;
+        if let ExprKind::Index { obj, optional, .. } = &mut ast.exprs[at as usize].kind {
+            *obj = member;
+            *optional = true;
+        }
+        changed = true;
+    }
+    for (m, at, rest, keys, dots) in &rw.rest_lits {
+        let ast = &mut modules[*m as usize].ast;
+        let ExprKind::Object(fields) = &mut ast.exprs[*at as usize].kind else { continue };
+        let (extra, kept): (Vec<_>, Vec<_>) = std::mem::take(fields).into_iter().partition(|f| keys.contains(&f.name));
+        let Some(first) = extra.first() else {
+            *fields = kept;
+            continue;
+        };
+        let span = first.name_span;
+        let name_span = span;
+        *fields = kept;
+        // (a `$rest` already there, from a spread: its keys first, `{ ...old, extra }`)
+        let old = fields.iter().position(|f| f.name == *rest).map(|i| fields.remove(i));
+        let mut inner_fields: Vec<crate::ast::ObjField> = Vec::new();
+        if let Some(old) = old {
+            let sp = ast.exprs.len() as ExprId;
+            let vspan = ast.exprs[old.value as usize].span;
+            ast.exprs.push(crate::ast::Expr { kind: ExprKind::Spread(old.value), span: vspan });
+            inner_fields.push(crate::ast::ObjField { name: *dots, name_span: old.name_span, value: sp, quoted: false });
+        }
+        inner_fields.extend(extra.into_iter().map(|f| crate::ast::ObjField { quoted: true, ..f }));
+        let inner = ast.exprs.len() as ExprId;
+        let fields_span = ast.exprs[*at as usize].span;
+        ast.exprs.push(crate::ast::Expr { kind: ExprKind::Object(inner_fields), span: fields_span });
+        if let ExprKind::Object(fields) = &mut ast.exprs[*at as usize].kind {
+            fields.push(crate::ast::ObjField { name: *rest, name_span, value: inner, quoted: false });
         }
         changed = true;
     }

@@ -1,0 +1,8 @@
+43 new r2 43 ext
+{"type":"ext","raw":"r2","extra":43,"added":"new"}
+type,raw,extra,added
+new
+[{"type":"paragraph","raw":"p!","text":"a?"},{"type":"text","raw":"t!","text":"b?"}]
+type,a true true false
+{"type":"x","a":1,"b":2}
+y 2 {"type":"y","q":[1,2]}

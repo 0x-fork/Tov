@@ -1763,9 +1763,26 @@ impl<'a> Parser<'a> {
         }
         let body_start = self.cur_span();
         let saved_call = self.call_sig.take();
-        let members = self.record_fields();
+        let saved_sig = self.index_sig.take();
+        let mut members = self.record_fields();
         if let Some((_, cspan)) = std::mem::replace(&mut self.call_sig, saved_call) {
             self.err("U0021", cspan, "an interface with a call signature is not supported yet; use a function type (`type F = (x: T) => R`)");
+        }
+        // (`[k: string]: V`: a `Record<string, V>` alone, else the other keys' values beside the
+        // fields, see `rest_field`)
+        let sig = std::mem::replace(&mut self.index_sig, saved_sig);
+        let alone = sig.is_some() && members.is_empty() && extends.is_empty();
+        if let Some((k, v, sspan)) = sig {
+            if alone {
+                let rec = self.interner.intern("Record");
+                let span = body_start.to(self.prev_span());
+                let body = self.mk_ty(TypeExprKind::Named { ns: None, name: rec, name_span: span, args: vec![k, v] }, span);
+                let span = start.to(self.prev_span());
+                self.ast.items.push(Item { kind: ItemKind::Interface { name, name_span, tparams, members, body, extends }, span, exported });
+                return;
+            }
+            let f = self.rest_field(k, v, sspan);
+            members.push(f);
         }
         let body = self.mk_ty(TypeExprKind::Record(members.clone()), body_start.to(self.prev_span()));
         // (as a record: those it extends and its own members, `A & B<T> & { ... }`)
@@ -2825,7 +2842,10 @@ impl<'a> Parser<'a> {
                 }
                 if let Some((k, v, sspan)) = sig {
                     if !fields.is_empty() {
-                        self.err("X0017", sspan, "an index signature with other fields is not supported; use a `Map<K, V>` field for the dynamic keys");
+                        let mut fields = fields;
+                        let f = self.rest_field(k, v, sspan);
+                        fields.push(f);
+                        return self.mk_ty(TypeExprKind::Record(fields), span);
                     }
                     let rec = self.interner.intern("Record");
                     return self.mk_ty(TypeExprKind::Named { ns: None, name: rec, name_span: span, args: vec![k, v] }, span);
@@ -3004,6 +3024,14 @@ impl<'a> Parser<'a> {
     }
 
     /// `{ a: T, b?: U, m(x: T): R }` for record types and interfaces.
+    /// The hidden field `$rest?: Record<K, V>` of a record with an index signature `[k: K]: V`
+    /// and fields: the values of its other keys.
+    fn rest_field(&mut self, k: TypeId, v: TypeId, span: Span) -> FieldTy {
+        let rec = self.interner.intern("Record");
+        let ty = self.mk_ty(TypeExprKind::Named { ns: None, name: rec, name_span: span, args: vec![k, v] }, span);
+        FieldTy { name: self.interner.intern("$rest"), name_span: span, optional: true, ty }
+    }
+
     fn record_fields(&mut self) -> Vec<FieldTy> {
         self.bump(); // {
         let mut fields = Vec::new();

@@ -401,8 +401,8 @@ impl<'a> Checker<'a> {
                 t
             }
             ExprKind::Index { obj, index, optional } => self.index(e, *obj, *index, *optional, *optional || want, span),
-            ExprKind::Object(fields) if fields.iter().any(|f| matches!(self.ast().expr(f.value).kind, ExprKind::Spread(_))) => self.object_spread(e, fields, span),
-            ExprKind::Object(fields) => self.object(fields, exp, span),
+            ExprKind::Object(fields) if fields.iter().any(|f| matches!(self.ast().expr(f.value).kind, ExprKind::Spread(_))) => self.object_spread(e, fields, exp, span),
+            ExprKind::Object(fields) => self.object(e, fields, exp, span),
             ExprKind::Array(elems) => self.array_lit(elems, exp, span),
             ExprKind::Yield(v, delegate) => {
                 let generator = self.fcx.last().and_then(|f| f.frames.last()).and_then(|fr| fr.generator);
@@ -2408,6 +2408,11 @@ impl<'a> Checker<'a> {
             }
             return if absent { self.types.optional(STR) } else { STR };
         }
+        let rest_v = if matches!(self.types.get(base), Ty::Record(_)) { self.rest_value(base) } else { None };
+        let str_field = match self.ast().expr(index).kind {
+            ExprKind::Str(key) if self.ts_module() && matches!(self.types.get(base), Ty::Record(_) | Ty::Class(..) | Ty::Interface(..)) => self.field_of(base, key).map(|t| (key, t)),
+            _ => None,
+        };
         let result = match *self.types.get(base) {
             Ty::Error => return ERROR,
             // (TypeScript's type for an element: present, as it assumes; out of bounds traps)
@@ -2449,7 +2454,24 @@ impl<'a> Checker<'a> {
             }
             // `p[k]` with `k: keyof P` (a union of field names): the field it names (see
             // `keyed_read`)
+            // (`g[k]` of a record with an index signature: its other keys' map, `g.$rest?.[k]`)
+            Ty::Record(_) if !matches!(self.ast().expr(index).kind, ExprKind::Str(_)) && rest_v.is_some() && self.ts_module() => {
+                let it = self.expr(index, Some(STR));
+                if !self.types.is_string(it) && it != ERROR && it != ANY {
+                    let s = self.ast().expr(index).span;
+                    self.expect_assignable(it, STR, s, Some("the key".into()));
+                }
+                if let Some(rest) = self.interner.lookup("$rest") {
+                    self.rewrites.rest_indexes.push((self.cur, e, rest));
+                }
+                return rest_v.unwrap();
+            }
             Ty::Record(_) | Ty::Interface(..) | Ty::Class(..) if !matches!(self.ast().expr(index).kind, ExprKind::Str(_)) => return self.keyed_read(e, obj, index, base, span),
+            // (`r["field"]` in TypeScript: `r.field`, rewritten so)
+            Ty::Record(_) | Ty::Class(..) | Ty::Interface(..) if let Some((key, t)) = str_field => {
+                self.rewrites.str_members.push((self.cur, e, key));
+                return if absent { self.types.optional(t) } else { t };
+            }
             Ty::Record(fields) => {
                 if let ExprKind::Str(key) = self.ast().expr(index).kind {
                     let key = &self.name(key).to_string();
@@ -2870,10 +2892,27 @@ impl<'a> Checker<'a> {
         let n = self.name(name).to_string();
         match *self.types.get(ty) {
             Ty::Error => Some(ERROR),
-            Ty::Record(fs) => self.types.fields(fs).iter().find(|f| f.name == name).map(|f| f.ty),
+            Ty::Record(fs) => match self.types.fields(fs).iter().find(|f| f.name == name).map(|f| f.ty) {
+                Some(t) => Some(t),
+                // (a key its index signature has: a value of that, if it's there)
+                None => self.rest_value(ty),
+            },
             Ty::Interface(i, args) => {
                 let args = self.types.tys(args).to_vec();
-                self.iface_fields_inst(i, &args).into_iter().find(|f| f.name == name).map(|f| f.ty)
+                let fs = self.iface_fields_inst(i, &args);
+                match fs.iter().find(|f| f.name == name) {
+                    Some(f) => Some(f.ty),
+                    // (an index signature's other keys, as a record's)
+                    None => {
+                        let rest = self.interner.lookup("$rest")?;
+                        let rf = fs.iter().find(|f| f.name == rest)?;
+                        let m = self.types.without_undefined(rf.ty);
+                        match *self.types.get(m) {
+                            Ty::Map(k, v) if self.types.is_string(k) => Some(if v == ANY || v == UNKNOWN { v } else { self.types.optional(v) }),
+                            _ => None,
+                        }
+                    }
+                }
             }
             Ty::Param(p) => {
                 let b = self.gparam(p).bound?;
@@ -2888,13 +2927,30 @@ impl<'a> Checker<'a> {
         }
     }
 
+    /// A record with an index signature beside its fields (`{ type: string; [k: string]: V }`,
+    /// the other keys in its hidden `$rest` map): what reading another key gives, `V` (as
+    /// `undefined` too where `V` doesn't hold it).
+    pub(crate) fn rest_value(&mut self, ty: TyId) -> Option<TyId> {
+        let rest = self.interner.lookup("$rest")?;
+        let Ty::Record(fs) = *self.types.get(ty) else { return None };
+        let f = self.types.fields(fs).iter().find(|f| f.name == rest).copied()?;
+        let m = self.types.without_undefined(f.ty);
+        let Ty::Map(k, v) = *self.types.get(m) else { return None };
+        if !self.types.is_string(k) {
+            return None;
+        }
+        Some(if v == ANY || v == UNKNOWN { v } else { self.types.optional(v) })
+    }
+
     /// Whether a value of type `ty` has key `name` (`"k" in x`): known by its type, or `None`
     /// when only the value says (an optional field, a map, an `unknown`).
     pub(crate) fn has_key(&mut self, ty: TyId, name: Sym) -> Option<bool> {
         match *self.types.get(ty) {
-            Ty::Record(fs) => match self.types.fields(fs).iter().find(|f| f.name == name) {
+            Ty::Record(fs) => match self.types.fields(fs).iter().find(|f| f.name == name).copied() {
                 Some(f) if f.optional || self.types.has_undefined(f.ty) => None,
                 Some(_) => Some(true),
+                // (an index signature's keys: as it runs)
+                None if self.rest_value(ty).is_some() => None,
                 None => Some(false),
             },
             Ty::Interface(i, args) => {
@@ -2964,7 +3020,7 @@ impl<'a> Checker<'a> {
         map
     }
 
-    fn object(&mut self, fields: &[crate::ast::ObjField], exp: Option<TyId>, span: Span) -> TyId {
+    fn object(&mut self, lit_expr: ExprId, fields: &[crate::ast::ObjField], exp: Option<TyId>, span: Span) -> TyId {
         // (where an `any` is wanted: JavaScript's object, keys added and removed as it runs)
         let exp = if exp == Some(ANY) { Some(self.types.intern(Ty::Map(STR, ANY))) } else { exp };
         let as_const = std::mem::take(&mut self.as_const);
@@ -3054,6 +3110,17 @@ impl<'a> Checker<'a> {
             return t;
         };
         let mut provided = HashSet::default();
+        let mut rest_keys: Vec<Sym> = Vec::new();
+        let rest_vt = match self.interner.lookup("$rest").and_then(|rest| tfields.iter().find(|tf| tf.name == rest)).map(|rf| rf.ty) {
+            Some(rt) => {
+                let m = self.types.without_undefined(rt);
+                match *self.types.get(m) {
+                    Ty::Map(_, vt) => Some(vt),
+                    _ => None,
+                }
+            }
+            None => None,
+        };
         for f in fields {
             match tfields.iter().find(|tf| tf.name == f.name) {
                 Some(tf) => {
@@ -3066,6 +3133,15 @@ impl<'a> Checker<'a> {
                         let vspan = c.ast().expr(value).span;
                         c.expect_assignable(t, fty, vspan, Some(format!("field `{fname}`")));
                     });
+                }
+                // (another key of a record with an index signature: into its `$rest`)
+                None if let Some(vt) = rest_vt => {
+                    let value = f.value;
+                    let t = self.expr(value, Some(vt));
+                    let vspan = self.ast().expr(value).span;
+                    let fname = self.name(f.name).to_string();
+                    self.expect_assignable(t, vt, vspan, Some(format!("key `{fname}`")));
+                    rest_keys.push(f.name);
                 }
                 None => {
                     self.expr(f.value, None);
@@ -3084,8 +3160,14 @@ impl<'a> Checker<'a> {
             }
         }
         let missing: Vec<&Field> = tfields.iter().filter(|tf| !tf.optional && !provided.contains(&tf.name)).collect();
+        if !rest_keys.is_empty()
+            && let Some(rest) = self.interner.lookup("$rest")
+            && let Some(dots) = self.interner.lookup("...")
+        {
+            self.rewrites.rest_lits.push((self.cur, lit_expr, rest, rest_keys.clone(), dots));
+        }
         // Don't report missing fields when a misspelled field already explains it.
-        let misspelled = fields.iter().any(|f| !tfields.iter().any(|tf| tf.name == f.name));
+        let misspelled = fields.iter().any(|f| !tfields.iter().any(|tf| tf.name == f.name) && !rest_keys.contains(&f.name));
         if !missing.is_empty() && !misspelled {
             let names: Vec<String> = missing.iter().map(|f| format!("`{}`", self.name(f.name))).collect();
             let insert: Vec<String> = missing.iter().map(|f| format!("{}: <{}>", self.name(f.name), self.show(f.ty))).collect();
@@ -3184,7 +3266,10 @@ impl<'a> Checker<'a> {
     /// `{ ...a, y: 3 }`: the literal with a's fields written out (`{ x: a.x, y: 3 }`, see
     /// `rewrite`), checked again; its type for now. What's spread must be a variable or a field
     /// path (read once per field).
-    fn object_spread(&mut self, e: ExprId, fields: &[crate::ast::ObjField], span: Span) -> TyId {
+    fn object_spread(&mut self, e: ExprId, fields: &[crate::ast::ObjField], exp: Option<TyId>, span: Span) -> TyId {
+        if let Some(t) = self.map_spread(fields, exp) {
+            return t;
+        }
         let mut out: Vec<Field> = Vec::new();
         let mut expansions = Vec::new();
         let mut ok = true;
@@ -3268,6 +3353,81 @@ impl<'a> Checker<'a> {
         self.types.note_field_order(t, order);
         let _ = span;
         t
+    }
+
+    /// `{ ...m, k: v }` where a spread is a `Record<string, V>` (a map; or one is wanted): a map
+    /// of them all, made as it runs (a record spread gives its fields; `undefined` nothing).
+    fn map_spread(&mut self, fields: &[crate::ast::ObjField], exp: Option<TyId>) -> Option<TyId> {
+        let want = exp.and_then(|x| self.map_literal_target(x)).and_then(|m| match *self.types.get(m) {
+            Ty::Map(k, v) if self.types.is_string(k) => Some(v),
+            _ => None,
+        });
+        let spreads: Vec<ExprId> = fields.iter().filter_map(|f| match self.ast().expr(f.value).kind {
+            ExprKind::Spread(x) => Some(x),
+            _ => None,
+        }).collect();
+        // (a map among the spreads decides it, else what's wanted)
+        let mut tys = Vec::new();
+        let mut any_map = false;
+        for &x in &spreads {
+            let t = self.expr_type_peek(x);
+            let b = t.map(|t| self.types.without_undefined(t));
+            if let Some(b) = b
+                && let Ty::Map(k, _) = *self.types.get(b)
+                && self.types.is_string(k)
+            {
+                any_map = true;
+            }
+            tys.push(t);
+        }
+        if !any_map && want.is_none() {
+            return None;
+        }
+        let mut vals = Vec::new();
+        for f in fields {
+            match self.ast().expr(f.value).kind {
+                ExprKind::Spread(x) => {
+                    let t = self.expr(x, None);
+                    let base = self.types.without_undefined(t);
+                    match *self.types.get(base) {
+                        Ty::Map(k, v) if self.types.is_string(k) => vals.push((v, self.ast().expr(x).span)),
+                        Ty::Record(_) if self.tuple_of(base).is_none() => {
+                            let s = self.ast().expr(x).span;
+                            for fl in self.types.fields_in_order(base) {
+                                vals.push((fl.ty, s));
+                            }
+                        }
+                        Ty::Error => {}
+                        _ => {
+                            let shown = self.show(t);
+                            let xspan = self.ast().expr(x).span;
+                            self.report(Diagnostic::new("U0011", xspan, format!("spreading `{shown}` into an object literal is not supported yet")).note("supported", "spreading a record, an interface value or a `Record<string, V>`"));
+                        }
+                    }
+                }
+                _ => {
+                    let t = self.expr(f.value, want);
+                    vals.push((t, self.ast().expr(f.value).span));
+                }
+            }
+        }
+        let v = match want {
+            Some(v) => {
+                for &(t, s) in &vals {
+                    self.expect_assignable(t, v, s, None);
+                }
+                v
+            }
+            None => {
+                let mut v = NEVER;
+                for &(t, _) in &vals {
+                    let w = self.types.widen(t);
+                    v = self.join_numbers(v, w);
+                }
+                if v == NEVER { UNKNOWN } else { v }
+            }
+        };
+        Some(self.types.intern(Ty::Map(STR, v)))
     }
 
     /// Chooses the record type an object literal should be checked against.

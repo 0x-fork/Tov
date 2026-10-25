@@ -4751,7 +4751,8 @@ impl<'c, 'a> Gen<'c, 'a> {
                     });
                     // (not where locals live in a frame, an async function's or a generator's: no arrays there)
                     let framed = self.b().async_fn.is_some() || self.b().gen_elem.is_some();
-                    if k == STR && distinct && calm && !framed && fields.len() >= 2 && !matches!(self.tget(v), Ty::Undefined | Ty::Null | Ty::Void) {
+                    let spreads = fields.iter().any(|f| matches!(self.ast(m).expr(f.value).kind, ExprKind::Spread(_)));
+                    if k == STR && distinct && calm && !framed && !spreads && fields.len() >= 2 && !matches!(self.tget(v), Ty::Undefined | Ty::Null | Ty::Void) {
                         let (ka, va, ha) = (self.fresh("ks"), self.fresh("vs"), self.fresh("hs"));
                         let keys: Vec<String> = fields.iter().map(|f| self.lit(self.sym(f.name).to_string().as_bytes())).collect();
                         self.line(format!("{kct} {ka}[{}] = {{{}}}; {vct} {va}[{}]; static uint64_t {ha}[{}];", keys.len(), keys.join(", "), keys.len(), keys.len()));
@@ -4766,6 +4767,49 @@ impl<'c, 'a> Gen<'c, 'a> {
                     }
                     let res = self.tmp(target, "tv_map_fresh_object()", true);
                     for f in fields {
+                        // (`...m`: its entries; `...r`: its fields; `undefined`: nothing)
+                        if let ExprKind::Spread(x) = self.ast(m).expr(f.value).kind {
+                            let sv = self.expr(x);
+                            let st = self.c.types.without_undefined(sv.ty);
+                            let present = if st != sv.ty { self.truthy_val(sv.clone()) } else { "true".to_string() };
+                            self.open(&format!("if ({present}) {{"));
+                            self.push_temps();
+                            let pv = self.project(sv, st);
+                            match self.tget(st) {
+                                Ty::Map(sk, svt) => {
+                                    let (skd, svd, sct) = (self.desc(sk), self.desc(svt), self.ctype(svt));
+                                    let (it, kp, vp) = (self.fresh("i"), self.fresh("kp"), self.fresh("vp"));
+                                    self.line(format!("tv_int {it} = 0; void *{kp}, *{vp};"));
+                                    self.open(&format!("while (tv_map_next({}, {skd}, {svd}, &{it}, &{kp}, &{vp})) {{", pv.code));
+                                    self.push_temps();
+                                    let ev = self.coerce(Val { code: format!("(*({sct} *){vp})"), ty: svt, owned: false }, v);
+                                    let ev = self.own(ev);
+                                    let vc = self.consume(ev);
+                                    let (kn, vn) = (self.fresh("k"), self.fresh("v"));
+                                    self.line(format!("{kct} {kn} = *({kct} *){kp}; tv_str_retain({kn}); {vct} {vn} = {vc};"));
+                                    self.line(format!("tv_map_set(&{}, {kd}, {vd}, &{kn}, &{vn});", res.code));
+                                    self.pop_temps();
+                                    self.close("}");
+                                }
+                                Ty::Record(_) => {
+                                    for fl in self.c.types.fields_in_order(st) {
+                                        let fname = self.sym(fl.name).to_string();
+                                        let key = self.lit(fname.as_bytes());
+                                        let fv = Val { code: self.fld(st, &pv.code, &fname), ty: fl.ty, owned: false };
+                                        let fv = self.coerce(fv, v);
+                                        let fv = self.own(fv);
+                                        let vc = self.consume(fv);
+                                        let (kn, vn) = (self.fresh("k"), self.fresh("v"));
+                                        self.line(format!("{kct} {kn} = {key}; {vct} {vn} = {vc};"));
+                                        self.line(format!("tv_map_set(&{}, {kd}, {vd}, &{kn}, &{vn});", res.code));
+                                    }
+                                }
+                                _ => self.unsupported(span, "this spread"),
+                            }
+                            self.pop_temps();
+                            self.close("}");
+                            continue;
+                        }
                         let key = self.lit(self.sym(f.name).to_string().as_bytes());
                         let vv = self.expr(f.value);
                         let vv = self.coerce(vv, v);
@@ -6513,6 +6557,29 @@ impl<'c, 'a> Gen<'c, 'a> {
                 }
                 if tests.is_empty() { "false".into() } else { format!("({})", tests.join(" || ")) }
             }
+            // (a key of a record with an index signature that isn't one of its fields: in `$rest`)
+            Ty::Record(fs) if self.rest_field(v.ty).is_some() && lit.is_none_or(|n| !self.c.types.fields(fs).iter().any(|f| f.name == n)) => {
+                let rt = self.rest_field(v.ty).unwrap();
+                let mt = self.c.types.without_undefined(rt);
+                let Ty::Map(mk, mv) = self.tget(mt) else { return "false".into() };
+                let place = self.fld(v.ty, &v.code, "$rest");
+                let present = self.truthy_val(Val::plain(place.clone(), rt));
+                let m = self.project(Val::plain(place, rt), mt);
+                let (kd, vd) = (self.desc(mk), self.desc(mv));
+                let mut tests = vec![format!("({present} && tv_map_has({}, {kd}, {vd}, &{key}))", m.code)];
+                // (a computed key: one of the fields too)
+                if lit.is_none() {
+                    let rest = self.c.interner.lookup("$rest");
+                    for f in self.c.types.fields(fs).to_vec() {
+                        if Some(f.name) == rest {
+                            continue;
+                        }
+                        let l = self.lit(self.sym(f.name).to_string().as_bytes());
+                        tests.push(format!("tv_str_eq({key}, {l})"));
+                    }
+                }
+                format!("({})", tests.join(" || "))
+            }
             _ => {
                 let Some(name) = lit else { return "false".into() };
                 match self.c.has_key(v.ty, name) {
@@ -7026,8 +7093,9 @@ impl<'c, 'a> Gen<'c, 'a> {
         let n = self.sym(name).to_string();
         match self.tget(base.ty) {
             Ty::Class(..) => self.class_field_read(base, name, ty, span),
-            Ty::Interface(..) => match self.iface_field(base, name, ty) {
+            Ty::Interface(..) => match self.iface_field(base.clone(), name, ty) {
                 Some(v) => v,
+                None if let Some(v) = self.iface_rest_read(&base, &n, ty) => v,
                 None => {
                     self.unsupported(span, "using an interface method as a value");
                     Val::plain("0", ty)
@@ -7036,6 +7104,9 @@ impl<'c, 'a> Gen<'c, 'a> {
             Ty::Record(fs) => {
                 let f = self.c.types.fields(fs).iter().find(|f| f.name == name).copied();
                 let Some(f) = f else {
+                    if let Some(v) = self.rest_read(&base, &n, ty) {
+                        return v;
+                    }
                     self.unsupported(span, "this field access");
                     return Val::plain("0", ty);
                 };
@@ -7092,6 +7163,189 @@ impl<'c, 'a> Gen<'c, 'a> {
                 Val::plain("0", ty)
             }
         }
+    }
+
+    /// `o.name op= value` where `o` (of type `nt`) is a union of records, or a record with an
+    /// index signature that lacks the field: the value stored in each member's field (in `$rest`
+    /// where a member has none).
+    fn record_member_assign(&mut self, op: AssignOp, obj: ExprId, name: crate::intern::Sym, value: ExprId, nt: TyId, span: Span) -> Val {
+        let p = self.place(obj);
+        let p = self.project_place(p, nt);
+        let v = self.expr(value);
+        let v = self.own(v);
+        let key = self.sym(name).to_string();
+        if let Ty::Union(_) = self.tget(nt) {
+            let ms = self.members(nt);
+            let tag = self.u_tag(&p.lv, nt);
+            self.open(&format!("switch ({tag}) {{"));
+            for (i, &mt) in ms.iter().enumerate() {
+                self.open(&format!("case {i}: {{"));
+                self.push_temps();
+                let mp = self.project_place(Place { lv: p.lv.clone(), ty: nt, weak: false }, mt);
+                self.member_store(&mp, name, &key, op, &v, span);
+                self.pop_temps();
+                self.line("break;");
+                self.close("}");
+            }
+            self.line("default: break;");
+            self.close("}");
+        } else {
+            self.member_store(&p, name, &key, op, &v, span);
+        }
+        Val { owned: false, ..v }
+    }
+
+    /// One record's `.name op= v` (in its `$rest` when it has no such field).
+    fn member_store(&mut self, rec: &Place, name: crate::intern::Sym, key: &str, op: AssignOp, v: &Val, span: Span) {
+        let borrowed = Val { owned: false, ..v.clone() };
+        let ft = match self.tget(rec.ty) {
+            Ty::Record(fs) => self.c.types.fields(fs).iter().find(|f| f.name == name).map(|f| f.ty),
+            _ => None,
+        };
+        let (cur, slot_ty) = match ft {
+            Some(ft) => (Val::plain(self.fld(rec.ty, &rec.lv, key), ft), ft),
+            None => {
+                let Some(rt) = self.rest_field(rec.ty) else {
+                    self.unsupported(span, "assigning to this member");
+                    return;
+                };
+                let mt = self.c.types.without_undefined(rt);
+                let Ty::Map(_, vt) = self.tget(mt) else { return };
+                let read_ty = if vt == ANY || vt == UNKNOWN { vt } else { self.c.types.optional(vt) };
+                let cur = if matches!(op, AssignOp::Assign) {
+                    Val::plain("0", UNDEFINED)
+                } else {
+                    let base = Val::plain(rec.lv.clone(), rec.ty);
+                    self.rest_read(&base, key, read_ty).unwrap_or_else(|| Val::plain("0", UNDEFINED))
+                };
+                (cur, vt)
+            }
+        };
+        let nv = match op {
+            AssignOp::Assign => self.coerce(borrowed, slot_ty),
+            AssignOp::Op(b) => self.compound_val(b, cur.clone(), borrowed, slot_ty, span),
+        };
+        let nv = self.own(nv);
+        let code = self.consume(nv);
+        if ft.is_some() {
+            let ct = self.ctype(slot_ty);
+            let t = self.fresh("n");
+            let rel = self.release_code(slot_ty, &cur.code);
+            let rel = if rel.is_empty() { String::new() } else { format!("{rel}; ") };
+            self.line(format!("{ct} {t} = {code}; {rel}{} = {t};", cur.code));
+            return;
+        }
+        // (into `$rest`, made the first time)
+        let rt = self.rest_field(rec.ty).unwrap();
+        let mt = self.c.types.without_undefined(rt);
+        let Ty::Map(k, vt) = self.tget(mt) else { return };
+        let rp = Place { lv: self.fld(rec.ty, &rec.lv, "$rest"), ty: rt, weak: false };
+        let present = self.truthy_val(Val::plain(rp.lv.clone(), rt));
+        self.open(&format!("if (!{present}) {{"));
+        self.push_temps();
+        let fresh = self.fresh("rm");
+        self.line(format!("tv_map {fresh} = tv_map_fresh_object();"));
+        let fm = self.coerce(Val { code: fresh, ty: mt, owned: true }, rt);
+        let fm = self.consume(fm);
+        self.line(format!("{} = {fm};", rp.lv));
+        self.pop_temps();
+        self.close("}");
+        let ml = self.project_place(rp, mt);
+        let (kd, vd, vct) = (self.desc(k), self.desc(vt), self.ctype(vt));
+        let lit = self.lit(key.as_bytes());
+        let (kv, xv) = (self.fresh("rk"), self.fresh("rx"));
+        self.line(format!("tv_str {kv} = {lit}; {vct} {xv} = {code}; tv_map_set(&{}, {kd}, {vd}, &{kv}, &{xv});", ml.lv));
+    }
+
+    /// `a op b` of two values, for `x op= y` (`+` of strings: concatenated).
+    fn compound_val(&mut self, b: BinOp, cur: Val, rhs: Val, ty: TyId, span: Span) -> Val {
+        if cur.ty == ANY || rhs.ty == ANY || ty == ANY {
+            let rt = self.c.any_binary(b, cur.ty, rhs.ty);
+            let r = self.any_binop(b, cur, rhs, rt);
+            return self.coerce(r, ty);
+        }
+        if b == BinOp::Add && (self.c.types.is_stringish(cur.ty) || self.c.types.is_stringish(rhs.ty)) {
+            let sbv = self.fresh("sb");
+            self.line(format!("tv_sb {sbv} = {{0}};"));
+            self.open("{");
+            self.line(format!("tv_sb *sb = &{sbv};"));
+            let (c1, c2) = (self.string_code(cur.ty, &cur.code), self.string_code(rhs.ty, &rhs.code));
+            self.line(format!("{c1}; {c2};"));
+            self.close("}");
+            let r = self.tmp(STR, &format!("tv_str_from_sb(&{sbv})"), true);
+            return self.coerce(r, ty);
+        }
+        let cur = self.coerce(cur, ty);
+        let rhs = if self.c.types.is_float(ty) { self.coerce(rhs, ty) } else { rhs };
+        self.arith(b, cur, rhs, ty, span)
+    }
+
+    /// The hidden `$rest` map of a record with an index signature (its type), if it has one.
+    pub(crate) fn rest_field(&self, rec: TyId) -> Option<TyId> {
+        let rest = self.c.interner.lookup("$rest")?;
+        let Ty::Record(fs) = self.tget(rec) else { return None };
+        self.c.types.fields(fs).iter().find(|f| f.name == rest).map(|f| f.ty)
+    }
+
+    /// `r.k` of a record with an index signature that has no field `k`: its value in `$rest`,
+    /// `undefined` if it's not there.
+    fn rest_read(&mut self, base: &Val, key: &str, ty: TyId) -> Option<Val> {
+        let rt = self.rest_field(base.ty)?;
+        let lv = self.fld(base.ty, &base.code, "$rest");
+        self.rest_read_at(lv, rt, key, ty)
+    }
+
+    /// The same of an interface value, through its `$rest` member.
+    fn iface_rest_read(&mut self, base: &Val, key: &str, ty: TyId) -> Option<Val> {
+        let rest = self.c.interner.lookup("$rest")?;
+        let (lv, rt) = self.iface_field_lv(base, rest)?;
+        self.rest_read_at(lv, rt, key, ty)
+    }
+
+    /// `rest_lv` (a `$rest`, of type `rt`)'s value for `key`, as `ty`.
+    fn rest_read_at(&mut self, rest_lv: String, rt: TyId, key: &str, ty: TyId) -> Option<Val> {
+        let mt = self.c.types.without_undefined(rt);
+        let Ty::Map(k, v) = self.tget(mt) else { return None };
+        let rv = Val { code: rest_lv, ty: rt, owned: false };
+        let present = self.truthy_val(rv.clone());
+        let (kd, vd, vct, ct) = (self.desc(k), self.desc(v), self.ctype(v), self.ctype(ty));
+        let lit = self.lit(key.as_bytes());
+        let res = self.fresh("rr");
+        self.line(format!("{ct} {res};"));
+        let undef = |g: &mut Self| {
+            let u = g.coerce(Val::plain("0", UNDEFINED), ty);
+            g.consume(u)
+        };
+        self.open(&format!("if ({present}) {{"));
+        self.push_temps();
+        let mv = self.project(rv, mt);
+        let (kv, vp) = (self.fresh("rk"), self.fresh("rp"));
+        self.line(format!("tv_str {kv} = {lit}; {vct} *{vp} = tv_map_get({}, {kd}, {vd}, &{kv});", mv.code));
+        self.open(&format!("if ({vp}) {{"));
+        self.push_temps();
+        let x = self.coerce(Val { code: format!("(*{vp})"), ty: v, owned: false }, ty);
+        let x = self.own(x);
+        let xc = self.consume(x);
+        self.line(format!("{res} = {xc};"));
+        self.pop_temps();
+        self.close("} else {");
+        self.bump(1);
+        let u = undef(self);
+        self.line(format!("{res} = {u};"));
+        self.bump(-1);
+        self.line("}");
+        self.pop_temps();
+        self.close("} else {");
+        self.bump(1);
+        let u = undef(self);
+        self.line(format!("{res} = {u};"));
+        self.bump(-1);
+        self.line("}");
+        let owned = self.is_rc(ty);
+        if owned {
+            self.b().temps.last_mut().unwrap().push((res.clone(), ty));
+        }
+        Some(Val { code: res, ty, owned })
     }
 
     fn index(&mut self, e: ExprId, obj: ExprId, index: ExprId, optional: bool, ty: TyId, span: Span) -> Val {
@@ -8038,6 +8292,17 @@ impl<'c, 'a> Gen<'c, 'a> {
             && self.ty(obj) == ANY
         {
             return self.any_assign(op, target, value, span);
+        }
+        // (a field of a union of records, each member's; a key of a record with an index
+        // signature, in its `$rest`)
+        if let ExprKind::Member { obj, name, .. } = self.ast(m).expr(target).kind {
+            let nt = self.ty(obj);
+            let nt = self.c.types.without_undefined(nt);
+            let union = matches!(self.tget(nt), Ty::Union(_)) && self.members(nt).iter().all(|&mt| matches!(self.tget(mt), Ty::Record(_)) && self.tuple_of(mt).is_none());
+            let rest = matches!(self.tget(nt), Ty::Record(fs) if !self.c.types.fields(fs).iter().any(|f| f.name == name)) && self.rest_field(nt).is_some();
+            if union || rest {
+                return self.record_member_assign(op, obj, name, value, nt, span);
+            }
         }
         if let ExprKind::Member { obj, .. } | ExprKind::Index { obj, .. } = self.ast(m).expr(target).kind {
             let ot = self.ty(obj);

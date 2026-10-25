@@ -168,6 +168,39 @@ impl<'c, 'a> Gen<'c, 'a> {
         }
         let mut b = String::from("    bool first = true;\n    tv_sb_add_char(sb, '{');\n");
         for (name, ty, lv) in parts {
+            // (a record's index-signature keys, its `$rest` map: as its own keys)
+            if name == "$rest"
+                && let mt = self.c.types.without_undefined(*ty)
+                && let Ty::Map(k, v) = self.tget(mt)
+            {
+                let (kd, vd, vct) = (self.desc(k), self.desc(v), self.ctype(v));
+                let w = self.json_writer(v);
+                let present = match self.tag_of(*ty, UNDEFINED) {
+                    Some(t) => format!("!({})", self.u_is(lv, *ty, t)),
+                    None => "true".into(),
+                };
+                let ml = match self.tag_of(*ty, mt) {
+                    Some(t) if mt != *ty => self.u_payload(lv, *ty, t),
+                    _ => lv.clone(),
+                };
+                let skip = self.json_is_undefined(v, &format!("(*({vct} *)vp)"));
+                let _ = writeln!(
+                    b,
+                    "    if ({present}) {{
+        tv_int i = 0; void *kp, *vp;
+        while (tv_map_next({ml}, {kd}, {vd}, &i, &kp, &vp)) {{
+            if ({skip}) continue;
+            if (!first) tv_sb_add_char(sb, ',');
+            first = false;
+            tvg_js_nl(sb, ind, lvl + 1);
+            tv_json_quote(sb, *(tv_str *)kp);
+            if (ind.p->len) tv_sb_add(sb, \": \", 2); else tv_sb_add_char(sb, ':');
+            {w}(sb, ({vct} *)vp, ind, lvl + 1);
+        }}
+    }}"
+                );
+                continue;
+            }
             let w = self.json_writer(*ty);
             let ct = self.ctype(*ty);
             let key_text = format!("\"{name}\"");
@@ -304,8 +337,29 @@ impl<'c, 'a> Gen<'c, 'a> {
                     let _ = writeln!(b, "    bool seen{i} = false;");
                 }
                 b.push_str("    if (!tv_jp_try_char(p, '}')) {\n        do {\n            tv_str k;\n            if (!tv_jp_string(p, &k)) return false;\n            if (!tv_jp_char(p, ':')) { tv_str_release(k); return false; }\n            ");
+                // (an index signature's other keys: into `$rest`, made the first time)
+                let mut other = "{ tv_str_release(k); if (!tv_jp_skip(p)) return false; }".to_string();
+                if let Some(rf) = fs.iter().find(|f| self.sym(f.name) == "$rest")
+                    && let mt = self.c.types.without_undefined(rf.ty)
+                    && let Ty::Map(mk, mv) = self.tget(mt)
+                    && self.c.types.is_string(mk)
+                {
+                    let rt = rf.ty;
+                    let place = self.fld(t, "*out", "$rest");
+                    let (present, ml, make) = match (self.tag_of(rt, UNDEFINED), self.tag_of(rt, mt)) {
+                        (Some(u), Some(k)) if mt != rt => (format!("!({})", self.u_is(&place, rt, u)), self.u_payload(&place, rt, k), self.u_make(rt, k, Some("tv_map_fresh_object()"))),
+                        _ => ("true".to_string(), place.clone(), "tv_map_fresh_object()".to_string()),
+                    };
+                    let pv = self.json_parser(mv);
+                    let (vct, vd, dv) = (self.ctype(mv), self.desc(mv), self.default_value(mv));
+                    let rel = self.release_code(mv, "x");
+                    other = format!("{{ if (!({present})) {place} = {make}; {vct} x = {dv}; if (!{pv}(p, &x)) {{ {rel}; tv_str_release(k); return false; }} tv_map_set(&{ml}, &tv_type_str, {vd}, &k, &x); }}");
+                }
                 for (i, f) in fs.iter().enumerate() {
                     let n = self.sym(f.name).to_string();
+                    if n == "$rest" {
+                        continue;
+                    }
                     let pf = self.json_parser(f.ty);
                     let place = self.fld(t, "*out", &n);
                     let _ = write!(
@@ -316,7 +370,8 @@ impl<'c, 'a> Gen<'c, 'a> {
                         n.len()
                     );
                 }
-                b.push_str("{ tv_str_release(k); if (!tv_jp_skip(p)) return false; }\n        } while (tv_jp_try_char(p, ','));\n        if (!tv_jp_char(p, '}')) return false;\n    }\n");
+                b.push_str(&other);
+                b.push_str("\n        } while (tv_jp_try_char(p, ','));\n        if (!tv_jp_char(p, '}')) return false;\n    }\n");
                 for (i, f) in fs.iter().enumerate() {
                     if !f.optional && !self.c.types.has_undefined(f.ty) {
                         let n = self.sym(f.name);

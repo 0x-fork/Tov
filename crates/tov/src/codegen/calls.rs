@@ -2752,8 +2752,59 @@ impl<'c, 'a> Gen<'c, 'a> {
                         let out = self.tmp(ty, &format!("tv_arr_with_capacity({rd}, {})", fields.len()), true);
                         let tf = self.tuple_of(rt);
                         for f in &fields {
-                            let key = self.lit(self.sym(f.name).to_string().as_bytes());
-                            let fv = Val::plain(self.fld(base, &v.code, self.sym(f.name)), f.ty);
+                            let fname = self.sym(f.name).to_string();
+                            let place = self.fld(base, &v.code, &fname);
+                            // (the keys of an index signature, its `$rest` map: each entry)
+                            if fname == "$rest"
+                                && let mt = self.c.types.without_undefined(f.ty)
+                                && let Ty::Map(mk, mv) = self.tget(mt)
+                            {
+                                let present = self.truthy_val(Val::plain(place.clone(), f.ty));
+                                self.open(&format!("if ({present}) {{"));
+                                self.push_temps();
+                                let m = self.project(Val::plain(place.clone(), f.ty), mt);
+                                let (mkd, mvd, mvct) = (self.desc(mk), self.desc(mv), self.ctype(mv));
+                                let (it, kp, vp) = (self.fresh("i"), self.fresh("kp"), self.fresh("vp"));
+                                self.line(format!("tv_int {it} = 0; void *{kp}, *{vp};"));
+                                self.open(&format!("while (tv_map_next({}, {mkd}, {mvd}, &{it}, &{kp}, &{vp})) {{", m.code));
+                                self.push_temps();
+                                let key = format!("({{ tv_str k_ = *(tv_str *){kp}; tv_str_retain(k_); k_; }})");
+                                let ev = Val { code: format!("(*({mvct} *){vp})"), ty: mv, owned: false };
+                                let item = match name {
+                                    "keys" => key,
+                                    "values" => {
+                                        let x = self.coerce(ev, rt);
+                                        let x = self.own(x);
+                                        self.consume(x)
+                                    }
+                                    _ => match &tf {
+                                        Some(tf) => {
+                                            let x = self.coerce(ev, tf[1].ty);
+                                            let x = self.own(x);
+                                            let x = self.consume(x);
+                                            let parts = format!(".f_{} = {key}, .f_{} = {x}", self.sym(tf[0].name), self.sym(tf[1].name));
+                                            self.rec_lit(rt, &parts)
+                                        }
+                                        None => "0".into(),
+                                    },
+                                };
+                                self.line(format!("TVG_PUSH({rct}, &{}, {rd}, {item});", out.code));
+                                self.pop_temps();
+                                self.close("}");
+                                self.pop_temps();
+                                self.close("}");
+                                continue;
+                            }
+                            // (an optional field that's absent: no key)
+                            let absent = match self.tag_of(f.ty, UNDEFINED).filter(|_| f.optional) {
+                                Some(k) => Some(self.u_is(&place, f.ty, k)),
+                                None => None,
+                            };
+                            if let Some(a) = &absent {
+                                self.open(&format!("if (!({a})) {{"));
+                            }
+                            let key = self.lit(fname.as_bytes());
+                            let fv = Val::plain(place, f.ty);
                             let item = match name {
                                 "keys" => key,
                                 "values" => {
@@ -2762,7 +2813,12 @@ impl<'c, 'a> Gen<'c, 'a> {
                                     self.consume(x)
                                 }
                                 _ => {
-                                    let Some(tf) = &tf else { continue };
+                                    let Some(tf) = &tf else {
+                                        if absent.is_some() {
+                                            self.close("}");
+                                        }
+                                        continue;
+                                    };
                                     let x = self.coerce(fv, tf[1].ty);
                                     let x = self.own(x);
                                     let x = self.consume(x);
@@ -2771,6 +2827,9 @@ impl<'c, 'a> Gen<'c, 'a> {
                                 }
                             };
                             self.line(format!("TVG_PUSH({rct}, &{}, {rd}, {item});", out.code));
+                            if absent.is_some() {
+                                self.close("}");
+                            }
                         }
                         out
                     }

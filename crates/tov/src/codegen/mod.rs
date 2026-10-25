@@ -1489,8 +1489,33 @@ impl<'c, 'a> Gen<'c, 'a> {
                             } else if fs.iter().any(|f| f.optional) {
                                 // (an optional field that's absent isn't shown, as JavaScript has no key for it)
                                 let n = fs.len();
-                                let _ = writeln!(b, "    const char *names[{n}]; const tv_type *types[{n}]; const void *fields[{n}]; int n = 0;");
+                                // (a record's index-signature keys, its `$rest` map: shown as its own)
+                                let rest = fs.iter().find(|f| self.sym(f.name) == "$rest").map(|f| f.ty);
+                                let mut rest_add = String::new();
+                                let size = match rest {
+                                    Some(rt) => {
+                                        let mt = self.c.types.without_undefined(rt);
+                                        let place = "x->f_$rest".to_string();
+                                        let (present, ml) = match (self.tag_of(rt, UNDEFINED), self.tag_of(rt, mt)) {
+                                            (Some(u), Some(k)) if mt != rt => (format!("!({})", self.u_is(&place, rt, u)), self.u_payload(&place, rt, k)),
+                                            _ => ("true".to_string(), place.clone()),
+                                        };
+                                        if let Ty::Map(k, v) = self.tget(mt) {
+                                            let (kd, vd) = (self.desc(k), self.desc(v));
+                                            let _ = writeln!(b, "    tv_int rn = {present} ? tv_map_size({ml}) : 0;");
+                                            rest_add = format!("    if ({present}) {{ tv_int ri = 0; void *kp, *vp; while (tv_map_next({ml}, {kd}, {vd}, &ri, &kp, &vp)) {{ names[n] = ((tv_str *)kp)->p->data; types[n] = {vd}; fields[n] = vp; n++; }} }}\n");
+                                            format!("{n} + rn")
+                                        } else {
+                                            n.to_string()
+                                        }
+                                    }
+                                    None => n.to_string(),
+                                };
+                                let _ = writeln!(b, "    const char *names[{size}]; const tv_type *types[{size}]; const void *fields[{size}]; int n = 0;");
                                 for (i, f) in fs.iter().enumerate() {
+                                    if Some(f.ty) == rest && self.sym(f.name) == "$rest" {
+                                        continue;
+                                    }
                                     let place = format!("x->f_{}", self.sym(f.name));
                                     let add = format!("names[n] = {}; types[n] = {}; fields[n] = {}; n++;", names[i], descs[i], ptrs[i]);
                                     match self.tag_of(f.ty, UNDEFINED).filter(|_| f.optional) {
@@ -1503,6 +1528,7 @@ impl<'c, 'a> Gen<'c, 'a> {
                                         }
                                     }
                                 }
+                                b.push_str(&rest_add);
                                 b.push_str("    tv_inspect_record(sb, depth, n, names, types, fields);\n");
                             } else {
                                 let _ = writeln!(b, "    static const char *const names[] = {{ {} }};", names.join(", "));

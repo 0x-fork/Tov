@@ -1035,6 +1035,11 @@ impl<'a> Checker<'a> {
                         for &m in &members {
                             let ft = match *self.types.get(m) {
                                 Ty::Record(fs) => self.types.fields(fs).iter().find(|f| f.name == *name).map(|f| *self.types.get(f.ty)),
+                                // (an interface checked as one: its members')
+                                Ty::Interface(i, args) => {
+                                    let args = self.types.tys(args).to_vec();
+                                    self.iface_fields_inst(i, &args).into_iter().find(|f| f.name == *name).map(|f| *self.types.get(f.ty))
+                                }
                                 _ => None,
                             };
                             match ft {
