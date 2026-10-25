@@ -52,14 +52,16 @@ typedef struct tv_re {
 } tv_re;
 
 /* A sequence of characters, classes and greedy quantifiers, groups around parts of it (none
- * quantified), `^` first and `$` last at most, in which nothing a quantifier may take could
- * also start what follows it: then the longest run of each item is the only one a match can use,
- * and the match is found with no backtracking, as the engine would find it. */
+ * quantified), `^` first and `$` last at most: matched by taking each item's longest run and,
+ * when what follows fails, giving back one character at a time from the nearest item that can
+ * spare one, as the engine backtracks. When nothing a quantifier may take could also start what
+ * follows it (`det`), the longest runs are the only ones a match can use: no backtracking. */
 enum { TV_LIN_ITEMS = 32, TV_LIN_GROUPS = 9 };
 typedef struct tv_re_lin {
     int n, ngroups;
     bool start, end; /* `^`, `$` */
     bool any_start;  /* the first item may be empty: a match may start anywhere */
+    bool det;        /* every quantifier apart from what may follow it: no backtracking */
     int one;         /* the one character the first item takes, or -1 */
     struct { bool set[128]; int min, max; } item[TV_LIN_ITEMS]; /* max -1: no limit */
     struct { int first, last; } group[TV_LIN_GROUPS];          /* items [first, last) */
@@ -278,11 +280,12 @@ static bool tv_re_lin_parse(const tv_re *r, const char *src, size_t n, tv_re_lin
         for (int ch = 0; ch < 128; ch++) if (L->item[0].set[ch]) { L->one = ch; count++; }
         if (count != 1) L->one = -1;
     }
-    /* (each quantifier's characters apart from all that may come next) */
-    for (int k = 0; k < L->n; k++) {
+    /* (each quantifier's characters apart from all that may come next: no backtracking) */
+    L->det = true;
+    for (int k = 0; k < L->n && L->det; k++) {
         if (L->item[k].min == L->item[k].max) continue;
-        for (int j = k + 1; j < L->n; j++) {
-            for (int ch = 0; ch < 128; ch++) if (L->item[k].set[ch] && L->item[j].set[ch]) return false;
+        for (int j = k + 1; j < L->n && L->det; j++) {
+            for (int ch = 0; ch < 128; ch++) if (L->item[k].set[ch] && L->item[j].set[ch]) { L->det = false; break; }
             if (L->item[j].min > 0) break;
         }
     }
@@ -308,14 +311,29 @@ static bool tv_re_lin_find(const tv_re_lin *L, uint8_t **cap, const uint8_t *buf
         }
         tv_int p = i;
         int k = 0;
-        for (; k < L->n; k++) {
-            at[k] = buf + p;
-            const bool *set = L->item[k].set;
-            int max = L->item[k].max, got = 0;
-            while ((max < 0 || got < max) && p < n && set[buf[p]]) p++, got++;
-            if (got < L->item[k].min) break;
+        int got[TV_LIN_ITEMS];
+        for (;;) {
+            /* forward: each item from k on its longest run */
+            for (; k < L->n; k++) {
+                at[k] = buf + p;
+                const bool *set = L->item[k].set;
+                int max = L->item[k].max, g = 0;
+                while ((max < 0 || g < max) && p < n && set[buf[p]]) p++, g++;
+                got[k] = g;
+                if (g < L->item[k].min) break;
+            }
+            if (k == L->n && (!L->end || p == n)) break; /* matched */
+            if (L->det) { k = -1; break; }
+            /* back: the nearest earlier item that can give a character back (the failing one can't) */
+            if (k == L->n) k--;
+            else k--;
+            while (k >= 0 && got[k] <= L->item[k].min) k--;
+            if (k < 0) break;
+            got[k]--;
+            p = (tv_int)(at[k] - buf) + got[k];
+            k++;
         }
-        if (k < L->n || (L->end && p != n)) continue;
+        if (k < 0) continue;
         at[L->n] = buf + p;
         cap[0] = (uint8_t *)buf + i;
         cap[1] = (uint8_t *)buf + p;
