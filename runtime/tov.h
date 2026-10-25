@@ -323,7 +323,7 @@ tv_str tv_f64_to_locale(double v, int min_frac, int max_frac); /* Intl.NumberFor
 tv_str tv_int_to_locale(tv_int v, int min_frac);
 tv_str tv_f64_to_precision(double v, tv_int digits, const char *loc); /* JS toPrecision; traps if digits ∉ 1..100 */
 tv_str tv_f64_to_exponential(double v, tv_int digits, bool has_digits, const char *loc); /* JS toExponential */
-tv_int tv_str_locale_compare(tv_str a, tv_str b); /* -1, 0, 1: letters in alphabetical order (case after), then code points */
+tv_int tv_str_locale_compare(tv_str a, tv_str b); /* -1, 0, 1: ICU's root collation (base letters, then accents, then case) */
 void tv_sb_push_int(tv_sb *sb, tv_int v);
 void tv_sb_push_f64(tv_sb *sb, double v);       /* same format as tv_str_from_f64 */
 /* A TypeScript number held as an integer: past 2^53 written as JavaScript writes that double. */
