@@ -45,6 +45,7 @@ typedef struct tv_re {
     uint8_t *bc1;
     bool anchored;
     int lead;            /* the one byte `first` holds, or -1 */
+    int simple_one;      /* the one byte `set` holds, or -1 */
     tv_arr names;        /* reNames' answer, made once (p NULL until then) */
     bool first[128];
 } tv_re;
@@ -156,6 +157,10 @@ static bool tv_re_simple_parse(tv_re *r, const char *src, size_t n) {
     if (i != n) return false;
     memcpy(r->set, set, sizeof set);
     r->plus = plus;
+    /* (one character: found with memchr) */
+    int count = 0, one = -1;
+    for (int c = 0; c < 128; c++) if (set[c]) { count++; one = c; }
+    r->simple_one = count == 1 ? one : -1;
     return true;
 }
 
@@ -268,7 +273,13 @@ static bool tv_re_find(const tv_re *r, uint8_t **cap, const uint8_t *buf, tv_int
     if (from < 0 || from > n) return false;
     if (r->simple && ascii) {
         for (tv_int i = from; i < n; i++) {
-            if (!r->set[buf[i]]) continue;
+            if (r->simple_one >= 0) {
+                const uint8_t *q = memchr(buf + i, r->simple_one, (size_t)(n - i));
+                if (!q) return false;
+                i = (tv_int)(q - buf);
+            } else if (!r->set[buf[i]]) {
+                continue;
+            }
             tv_int j = i + 1;
             if (r->plus) while (j < n && r->set[buf[j]]) j++;
             cap[0] = (uint8_t *)buf + i;
