@@ -69,5 +69,7 @@ DEF(negative_lookahead, 5) /* must come after */
 DEF(set_char_pos, 2) /* store the character position to a register */
 DEF(check_advance, 2) /* check that the register is different from the character position */
 DEF(prev, 1) /* go to the previous char */
+DEF(greedy_char, 13) /* Tov: u32 min, u32 max, u32 len, then a one-character atom of len bytes,
+                        repeated greedily; one backtrack state gives the characters back */
 
 #endif /* DEF */

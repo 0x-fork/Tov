@@ -83,6 +83,7 @@ typedef struct {
     int capture_count;
     int total_capture_count; /* -1 = not computed yet */
     int has_named_captures; /* -1 = don't know, 0 = no, 1 = yes */
+    BOOL tv_lookaround; /* Tov: the pattern has a lookaround (greedy_char isn't used) */
     void *opaque;
     DynBuf group_names;
     union {
@@ -570,6 +571,10 @@ static __maybe_unused void lre_dump_bytecode(const uint8_t *buf,
         case REOP_save_reset:
             printf(" %u %u", buf[pos + 1], buf[pos + 2]);
             break;
+        case REOP_greedy_char:
+            printf(" %u..%u", get_u32(buf + pos + 1), get_u32(buf + pos + 5));
+            len += get_u32(buf + pos + 9) & 0xffff;
+            break;
         case REOP_set_i32:
             val = buf[pos + 1];
             val2 = get_u32(buf + pos + 2);
@@ -626,6 +631,67 @@ static int re_emit_op_u32(REParseState *s, int op, uint32_t val)
     pos = s->byte_code.size;
     dbuf_put_u32(&s->byte_code, val);
     return pos;
+}
+
+/* Tov: an opcode's size, its variable part included. */
+static int tv_re_op_len(const uint8_t *b)
+{
+    int len = reopcode_info[b[0]].size;
+    switch (b[0]) {
+    case REOP_range: case REOP_range_i: len += get_u16(b + 1) * 4; break;
+    case REOP_range32: case REOP_range32_i: len += get_u16(b + 1) * 8; break;
+    case REOP_back_reference: case REOP_back_reference_i:
+    case REOP_backward_back_reference: case REOP_backward_back_reference_i: len += b[1]; break;
+    case REOP_greedy_char: len += get_u32(b + 9) & 0xffff; break;
+    }
+    return len;
+}
+
+/* Tov: the one-character atom at a (not case-insensitive) can't match character c. */
+static BOOL tv_re_never_matches(const uint8_t *a, uint32_t c)
+{
+    switch (a[0]) {
+    case REOP_char: return get_u16(a + 1) != c;
+    case REOP_char32: return get_u32(a + 1) != c;
+    case REOP_dot: return c == 0x0a || c == 0x0d || c == 0x2028 || c == 0x2029;
+    case REOP_space: return !lre_is_space(c);
+    case REOP_not_space: return lre_is_space(c);
+    case REOP_range:
+    case REOP_range32:
+        {
+            int n = get_u16(a + 1), wide = a[0] == REOP_range32, i;
+            for (i = 0; i < n; i++) {
+                uint32_t low = wide ? get_u32(a + 3 + i * 8) : get_u16(a + 3 + i * 4);
+                uint32_t high = wide ? get_u32(a + 3 + i * 8 + 4) : get_u16(a + 3 + i * 4 + 2);
+                if (!wide && i == n - 1 && high == 0xffff)
+                    high = 0x10ffff;
+                if (low <= c && c <= high)
+                    return FALSE;
+            }
+            return TRUE;
+        }
+    default:
+        return FALSE;
+    }
+}
+
+/* Tov: a greedy run followed (past capture marks) by a character it can't match never gives
+   any back usefully: the character there would be one of its own. It keeps no backtrack state
+   (bit 31 of its atom length). */
+static void tv_re_possessive(uint8_t *bc, int len)
+{
+    int pos = 0;
+    while (pos < len) {
+        int l = tv_re_op_len(bc + pos);
+        if (bc[pos] == REOP_greedy_char) {
+            int next = pos + l;
+            while (next < len && (bc[next] == REOP_save_start || bc[next] == REOP_save_end))
+                next += reopcode_info[bc[next]].size;
+            if (next < len && bc[next] == REOP_char && tv_re_never_matches(bc + pos + 13, get_u16(bc + next + 1)))
+                put_u32(bc + pos + 9, get_u32(bc + pos + 9) | 0x80000000u);
+        }
+        pos += l;
+    }
 }
 
 static int re_emit_goto(REParseState *s, int op, uint32_t val)
@@ -1580,6 +1646,11 @@ static BOOL re_need_check_adv_and_capture_init(BOOL *pneed_capture_init,
             len += val * 8;
             need_check_adv = FALSE;
             break;
+        case REOP_greedy_char:
+            len += get_u32(bc_buf + pos + 9) & 0xffff;
+            if (get_u32(bc_buf + pos + 1) > 0)
+                need_check_adv = FALSE;
+            break;
         case REOP_char:
         case REOP_char_i:
         case REOP_char32:
@@ -2254,6 +2325,37 @@ static int re_parse_term(REParseState *s, BOOL is_backward_dir)
             if (last_atom_start < 0) {
                 return re_parse_error(s, "nothing to repeat");
             }
+            /* (Tov: a greedy repeat of one character, `\S+`, `[^:]*`, `.{2,}`: one
+               opcode taking the longest run, giving characters back one at a time, instead
+               of a backtrack state per character) */
+            if (greedy && !is_backward_dir && !s->tv_lookaround && last_capture_count == s->capture_count &&
+                quant_max >= 2 && s->byte_code.size - last_atom_start <= 0xffff) {
+                const uint8_t *a = s->byte_code.buf + last_atom_start;
+                int alen = s->byte_code.size - last_atom_start, one = -1;
+                switch (a[0]) {
+                case REOP_char: case REOP_char_i: case REOP_char32: case REOP_char32_i:
+                case REOP_dot: case REOP_any: case REOP_space: case REOP_not_space:
+                    one = reopcode_info[a[0]].size;
+                    break;
+                case REOP_range: case REOP_range_i:
+                    one = reopcode_info[a[0]].size + get_u16(a + 1) * 4;
+                    break;
+                case REOP_range32: case REOP_range32_i:
+                    one = reopcode_info[a[0]].size + get_u16(a + 1) * 8;
+                    break;
+                }
+                if (one == alen) {
+                    if (dbuf_insert(&s->byte_code, last_atom_start, 13))
+                        goto out_of_memory;
+                    uint8_t *q = s->byte_code.buf + last_atom_start;
+                    q[0] = REOP_greedy_char;
+                    put_u32(q + 1, quant_min);
+                    put_u32(q + 5, quant_max);
+                    put_u32(q + 9, alen);
+                    last_atom_start = -1;
+                    break;
+                }
+            }
             {
                 BOOL need_capture_init, add_zero_advance_check;
                 int len, pos;
@@ -2498,6 +2600,9 @@ static int compute_register_count(uint8_t *bc_buf, int bc_buf_len)
             val = bc_buf[pos + 1];
             len += val;
             break;
+        case REOP_greedy_char:
+            len += get_u32(bc_buf + pos + 9) & 0xffff;
+            break;
         }
         pos += len;
     }
@@ -2542,6 +2647,9 @@ uint8_t *lre_compile(int *plen, char *error_msg, int error_msg_size,
     s->capture_count = 1;
     s->total_capture_count = -1;
     s->has_named_captures = -1;
+    for (size_t k = 0; k + 2 < buf_len; k++)
+        if (buf[k] == '(' && buf[k + 1] == '?' && (buf[k + 2] == '=' || buf[k + 2] == '!' || buf[k + 2] == '<'))
+            s->tv_lookaround = TRUE;
 
     dbuf_init2(&s->byte_code, opaque, lre_bytecode_realloc);
     dbuf_init2(&s->group_names, opaque, lre_realloc);
@@ -2585,6 +2693,7 @@ uint8_t *lre_compile(int *plen, char *error_msg, int error_msg_size,
         goto error;
     }
 
+    tv_re_possessive(s->byte_code.buf + RE_HEADER_LEN, s->byte_code.size - RE_HEADER_LEN);
     register_count = compute_register_count(s->byte_code.buf, s->byte_code.size);
     if (register_count < 0) {
         re_parse_error(s, "too many imbricated quantifiers");
@@ -2705,6 +2814,7 @@ typedef enum {
     RE_EXEC_STATE_SPLIT,
     RE_EXEC_STATE_LOOKAHEAD,
     RE_EXEC_STATE_NEGATIVE_LOOKAHEAD,
+    RE_EXEC_STATE_GREEDY, /* Tov: greedy_char's characters to give back (the least run below) */
 } REExecStateEnum;
 
 #if INTPTR_MAX >= INT64_MAX
@@ -2746,6 +2856,85 @@ static int lre_poll_timeout(REExecContext *s)
     }
     return 0;
 }
+
+/* Tov: the one-character atom at apc matches at *pcptr (advanced past it if so). */
+static BOOL tv_re_match1(REExecContext *s, const uint8_t *apc, const uint8_t **pcptr,
+                         const uint8_t *cbuf_end, int cbuf_type)
+{
+    const uint8_t *cptr = *pcptr;
+    uint32_t c, val;
+    int op = apc[0];
+    if (cptr >= cbuf_end)
+        return FALSE;
+    GET_CHAR(c, cptr, cbuf_end, cbuf_type);
+    switch (op) {
+    case REOP_char:
+    case REOP_char_i:
+        val = get_u16(apc + 1);
+        if (op == REOP_char_i)
+            c = lre_canonicalize(c, s->is_unicode);
+        if (c != val)
+            return FALSE;
+        break;
+    case REOP_char32:
+    case REOP_char32_i:
+        val = get_u32(apc + 1);
+        if (op == REOP_char32_i)
+            c = lre_canonicalize(c, s->is_unicode);
+        if (c != val)
+            return FALSE;
+        break;
+    case REOP_dot:
+        if (is_line_terminator(c))
+            return FALSE;
+        break;
+    case REOP_any:
+        break;
+    case REOP_space:
+        if (!lre_is_space(c))
+            return FALSE;
+        break;
+    case REOP_not_space:
+        if (lre_is_space(c))
+            return FALSE;
+        break;
+    case REOP_range:
+    case REOP_range_i:
+    case REOP_range32:
+    case REOP_range32_i:
+        {
+            int n = get_u16(apc + 1), wide = op == REOP_range32 || op == REOP_range32_i;
+            int idx_min = 0, idx_max = n - 1;
+            const uint8_t *r = apc + 3;
+            if (op == REOP_range_i || op == REOP_range32_i)
+                c = lre_canonicalize(c, s->is_unicode);
+            while (idx_min <= idx_max) {
+                int idx = (idx_min + idx_max) / 2;
+                uint32_t low = wide ? get_u32(r + idx * 8) : get_u16(r + idx * 4);
+                uint32_t high = wide ? get_u32(r + idx * 8 + 4) : get_u16(r + idx * 4 + 2);
+                /* 0xffff as a 16-bit range's last bound means +infinity */
+                if (!wide && idx == n - 1 && high == 0xffff && c >= 0xffff && c >= low)
+                    goto found;
+                if (c < low)
+                    idx_max = idx - 1;
+                else if (c > high)
+                    idx_min = idx + 1;
+                else
+                    goto found;
+            }
+            return FALSE;
+        found:
+            break;
+        }
+    default:
+        return FALSE;
+    }
+    *pcptr = cptr;
+    return TRUE;
+}
+
+static __thread StackElem *tv_re_stack_cache;
+static __thread size_t tv_re_stack_cache_size;
 
 static no_inline int stack_realloc(REExecContext *s, size_t n)
 {
@@ -2865,11 +3054,57 @@ static intptr_t lre_exec_backtrack(REExecContext *s, uint8_t **capture,
                 type = sp[-1].bp.type;
                 bp = s->stack_buf + sp[-1].bp.val;
                 sp -= 3;
+                if (type == RE_EXEC_STATE_GREEDY) {
+                    /* one character fewer for the repeat, then on from after it */
+                    const uint8_t *least = sp[-1].ptr;
+                    sp -= 1;
+                    PREV_CHAR(cptr, s->cbuf, cbuf_type);
+                    if (cptr != least) {
+                        sp[0].ptr = (uint8_t *)least;
+                        sp[1].ptr = (uint8_t *)pc;
+                        sp[2].ptr = (uint8_t *)cptr;
+                        sp[3].bp.val = bp - s->stack_buf;
+                        sp[3].bp.type = RE_EXEC_STATE_GREEDY;
+                        sp += 4;
+                        bp = sp;
+                    }
+                    break;
+                }
                 if (type != RE_EXEC_STATE_LOOKAHEAD)
                     break;
             }
             if (lre_poll_timeout(s))
                 return LRE_RET_TIMEOUT;
+            break;
+        case REOP_greedy_char:
+            {
+                uint32_t qmin = get_u32(pc), qmax = get_u32(pc + 4), alen = get_u32(pc + 8), n = 0;
+                const uint8_t *apc = pc + 12, *least = cptr;
+                BOOL possessive = (alen >> 31) != 0;
+                alen &= 0xffff;
+                pc = apc + alen;
+                while (n < qmax) {
+                    const uint8_t *c2 = cptr;
+                    if (!tv_re_match1(s, apc, &c2, cbuf_end, cbuf_type))
+                        break;
+                    cptr = c2;
+                    n++;
+                    if (n == qmin)
+                        least = cptr;
+                }
+                if (n < qmin)
+                    goto no_match;
+                if (cptr != least && !possessive) {
+                    CHECK_STACK_SPACE(4);
+                    sp[0].ptr = (uint8_t *)least;
+                    sp[1].ptr = (uint8_t *)pc;
+                    sp[2].ptr = (uint8_t *)cptr;
+                    sp[3].bp.val = bp - s->stack_buf;
+                    sp[3].bp.type = RE_EXEC_STATE_GREEDY;
+                    sp += 4;
+                    bp = sp;
+                }
+            }
             break;
         case REOP_lookahead_match:
             /* pop all the saved states until reaching the start of
@@ -3342,8 +3577,16 @@ int lre_exec(uint8_t **capture,
     s->interrupt_counter = INTERRUPT_COUNTER_INIT;
     s->opaque = opaque;
 
-    s->stack_buf = s->static_stack_buf;
-    s->stack_size = countof(s->static_stack_buf);
+    /* (Tov: a stack grown by an earlier match is kept for the next: a pattern whose greedy
+       loops outgrow the static one did so on every match, a malloc, realloc and free each) */
+    if (tv_re_stack_cache) {
+        s->stack_buf = tv_re_stack_cache;
+        s->stack_size = tv_re_stack_cache_size;
+        tv_re_stack_cache = NULL;
+    } else {
+        s->stack_buf = s->static_stack_buf;
+        s->stack_size = countof(s->static_stack_buf);
+    }
 
     for(i = 0; i < s->capture_count * 2; i++)
         capture[i] = NULL;
@@ -3358,8 +3601,15 @@ int lre_exec(uint8_t **capture,
 
     ret = lre_exec_backtrack(s, capture, bc_buf + RE_HEADER_LEN, cptr);
 
-    if (s->stack_buf != s->static_stack_buf)
-        lre_realloc(s->opaque, s->stack_buf, 0);
+    if (s->stack_buf != s->static_stack_buf) {
+        /* (kept, up to 4 MB; one already kept by a match this one ran inside of is freed) */
+        if (!tv_re_stack_cache && s->stack_size * sizeof(StackElem) <= ((size_t)4 << 20)) {
+            tv_re_stack_cache = s->stack_buf;
+            tv_re_stack_cache_size = s->stack_size;
+        } else {
+            lre_realloc(s->opaque, s->stack_buf, 0);
+        }
+    }
     return ret;
 }
 

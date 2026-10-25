@@ -1,0 +1,39 @@
+^(\S+) \S+ \S+ \[([^:]+):(\d{2}) ["10.1.2.3 - - [24/Oct/2026:13","10.1.2.3","24/Oct/2026","13"] @0 <10.1.2.3 - - [24/Oct/2026:13>:55:36 +0000] 5
+a+b ["aaab"] @1 c<aaab> 2
+a+ab ["aaab"] @1 c<aaab> 2
+a*aab ["aaab"] @0 <aaab> 2
+x* [""] @0 <>yyy 3
+(\w+)@(\w+)\.com ["bob@site.com","bob","site"] @5 mail <bob@site.com> now 4
+.+?, ["a,"] @0 <a,>b,c 3
+.+, ["a,b,"] @0 <a,b,>c 2
+\d{2,4} ["1234"] @0 <1234>56 3
+\d{2,4}5 ["12345"] @0 <12345>6 2
+[a-z]{3} ["xyA"] @0 <xyA>BCd 3
+^.*$ ["line one"] @0 <line one>
+line two 3
+\s+ ["  "] @1 a<  >b<		>c 3
+[^"]+" ["say \""] @0 <say ">hi" now 3
+(?:ab)+ ["ababab"] @0 <ababab> 2
+é+ ["ééé"] @3 caf<ééé>x 2
+[à-ÿ]+ ["àéî"] @1 x<àéî>z 2
+😀+ ["😀😀"] @1 a<😀😀>b 2
+.{3,} ["ab\ncd"] @0 <ab
+cd> 2
+(a+)+b ["aaab","aaa"] @0 <aaab> 3
+\bw\w* ["word"] @0 <word> <wide> <web> 4
+[0-9a-f]+$ ["DEADbeef"] @3 id=<DEADbeef> 2
+(?=x)x+ ["xxx"] @1 a<xxx> 2
+q+(?!r) ["qq"] @0 <qq>qr 2
+(?<=\$)\d+ ["42"] @6 cost $<42> 2
+a{0,2}a{2} ["aaa"] @0 <aaa> 2
+[a-c]*c ["abcabc"] @0 <abcabc> 2
+\S*\d ["abc1def2"] @0 <abc1def2> x 2
+800000
+\d+5 12345|@0
+[^,]+,x cd,x|@3
+\w+ x bb x|@3
+(\S+)z abz|ab@0
+a+a aaa|@0
+[a-z]+(\d) abc1|1@0
+.+:(.+): a:b:c:|c@0
+\s+$    |@1
