@@ -345,6 +345,9 @@ pub(crate) struct Gen<'c, 'a> {
     pub(crate) fresh_arrays: FxMap<u32, FxSet<u32>>,
     /// Objects' record structs (see `is_obj`), and TOV_BOX_ALL=1 (every record an object, to test).
     rec_structs: FxMap<TyId, String>,
+    /// `define_struct`s under way, and the classes met in their fields meanwhile (defined after).
+    struct_depth: u32,
+    pending_class_structs: Vec<TyId>,
     box_all: bool,
     /// The awaited calls embedded in the async body just emitted: (union member, frame type).
     pub(crate) last_children: Vec<(String, String)>,
@@ -471,6 +474,8 @@ impl<'c, 'a> Gen<'c, 'a> {
             resizers: FxMap::default(),
             fresh_arrays: FxMap::default(),
             rec_structs: FxMap::default(),
+            struct_depth: 0,
+            pending_class_structs: Vec::new(),
             box_all: std::env::var("TOV_BOX_ALL").is_ok_and(|v| v == "1"),
             last_children: Vec::new(),
             agen_helpers: FxMap::default(),
@@ -1016,7 +1021,13 @@ impl<'c, 'a> Gen<'c, 'a> {
                 let _ = writeln!(self.typedefs, "typedef struct {n} {n};");
                 let p = format!("{n}*");
                 self.ctypes.insert(t, p.clone());
-                self.define_struct(t);
+                // (held by pointer: met in another struct's fields, defined once that struct is,
+                // so what the class holds by value never comes before what that struct needs)
+                if self.struct_depth > 0 {
+                    self.pending_class_structs.push(t);
+                } else {
+                    self.define_struct(t);
+                }
                 return p;
             }
             Ty::Interface(..) => "tv_iface".into(),
@@ -1040,6 +1051,27 @@ impl<'c, 'a> Gen<'c, 'a> {
     }
 
     fn define_struct(&mut self, t: TyId) {
+        self.struct_depth += 1;
+        self.define_struct_in(t);
+        self.struct_depth -= 1;
+        if self.struct_depth == 0 {
+            while let Some(c) = self.pending_class_structs.pop() {
+                self.struct_depth += 1;
+                self.define_struct_in(c);
+                self.struct_depth -= 1;
+            }
+        }
+    }
+
+    /// `define_struct` of a type needed complete now (a base class, embedded by value).
+    pub(crate) fn define_struct_now(&mut self, t: TyId) {
+        self.pending_class_structs.retain(|&c| c != t);
+        self.struct_depth += 1;
+        self.define_struct_in(t);
+        self.struct_depth -= 1;
+    }
+
+    fn define_struct_in(&mut self, t: TyId) {
         if !self.defined.insert(t) {
             return;
         }

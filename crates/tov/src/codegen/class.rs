@@ -83,6 +83,8 @@ impl<'c, 'a> Gen<'c, 'a> {
             Some(b) => {
                 let bt = self.c.types.subst(b, &ci.subst);
                 let bn = self.box_name(bt);
+                // (held by value: defined first, not left for later as a class met in a field is)
+                self.define_struct_now(bt);
                 let _ = writeln!(body, "    {bn} base;");
             }
             None if self.needs_weak_slot(ci.decl) => body.push_str("    tvg_objw h;\n"),
@@ -1009,6 +1011,52 @@ impl<'c, 'a> Gen<'c, 'a> {
 
     /// Code visiting the cyclic-object references inside a value at `place` (None: there are none).
     fn gc_visit(&mut self, ty: TyId, place: &str, gv: &mut FxMap<TyId, String>) -> Option<String> {
+        // (a buffer's visitor `gv_<ty>`: made once; one of a recursive type is called from inside
+        // itself, so it's entered in `gv` before its contents are visited, "" while being made, "\0"
+        // once something inside called it, its code when done)
+        let buf_call = |kind: u8, place: &str, name: &str| match kind {
+            0 => format!("if (tvg_gc_buf({place}, 0, {name})) {name}({place}, 0);"),
+            1 => format!("if (tvg_gc_buf(({place}).p, ({place}).p->len, {name})) {name}(({place}).p, ({place}).p->len);"),
+            _ => format!("if (tvg_gc_buf(({place}).p, 0, {name})) {name}(({place}).p, 0);"),
+        };
+        let kind = match self.tget(ty) {
+            Ty::Record(_) if self.is_obj(ty) => Some(0u8),
+            Ty::Rec(..) => Some(0),
+            Ty::Array(_) => Some(1),
+            Ty::Map(..) | Ty::Set(_) => Some(2),
+            _ => None,
+        };
+        let name = format!("gv_{}", ty.0);
+        if let Some(k) = kind {
+            if let Some(c) = gv.get(&ty) {
+                if c.is_empty() {
+                    gv.insert(ty, "\0".into());
+                }
+                return Some(buf_call(k, place, &name));
+            }
+            gv.insert(ty, String::new());
+        }
+        // a buffer type's visitor body (None: nothing in it to visit), its code made from it
+        let finish = |g: &mut Self, gv: &mut FxMap<TyId, String>, code: Option<String>| -> Option<String> {
+            let k = kind.unwrap();
+            let called = gv.get(&ty).is_some_and(|c| c == "\0");
+            match code {
+                Some(c) => {
+                    gv.insert(ty, c);
+                    Some(buf_call(k, place, &name))
+                }
+                // (empty, but called from inside: made empty, so the call has something to call)
+                None if called => {
+                    gv.insert(ty, format!("static void {name}(void *buf, int64_t len) {{\n    (void)buf; (void)len;\n}}\n"));
+                    let _ = g;
+                    Some(buf_call(k, place, &name))
+                }
+                None => {
+                    gv.remove(&ty);
+                    None
+                }
+            }
+        };
         match self.tget(ty) {
             Ty::Class(d, _) => self.maybe_cyclic(d).then(|| format!("tvg_gc_obj({place});")),
             Ty::Union(ms) => {
@@ -1036,16 +1084,8 @@ impl<'c, 'a> Gen<'c, 'a> {
                         body.push(' ');
                     }
                 }
-                if body.is_empty() {
-                    return None;
-                }
-                let name = format!("gv_{}", ty.0);
-                if !gv.contains_key(&ty) {
-                    gv.insert(ty, String::new());
-                    let code = format!("static void {name}(void *buf, int64_t len) {{\n    (void)len; {body}\n}}\n");
-                    gv.insert(ty, code);
-                }
-                Some(format!("if (tvg_gc_buf({place}, 0, {name})) {name}({place}, 0);"))
+                let code = (!body.is_empty()).then(|| format!("static void {name}(void *buf, int64_t len) {{\n    (void)len; {body}\n}}\n"));
+                finish(self, gv, code)
             }
             Ty::Record(fs) => {
                 let fs = self.c.types.fields(fs).to_vec();
@@ -1060,58 +1100,38 @@ impl<'c, 'a> Gen<'c, 'a> {
             }
             Ty::Array(e) => {
                 let ect = self.ctype(e);
-                let body = self.gc_visit(e, "d[i]", gv)?;
-                let name = format!("gv_{}", ty.0);
-                if !gv.contains_key(&ty) {
-                    gv.insert(ty, String::new());
-                    let code = format!("static void {name}(void *buf, int64_t len) {{\n    {ect} *d = ({ect} *)(void *)tv_arrbuf_data((tv_arrbuf *)buf);\n    for (int64_t i = 0; i < len; i++) {{ {body} }}\n}}\n");
-                    gv.insert(ty, code);
-                }
-                Some(format!("if (tvg_gc_buf(({place}).p, ({place}).p->len, {name})) {name}(({place}).p, ({place}).p->len);"))
+                let code = self.gc_visit(e, "d[i]", gv).map(|body| format!("static void {name}(void *buf, int64_t len) {{\n    {ect} *d = ({ect} *)(void *)tv_arrbuf_data((tv_arrbuf *)buf);\n    for (int64_t i = 0; i < len; i++) {{ {body} }}\n}}\n"));
+                finish(self, gv, code)
             }
             Ty::Map(k, v) => {
                 let (kct, vct) = (self.ctype(k), self.ctype(v));
                 let kv = self.gc_visit(k, &format!("(*({kct} *)kp)"), gv);
                 let vv = self.gc_visit(v, &format!("(*({vct} *)vp)"), gv);
-                if kv.is_none() && vv.is_none() {
-                    return None;
-                }
-                let (kd, vd) = (self.desc(k), self.desc(v));
-                let name = format!("gv_{}", ty.0);
-                if !gv.contains_key(&ty) {
-                    gv.insert(ty, String::new());
-                    let code = format!(
+                let code = if kv.is_none() && vv.is_none() {
+                    None
+                } else {
+                    let (kd, vd) = (self.desc(k), self.desc(v));
+                    Some(format!(
                         "static void {name}(void *buf, int64_t len) {{\n    (void)len; tv_map m = {{ (tv_maphdr *)buf }}; tv_int i = 0; void *kp, *vp;\n    while (tv_map_next(m, {kd}, {vd}, &i, &kp, &vp)) {{ {} {} }}\n}}\n",
                         kv.unwrap_or_default(),
                         vv.unwrap_or_default()
-                    );
-                    gv.insert(ty, code);
-                }
-                Some(format!("if (tvg_gc_buf(({place}).p, 0, {name})) {name}(({place}).p, 0);"))
+                    ))
+                };
+                finish(self, gv, code)
             }
             Ty::Set(k) => {
                 let kct = self.ctype(k);
-                let kv = self.gc_visit(k, &format!("(*({kct} *)kp)"), gv)?;
-                let kd = self.desc(k);
-                let name = format!("gv_{}", ty.0);
-                if !gv.contains_key(&ty) {
-                    gv.insert(ty, String::new());
-                    let code = format!("static void {name}(void *buf, int64_t len) {{\n    (void)len; tv_map m = {{ (tv_maphdr *)buf }}; tv_int i = 0; void *kp, *vp;\n    while (tv_map_next(m, {kd}, &tv_type_undefined, &i, &kp, &vp)) {{ {kv} }}\n}}\n");
-                    gv.insert(ty, code);
-                }
-                Some(format!("if (tvg_gc_buf(({place}).p, 0, {name})) {name}(({place}).p, 0);"))
+                let code = self.gc_visit(k, &format!("(*({kct} *)kp)"), gv).map(|kv| {
+                    let kd = self.desc(k);
+                    format!("static void {name}(void *buf, int64_t len) {{\n    (void)len; tv_map m = {{ (tv_maphdr *)buf }}; tv_int i = 0; void *kp, *vp;\n    while (tv_map_next(m, {kd}, &tv_type_undefined, &i, &kp, &vp)) {{ {kv} }}\n}}\n")
+                });
+                finish(self, gv, code)
             }
             Ty::Rec(..) => {
                 let inner = self.c.unfold(ty);
                 let bn = self.box_name(ty);
-                let body = self.gc_visit(inner, &format!("(({bn} *)buf)->v"), gv)?;
-                let name = format!("gv_{}", ty.0);
-                if !gv.contains_key(&ty) {
-                    gv.insert(ty, String::new());
-                    let code = format!("static void {name}(void *buf, int64_t len) {{\n    (void)len; {body}\n}}\n");
-                    gv.insert(ty, code);
-                }
-                Some(format!("if (tvg_gc_buf({place}, 0, {name})) {name}({place}, 0);"))
+                let code = self.gc_visit(inner, &format!("(({bn} *)buf)->v"), gv).map(|body| format!("static void {name}(void *buf, int64_t len) {{\n    (void)len; {body}\n}}\n"));
+                finish(self, gv, code)
             }
             _ => None,
         }
