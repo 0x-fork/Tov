@@ -107,23 +107,43 @@ impl<'a> Checker<'a> {
     }
 
     fn type_sites_into(&self, m: u32, te: ast::TypeId, out: &mut Vec<Site>) {
+        let mut seen = Vec::new();
+        self.type_sites_in(m, te, out, &mut seen);
+    }
+
+    /// (`seen`: the aliases walked into, so a recursive one is walked once)
+    fn type_sites_in(&self, m: u32, te: ast::TypeId, out: &mut Vec<Site>, seen: &mut Vec<(u32, usize)>) {
         if self.spec_site(m, te) {
             out.push((m, te));
             return;
         }
         match &self.modules[m as usize].ast.ty(te).kind {
-            TypeExprKind::Array(e) => self.type_sites_into(m, *e, out),
-            TypeExprKind::Union(ms) | TypeExprKind::Intersection(ms) => ms.iter().for_each(|&t| self.type_sites_into(m, t, out)),
-            TypeExprKind::Record(fields) => fields.iter().for_each(|f| self.type_sites_into(m, f.ty, out)),
+            TypeExprKind::Array(e) => self.type_sites_in(m, *e, out, seen),
+            TypeExprKind::Union(ms) | TypeExprKind::Intersection(ms) => ms.iter().for_each(|&t| self.type_sites_in(m, t, out, seen)),
+            TypeExprKind::Record(fields) => fields.iter().for_each(|f| self.type_sites_in(m, f.ty, out, seen)),
             TypeExprKind::Func(params, ret, _) => {
                 for p in params {
                     if let Some(t) = p.ty {
-                        self.type_sites_into(m, t, out);
+                        self.type_sites_in(m, t, out, seen);
                     }
                 }
-                self.type_sites_into(m, *ret, out);
+                self.type_sites_in(m, *ret, out, seen);
             }
-            TypeExprKind::Named { args, .. } => args.iter().for_each(|&t| self.type_sites_into(m, t, out)),
+            TypeExprKind::Named { ns, name, args, .. } => {
+                args.iter().for_each(|&t| self.type_sites_in(m, t, out, seen));
+                // (a type alias of this module, `type Val = number | string | Val[]`: its numbers)
+                if ns.is_none() {
+                    let items = &self.modules[m as usize].ast.items;
+                    if let Some((ii, ty)) = items.iter().enumerate().find_map(|(ii, it)| match &it.kind {
+                        ast::ItemKind::TypeAlias { name: n, tparams, ty, .. } if n == name && tparams.is_empty() => Some((ii, *ty)),
+                        _ => None,
+                    }) && !seen.contains(&(m, ii))
+                    {
+                        seen.push((m, ii));
+                        self.type_sites_in(m, ty, out, seen);
+                    }
+                }
+            }
             _ => {}
         }
     }

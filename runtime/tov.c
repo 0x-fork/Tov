@@ -928,8 +928,21 @@ tv_str tv_str_from_int(tv_int v) {
         }
         return (tv_str){(tv_strbuf *)(void *)b};
     }
+    /* (others made text again and again, `String(key)` in a hash or `String(id)` as a key:
+     * the last ones' text kept, by value; Tov's values live on one thread) */
+    static struct { tv_int v; tv_str s; } cache[256];
+    size_t h = (size_t)(((uint64_t)v * 0x9E3779B97F4A7C15ull) >> 56);
+    if (cache[h].s.p && cache[h].v == v) {
+        tv_str_retain(cache[h].s);
+        return cache[h].s;
+    }
     char buf[24];
-    return tv_str_from_ascii(buf, tv_fmt_i64(buf, v));
+    tv_str s = tv_str_from_ascii(buf, tv_fmt_i64(buf, v));
+    if (cache[h].s.p) tv_str_release(cache[h].s);
+    tv_str_retain(s);
+    cache[h].v = v;
+    cache[h].s = s;
+    return s;
 }
 
 void tv_sb_push_int(tv_sb *sb, tv_int v) {

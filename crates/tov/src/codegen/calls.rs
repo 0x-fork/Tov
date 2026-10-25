@@ -371,7 +371,13 @@ impl<'c, 'a> Gen<'c, 'a> {
                 let code = self.consume(v);
                 out.push(code);
             } else {
-                let v = self.expr(a.expr);
+                // (a narrowed local given where its own type goes: the local, not its narrowed view
+                // made that type again)
+                let held = matches!(self.ast(self.cur_m()).expr(a.expr).kind, ExprKind::Ident(_)) && {
+                    let m = self.cur_m();
+                    matches!(self.ident_fact(m, a.expr), Some(crate::check::IdentFact::Local(k)) if self.b().locals.get(&k).is_some_and(|l| l.ty == p.ty))
+                };
+                let v = if held { self.expr_held(a.expr) } else { self.expr(a.expr) };
                 // An argument before one that awaits (or assigns) is read first, as in JavaScript.
                 let v = if args[i + 1..].iter().any(|later| self.changes_in(later.expr)) { self.snapshot(v) } else { v };
                 // A value reached through a class instance (or a closure's cell) could be released by
@@ -2561,7 +2567,7 @@ impl<'c, 'a> Gen<'c, 'a> {
                 self.build_spread(&elems, ty)
             }
             (Some("Array"), "isArray") => {
-                let v = self.expr(args[0].expr);
+                let v = self.expr_held(args[0].expr);
                 let code = self.is_array_code(v);
                 Val::plain(code, BOOL)
             }

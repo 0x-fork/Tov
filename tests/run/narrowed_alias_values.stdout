@@ -1,0 +1,6 @@
+num num 0 number true
+str str 0 string true
+null null 0 object true
+arr2 arr2 3 object true
+obj obj 3 object true
+true true true true

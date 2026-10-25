@@ -3859,7 +3859,20 @@ impl<'c, 'a> Gen<'c, 'a> {
                     }
                     Some(x) if ret != VOID => {
                         self.push_temps();
-                        let val = self.expr(*x);
+                        // (`return x` of a narrowed local held as the result's type: the local
+                        // itself, not its narrowed view made the result's again)
+                        let m = self.cur_m();
+                        let held = match (&self.ast(m).expr(*x).kind, self.ident_fact(m, *x)) {
+                            (ExprKind::Ident(_), Some(IdentFact::Local(k))) => {
+                                let narrowed = self.ty(*x);
+                                self.b().locals.get(&k).filter(|l| l.ty == ret && narrowed != ret).cloned()
+                            }
+                            _ => None,
+                        };
+                        let val = match held {
+                            Some(l) => Val::plain(l.access, l.ty),
+                            None => self.expr(*x),
+                        };
                         let val = self.coerce(val, ret);
                         let code = self.consume(val);
                         let ct = self.ctype(ret);
@@ -5573,6 +5586,67 @@ impl<'c, 'a> Gen<'c, 'a> {
         self.coerce(v, to)
     }
 
+    /// `x` as it's held: a local narrowed by the flow as its own (declared) type, for a test of
+    /// what it holds; anything else as usual.
+    pub(crate) fn expr_held(&mut self, x: ExprId) -> Val {
+        let m = self.cur_m();
+        if let (ExprKind::Ident(_), Some(IdentFact::Local(k))) = (&self.ast(m).expr(x).kind, self.ident_fact(m, x))
+            && let Some(l) = self.b().locals.get(&k).cloned()
+            && l.ty != self.ty(x)
+        {
+            return Val::plain(l.access, l.ty);
+        }
+        self.expr(x)
+    }
+
+    /// `typeof v === want` as a C condition (on its tag, for a union).
+    fn typeof_test(&mut self, v: &Val, want: &str) -> String {
+        if matches!(self.tget(v.ty), Ty::Rec(..)) {
+            let u = self.unfold_val(v.clone());
+            return self.typeof_test(&u, want);
+        }
+        if let Ty::Union(ms) = self.tget(v.ty) {
+            let ms = self.c.types.tys(ms).to_vec();
+            let tag = self.u_tag(&v.code, v.ty);
+            let mut parts = Vec::new();
+            for (i, &m) in ms.iter().enumerate() {
+                if matches!(self.tget(m), Ty::Rec(..) | Ty::Union(_)) {
+                    let payload = Val { code: self.u_payload(&v.code, v.ty, i), ty: m, owned: false };
+                    let inner = self.typeof_test(&payload, want);
+                    if inner != "false" {
+                        parts.push(format!("({tag} == {i} && {inner})"));
+                    }
+                } else if self.typeof_name(m) == want {
+                    parts.push(format!("{tag} == {i}"));
+                }
+            }
+            return if parts.is_empty() { "false".into() } else { format!("({})", parts.join(" || ")) };
+        }
+        if self.typeof_name(v.ty) == want { "true".into() } else { "false".into() }
+    }
+
+    /// What `typeof` says of a value of (non-union) type `t`.
+    fn typeof_name(&self, t: TyId) -> &'static str {
+        let types = &self.c.types;
+        if types.is_numeric(t) {
+            "number"
+        } else if t == BIGINT {
+            "bigint"
+        } else if t == DECIMAL {
+            "decimal"
+        } else if types.is_string(t) {
+            "string"
+        } else if t == BOOL || matches!(types.get(t), Ty::BoolLit(_)) {
+            "boolean"
+        } else if t == UNDEFINED || t == VOID {
+            "undefined"
+        } else if matches!(types.get(t), Ty::Func(..)) {
+            "function"
+        } else {
+            "object"
+        }
+    }
+
     fn typeof_str(&mut self, v: Val) -> Val {
         if v.ty == UNKNOWN {
             return self.dyn_typeof(v);
@@ -5984,6 +6058,34 @@ impl<'c, 'a> Gen<'c, 'a> {
                 Val::plain(if op == LooseEq { format!("(!{present})") } else { present }, BOOL)
             }
             Eq | Ne | LooseEq | LooseNe => {
+                // (`typeof x === "string"`: a test of what x holds, no string made)
+                let m = self.cur_m();
+                let typeof_lit = match (&self.ast(m).expr(l).kind, &self.ast(m).expr(r).kind) {
+                    (ExprKind::Typeof(x), ExprKind::Str(s)) | (ExprKind::Str(s), ExprKind::Typeof(x)) => Some((*x, *s)),
+                    _ => None,
+                };
+                if let Some((x, want)) = typeof_lit {
+                    let xt = self.ty(x);
+                    if xt != UNKNOWN && xt != JS && self.c.types.without_undefined(xt) != JS {
+                        let v = self.expr_held(x);
+                        let want = self.sym(want).to_string();
+                        let t = self.typeof_test(&v, &want);
+                        return Val::plain(if matches!(op, Eq | LooseEq) { t } else { format!("(!{t})") }, BOOL);
+                    }
+                }
+                // (`x === null` of a narrowed local: tested as what it holds, no narrowed copy)
+                let unit = |c: &Self, e: ExprId| matches!(c.ast(m).expr(e).kind, ExprKind::Null | ExprKind::Undefined);
+                if unit(self, r) || unit(self, l) {
+                    let (x, u) = if unit(self, r) { (l, r) } else { (r, l) };
+                    if matches!(self.ast(m).expr(x).kind, ExprKind::Ident(_)) {
+                        let xv = self.expr_held(x);
+                        if !matches!(self.tget(xv.ty), Ty::Unknown | Ty::Js) {
+                            let uv = self.expr(u);
+                            let eq = self.equality(xv, uv, true);
+                            return Val::plain(if matches!(op, Eq | LooseEq) { eq } else { format!("(!{eq})") }, BOOL);
+                        }
+                    }
+                }
                 // (`xs[i] === x` past either end: false, as JavaScript's `undefined` isn't `x`)
                 if let Some(v) = self.compare_past_end(op, l, r) {
                     return v;
@@ -6488,6 +6590,20 @@ impl<'c, 'a> Gen<'c, 'a> {
                 return format!("tv_str_eq({}, {})", a.code, b.code);
             }
             _ => {}
+        }
+        // (a recursive alias against a plain value, `op === "if"`: what it holds, a union)
+        let plain = |c: &Self, t: TyId| matches!(c.tget(t), Ty::StrLit(_) | Ty::Str | Ty::Int | Ty::F64 | Ty::Null | Ty::Undefined | Ty::Bool | Ty::BoolLit(_));
+        if matches!(self.tget(ta), Ty::Rec(..)) && plain(self, tb) && is_simple_code(&a.code) {
+            let ua = self.unfold_val(a.clone());
+            if matches!(self.tget(ua.ty), Ty::Union(_)) {
+                return self.equality(ua, b, strict);
+            }
+        }
+        if matches!(self.tget(tb), Ty::Rec(..)) && plain(self, ta) && is_simple_code(&b.code) {
+            let ub = self.unfold_val(b.clone());
+            if matches!(self.tget(ub.ty), Ty::Union(_)) {
+                return self.equality(a, ub, strict);
+            }
         }
         // A union compared with one of its members (e.g. `x === undefined`, `s.kind === "circle"`).
         for (u, x) in [(&a, &b), (&b, &a)] {
@@ -8579,6 +8695,14 @@ fn is_trivial(code: &str) -> bool {
     code.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '.' | '(' | ')' | '*' | '-' | '>' | ' '))
         && !code.contains("->") && !code.contains('(')
         || code == "0"
+}
+
+/// A C expression that reads (a name, a field path, a dereference) and calls nothing: safe to
+/// write out twice.
+fn is_simple_code(code: &str) -> bool {
+    let b = code.as_bytes();
+    code.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '.' | '(' | ')' | '*' | '-' | '>' | ' '))
+        && !(1..b.len()).any(|i| b[i] == b'(' && (b[i - 1].is_ascii_alphanumeric() || b[i - 1] == b'_'))
 }
 
 pub(crate) fn is_mutating_method(name: &str) -> bool {

@@ -527,6 +527,11 @@ impl<'a> Checker<'a> {
                     self.blame(&sites);
                     self.spec_poison(target);
                 }
+                // (`v as number` of a union holding a float: the `number` it's taken as is one too)
+                if self.spec.on && target == INT && self.flat_members(src).iter().any(|&m| self.types.is_float(m)) {
+                    let sites = self.type_sites(self.cur, *te);
+                    self.blame(&sites);
+                }
                 if src == ERROR || target == ERROR || src == UNKNOWN || self.assignable(src, target) || self.assignable(target, src) {
                     return target;
                 }
@@ -4173,7 +4178,7 @@ impl<'a> Checker<'a> {
                 // `new Array(n).fill(v)`: the array's type is the value's
                 let mut recv_hint = None;
                 if mtext == "fill"
-                    && let ExprKind::New { callee: nc, type_args: nta, .. } = &self.ast().expr(obj).kind
+                    && let ExprKind::New { callee: nc, type_args: nta, .. } | ExprKind::Call { callee: nc, type_args: nta, .. } = &self.ast().expr(obj).kind
                     && nta.is_empty()
                     && matches!(self.ast().expr(*nc).kind, ExprKind::Ident(s) if self.name(s) == "Array")
                     && let Some(a) = args.first()
@@ -4182,6 +4187,15 @@ impl<'a> Checker<'a> {
                         Ty::Array(t) => Some(t),
                         _ => None,
                     }));
+                    // (`const m: number[] = Array(n).fill(1.5)` with `number` taken as `int`: the
+                    // float's array, so the annotation it's given to is what turns `f64`)
+                    let float_fill = exp_elem == Some(INT) && self.spec.on && matches!(self.ast().expr(a.expr).kind, ExprKind::Float(_) | ExprKind::Ident(_) | ExprKind::Unary(..)) && {
+                        let marks = self.diags.len();
+                        let t = self.expr(a.expr, None);
+                        self.diags.truncate(marks);
+                        self.types.is_float(t)
+                    };
+                    let exp_elem = if float_fill { None } else { exp_elem };
                     let vt = match exp_elem {
                         Some(t) if t != ERROR => t,
                         _ => {
@@ -5348,7 +5362,8 @@ impl<'a> Checker<'a> {
             return;
         }
         // (`Result<number>` given where its body is the pattern: the body)
-        let actual = if matches!(self.types.get(actual), Ty::Rec(..)) && !matches!(self.types.get(pattern), Ty::Rec(..)) { self.unfold(actual) } else { actual };
+        // (but a type parameter takes the alias itself: `xs.map(x => evaluate(x))` is a `Val[]`)
+        let actual = if matches!(self.types.get(actual), Ty::Rec(..)) && !matches!(self.types.get(pattern), Ty::Rec(..) | Ty::Param(_)) { self.unfold(actual) } else { actual };
         match *self.types.get(pattern) {
             Ty::Param(p) if free.contains(&p) => match map.get(&p).copied() {
                 None => {
