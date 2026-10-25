@@ -255,7 +255,19 @@ extern const tv_type tv_type_gen;
 static inline bool tv_str_eq(tv_str a, tv_str b) {
     return a.p == b.p || (a.p->len == b.p->len && memcmp(a.p->data, b.p->data, (size_t)b.p->len) == 0);
 }
-int tv_str_cmp(tv_str a, tv_str b);             /* byte order == code point order */
+int tv_str_cmp_long(tv_str a, tv_str b);
+/* byte order == code point order (inline: short strings, `a < b` of keys or numbers' text, mostly
+ * differ in their first bytes) */
+static inline int tv_str_cmp(tv_str a, tv_str b) {
+    if (a.p == b.p) return 0;
+    int32_t na = a.p->len, nb = b.p->len, n = na < nb ? na : nb;
+    if (n > 16) return tv_str_cmp_long(a, b);
+    for (int32_t i = 0; i < n; i++) {
+        unsigned char x = (unsigned char)a.p->data[i], y = (unsigned char)b.p->data[i];
+        if (x != y) return x < y ? -1 : 1;
+    }
+    return na < nb ? -1 : na > nb;
+}
 /* tv_str_cmp(s, the one-character string c), c ASCII: s's first byte decides (a lead byte of a
  * longer character is above every ASCII one), then whether there's more of it. */
 static inline int tv_str_cmp1(tv_str s, unsigned char c) {

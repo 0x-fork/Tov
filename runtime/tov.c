@@ -740,11 +740,31 @@ tv_str tv_str_from(const char *bytes, size_t n) {
     return (tv_str){b};
 }
 
-/* Text known to be ASCII (number formatting): its UTF-16 length is its byte length. */
+/* Text known to be ASCII (number formatting): its UTF-16 length is its byte length. The bytes
+ * were just written one at a time: copied one at a time too (a wider load of bytes still being
+ * stored waits for all of them on x86, a store-forwarding stall that was most of `String(x)`). */
+static tv_str tv_str_from_fresh(const char *bytes, size_t n);
 static tv_str tv_str_from_ascii(const char *bytes, size_t n) {
-    tv_str r = tv_str_from(bytes, n);
+    tv_str r = n <= 1 || n > 40 ? tv_str_from(bytes, n) : tv_str_from_fresh(bytes, n);
     if (r.p->rc > 0) r.p->rc |= TV_STR_ASCII;
     return r;
+}
+
+/* A short string of bytes just written (2 to 40 of them): see tv_str_from_ascii. */
+static tv_str tv_str_from_fresh(const char *bytes, size_t n) {
+    tv_strbuf *b = tv_strbuf_new(n);
+    /* (gathered a byte at a time, written a word at a time, the NUL and the block's padding
+     * included: later word reads of the string, a compare's, forward from those stores) */
+    const volatile unsigned char *src = (const volatile unsigned char *)bytes;
+    for (size_t w = 0; w * 8 <= n; w++) {
+        uint64_t word = 0;
+        for (size_t k = 0; k < 8; k++) {
+            size_t i = w * 8 + k;
+            if (i < n) word |= (uint64_t)src[i] << (8 * k);
+        }
+        memcpy(b->data + w * 8, &word, 8);
+    }
+    return (tv_str){b};
 }
 
 tv_str tv_str_from_sb(tv_sb *sb) {
@@ -755,7 +775,7 @@ tv_str tv_str_from_sb(tv_sb *sb) {
         return r;
     }
     if (tv_strbuf_size(n) <= TV_SMALL_MAX) { /* small strings live in the small-block allocator */
-        tv_str r = tv_str_from(sb->data, n);
+        tv_str r = n <= 40 ? tv_str_from_fresh(sb->data, n) : tv_str_from(sb->data, n);
         tv_sb_free(sb);
         return r;
     }
@@ -959,8 +979,7 @@ static void tv_gen_str_v(tv_sb *sb, const void *p) { (void)p; tv_sb_push_cstr(sb
 static void tv_gen_inspect_v(tv_sb *sb, const void *p, int depth) { (void)p; (void)depth; tv_sb_push_cstr(sb, "Object [Generator] {}"); }
 const tv_type tv_type_gen = {sizeof(tv_gen *), tv_gen_retain_v, tv_gen_release_v, tv_gen_eq_v, tv_gen_hash_v, tv_gen_str_v, tv_gen_inspect_v};
 
-int tv_str_cmp(tv_str a, tv_str b) {
-    if (a.p == b.p) return 0;
+int tv_str_cmp_long(tv_str a, tv_str b) {
     int64_t na = a.p->len, nb = b.p->len;
     int c = memcmp(a.p->data, b.p->data, (size_t)(na < nb ? na : nb));
     if (c) return c < 0 ? -1 : 1;
