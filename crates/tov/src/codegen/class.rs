@@ -813,12 +813,14 @@ impl<'c, 'a> Gen<'c, 'a> {
             let _ = writeln!(self.funcs, "static {ct} {fname}(void) {{\n{code}}}\n");
             // (a script's own classes: where they're declared, see `init_script_statics`)
             if self.script_module != Some(m) {
-                let _ = writeln!(self.const_init, "    {gname} = {fname}();");
+                let mut line = format!("    {gname} = {fname}();\n");
                 // (an error it throws is uncaught: the program ends with it)
                 if code.contains("tvg_err") {
-                    let _ = writeln!(self.const_init, "    if (tvg_err) {{ tvg_uncaught(); return 1; }}");
+                    line.push_str("    if (tvg_err) { tvg_uncaught(); return 1; }\n");
                     self.needs_uncaught = true;
                 }
+                let rank = self.init_rank(m, info.item, member + 1);
+                self.const_init.push((rank, line));
             } else if code.contains("tvg_err") {
                 self.static_throws.insert((decl, member));
             }

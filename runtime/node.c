@@ -284,6 +284,7 @@ NATIVE(n_set_tz) {
     else unsetenv("TZ");
     free(tz);
     tzset();
+    tv_tz_changed();
 #ifdef TV_JSC_OWN
     extern void TVTimeZoneDidChange(JSContextRef);
     TVTimeZoneDidChange(ctx);

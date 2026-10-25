@@ -3190,7 +3190,16 @@ impl<'a> Checker<'a> {
                 continue;
             }
             let lit = self.types.str_lit(val_sym);
-            if let Some((m, fs)) = records.iter().find(|(_, fs)| fs.iter().any(|x| x.name == f.name && x.ty == lit)) {
+            // (two variants of one discriminant, `{ type: "html", ... }` of two kinds of token: the
+            // one whose fields the literal's fit)
+            let with: Vec<&(TyId, Vec<Field>)> = records.iter().filter(|(_, fs)| fs.iter().any(|x| x.name == f.name && x.ty == lit)).collect();
+            if with.len() > 1 {
+                let names: Vec<Sym> = fields.iter().map(|f| f.name).collect();
+                if let Some((m, fs)) = with.iter().find(|(_, fs)| names.iter().all(|n| fs.iter().any(|x| x.name == *n)) && fs.iter().all(|x| x.optional || names.contains(&x.name))) {
+                    return Some((*m, fs.clone()));
+                }
+            }
+            if let Some((m, fs)) = with.first() {
                 return Some((*m, fs.clone()));
             }
             let options: Vec<String> = records

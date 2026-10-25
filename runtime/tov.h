@@ -1155,6 +1155,7 @@ bool tv_process_env(tv_str name, tv_str *out);
 tv_int tv_process_pid(void);
 _Noreturn void tv_process_exit(tv_int code);
 double tv_date_now(void);                              /* ms since the epoch */
+void tv_tz_changed(void);                               /* TZ was set: Date's offsets asked again */
 double tv_performance_now(void);                       /* ms since the program started */
 void tv_write_stdout(tv_str s);
 void tv_write_stderr(tv_str s);
@@ -1178,6 +1179,8 @@ bool tv_jp_number(tv_jp *p, double *out);
 bool tv_jp_decimal(tv_jp *p, tv_dec *out);   /* a JSON number, exactly */
 bool tv_jp_skip(tv_jp *p);                             /* any value */
 bool tv_jp_end(tv_jp *p);                              /* only spaces left */
+bool tv_jp_dyn(tv_jp *p, tv_dyn *out);                  /* any JSON value, as an `unknown` */
+extern const struct tv_type tv_type_dynarr, tv_type_dynobj; /* (its arrays and objects: unknown[], Record<string, unknown>) */
 bool tv_jp_fail(tv_jp *p, const char *expected);       /* records "expected X at position N"; returns false */
 bool tv_jp_find_key(tv_jp *p, const char *key, tv_str *val);  /* string value of key in the object at the cursor (not consumed) */
 tv_str tv_jp_error(tv_jp *p);

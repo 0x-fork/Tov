@@ -307,7 +307,10 @@ impl<'c, 'a> Gen<'c, 'a> {
             // (a getter, or a field of another representation: can't be assigned this way)
             let body = match addr {
                 Some(a) => format!("{self_decl} return (void *){a};"),
-                None => "(void)self; __builtin_trap();".to_string(),
+                None => {
+                    let msg = format!("setting `{}` of an object made without it isn't supported yet (give it the field when it's made)", self.sym(f.name));
+                    format!("(void)self; tv_trap({}, NULL);", super::c_string(msg.as_bytes()))
+                }
             };
             let tname = format!("{name}_f{k}");
             let _ = writeln!(out, "static void *{tname}(void *self) {{ {body} }}");

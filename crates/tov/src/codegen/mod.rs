@@ -218,7 +218,11 @@ pub(crate) struct Gen<'c, 'a> {
     /// Closure environment structs (after all value structs they may contain).
     pub(crate) env_structs: String,
     consts_done: FxSet<(u32, u32)>,
-    const_init: String,
+    /// Module variables' (and class statics') initializations: by when JavaScript runs them
+    /// (the module's place in the evaluation order, the item, the member), see `init_rank`.
+    const_init: Vec<((u32, u32, u32), String)>,
+    /// Each module's place in JavaScript's evaluation order (imports first, depth first).
+    module_rank: Vec<u32>,
     /// Running a script: its module variables are initialized by the script, in source order.
     script_module: Option<u32>,
     /// Module variables some module changes (union of the facts).
@@ -397,7 +401,8 @@ impl<'c, 'a> Gen<'c, 'a> {
             static_insts: FxMap::default(),
             env_structs: String::new(),
             consts_done: FxSet::default(),
-            const_init: String::new(),
+            const_init: Vec::new(),
+            module_rank: Vec::new(),
             script_module: None,
             mutated_globals: FxSet::default(),
             counter: 0,
@@ -726,7 +731,9 @@ impl<'c, 'a> Gen<'c, 'a> {
         let dispatch = std::mem::take(&mut self.dispatch_bodies);
         self.helpers_after.push(dispatch);
         self.helpers_after.push(tables);
-        let mut init = std::mem::take(&mut self.const_init);
+        let mut inits = std::mem::take(&mut self.const_init);
+        inits.sort_by_key(|x| x.0);
+        let mut init: String = inits.into_iter().map(|x| x.1).collect();
         // Programs that never start a task, timer or server skip the event loop entirely, so
         // dead stripping drops it (and the HTTP runtime behind it) from the binary.
         let mut main_body = main_body;
@@ -2159,10 +2166,53 @@ impl<'c, 'a> Gen<'c, 'a> {
             let _ = writeln!(self.funcs, "static {ct} {fname}(void) {{\n{code}}}\n");
             // A script initializes its own variables where they're declared.
             if self.script_module != Some(m) {
-                let _ = writeln!(self.const_init, "    {gname} = {fname}();");
+                let rank = self.init_rank(m, item, 0);
+                self.const_init.push((rank, format!("    {gname} = {fname}();\n")));
             }
         }
         Val::plain(gname, ty)
+    }
+
+    /// When JavaScript runs module `m`'s item `item` (member `member` + 1 of a class, 0 for a
+    /// variable): modules in evaluation order (each after what it imports, depth first from the
+    /// entry modules, the prelude and standard modules first), then in source order.
+    pub(crate) fn init_rank(&mut self, m: u32, item: u32, member: u32) -> (u32, u32, u32) {
+        if self.module_rank.is_empty() {
+            let n = self.c.modules.len();
+            let mut rank = vec![u32::MAX; n];
+            let mut next = 0u32;
+            fn visit(ms: &[crate::check::Module], m: usize, rank: &mut [u32], next: &mut u32, on: &mut Vec<bool>) {
+                if rank[m] != u32::MAX || on[m] {
+                    return;
+                }
+                on[m] = true;
+                let mut deps: Vec<(u32, u32)> = ms[m].imports.iter().map(|(&i, &d)| (i, d)).collect();
+                deps.sort();
+                for (_, d) in deps {
+                    visit(ms, d as usize, rank, next, on);
+                }
+                on[m] = false;
+                rank[m] = *next;
+                *next += 1;
+            }
+            let mut on = vec![false; n];
+            let mods = &self.c.modules;
+            for i in 0..n {
+                if mods[i].builtin || mods[i].std {
+                    visit(mods, i, &mut rank, &mut next, &mut on);
+                }
+            }
+            for i in 0..n {
+                if mods[i].entry {
+                    visit(mods, i, &mut rank, &mut next, &mut on);
+                }
+            }
+            for i in 0..n {
+                visit(mods, i, &mut rank, &mut next, &mut on);
+            }
+            self.module_rank = rank;
+        }
+        (self.module_rank[m as usize], item, member)
     }
 
     fn consts_read_by_called_fns(&self, m: u32, init: ExprId) -> Vec<(u32, u32)> {

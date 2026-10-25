@@ -7057,12 +7057,42 @@ double tv_date_now(void) {
 /* ---- Date's time zone (the system's: TZ, else /etc/localtime) */
 double tv_native_dateNow(void) { return tv_date_now(); }
 
-/* The seconds east of UTC at UTC second `s`. */
-static long tv_date_gmtoff(double s) {
+/* The seconds east of UTC at UTC second `s`. localtime_r reads the time zone again each call
+ * (most of a local date's field reads), so the offset is kept for spans it holds for: the same at
+ * a second and two weeks either side of it, it holds for those four weeks (no time zone changes
+ * its offset twice within two weeks: Morocco's Ramadan pause, the shortest, is a month).
+ * Forgotten when TZ changes (see tv_tz_changed). */
+static unsigned tv_tz_generation = 1;
+void tv_tz_changed(void) { tv_tz_generation++; }
+static long tv_gmtoff_at(double s) {
     time_t tt = (time_t)s;
     struct tm tm;
     if (!localtime_r(&tt, &tm)) return 0;
     return tm.tm_gmtoff;
+}
+static long tv_date_gmtoff(double s) {
+    static struct { double lo, hi; long off; unsigned gen; } spans[4];
+    static unsigned next, utc_gen;
+    static bool utc;
+    /* (TZ naming UTC: no offset ever, nothing to ask) */
+    if (utc_gen != tv_tz_generation) {
+        utc_gen = tv_tz_generation;
+        const char *tz = getenv("TZ");
+        utc = tz && (!strcmp(tz, "UTC") || !strcmp(tz, "Etc/UTC") || !strcmp(tz, "UTC0") || !strcmp(tz, "GMT") || !strcmp(tz, "Etc/GMT") || !strcmp(tz, "Universal") || !strcmp(tz, "Zulu") || !strcmp(tz, ":UTC"));
+    }
+    if (utc) return 0;
+    for (int i = 0; i < 4; i++)
+        if (spans[i].gen == tv_tz_generation && s >= spans[i].lo && s < spans[i].hi) return spans[i].off;
+    long off = tv_gmtoff_at(s);
+    const double fortnight = 14 * 86400.0;
+    if (tv_gmtoff_at(s - fortnight) == off && tv_gmtoff_at(s + fortnight) == off) {
+        unsigned i = next++ & 3;
+        spans[i].lo = s - fortnight;
+        spans[i].hi = s + fortnight;
+        spans[i].off = off;
+        spans[i].gen = tv_tz_generation;
+    }
+    return off;
 }
 
 static double tv_floor_div(double a, double b) { return floor(a / b); }
@@ -7676,6 +7706,87 @@ bool tv_jp_skip(tv_jp *p) {
     case 'f': return tv_jp_word(p, "false");
     case 'n': return tv_jp_word(p, "null");
     default: { double d; return tv_jp_number(p, &d); }
+    }
+}
+
+/* ---------------------------------------------------------------- JSON as an `unknown` */
+
+/* JSON.parse into an `unknown`: an object as a map of its keys to unknowns (made as an object, so
+ * it prints and stringifies as one), an array of unknowns, numbers as f64s, strings, booleans and
+ * null as themselves. */
+static void tv_dynarrp_retain(void *p) { tv_arr_retain(*(tv_arr *)p); }
+static void tv_dynarrp_release(void *p) { tv_arr_release(*(tv_arr *)p, &tv_type_dyn); }
+static bool tv_dynrefp_eq(const void *a, const void *b) { return *(void *const *)a == *(void *const *)b; }
+static uint64_t tv_dynrefp_hash(const void *p) { return (uint64_t)(uintptr_t)*(void *const *)p * 0x9E3779B97F4A7C15ull; }
+static void tv_dynarrp_to_str(tv_sb *sb, const void *p) { tv_to_str_arr(sb, *(const tv_arr *)p, &tv_type_dyn); }
+static void tv_dynarrp_inspect(tv_sb *sb, const void *p, int depth) { tv_inspect_arr(sb, *(const tv_arr *)p, &tv_type_dyn, depth); }
+const tv_type tv_type_dynarr = {sizeof(tv_arr), tv_dynarrp_retain, tv_dynarrp_release, tv_dynrefp_eq, tv_dynrefp_hash, tv_dynarrp_to_str, tv_dynarrp_inspect};
+static void tv_dynobjp_retain(void *p) { tv_map_retain(*(tv_map *)p); }
+static void tv_dynobjp_release(void *p) { tv_map_release(*(tv_map *)p, &tv_type_str, &tv_type_dyn); }
+static void tv_dynobjp_to_str(tv_sb *sb, const void *p) { (void)p; tv_sb_push_cstr(sb, "[object Object]"); }
+static void tv_dynobjp_inspect(tv_sb *sb, const void *p, int depth) { tv_map_inspect(sb, *(const tv_map *)p, &tv_type_str, &tv_type_dyn, depth); }
+const tv_type tv_type_dynobj = {sizeof(tv_map), tv_dynobjp_retain, tv_dynobjp_release, tv_dynrefp_eq, tv_dynrefp_hash, tv_dynobjp_to_str, tv_dynobjp_inspect};
+
+bool tv_jp_dyn(tv_jp *p, tv_dyn *out) {
+    char c = tv_jp_peek(p);
+    switch (c) {
+    case '"': {
+        tv_str s;
+        if (!tv_jp_string(p, &s)) return false;
+        *out = tv_dyn_box(&tv_type_str, &s);
+        return true;
+    }
+    case '{': {
+        p->i++;
+        tv_map m = tv_map_fresh();
+        m.p->object = 1;
+        if (!tv_jp_try_char(p, '}')) {
+            do {
+                tv_str k;
+                if (!tv_jp_string(p, &k)) { tv_map_release(m, &tv_type_str, &tv_type_dyn); return false; }
+                tv_dyn v = {&tv_type_undefined, NULL};
+                if (!tv_jp_char(p, ':') || !tv_jp_dyn(p, &v)) {
+                    tv_str_release(k);
+                    tv_map_release(m, &tv_type_str, &tv_type_dyn);
+                    return false;
+                }
+                tv_map_set(&m, &tv_type_str, &tv_type_dyn, &k, &v);
+            } while (tv_jp_try_char(p, ','));
+            if (!tv_jp_char(p, '}')) { tv_map_release(m, &tv_type_str, &tv_type_dyn); return false; }
+        }
+        *out = tv_dyn_box(&tv_type_dynobj, &m);
+        return true;
+    }
+    case '[': {
+        p->i++;
+        tv_arr a = tv_arr_fresh();
+        if (!tv_jp_try_char(p, ']')) {
+            do {
+                tv_dyn v = {&tv_type_undefined, NULL};
+                if (!tv_jp_dyn(p, &v)) { tv_arr_release(a, &tv_type_dyn); return false; }
+                tv_arr_push(&a, &tv_type_dyn, &v);
+            } while (tv_jp_try_char(p, ','));
+            if (!tv_jp_char(p, ']')) { tv_arr_release(a, &tv_type_dyn); return false; }
+        }
+        *out = tv_dyn_box(&tv_type_dynarr, &a);
+        return true;
+    }
+    case 't': case 'f': {
+        bool b = c == 't';
+        if (!tv_jp_word(p, b ? "true" : "false")) return false;
+        *out = tv_dyn_box(&tv_type_bool, &b);
+        return true;
+    }
+    case 'n':
+        if (!tv_jp_word(p, "null")) return false;
+        *out = (tv_dyn){&tv_type_null, NULL};
+        return true;
+    default: {
+        double d;
+        if (!tv_jp_number(p, &d)) return false;
+        *out = tv_dyn_box(&tv_type_f64, &d);
+        return true;
+    }
     }
 }
 

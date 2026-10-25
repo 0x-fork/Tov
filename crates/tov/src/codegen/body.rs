@@ -9,7 +9,7 @@ use crate::types::*;
 use std::fmt::Write;
 
 /// Maps a case label literal to a union tag.
-type LabelTag = Box<dyn Fn(&Gen, crate::intern::Sym) -> Option<usize>>;
+type LabelTag = Box<dyn Fn(&Gen, crate::intern::Sym) -> Vec<usize>>;
 
 pub(crate) enum FnBodyKind {
     Block(StmtId),
@@ -745,7 +745,11 @@ impl<'c, 'a> Gen<'c, 'a> {
                 self.stmt(ss[i + 1]);
                 self.b().no_release = None;
                 skip = true;
-            } else if let Some(j) = self.take_plan(ss, i) {
+            } else if self.b().take_slot.is_none()
+                && let Some(j) = self.take_plan(ss, i)
+            {
+                // (one at a time: a second would replace the first's pending store, which would
+                // then release what the first's x holds)
                 // `const x = P; ...; P = v`: x takes P's reference (see `take_plan`)
                 self.b().take_slot = Some((ss[j], i));
                 self.b().take_let = true;
@@ -4108,7 +4112,7 @@ impl<'c, 'a> Gen<'c, 'a> {
         // a C switch on the tag. Anything else: an if-chain.
         self.push_temps();
         let (tag_expr, label_tag): (Option<String>, LabelTag) = {
-            let mut result: (Option<String>, LabelTag) = (None, Box::new(|_, _| None));
+            let mut result: (Option<String>, LabelTag) = (None, Box::new(|_, _| Vec::new()));
             if let ExprKind::Member { obj, name, optional: false, .. } = &ast.expr(disc).kind {
                 let base = self.expr(*obj);
                 let base = self.unfold_val(base);
@@ -4128,7 +4132,7 @@ impl<'c, 'a> Gen<'c, 'a> {
                         }
                     }
                     if ok {
-                        result = (Some(self.u_tag(&base.code, base.ty)), Box::new(move |_, l| map.iter().find(|(s, _)| *s == l).map(|(_, i)| *i)));
+                        result = (Some(self.u_tag(&base.code, base.ty)), Box::new(move |_, l| map.iter().filter(|(s, _)| *s == l).map(|(_, i)| *i).collect()));
                     }
                 }
             }
@@ -4138,7 +4142,7 @@ impl<'c, 'a> Gen<'c, 'a> {
                     let ms = self.c.types.tys(ms).to_vec();
                     if ms.iter().all(|&x| matches!(self.tget(x), Ty::StrLit(_))) {
                         let lits: Vec<(crate::intern::Sym, usize)> = ms.iter().enumerate().map(|(i, &x)| (if let Ty::StrLit(l) = self.tget(x) { l } else { unreachable!() }, i)).collect();
-                        result = (Some(self.u_tag(&v.code, v.ty)), Box::new(move |_, l| lits.iter().find(|(s, _)| *s == l).map(|(_, i)| *i)));
+                        result = (Some(self.u_tag(&v.code, v.ty)), Box::new(move |_, l| lits.iter().filter(|(s, _)| *s == l).map(|(_, i)| *i).collect()));
                     }
                 }
                 // Every case an integer constant (a literal, an enum's member): a C switch
@@ -4220,6 +4224,10 @@ impl<'c, 'a> Gen<'c, 'a> {
         self.open(&format!("switch ({tv}) {{"));
         let depth = self.b().scopes.len();
         self.b().breaks.push((BreakTarget::Native, depth));
+        // (every variant of the case's discriminant, `case 'html'` of two kinds of token: each of
+        // their tags, but one an earlier case took)
+        let mut taken: Vec<usize> = Vec::new();
+        let mut dummy = 0u32;
         for case in cases {
             match case.test {
                 Some(t) => {
@@ -4228,9 +4236,14 @@ impl<'c, 'a> Gen<'c, 'a> {
                         ExprKind::Str(l) => Some(*l),
                         _ => self.enum_str_member(m, t),
                     };
-                    match lit.and_then(|l| label_tag(self, l)) {
-                        Some(i) => self.line(format!("case {i}:")),
-                        None => self.line("case 0xFFFFFFFF:"),
+                    let tags: Vec<usize> = lit.map(|l| label_tag(self, l)).unwrap_or_default().into_iter().filter(|i| !taken.contains(i)).collect();
+                    if tags.is_empty() {
+                        dummy += 1;
+                        self.line(format!("case {}u:", 0xFFFF_FFFFu32 - dummy));
+                    }
+                    for i in tags {
+                        taken.push(i);
+                        self.line(format!("case {i}:"));
                     }
                 }
                 None => self.line("default:"),
@@ -8642,6 +8655,18 @@ impl<'c, 'a> Gen<'c, 'a> {
             body.arrow_root = Some(*s);
         }
         self.bodies.push(body);
+        // A parameter the body reassigns is owned from the start (borrowed, it can't be changed in
+        // place or released when replaced), as a function's is.
+        let reassigned = self.reassigned_locals(&kind);
+        for (i, &(key, ty, inout)) in params.iter().enumerate() {
+            if !inout && !self.b().boxed.contains(&key) && reassigned.contains(&key) && self.is_rc(ty) && self.b().locals.get(&key).is_some_and(|l| l.access == format!("p{i}")) {
+                let r = self.retain_code(ty, &format!("p{i}"));
+                self.line(format!("{r};"));
+                let rel = format!("{};", self.release_code(ty, &format!("p{i}")));
+                self.b().scopes[0].releases.push(rel);
+                self.b().params.remove(&key);
+            }
+        }
         match kind {
             FnBodyKind::Block(s) => {
                 self.stmt_list_of(s);

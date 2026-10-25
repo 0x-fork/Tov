@@ -432,9 +432,16 @@ static bool tv_re_first_parse(tv_re *r, const char *src, size_t n) {
     if (r->flags & LRE_FLAG_STICKY) return false;
     for (size_t k = 0; k < n; k++) if ((unsigned char)src[k] >= 128) return false;
     if (n > 0 && src[0] == '^') {
-        size_t i = 1;
-        tv_re_skip_branch(src, n, &i);
-        if (i < n) return false; /* (`^a|b`) */
+        /* (`^a|^b`: every alternative anchored; `^a|b` isn't) */
+        size_t i = 0;
+        for (;;) {
+            if (i >= n || src[i] != '^') return false;
+            i++;
+            tv_re_skip_branch(src, n, &i);
+            if (i >= n) break;
+            if (src[i] != '|') return false;
+            i++;
+        }
         r->anchored = true;
         return true;
     }
