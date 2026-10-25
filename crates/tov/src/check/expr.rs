@@ -3202,11 +3202,18 @@ impl<'a> Checker<'a> {
         for f in fields {
             let ExprKind::Str(val_sym) = self.ast().expr(f.value).kind else { continue };
             let val = &self.name(val_sym).to_string();
-            let is_disc = records.iter().all(|(_, fs)| fs.iter().any(|x| x.name == f.name && matches!(self.types.get(x.ty), Ty::StrLit(_))));
+            // (an open variant, `{ type: string; ... }`, takes any value no other one does)
+            let is_disc = records.iter().all(|(_, fs)| fs.iter().any(|x| x.name == f.name && matches!(self.types.get(x.ty), Ty::StrLit(_) | Ty::Str)))
+                && records.iter().any(|(_, fs)| fs.iter().any(|x| x.name == f.name && matches!(self.types.get(x.ty), Ty::StrLit(_))));
             if !is_disc {
                 continue;
             }
             let lit = self.types.str_lit(val_sym);
+            if !records.iter().any(|(_, fs)| fs.iter().any(|x| x.name == f.name && x.ty == lit))
+                && let Some((m, fs)) = records.iter().find(|(_, fs)| fs.iter().any(|x| x.name == f.name && x.ty == STR))
+            {
+                return Some((*m, fs.clone()));
+            }
             // (two variants of one discriminant, `{ type: "html", ... }` of two kinds of token: the
             // one whose fields the literal's fit)
             let with: Vec<&(TyId, Vec<Field>)> = records.iter().filter(|(_, fs)| fs.iter().any(|x| x.name == f.name && x.ty == lit)).collect();

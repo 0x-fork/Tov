@@ -3,7 +3,9 @@ use crate::ast::{ArrowBody, AssignOp, BinOp, Case, ExprKind, StmtKind};
 
 enum SwitchMode {
     /// `switch (x.kind)` over a discriminated union: variants are (literal, member type).
-    Discriminated { local: LocalId, variants: Vec<(Sym, TyId)> },
+    /// Open variants (the field a plain `string`, as in `{ type: string; [k: string]: any }`)
+    /// can be any case.
+    Discriminated { local: LocalId, variants: Vec<(Sym, TyId)>, open: Vec<TyId> },
     /// `switch (x)` where `x` is a union of string literals.
     Literal { local: Option<LocalId>, lits: Vec<Sym> },
     General,
@@ -1010,24 +1012,23 @@ impl<'a> Checker<'a> {
                     let members = self.flat_members(ty);
                     if members.len() > 1 {
                         let mut variants = Vec::new();
+                        let mut open = Vec::new();
                         for &m in &members {
-                            let lit = match *self.types.get(m) {
-                                Ty::Record(fs) => self.types.fields(fs).iter().find(|f| f.name == *name).and_then(|f| match *self.types.get(f.ty) {
-                                    Ty::StrLit(l) => Some(l),
-                                    _ => None,
-                                }),
+                            let ft = match *self.types.get(m) {
+                                Ty::Record(fs) => self.types.fields(fs).iter().find(|f| f.name == *name).map(|f| *self.types.get(f.ty)),
                                 _ => None,
                             };
-                            match lit {
-                                Some(l) => variants.push((l, m)),
-                                None => {
+                            match ft {
+                                Some(Ty::StrLit(l)) => variants.push((l, m)),
+                                Some(Ty::Str) => open.push(m),
+                                _ => {
                                     variants.clear();
                                     break;
                                 }
                             }
                         }
                         if !variants.is_empty() {
-                            return SwitchMode::Discriminated { local: id, variants };
+                            return SwitchMode::Discriminated { local: id, variants, open };
                         }
                     }
                 }
@@ -1067,6 +1068,7 @@ impl<'a> Checker<'a> {
             SwitchMode::General => Vec::new(),
         };
         let literal_mode = !matches!(mode, SwitchMode::General);
+        let has_open = matches!(&mode, SwitchMode::Discriminated { open, .. } if !open.is_empty());
         // Labels first, so `default` can be narrowed to what's left.
         let mut covered: Vec<Sym> = Vec::new();
         let mut labels: Vec<Option<Sym>> = Vec::new();
@@ -1094,7 +1096,7 @@ impl<'a> Checker<'a> {
                 };
                 let v = self.name(lit).to_string();
                 let v = &v;
-                if !options.contains(&lit) {
+                if !options.contains(&lit) && !has_open {
                     let opts: Vec<String> = options.iter().map(|&o| self.name(o).to_string()).collect();
                     let quoted: Vec<String> = opts.iter().map(|o| format!("\"{o}\"")).collect();
                     let shown = self.show(if let SwitchMode::Discriminated { local, .. } = &mode { self.local(*local).ty } else { dt });
@@ -1142,8 +1144,9 @@ impl<'a> Checker<'a> {
             match &mode {
                 // (a `default` after a case for every variant: `never`, as in TypeScript's
                 // `const _exhaustive: never = s`)
-                SwitchMode::Discriminated { local, variants } => {
-                    let tys: Vec<TyId> = variants.iter().filter(|(l, _)| narrowed_lits.contains(l)).map(|(_, t)| *t).collect();
+                SwitchMode::Discriminated { local, variants, open } => {
+                    let mut tys: Vec<TyId> = variants.iter().filter(|(l, _)| narrowed_lits.contains(l)).map(|(_, t)| *t).collect();
+                    tys.extend(open.iter().copied());
                     if !tys.is_empty() || group_default {
                         let t = self.types.union(&tys);
                         self.narrow(*local, t);
@@ -1177,7 +1180,7 @@ impl<'a> Checker<'a> {
             group_default = false;
         }
         self.fcx().frames.last_mut().unwrap().switches -= 1;
-        if literal_mode && !has_default {
+        if literal_mode && !has_default && !has_open {
             let missing: Vec<Sym> = options.iter().copied().filter(|o| !covered.contains(o)).collect();
             if missing.is_empty() {
                 self.exhaustive.insert((self.cur, sid));
