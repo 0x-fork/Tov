@@ -2324,6 +2324,39 @@ impl<'c, 'a> Gen<'c, 'a> {
                     let f = if v.ty == INT && self.js_ints(self.cur_m()) { "tv_str_from_jint" } else { "tv_str_from_int" };
                     return self.tmp(STR, &format!("{f}((tv_int)({}))", v.code), true);
                 }
+                if v.ty == F64 {
+                    return self.tmp(STR, &format!("tv_str_from_f64({})", v.code), true);
+                }
+                // (a union of strings, numbers and the like: each member's text, no builder)
+                if let Ty::Union(ms) = self.tget(v.ty)
+                    && self.niche(v.ty).is_none()
+                {
+                    let ms = self.c.types.tys(ms).to_vec();
+                    let simple = ms.iter().all(|&m| matches!(self.tget(m), Ty::Str | Ty::StrLit(_) | Ty::F64 | Ty::Int | Ty::Bool | Ty::Undefined | Ty::Null | Ty::BoolLit(_)));
+                    if simple {
+                        let res = self.fresh("s");
+                        let tag = self.u_tag(&v.code, v.ty);
+                        self.line(format!("tv_str {res};"));
+                        self.open(&format!("switch ({tag}) {{"));
+                        for (i, &m) in ms.iter().enumerate() {
+                            let p = if self.is_unit(m) { String::new() } else { self.u_payload(&v.code, v.ty, i) };
+                            let code = match self.tget(m) {
+                                Ty::Str => format!("{p}; tv_str_retain({res})"),
+                                Ty::StrLit(sym) => self.lit(self.sym(sym).to_string().as_bytes()),
+                                Ty::F64 => format!("tv_str_from_f64({p})"),
+                                Ty::Int => format!("{}({p})", if self.js_ints(self.cur_m()) { "tv_str_from_jint" } else { "tv_str_from_int" }),
+                                Ty::Bool => format!("(({p}) ? {} : {})", self.lit(b"true"), self.lit(b"false")),
+                                Ty::BoolLit(b) => self.lit(if b { b"true" as &[u8] } else { b"false" }),
+                                Ty::Undefined => self.lit(b"undefined"),
+                                _ => self.lit(b"null"),
+                            };
+                            self.line(format!("case {i}: {res} = {code}; break;"));
+                        }
+                        self.line(format!("default: {res} = TV_EMPTY_STR; break;"));
+                        self.close("}");
+                        return self.tmp(STR, &res, true);
+                    }
+                }
                 let sbv = self.fresh("sb");
                 self.line(format!("tv_sb {sbv} = {{0}};"));
                 self.line("{");

@@ -1185,8 +1185,23 @@ laid_out:
 }
 
 tv_str tv_str_from_f64(double v) {
+    /* (a number made text again and again, by a sort comparing them as strings or `String(id)`:
+     * the last ones' text kept, by the number's bits; Tov's values live on one thread) */
+    static struct { uint64_t bits; tv_str s; } cache[256];
+    uint64_t bits;
+    memcpy(&bits, &v, 8);
+    size_t h = (size_t)((bits * 0x9E3779B97F4A7C15ull) >> 56);
+    if (cache[h].s.p && cache[h].bits == bits) {
+        tv_str_retain(cache[h].s);
+        return cache[h].s;
+    }
     char buf[40];
-    return tv_str_from_ascii(buf, tv_fmt_number(buf, v, false));
+    tv_str s = tv_str_from_ascii(buf, tv_fmt_number(buf, v, false));
+    if (cache[h].s.p) tv_str_release(cache[h].s);
+    tv_str_retain(s);
+    cache[h].bits = bits;
+    cache[h].s = s;
+    return s;
 }
 
 static const char tv_radix_digits[] = "0123456789abcdefghijklmnopqrstuvwxyz";
@@ -5546,6 +5561,15 @@ void *tv_map_get(tv_map mm, const tv_type *kt, const tv_type *vt, const void *ke
     tv_mapbuf *m = tv_map_buf(mm);
     if (!m || !m->count) return NULL;
     tv_mlayout L = tv_mlay(kt, vt);
+    /* (a few string keys, a record's: the same string as the key, a literal passed along, found
+     * by its address before any hashing) */
+    if (kt == &tv_type_str && m->used <= 8) {
+        const void *kp = *(void *const *)key;
+        for (int64_t i = 0; i < m->used; i++) {
+            unsigned char *e = tv_entry(m, L, i);
+            if (*(void *const *)(e + 8) == kp && tv_entry_hash(e)) return e + L.voff;
+        }
+    }
     bool found;
     uint64_t pos = tv_map_find(m, L, kt, key, tv_key_hash(kt, key), &found);
     return found ? tv_entry(m, L, tv_slot_entry(m, m->index[pos])) + L.voff : NULL;
