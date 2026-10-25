@@ -170,10 +170,13 @@ impl<'c, 'a> Gen<'c, 'a> {
             let ct = self.ctype(*ty);
             let key_text = format!("\"{name}\"");
             let key = format!("{}, {}", c_string(key_text.as_bytes()), key_text.len());
+            // (compact, the usual: the comma, the key and the colon in one piece)
+            let compact_text = format!(",\"{name}\":");
+            let compact = format!("{} + first, {} - first", c_string(compact_text.as_bytes()), compact_text.len());
             let skip = self.json_is_undefined(*ty, lv);
             let _ = writeln!(
                 b,
-                "    if (!({skip})) {{\n        if (!first) tv_sb_add_char(sb, ',');\n        first = false;\n        tvg_js_nl(sb, ind, lvl + 1);\n        tv_sb_add(sb, {key});\n        if (ind.p->len) tv_sb_add(sb, \": \", 2); else tv_sb_add_char(sb, ':');\n        {w}(sb, (const {ct} *)&{lv}, ind, lvl + 1);\n    }}"
+                "    if (!({skip})) {{\n        if (__builtin_expect(!ind.p->len, 1)) tv_sb_add(sb, {compact});\n        else {{\n            if (!first) tv_sb_add_char(sb, ',');\n            tvg_js_nl(sb, ind, lvl + 1);\n            tv_sb_add(sb, {key});\n            tv_sb_add(sb, \": \", 2);\n        }}\n        first = false;\n        {w}(sb, (const {ct} *)&{lv}, ind, lvl + 1);\n    }}"
             );
         }
         b.push_str("    if (!first) tvg_js_nl(sb, ind, lvl);\n    tv_sb_add_char(sb, '}');\n");

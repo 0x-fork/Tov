@@ -2303,10 +2303,12 @@ static inline void *tvg_alloc_small(size_t size) {
     return tv_small_refill(c);
 }
 /* JSON.stringify indentation: a newline and `lvl` copies of `ind` (nothing when compact). */
-static void tvg_js_nl(tv_sb *sb, tv_str ind, int lvl) {
-    if (!ind.p->len) return;
+static __attribute__((noinline)) void tvg_js_nl_slow(tv_sb *sb, tv_str ind, int lvl) {
     tv_sb_push_char(sb, '\n');
     for (int i = 0; i < lvl; i++) tv_sb_push(sb, ind.p->data, (size_t)ind.p->len);
+}
+static inline void tvg_js_nl(tv_sb *sb, tv_str ind, int lvl) {
+    if (__builtin_expect(ind.p->len != 0, 0)) tvg_js_nl_slow(sb, ind, lvl);
 }
 static tv_str tvg_js_spaces(tv_int n) {
     static const char sp[] = "          ";

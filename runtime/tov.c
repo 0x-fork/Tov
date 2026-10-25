@@ -7184,6 +7184,16 @@ void tv_json_quote(tv_sb *sb, tv_str s) {
     sb->data[sb->len++] = '"';
     while (i < n) {
         size_t start = i;
+        /* (eight bytes at a time while none is below 0x20, a quote or a backslash) */
+        while (i + 8 <= n) {
+            uint64_t w;
+            memcpy(&w, d + i, 8);
+            const uint64_t ones = 0x0101010101010101ULL, highs = 0x8080808080808080ULL;
+            uint64_t q = w ^ (ones * '"'), b = w ^ (ones * '\\');
+            uint64_t hit = ((w - ones * 0x20) & ~w) | ((q - ones) & ~q) | ((b - ones) & ~b);
+            if (hit & highs) break;
+            i += 8;
+        }
         while (i < n && !tv_json_esc[d[i]]) i++;
         if (i > start) tv_sb_push(sb, (const char *)d + start, i - start);
         if (i == n) break;
