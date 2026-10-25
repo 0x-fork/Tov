@@ -621,6 +621,7 @@ void tv_arr_reverse(tv_arr *a, const tv_type *t);
  * (compare String(x) of each element). */
 void tv_arr_sort(tv_arr *a, const tv_type *t, double (*cmp)(void *ctx, const void *x, const void *y), void *ctx);
 tv_int tv_arr_index_of(tv_arr a, const tv_type *t, const void *elem);
+bool tv_arr_includes(tv_arr a, const tv_type *t, const void *elem); /* SameValueZero: NaN is found */
 tv_int tv_arr_last_index_of(tv_arr a, const tv_type *t, const void *elem);
 tv_str tv_arr_join(tv_arr a, const tv_type *t, tv_str sep);       /* elements via t->to_str; "undefined" members print as "" (JS) */
 

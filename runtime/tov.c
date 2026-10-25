@@ -5200,9 +5200,54 @@ void tv_arr_sort(tv_arr *a, const tv_type *t, double (*cmp)(void *ctx, const voi
 tv_int tv_arr_index_of(tv_arr a, const tv_type *t, const void *elem) {
     int64_t n = tv_arr_len(a);
     size_t es = t->size;
+    const unsigned char *d = n ? tv_arrbuf_data(a.p) : NULL;
+    /* (the common elements compared here, not through the descriptor: a loop the C compiler can
+     * unroll; a string by its length before its bytes) */
+    if (t == &tv_type_int) {
+        int64_t x;
+        memcpy(&x, elem, 8);
+        const int64_t *p = (const int64_t *)(const void *)d;
+        for (int64_t i = 0; i < n; i++) if (p[i] == x) return i;
+        return -1;
+    }
+    if (t == &tv_type_f64) {
+        double x;
+        memcpy(&x, elem, 8);
+        const double *p = (const double *)(const void *)d;
+        for (int64_t i = 0; i < n; i++) if (p[i] == x) return i;
+        return -1;
+    }
+    if (t == &tv_type_str) {
+        tv_str x;
+        memcpy(&x, elem, sizeof x);
+        const tv_str *p = (const tv_str *)(const void *)d;
+        int32_t xl = x.p->len;
+        for (int64_t i = 0; i < n; i++) {
+            const tv_strbuf *b = p[i].p;
+            if (b == x.p || (b->len == xl && memcmp(b->data, x.p->data, (size_t)xl) == 0)) return i;
+        }
+        return -1;
+    }
     for (int64_t i = 0; i < n; i++)
-        if (t->eq(tv_arrbuf_data(a.p) + (size_t)i * es, elem)) return i;
+        if (t->eq(d + (size_t)i * es, elem)) return i;
     return -1;
+}
+
+bool tv_arr_includes(tv_arr a, const tv_type *t, const void *elem) {
+    /* (SameValueZero: NaN is found, as it isn't by indexOf) */
+    if (t == &tv_type_f64 || t == &tv_type_f32) {
+        double x = t == &tv_type_f64 ? *(const double *)elem : (double)*(const float *)elem;
+        if (x != x) {
+            int64_t n = tv_arr_len(a);
+            for (int64_t i = 0; i < n; i++) {
+                const unsigned char *e = tv_arrbuf_data(a.p) + (size_t)i * t->size;
+                double y = t == &tv_type_f64 ? *(const double *)(const void *)e : (double)*(const float *)(const void *)e;
+                if (y != y) return true;
+            }
+            return false;
+        }
+    }
+    return tv_arr_index_of(a, t, elem) >= 0;
 }
 
 tv_int tv_arr_last_index_of(tv_arr a, const tv_type *t, const void *elem) {

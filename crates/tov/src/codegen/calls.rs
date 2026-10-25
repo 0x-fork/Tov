@@ -1631,9 +1631,11 @@ impl<'c, 'a> Gen<'c, 'a> {
                 let x = self.expr(args[0].expr);
                 let x = self.coerce(x, et);
                 let xn = self.key_tmp(x, et);
+                if name == "includes" {
+                    return Val::plain(format!("tv_arr_includes({}, {d}, &{xn})", arr.code), BOOL);
+                }
                 let f = if name == "lastIndexOf" { "tv_arr_last_index_of" } else { "tv_arr_index_of" };
-                let call = format!("{f}({}, {d}, &{xn})", arr.code);
-                if name == "includes" { Val::plain(format!("({call} >= 0)"), BOOL) } else { Val::plain(call, INT) }
+                Val::plain(format!("{f}({}, {d}, &{xn})", arr.code), INT)
             }
             "toString" => {
                 let sep = self.lit(b",");

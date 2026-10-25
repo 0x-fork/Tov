@@ -849,10 +849,9 @@ impl<'a> Checker<'a> {
             // `Float64Array.from(xs)`, `Uint8Array.of(1, 2)`: as `new Float64Array(xs)` / of those numbers
             n if typed_array_elem(n).is_some() && matches!(name, "from" | "of") => {
                 let el = typed_array_elem(n).unwrap();
-                let int_el = super::expr::promoted(el) == INT;
                 if name == "of" {
                     for a in args {
-                        let hint = if !int_el { Some(F64) } else if self.is_int_literal(a.expr) { Some(INT) } else { None };
+                        let hint = Some(F64);
                         let t = self.expr(a.expr, hint);
                         if t != ERROR && !self.types.is_numeric(t) {
                             let shown = self.show(t);
@@ -865,8 +864,7 @@ impl<'a> Checker<'a> {
                     self.check_args_loose(args);
                 } else {
                     let src = args[0].expr;
-                    let floats = int_el && matches!(&self.ast().expr(src).kind, ExprKind::Array(xs) if !xs.iter().all(|&x| self.is_int_literal(x)));
-                    let hint = self.types.array(if floats || !int_el { F64 } else { INT });
+                    let hint = self.types.array(F64);
                     let t = self.expr(src, Some(hint));
                     let base = self.types.without_undefined(t);
                     match *self.types.get(base) {

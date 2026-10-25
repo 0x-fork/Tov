@@ -3909,9 +3909,9 @@ impl<'a> Checker<'a> {
                 }
                 if let Some(a) = args.first() {
                     // (elements are numbers, converted as they're stored: `new Uint8Array([300])` wraps)
-                    // (`new Uint8Array([0.5, x / 2])`: of numbers, then, not integers)
-                    let floats = matches!(&self.ast().expr(a.expr).kind, ExprKind::Array(xs) if !xs.iter().all(|&x| self.is_int_literal(x)));
-                    let hint = elem.map(|e| self.types.array(if (floats && promoted(e) == INT) || (typed.is_some() && self.types.is_float(e)) { F64 } else { promoted(e) }));
+                    // (a typed array's: numbers, `new Uint8Array([0.5, x / 2])`, converted as they're
+                    // stored, whichever round this is)
+                    let hint = elem.map(|e| self.types.array(if typed.is_some() { F64 } else { promoted(e) }));
                     let t = self.expr(a.expr, if typed.is_some() { hint } else { Some(INT) });
                     let s = self.ast().expr(a.expr).span;
                     let base = self.types.without_undefined(t);
