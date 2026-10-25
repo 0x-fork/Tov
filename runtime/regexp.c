@@ -852,6 +852,16 @@ bool tv_re_iter_next(tv_re_iter *it, tv_int pos[2]) {
     return true;
 }
 
+tv_str tv_re_iter_group(const tv_re_iter *it, tv_str s, int k) {
+    tv_re *r = &tv_res[it->h];
+    tv_re_text t = {.buf = it->buf, .units = it->units, .n = it->n, .ascii = it->ascii, .type = it->type, .shift = it->shift};
+    /* (past the groups: the match's offset, as text, then the input, as JavaScript passes them) */
+    if (k == r->ncap) return tv_str_from_int(tv_re_pos(&t, it->cap[0]));
+    if (k == r->ncap + 1) { tv_str_retain(s); return s; }
+    if (k >= r->ncap || !it->cap[2 * k]) return TV_EMPTY_STR;
+    return tv_re_slice(s, &t, tv_re_pos(&t, it->cap[2 * k]), tv_re_pos(&t, it->cap[2 * k + 1]));
+}
+
 void tv_re_iter_done(tv_re_iter *it) {
     tv_free(it->units);
     if (it->cap != it->on_stack) tv_free(it->cap);
@@ -923,6 +933,44 @@ tv_str tv_native_reReplace(tv_int h, tv_str s, tv_str rep) {
     uint8_t *on_stack[16];
     uint8_t **cap = 2 * r->ncap <= 16 ? on_stack : tv_alloc((size_t)(2 * r->ncap) * sizeof(uint8_t *) + 1);
     tv_re_text t = tv_re_text_of(s);
+    /* (ASCII text and a plain replacement: the matches found first, then the result written at
+     * its size, no builder to grow and copy) */
+    if (t.ascii && !dollar) {
+        enum { MAXM = 32 };
+        tv_int pos[2 * MAXM], m = 0, from = 0;
+        bool more = false;
+        while (from <= t.n && tv_re_find(r, cap, t.buf, t.n, from, true, t.type)) {
+            if (m == MAXM) { more = true; break; }
+            tv_int p0 = (tv_int)(cap[0] - t.buf), p1 = (tv_int)(cap[1] - t.buf);
+            pos[2 * m] = p0, pos[2 * m + 1] = p1, m++;
+            if (!global) break;
+            from = tv_re_next(r, &t, p0, p1);
+        }
+        if (!more) {
+            if (!m) {
+                if (cap != on_stack) tv_free(cap);
+                tv_str_retain(s);
+                return s;
+            }
+            size_t rl = (size_t)tv_str_byte_len(rep), len = (size_t)t.n;
+            for (tv_int i = 0; i < m; i++) len = len - (size_t)(pos[2 * i + 1] - pos[2 * i]) + rl;
+            if (len <= 1) goto built; /* (empty or one byte: the shared strings, by the builder) */
+            if (cap != on_stack) tv_free(cap);
+            char *o;
+            tv_str out = tv_str_alloc(len, &o);
+            tv_int last = 0;
+            for (tv_int i = 0; i < m; i++) {
+                memcpy(o, t.buf + last, (size_t)(pos[2 * i] - last)); o += pos[2 * i] - last;
+                memcpy(o, rep.p->data, rl); o += rl;
+                last = pos[2 * i + 1];
+            }
+            memcpy(o, t.buf + last, (size_t)(t.n - last));
+            /* (ASCII in, ASCII out when the replacement is) */
+            if (tv_str_is_ascii(rep) && out.p->rc > 0) out.p->rc |= TV_STR_ASCII;
+            return out;
+        }
+    }
+built:;
     tv_sb sb = {0};
     tv_int last = 0, from = 0;
     bool any = false;

@@ -1805,7 +1805,17 @@ impl<'c, 'a> Gen<'c, 'a> {
         let ast = self.ast(m);
         let ExprKind::Call { callee, args, optional: false, .. } = &ast.expr(e).kind else { return None };
         let ExprKind::Ident(f) = ast.expr(*callee).kind else { return None };
-        if self.sym(f) != "__reReplaceFn1" || args.len() != 3 {
+        // (`__reReplaceFn`: the callback's parameters after the match are the groups)
+        // (`__reReplaceFnG<k>`: k groups, then the offset and the input)
+        let fname = self.sym(f).to_string();
+        let offset_after = fname.strip_prefix("__reReplaceFnG").and_then(|k| k.parse::<usize>().ok());
+        let groups = match fname.as_str() {
+            "__reReplaceFn1" => false,
+            "__reReplaceFn" => true,
+            _ if offset_after.is_some() => true,
+            _ => return None,
+        };
+        if args.len() != 3 {
             return None;
         }
         // (the expression a literal, its flags known: global or not, never sticky)
@@ -1822,7 +1832,7 @@ impl<'c, 'a> Gen<'c, 'a> {
         let global = flags.contains('g');
         let ExprKind::Arrow(arrow) = &ast.expr(args[2].expr).kind else { return None };
         let crate::ast::ArrowBody::Expr(body) = arrow.body else { return None };
-        if arrow.params.len() > 1 || arrow.params.iter().any(|p| p.rest || p.optional) {
+        if arrow.params.len() > if groups { 10 } else { 1 } || arrow.params.iter().any(|p| p.rest || p.optional) {
             return None;
         }
         let ft = self.ty(args[2].expr);
@@ -1830,7 +1840,7 @@ impl<'c, 'a> Gen<'c, 'a> {
         if throws != NEVER {
             return None;
         }
-        let param = arrow.params.first().map(|p| p.span.start);
+        let params: Vec<u32> = arrow.params.iter().map(|p| p.span.start).collect();
         let sv = self.expr(args[0].expr);
         let sv = self.coerce(sv, STR);
         let rv = self.expr(args[1].expr);
@@ -1846,8 +1856,27 @@ impl<'c, 'a> Gen<'c, 'a> {
         self.line(format!("tv_str {mv} = tv_str_slice({sn}, {pos}[0], {pos}[1], true, NULL);"));
         self.push_scope();
         self.b().scopes.last_mut().unwrap().releases.push(format!("tv_str_release({mv});"));
-        if let Some(k) = param {
+        if let Some(&k) = params.first() {
             self.b().locals.insert(k, crate::codegen::body::Local { access: mv.clone(), ty: STR });
+        }
+        for (g, &k) in params.iter().enumerate().skip(1) {
+            if let Some(ng) = offset_after
+                && g > ng
+            {
+                // (the match's offset, then the input)
+                if g == ng + 1 {
+                    let ov = self.fresh("off");
+                    self.line(format!("tv_int {ov} = {pos}[0];"));
+                    self.b().locals.insert(k, crate::codegen::body::Local { access: ov, ty: INT });
+                } else {
+                    self.b().locals.insert(k, crate::codegen::body::Local { access: sn.clone(), ty: STR });
+                }
+                continue;
+            }
+            let gv = self.fresh("g");
+            self.line(format!("tv_str {gv} = tv_re_iter_group(&{it}, {sn}, {g});"));
+            self.b().scopes.last_mut().unwrap().releases.push(format!("tv_str_release({gv});"));
+            self.b().locals.insert(k, crate::codegen::body::Local { access: gv, ty: STR });
         }
         self.push_temps();
         let r = self.expr(body);

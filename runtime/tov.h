@@ -230,6 +230,7 @@ void tv_str_release_slow(tv_str s);
 static inline void tv_str_release(tv_str s) { if (s.p->rc > 0 && (--s.p->rc & TV_STR_COUNT) == 0) tv_str_release_slow(s); }
 
 tv_str tv_str_from(const char *bytes, size_t n);
+tv_str tv_str_alloc(size_t n, char **data); /* a new string of n bytes, *data to fill (n > 1: a one-byte string is shared) */
 tv_str tv_str_from_sb(tv_sb *sb);               /* takes the builder's contents; sb is reset */
 tv_str tv_str_concat(tv_str a, tv_str b);
 void tv_str_append(tv_str *s, tv_str t);                     /* s += t (in place when s is the only holder) */
@@ -352,6 +353,7 @@ typedef struct tv_re_iter {
 } tv_re_iter;
 void tv_re_iter_init(tv_re_iter *it, tv_int h, tv_str s);
 bool tv_re_iter_next(tv_re_iter *it, tv_int pos[2]);
+tv_str tv_re_iter_group(const tv_re_iter *it, tv_str s, int k); /* group k of the last match ("" when it took no part; past them its offset as text, then s) */
 void tv_re_iter_done(tv_re_iter *it);
 void tv_sb_push_units(tv_sb *sb, tv_str s, tv_int a, tv_int b);   /* units a..b of s */
 struct tv_arr tv_native_reExecInto(tv_int h, tv_str s, tv_int from, struct tv_arr p);

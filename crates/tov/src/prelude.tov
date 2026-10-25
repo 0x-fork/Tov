@@ -294,6 +294,138 @@ export function __reReplaceFn1(s: string, re: RegExp, f: (m: string) => string):
   return out
 }
 
+/** `s.replace(re, (match, offset, input) => text)` of a literal with 0 groups. */
+export function __reReplaceFnG0(s: string, re: RegExp, f: (m: string, offset: int, input: string) => string): string {
+  const h = re.__id()
+  const global = re.global
+  const sticky = re.sticky
+  const unicode = re.unicode
+  let from = global ? 0 : sticky ? re.lastIndex : 0
+  let out = ""
+  let last = 0
+  let p: int[] = []
+  let any = false
+  while (from <= s.length) {
+    p = __native.reExecInto(h, s, from, p)
+    if (p.length === 0) {
+      if (global || sticky) re.lastIndex = 0
+      if (!any) return s
+      break
+    }
+    any = true
+    const n = p.length
+    out += s.slice(last, p[0]!)
+    out += f(s.slice(p[0]!, p[1]!), p[0]!, s)
+    last = p[1]!
+    if (!global) {
+      if (sticky) re.lastIndex = p[1]!
+      break
+    }
+    from = __reNext(s, p, unicode)
+  }
+  out += s.slice(last)
+  return out
+}
+
+/** `s.replace(re, (match, p1, offset, input) => text)` of a literal with 1 group. */
+export function __reReplaceFnG1(s: string, re: RegExp, f: (m: string, p1: string, offset: int, input: string) => string): string {
+  const h = re.__id()
+  const global = re.global
+  const sticky = re.sticky
+  const unicode = re.unicode
+  let from = global ? 0 : sticky ? re.lastIndex : 0
+  let out = ""
+  let last = 0
+  let p: int[] = []
+  let any = false
+  while (from <= s.length) {
+    p = __native.reExecInto(h, s, from, p)
+    if (p.length === 0) {
+      if (global || sticky) re.lastIndex = 0
+      if (!any) return s
+      break
+    }
+    any = true
+    const n = p.length
+    out += s.slice(last, p[0]!)
+    out += f(s.slice(p[0]!, p[1]!), __reGroup(s, p, n, 1), p[0]!, s)
+    last = p[1]!
+    if (!global) {
+      if (sticky) re.lastIndex = p[1]!
+      break
+    }
+    from = __reNext(s, p, unicode)
+  }
+  out += s.slice(last)
+  return out
+}
+
+/** `s.replace(re, (match, p1, p2, offset, input) => text)` of a literal with 2 groups. */
+export function __reReplaceFnG2(s: string, re: RegExp, f: (m: string, p1: string, p2: string, offset: int, input: string) => string): string {
+  const h = re.__id()
+  const global = re.global
+  const sticky = re.sticky
+  const unicode = re.unicode
+  let from = global ? 0 : sticky ? re.lastIndex : 0
+  let out = ""
+  let last = 0
+  let p: int[] = []
+  let any = false
+  while (from <= s.length) {
+    p = __native.reExecInto(h, s, from, p)
+    if (p.length === 0) {
+      if (global || sticky) re.lastIndex = 0
+      if (!any) return s
+      break
+    }
+    any = true
+    const n = p.length
+    out += s.slice(last, p[0]!)
+    out += f(s.slice(p[0]!, p[1]!), __reGroup(s, p, n, 1), __reGroup(s, p, n, 2), p[0]!, s)
+    last = p[1]!
+    if (!global) {
+      if (sticky) re.lastIndex = p[1]!
+      break
+    }
+    from = __reNext(s, p, unicode)
+  }
+  out += s.slice(last)
+  return out
+}
+
+/** `s.replace(re, (match, p1, p2, p3, offset, input) => text)` of a literal with 3 groups. */
+export function __reReplaceFnG3(s: string, re: RegExp, f: (m: string, p1: string, p2: string, p3: string, offset: int, input: string) => string): string {
+  const h = re.__id()
+  const global = re.global
+  const sticky = re.sticky
+  const unicode = re.unicode
+  let from = global ? 0 : sticky ? re.lastIndex : 0
+  let out = ""
+  let last = 0
+  let p: int[] = []
+  let any = false
+  while (from <= s.length) {
+    p = __native.reExecInto(h, s, from, p)
+    if (p.length === 0) {
+      if (global || sticky) re.lastIndex = 0
+      if (!any) return s
+      break
+    }
+    any = true
+    const n = p.length
+    out += s.slice(last, p[0]!)
+    out += f(s.slice(p[0]!, p[1]!), __reGroup(s, p, n, 1), __reGroup(s, p, n, 2), __reGroup(s, p, n, 3), p[0]!, s)
+    last = p[1]!
+    if (!global) {
+      if (sticky) re.lastIndex = p[1]!
+      break
+    }
+    from = __reNext(s, p, unicode)
+  }
+  out += s.slice(last)
+  return out
+}
+
 /** `s.replace(re, (match, ...groups) => text)`. */
 export function __reReplaceFn(s: string, re: RegExp, f: (m: string, p1: string, p2: string, p3: string, p4: string, p5: string, p6: string, p7: string, p8: string, p9: string) => string): string {
   return __reReplaceWith(s, re, "", f)
@@ -327,7 +459,7 @@ function __reReplaceWith(s: string, re: RegExp, rep: string, f: ((m: string, p1:
     out += s.slice(last, p[0]!)
     if (f !== undefined) {
       const n = p.length
-      out += f(s.slice(p[0]!, p[1]!), __reGroup(s, p, n, 1), __reGroup(s, p, n, 2), __reGroup(s, p, n, 3), __reGroup(s, p, n, 4), __reGroup(s, p, n, 5), __reGroup(s, p, n, 6), __reGroup(s, p, n, 7), __reGroup(s, p, n, 8), __reGroup(s, p, n, 9))
+      out += f(s.slice(p[0]!, p[1]!), __reArg(s, p, n, 1), __reArg(s, p, n, 2), __reArg(s, p, n, 3), __reArg(s, p, n, 4), __reArg(s, p, n, 5), __reArg(s, p, n, 6), __reArg(s, p, n, 7), __reArg(s, p, n, 8), __reArg(s, p, n, 9))
     } else {
       out += __reSubst(h, s, p, rep)
     }
@@ -340,6 +472,14 @@ function __reReplaceWith(s: string, re: RegExp, rep: string, f: ((m: string, p1:
   }
   out += s.slice(last)
   return out
+}
+
+/** (a replace callback's argument k: a group, then past the groups the match's offset, as text
+ * here, and the input, as JavaScript passes them) */
+function __reArg(s: string, p: int[], n: int, k: int): string {
+  if (2 * k < n) return __reGroup(s, p, n, k)
+  if (2 * k === n) return String(p[0]!)
+  return 2 * k === n + 2 ? s : ""
 }
 
 /** (group k of a match, or "" when it has none or it didn't take part) */

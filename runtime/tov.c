@@ -651,6 +651,12 @@ void tv_str_release_slow(tv_str s) {
     else free(s.p);
 }
 
+tv_str tv_str_alloc(size_t n, char **data) {
+    tv_strbuf *b = tv_strbuf_new(n);
+    *data = b->data;
+    return (tv_str){b};
+}
+
 tv_str tv_str_from(const char *bytes, size_t n) {
     if (n == 0) return TV_EMPTY_STR;
     if (n == 1 && (unsigned char)bytes[0] - 32u < 96u) return tv_ascii_str((unsigned char)bytes[0]);

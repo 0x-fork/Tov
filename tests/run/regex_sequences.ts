@@ -9,7 +9,11 @@ for (const re of pats) {
     const ms: string[] = [];
     if (re.global) for (const m of s.matchAll(re)) ms.push(m.index + ":" + [...m].map(x => x === undefined ? "~" : x).join("|"));
     else { const m = re.exec(s); if (m) ms.push(m.index + ":" + [...m].map(x => x === undefined ? "~" : x).join("|")); }
-    lines.push(ms.join(";") + " # " + s.replace(re, "<$&>") + " # " + s.replace(re, (m: string) => "[" + m.length + "]"));
+    lines.push(ms.join(";") + " # " + s.replace(re, "<$&>") + " # " + s.replace(re, (m: string) => "[" + m.length + "]") + " # " + s.replace(re, (_: string, a: string, b: string) => "(" + a + "/" + (b ?? "") + ")"));
   }
   console.log(String(re), JSON.stringify(lines));
 }
+// A literal's callback past its groups: the match's offset and the input.
+console.log("a-b-c".replace(/-/g, (m: string, i: number) => "[" + (i * 2) + "]"), "x1y22".replace(/(\d+)/g, (m: string, d: string, at: number, all: string) => `<${d}@${at}/${all.length}>`));
+// Plain replacements made at their size: empty and one-byte results, many matches.
+console.log(JSON.stringify(["a".replace(/a/g, ""), "ab".replace(/a/g, ""), "aXa".replace(/a/g, ""), "x".repeat(100).replace(/x/g, "yz").length, "q".repeat(40).replace(/q/g, "").length, "abc".replace(/b/, "BB")]));

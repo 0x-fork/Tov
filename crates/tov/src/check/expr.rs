@@ -4191,8 +4191,27 @@ impl<'a> Checker<'a> {
                             && matches!(ra.get(1).map(|a| &self.ast().expr(a.expr).kind), Some(ExprKind::Str(fl)) if self.name(*fl).contains('g')));
                         // (a callback of the match alone: no groups made for it)
                         let one_param = args.get(1).is_some_and(|a| matches!(&self.ast().expr(a.expr).kind, ExprKind::Arrow(f) if f.params.len() <= 1 && !f.params.iter().any(|p| p.rest)));
+                        // (a callback past the groups of a literal: then the match's offset and the
+                        // input, `(m, i) => ...`, as JavaScript passes them)
+                        let lit_groups = match &self.ast().expr(a0.expr).kind {
+                            ExprKind::Call { callee, args: ra, .. } if matches!(self.ast().expr(*callee).kind, ExprKind::Ident(f) if self.name(f) == "__reLiteral") => match ra.first().map(|a| &self.ast().expr(a.expr).kind) {
+                                Some(ExprKind::Str(src)) => Some(capture_groups(self.name(*src))),
+                                _ => None,
+                            },
+                            _ => None,
+                        };
+                        let arrow_params = args.get(1).and_then(|a| match &self.ast().expr(a.expr).kind {
+                            ExprKind::Arrow(f) if !f.params.iter().any(|p| p.rest) => Some(f.params.len()),
+                            _ => None,
+                        });
+                        let with_offset = match (lit_groups, arrow_params) {
+                            (Some(k), Some(n)) if n > k + 1 && k <= 3 => Some(k),
+                            _ => None,
+                        };
+                        let offset_fn = with_offset.map(|k| format!("__reReplaceFnG{k}"));
                         let target = match mtext.as_str() {
                             "match" if global_lit => "__reMatchGlobal",
+                            "replace" | "replaceAll" if is_fn && offset_fn.is_some() => offset_fn.as_deref().unwrap(),
                             "replace" | "replaceAll" if is_fn && one_param => "__reReplaceFn1",
                             "replace" | "replaceAll" if is_fn => "__reReplaceFn",
                             "replace" | "replaceAll" => "__reReplace",
@@ -5832,4 +5851,26 @@ impl<'a> Checker<'a> {
         let Ty::Record(fs) = *self.types.get(t) else { return None };
         crate::types::tuple_fields(self.types.fields(fs), self.interner)
     }
+}
+
+/// The capturing groups of a regular expression's source: `(`, `(?<name>`, not `(?:` or a
+/// lookaround, not escaped or in a class.
+fn capture_groups(src: &str) -> usize {
+    let b = src.as_bytes();
+    let (mut i, mut n, mut class) = (0, 0, false);
+    while i < b.len() {
+        match b[i] {
+            b'\\' => i += 1,
+            b'[' => class = true,
+            b']' => class = false,
+            b'(' if !class => {
+                if b.get(i + 1) != Some(&b'?') || (b.get(i + 2) == Some(&b'<') && !matches!(b.get(i + 3), Some(b'=') | Some(b'!'))) {
+                    n += 1;
+                }
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    n
 }
