@@ -1160,13 +1160,20 @@ impl<'a> Checker<'a> {
                 }
                 tl
             }
+            // `"radius" in shape`: whether it has that key (by its type; a map's keys, an
+            // `unknown`'s, an optional field's presence at run time)
             In => {
-                self.expr(l, None);
-                self.expr(r, None);
-                self.report(
-                    Diagnostic::new("X0025", span, "the `in` operator is not supported")
-                        .note("instead", "records have fixed fields; for dynamic keys use `map.has(key)`"),
-                );
+                let tl = self.expr(l, Some(STR));
+                let tr = self.expr(r, None);
+                // (a computed key on a record or a class: its names are fixed, so known only by name)
+                let lit = matches!(self.ast().expr(l).kind, ExprKind::Str(_));
+                if !lit && self.flat_members(tr).iter().any(|&m| matches!(self.types.get(m), Ty::Record(_) | Ty::Interface(..) | Ty::Class(..) | Ty::Rec(..))) {
+                    self.report(Diagnostic::new("X0025", span, "`in` on a record or a class needs a literal key (`\"name\" in x`)").note("instead", "for dynamic keys use a `Map` or `Record<string, V>`: `map.has(key)`"));
+                }
+                if tl != ERROR && !self.types.is_string(tl) {
+                    let shown = self.show(tl);
+                    self.report(Diagnostic::new("X0025", span, format!("`in` takes a string key, found `{shown}`")).note("instead", "for an array's index, compare it with the length"));
+                }
                 BOOL
             }
             Instanceof => {
@@ -2762,6 +2769,36 @@ impl<'a> Checker<'a> {
                 super::class::ClassMemberRef::Method(_) => None,
             },
             _ => builtins::property(&self.types, ty, &n),
+        }
+    }
+
+    /// Whether a value of type `ty` has key `name` (`"k" in x`): known by its type, or `None`
+    /// when only the value says (an optional field, a map, an `unknown`).
+    pub(crate) fn has_key(&mut self, ty: TyId, name: Sym) -> Option<bool> {
+        match *self.types.get(ty) {
+            Ty::Record(fs) => match self.types.fields(fs).iter().find(|f| f.name == name) {
+                Some(f) if f.optional || self.types.has_undefined(f.ty) => None,
+                Some(_) => Some(true),
+                None => Some(false),
+            },
+            Ty::Interface(i, args) => {
+                let args = self.types.tys(args).to_vec();
+                match self.iface_fields_inst(i, &args).into_iter().find(|f| f.name == name) {
+                    Some(f) if f.optional || self.types.has_undefined(f.ty) => None,
+                    Some(_) => Some(true),
+                    None => Some(false),
+                }
+            }
+            Ty::Rec(..) => {
+                let u = self.unfold(ty);
+                let ms = self.flat_members(u);
+                let answers: Vec<Option<bool>> = ms.iter().map(|&m| self.has_key(m, name)).collect();
+                if answers.iter().all(|a| *a == Some(true)) { Some(true) } else if answers.iter().all(|a| *a == Some(false)) { Some(false) } else { None }
+            }
+            Ty::Class(..) => Some(self.class_member(ty, name).is_some()),
+            Ty::Map(..) | Ty::Unknown | Ty::Error | Ty::Param(_) => None,
+            // (numbers, strings, functions: no keys `in` sees as a record's)
+            _ => Some(false),
         }
     }
 
@@ -5474,6 +5511,19 @@ impl<'a> Checker<'a> {
                     }
                     _ => Vec::new(),
                 }
+            }
+            // `"radius" in shape`: the members that have it (or may), or that don't (or may not)
+            ExprKind::Binary(BinOp::In, l, r) => {
+                let ExprKind::Str(key) = ast.expr(*l).kind else { return Vec::new() };
+                let Some((target, ty)) = self.target_of(*r) else { return Vec::new() };
+                let mut keep = Vec::new();
+                for m in self.flat_members(ty) {
+                    match self.has_key(m, key) {
+                        Some(has) if has != positive => {}
+                        _ => keep.push(m),
+                    }
+                }
+                vec![target.with(self.types.union(&keep))]
             }
             ExprKind::Binary(BinOp::Instanceof, l, r) => {
                 let ExprKind::Ident(s) = ast.expr(*r).kind else { return Vec::new() };

@@ -21,6 +21,40 @@ impl<'c, 'a> Gen<'c, 'a> {
                 let b = self.coerce(v, BOOL);
                 return self.box_dyn(b);
             }
+            // (a recursive alias: what it holds, boxed as that, `typeof` and all)
+            Ty::Rec(..) => {
+                let owned = v.owned;
+                let rel = if owned { Some((v.code.clone(), v.ty)) } else { None };
+                let u = self.unfold_val(Val { owned: false, ..v });
+                let u = self.own(u);
+                let d = self.box_dyn(u);
+                if let Some((code, t)) = rel {
+                    let r = self.release_code(t, &code);
+                    if !r.is_empty() {
+                        self.line(format!("{r};"));
+                    }
+                }
+                return d;
+            }
+            // (a union kept as its one member, `undefined` its niche: that member's box, or undefined)
+            Ty::Union(ms) if self.niche(from).is_some() => {
+                let (pi, _) = self.niche(from).unwrap();
+                let m = self.c.types.tys(ms)[pi];
+                let v = self.own(v);
+                let ct = self.ctype(from);
+                let u = self.fresh("u");
+                let code = self.consume(v);
+                self.line(format!("{ct} {u} = {code};"));
+                let there = self.niche_there(&u, from);
+                let r = self.fresh("d");
+                self.line(format!("tv_dyn {r};"));
+                self.open(&format!("if ({there}) {{"));
+                let bv = self.box_dyn(Val { code: u.clone(), ty: m, owned: true });
+                let bc = self.consume(bv);
+                self.line(format!("{r} = {bc};"));
+                self.close(&format!("}} else {r} = (tv_dyn){{&tv_type_undefined, NULL}};"));
+                return self.tmp(UNKNOWN, &r, true);
+            }
             Ty::Union(ms) if self.niche(from).is_none() => {
                 // (the member it holds, boxed as that)
                 let ms = self.c.types.tys(ms).to_vec();
@@ -109,10 +143,10 @@ impl<'c, 'a> Gen<'c, 'a> {
     }
 
     /// Code asks an `unknown` what it holds: the switches over the program's types are made.
-    fn dyn_used(&mut self) {
+    pub(crate) fn dyn_used(&mut self) {
         if !self.dyn_tables {
             self.dyn_tables = true;
-            let _ = writeln!(self.protos, "static tv_str tvg_dyn_typeof(tv_dyn d);\nstatic void tvg_dyn_json(tv_sb *sb, const tv_dyn *v, tv_str ind, int lvl);\nstatic void *tvg_dyn_obj(tv_dyn d);");
+            let _ = writeln!(self.protos, "static tv_str tvg_dyn_typeof(tv_dyn d);\nstatic void tvg_dyn_json(tv_sb *sb, const tv_dyn *v, tv_str ind, int lvl);\nstatic void *tvg_dyn_obj(tv_dyn d);\nstatic bool tvg_dyn_is_array(tv_dyn d);\nstatic bool tvg_dyn_has(tv_dyn d, tv_str key);");
         }
     }
 
@@ -162,6 +196,12 @@ impl<'c, 'a> Gen<'c, 'a> {
         format!("tvg_dyn_json(sb, &({place}), ind, lvl)")
     }
 
+    /// `Array.isArray` of an `unknown`.
+    pub(crate) fn dyn_is_array(&mut self, code: &str) -> String {
+        self.dyn_used();
+        format!("tvg_dyn_is_array({code})")
+    }
+
     /// The class instance an `unknown` holds (`NULL` if it holds none).
     pub(crate) fn dyn_object(&mut self, code: &str) -> String {
         self.dyn_used();
@@ -178,6 +218,8 @@ impl<'c, 'a> Gen<'c, 'a> {
         let mut kinds = String::new();
         let mut json = String::new();
         let mut objs = String::new();
+        let mut arrays = String::new();
+        let mut has = String::new();
         for &t in &types {
             let d = self.desc(t);
             let kind = match self.tget(t) {
@@ -197,12 +239,32 @@ impl<'c, 'a> Gen<'c, 'a> {
             if matches!(self.tget(t), Ty::Class(..)) {
                 let _ = writeln!(objs, "    if (d.t == {d}) return *(void **)tv_dyn_data(d);");
             }
+            if matches!(self.tget(t), Ty::Array(_)) {
+                let _ = writeln!(arrays, "    if (d.t == {d}) return true;");
+            }
+            // (`"k" in x`: a record's or class's names, a map's keys)
+            let names: Vec<String> = match self.tget(t) {
+                Ty::Record(fs) => self.c.types.fields(fs).iter().map(|f| self.sym(f.name).to_string()).collect(),
+                Ty::Class(..) => self.c.class_member_names(t),
+                _ => Vec::new(),
+            };
+            if let Ty::Map(k, mv) = self.tget(t)
+                && k == STR
+            {
+                let (kd, vd) = (self.desc(k), self.desc(mv));
+                let _ = writeln!(has, "    if (d.t == {d}) return tv_map_is_object(*(tv_map *)tv_dyn_data(d)) && tv_map_has(*(tv_map *)tv_dyn_data(d), {kd}, {vd}, &key);");
+            } else if !names.is_empty() {
+                let tests: Vec<String> = names.iter().map(|n| format!("tv_str_eq(key, {})", self.lit(n.as_bytes()))).collect();
+                let _ = writeln!(has, "    if (d.t == {d}) return {};", tests.join(" || "));
+            }
         }
         let (u, n) = (self.lit(b"undefined"), self.lit(b"object"));
         let code = format!(
             "static tv_str tvg_dyn_typeof(tv_dyn d) {{\n    if (d.t == &tv_type_undefined) return {u};\n    if (d.t == &tv_type_null) return {n};\n{kinds}    return {n};\n}}\n\
              static void tvg_dyn_json(tv_sb *sb, const tv_dyn *v, tv_str ind, int lvl) {{\n    (void)ind; (void)lvl;\n{json}    tv_sb_push_cstr(sb, {});\n}}\n\
-             static void *tvg_dyn_obj(tv_dyn d) {{\n{objs}    (void)d;\n    return NULL;\n}}\n",
+             static void *tvg_dyn_obj(tv_dyn d) {{\n{objs}    (void)d;\n    return NULL;\n}}\n\
+             static bool tvg_dyn_is_array(tv_dyn d) {{\n{arrays}    (void)d;\n    return false;\n}}\n\
+             static bool tvg_dyn_has(tv_dyn d, tv_str key) {{\n{has}    (void)d; (void)key;\n    return false;\n}}\n",
             c_string(b"null")
         );
         self.helpers_after.push(code);

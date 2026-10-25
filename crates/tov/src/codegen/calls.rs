@@ -1903,6 +1903,39 @@ impl<'c, 'a> Gen<'c, 'a> {
         Some(self.coerce(v, ty))
     }
 
+    /// `Array.isArray(v)`: by its type, its union's tag, or (an `unknown`) what it holds; a member
+    /// that's a recursive alias or a union by what that holds.
+    fn is_array_code(&mut self, v: Val) -> String {
+        match self.tget(v.ty) {
+            Ty::Array(_) => "true".into(),
+            Ty::Unknown => self.dyn_is_array(&v.code),
+            Ty::Rec(..) => {
+                let u = self.unfold_val(v);
+                self.is_array_code(u)
+            }
+            Ty::Union(ms) => {
+                let ms = self.c.types.tys(ms).to_vec();
+                let tag = self.u_tag(&v.code, v.ty);
+                let mut parts = Vec::new();
+                for (i, &m) in ms.iter().enumerate() {
+                    match self.tget(m) {
+                        Ty::Array(_) => parts.push(format!("{tag} == {i}")),
+                        Ty::Rec(..) | Ty::Union(_) => {
+                            let payload = Val { code: self.u_payload(&v.code, v.ty, i), ty: m, owned: false };
+                            let inner = self.is_array_code(payload);
+                            if inner != "false" {
+                                parts.push(format!("({tag} == {i} && {inner})"));
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+                if parts.is_empty() { "false".into() } else { format!("({})", parts.join(" || ")) }
+            }
+            _ => "false".into(),
+        }
+    }
+
     pub(crate) fn map_method_pub(&mut self, mv: Val, k: TyId, v: TyId, name: &str, args: &[Arg], ty: TyId) -> Val {
         self.map_method(mv, k, v, name, args, ty)
     }
@@ -2422,16 +2455,8 @@ impl<'c, 'a> Gen<'c, 'a> {
             }
             (Some("Array"), "isArray") => {
                 let v = self.expr(args[0].expr);
-                match self.tget(v.ty) {
-                    Ty::Array(_) => Val::plain("true", BOOL),
-                    Ty::Union(ms) => {
-                        let ms = self.c.types.tys(ms).to_vec();
-                        let tag = self.u_tag(&v.code, v.ty);
-                        let arrays: Vec<String> = ms.iter().enumerate().filter(|(_, m)| matches!(self.tget(**m), Ty::Array(_))).map(|(i, _)| format!("{tag} == {i}")).collect();
-                        Val::plain(if arrays.is_empty() { "false".to_string() } else { format!("({})", arrays.join(" || ")) }, BOOL)
-                    }
-                    _ => Val::plain("false", BOOL),
-                }
+                let code = self.is_array_code(v);
+                Val::plain(code, BOOL)
             }
             (Some("String"), "fromCharCode" | "fromCodePoint") => {
                 let mut codes = Vec::new();

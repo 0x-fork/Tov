@@ -4671,6 +4671,15 @@ impl<'c, 'a> Gen<'c, 'a> {
                 let payload = Val { code: self.u_payload(&v.code, v.ty, k), ty: m, owned: false };
                 return self.unfold_val(payload);
             }
+            // Narrowed to what one member holds, a recursive alias kept as one member (`Val | F |
+            // undefined` narrowed to `Fn`, of `Val`): that member's, projected again.
+            if let Ty::Union(fms) = self.tget(v.ty) {
+                let fms = self.c.types.tys(fms).to_vec();
+                if let Some(k) = fms.iter().position(|&m| m != to && matches!(self.tget(m), Ty::Rec(..) | Ty::Union(_)) && self.c.assignable_pub(to, m) && !self.c.assignable_pub(m, to)) {
+                    let payload = Val { code: self.u_payload(&v.code, v.ty, k), ty: fms[k], owned: false };
+                    return self.project(payload, to);
+                }
+            }
             // Narrowed to a smaller union: re-tag (members outside the target can't occur here).
             if let Ty::Union(fms) = self.tget(v.ty)
                 && let Ty::Union(_) = self.tget(to)
@@ -5086,7 +5095,32 @@ impl<'c, 'a> Gen<'c, 'a> {
                 let Ty::Class(fc, _) = self.tget(fm) else { return None };
                 self.members(to).into_iter().find(|&t| matches!(self.tget(t), Ty::Class(tc, _) if self.c.class_descends(tc, fc)))
             });
-            let Some(mt) = target else { continue };
+            let Some(mt) = target else {
+                // (a member that's a recursive alias or a union of its own, its members among the
+                // target's: what it holds, converted)
+                let holds_union = match self.tget(fm) {
+                    Ty::Union(_) => true,
+                    Ty::Rec(..) => {
+                        let u = self.c.unfold(fm);
+                        matches!(self.tget(u), Ty::Union(_))
+                    }
+                    _ => false,
+                };
+                if holds_union {
+                    self.open(&format!("case {i}: {{"));
+                    self.push_temps();
+                    let payload = Val::plain(self.u_payload(&v.code, v.ty, i), fm);
+                    let inner = if matches!(self.tget(fm), Ty::Rec(..)) { self.unfold_val(payload) } else { payload };
+                    // (narrowing still: what it holds outside the target can't occur here)
+                    let cv = self.project(inner, to);
+                    let code = self.consume(cv);
+                    self.line(format!("{res} = {code};"));
+                    self.pop_temps();
+                    self.line("break;");
+                    self.close("}");
+                }
+                continue;
+            };
             let k = self.tag_of(to, mt).unwrap();
             self.open(&format!("case {i}: {{"));
             self.push_temps();
@@ -5158,6 +5192,45 @@ impl<'c, 'a> Gen<'c, 'a> {
             return Val::plain(res, to);
         }
         let v = if matches!(self.tget(v.ty), Ty::Rec(..)) { self.unfold_val(v) } else { v };
+        // `args[0] as string[]` of a `Val[]` (or a union holding one): a copy whose elements are
+        // each cast (a failed one traps), the array kinds differing in C
+        if let Ty::Array(te) = self.tget(to) {
+            let src_arr = match self.tget(v.ty) {
+                Ty::Array(fe) if fe != te => Some((v.clone(), fe)),
+                Ty::Union(_) => {
+                    let fms = self.members(v.ty);
+                    let arrs: Vec<(usize, TyId)> = fms.iter().enumerate().filter_map(|(i, &m)| match self.tget(m) { Ty::Array(fe) if fe != te => Some((i, m)), _ => None }).collect();
+                    if let [(i, at)] = arrs[..]
+                        && !fms.contains(&to)
+                    {
+                        let loc = self.loc(span);
+                        let is = self.u_is(&v.code, v.ty, i);
+                        self.line(format!("if (!{is}) tv_trap(\"`as` cast failed: the value has a different type\", {loc});"));
+                        let Ty::Array(fe) = self.tget(at) else { unreachable!() };
+                        Some((self.project(v.clone(), at), fe))
+                    } else {
+                        None
+                    }
+                }
+                _ => None,
+            };
+            if let Some((a, fe)) = src_arr {
+                let (fct, td) = (self.ctype(fe), self.desc(te));
+                let (out, i) = (self.fresh("cast"), self.fresh("i"));
+                let tct = self.ctype(te);
+                self.line(format!("tv_arr {out} = tv_arr_with_capacity({td}, tv_arr_len({}));", a.code));
+                self.open(&format!("for (tv_int {i} = 0; {i} < tv_arr_len({}); {i}++) {{", a.code));
+                self.push_temps();
+                let e = Val::plain(format!("((({fct} *)tv_arr_data({}))[{i}])", a.code), fe);
+                let c = self.downcast(e, te, span);
+                let c = self.own(c);
+                let code = self.consume(c);
+                self.line(format!("TVG_PUSH({tct}, &{out}, {td}, {code});"));
+                self.pop_temps();
+                self.close("}");
+                return self.tmp(to, &out, true);
+            }
+        }
         if let Ty::Union(_) = self.tget(v.ty) {
             let fms = self.members(v.ty);
             let allowed: Vec<usize> = fms.iter().enumerate().filter(|(_, fm)| **fm == to || self.members(to).contains(fm)).map(|(i, _)| i).collect();
@@ -5204,6 +5277,11 @@ impl<'c, 'a> Gen<'c, 'a> {
         if v.ty == JS {
             return self.tmp(STR, &format!("({{ const char *s = tv_js_typeof({}); tv_str_from(s, strlen(s)); }})", v.code), true);
         }
+        // (a recursive alias: what it holds)
+        if matches!(self.tget(v.ty), Ty::Rec(..)) {
+            let u = self.unfold_val(v);
+            return self.typeof_str(u);
+        }
         if let Ty::Union(ms) = self.tget(v.ty) {
             let ms = self.c.types.tys(ms).to_vec();
             let res = self.fresh("s");
@@ -5211,6 +5289,15 @@ impl<'c, 'a> Gen<'c, 'a> {
             let tag = self.u_tag(&v.code, v.ty);
             self.open(&format!("switch ({tag}) {{"));
             for (i, &m) in ms.iter().enumerate() {
+                // (a member that's a recursive alias or a union itself: the typeof of what it holds)
+                if matches!(self.tget(m), Ty::Rec(..) | Ty::Union(_)) {
+                    self.open(&format!("case {i}: {{"));
+                    let payload = Val { code: self.u_payload(&v.code, v.ty, i), ty: m, owned: false };
+                    let inner = self.typeof_str(payload);
+                    self.line(format!("{res} = {};", inner.code));
+                    self.close("} break;");
+                    continue;
+                }
                 let n = name(&self.c.types, m);
                 let l = self.lit(n.as_bytes());
                 self.line(format!("case {i}: {res} = {l}; break;"));
@@ -5778,7 +5865,107 @@ impl<'c, 'a> Gen<'c, 'a> {
                     _ => Val::plain("false", BOOL),
                 }
             }
-            In => Val::plain("false", BOOL),
+            In => {
+                // the key (a literal: known by name), then the value
+                let lit = match self.ast(self.cur_m()).expr(l).kind {
+                    ExprKind::Str(k) => Some(k),
+                    _ => None,
+                };
+                let kv = self.expr_before(l, &[r]);
+                let kv = self.coerce(kv, STR);
+                let kv = self.own(kv);
+                let kn = self.fresh("key");
+                let kc = self.consume(kv);
+                self.line(format!("tv_str {kn} = {kc};"));
+                self.b().temps.last_mut().unwrap().push((kn.clone(), STR));
+                let v = self.expr(r);
+                let code = self.in_code(v, lit, &kn);
+                Val::plain(code, BOOL)
+            }
+        }
+    }
+
+    /// `key in v`: by `v`'s type (a union's by its tag); a map's or an `unknown`'s by what it
+    /// holds; an optional field by whether it's there. `lit`: the key, when it's a literal.
+    fn in_code(&mut self, v: Val, lit: Option<crate::intern::Sym>, key: &str) -> String {
+        match self.tget(v.ty) {
+            Ty::Unknown => {
+                self.dyn_used();
+                format!("tvg_dyn_has({}, {key})", v.code)
+            }
+            // (a record's keys; a `Map`'s entries aren't properties: `"k" in new Map()` is false)
+            Ty::Map(k, mv) if k == STR => {
+                let (kd, vd) = (self.desc(k), self.desc(mv));
+                format!("(tv_map_is_object({0}) && tv_map_has({0}, {kd}, {vd}, &{key}))", v.code)
+            }
+            Ty::Rec(..) => {
+                let u = self.unfold_val(v);
+                self.in_code(u, lit, key)
+            }
+            Ty::Union(ms) if self.niche(v.ty).is_some() => {
+                let (pi, _) = self.niche(v.ty).unwrap();
+                let m = self.c.types.tys(ms)[pi];
+                let there = self.niche_there(&v.code, v.ty);
+                let inner = self.in_code(Val { code: v.code.clone(), ty: m, owned: false }, lit, key);
+                format!("({there} && {inner})")
+            }
+            Ty::Union(ms) => {
+                let ms = self.c.types.tys(ms).to_vec();
+                let tag = self.u_tag(&v.code, v.ty);
+                let mut parts = Vec::new();
+                for (i, &m) in ms.iter().enumerate() {
+                    let payload = if self.is_unit(m) { Val::plain("0", m) } else { Val { code: self.u_payload(&v.code, v.ty, i), ty: m, owned: false } };
+                    let c = self.in_code(payload, lit, key);
+                    if c != "false" {
+                        parts.push(format!("({tag} == {i} && {c})"));
+                    }
+                }
+                if parts.is_empty() { "false".into() } else { format!("({})", parts.join(" || ")) }
+            }
+            // (a class without it: an object of a subclass that has it does)
+            Ty::Class(c, _) if lit.is_some_and(|n| self.c.has_key(v.ty, n) == Some(false)) => {
+                let name = lit.unwrap();
+                let n = self.c.classes.len() as u32;
+                let mut tests = Vec::new();
+                for d in 0..n {
+                    if d == c || !self.c.class_descends(d, c) {
+                        continue;
+                    }
+                    let dt = self.c.classes[d as usize].this_ty;
+                    if self.c.has_key(dt, name) == Some(true) {
+                        tests.push(self.instanceof_code(v.clone(), d));
+                    }
+                }
+                if tests.is_empty() { "false".into() } else { format!("({})", tests.join(" || ")) }
+            }
+            _ => {
+                let Some(name) = lit else { return "false".into() };
+                match self.c.has_key(v.ty, name) {
+                    Some(true) => "true".into(),
+                    Some(false) => "false".into(),
+                    // (an optional field: there unless it's undefined)
+                    None => {
+                        let n = self.sym(name).to_string();
+                        let ft = match self.tget(v.ty) {
+                            Ty::Record(fs) => self.c.types.fields(fs).iter().find(|f| f.name == name).map(|f| f.ty),
+                            _ => None,
+                        };
+                        match ft {
+                            Some(ft) => {
+                                let place = self.fld(v.ty, &v.code, &n);
+                                match self.niche(ft) {
+                                    Some(_) => self.niche_there(&place, ft),
+                                    None => match self.tag_of(ft, UNDEFINED) {
+                                        Some(k) => format!("(!{})", self.u_is(&place, ft, k)),
+                                        None => "true".into(),
+                                    },
+                                }
+                            }
+                            None => "true".into(),
+                        }
+                    }
+                }
+            }
         }
     }
 
