@@ -277,7 +277,7 @@ static inline char *tv_sb_reserve(tv_sb *sb, size_t extra) {
     return sb->data + sb->len;
 }
 
-void tv_sb_push(tv_sb *sb, const char *s, size_t n) {
+void tv_sb_push_slow(tv_sb *sb, const char *s, size_t n) {
     if (!n) return;
     tv_copy(tv_sb_reserve(sb, n), s, n);
     sb->len += n;
@@ -1347,7 +1347,10 @@ static int tv_fixed_into(double v, int f, char *buf) {
         }
         char dig[48];
         int nd = 0;
-        do { dig[nd++] = (char)('0' + (int)(n % 10)); n /= 10; } while (n);
+        /* (128-bit division is a library call: the digits past 64 bits only that way) */
+        while (n >> 64) { dig[nd++] = (char)('0' + (int)(n % 10)); n /= 10; }
+        uint64_t n64 = (uint64_t)n;
+        do { dig[nd++] = (char)('0' + (int)(n64 % 10)); n64 /= 10; } while (n64);
         while (nd < f + 1) dig[nd++] = '0';
         len = 0;
         if (v < 0) buf[len++] = '-';

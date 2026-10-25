@@ -92,7 +92,7 @@ typedef struct tv_sb {
     size_t len, cap;
 } tv_sb;
 
-void tv_sb_push(tv_sb *sb, const char *s, size_t n);
+void tv_sb_push_slow(tv_sb *sb, const char *s, size_t n);
 void tv_sb_grow(tv_sb *sb, size_t need);          /* capacity >= need bytes */
 /* memcpy for the short pieces strings are mostly built from: overlapping word copies instead
  * of a call into the C library (which costs more than copying a few bytes). */
@@ -128,6 +128,16 @@ static inline void tv_copy(char *d, const char *s, size_t n) {
         return;
     }
     memcpy(d, s, n);
+}
+/* Appends n bytes: copied inline when they fit (a template's pieces, mostly), else the builder
+ * grows first. */
+static inline void tv_sb_push(tv_sb *sb, const char *s, size_t n) {
+    if (__builtin_expect(sb->cap - sb->len >= n && sb->data != NULL, 1)) {
+        tv_copy(sb->data + sb->len, s, n);
+        sb->len += n;
+        return;
+    }
+    tv_sb_push_slow(sb, s, n);
 }
 /* Inline fast paths for generated code. */
 static inline void tv_sb_add(tv_sb *sb, const char *s, size_t n) {
