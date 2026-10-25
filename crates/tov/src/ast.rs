@@ -26,6 +26,9 @@ pub struct Ast {
     /// Overload signatures (`function f(a: string): number;` before `function f(...) { ... }`):
     /// the function's name, its type parameters, parameters and result, in order.
     pub overloads: Vec<(Sym, Vec<TypeParam>, Vec<Param>, Option<TypeId>)>,
+    /// Declarations of `var`s hoisted to their function's start (see the parser's `fn_block`):
+    /// typed by what's assigned, as TypeScript types a `var` (no `undefined` before the first).
+    pub hoisted_vars: Vec<StmtId>,
     /// Where lines start that a `// @ts-expect-error` or `// @ts-ignore` comment covers (the
     /// line after it): in a test, a statement there that doesn't check throws a `TypeError`.
     pub ts_expect: Vec<u32>,

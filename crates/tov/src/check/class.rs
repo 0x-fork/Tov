@@ -656,8 +656,8 @@ impl<'a> Checker<'a> {
         match &self.ast().expr(e).kind {
             ExprKind::Array(xs) if xs.is_empty() => Some(2),
             ExprKind::New { callee, type_args, args } if type_args.is_empty() && args.is_empty() => match self.ast().expr(*callee).kind {
-                ExprKind::Ident(n) if self.name(n) == "Map" => Some(0),
-                ExprKind::Ident(n) if self.name(n) == "Set" => Some(1),
+                ExprKind::Ident(n) if matches!(self.name(n), "Map" | "WeakMap") => Some(0),
+                ExprKind::Ident(n) if matches!(self.name(n), "Set" | "WeakSet") => Some(1),
                 _ => None,
             },
             _ => None,

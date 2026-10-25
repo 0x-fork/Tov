@@ -106,8 +106,8 @@ impl<'a> Checker<'a> {
             return None;
         }
         match self.ast().expr(*callee).kind {
-            ExprKind::Ident(n) if self.lookup(n).is_none() && self.name(n) == "Map" => Some(true),
-            ExprKind::Ident(n) if self.lookup(n).is_none() && self.name(n) == "Set" => Some(false),
+            ExprKind::Ident(n) if self.lookup(n).is_none() && matches!(self.name(n), "Map" | "WeakMap") => Some(true),
+            ExprKind::Ident(n) if self.lookup(n).is_none() && matches!(self.name(n), "Set" | "WeakSet") => Some(false),
             _ => None,
         }
     }
@@ -419,8 +419,11 @@ impl<'a> Checker<'a> {
                     // `settle_evolving`)
                     (None, None) if *mutable && !self.fcx.is_empty() => {
                         let key = name_span.start;
-                        // (`undefined` until assigned: assignments narrow it, as TypeScript's do)
+                        // (`undefined` until assigned: assignments narrow it, as TypeScript's do;
+                        // a hoisted `var`, what's assigned, as TypeScript types it)
+                        let hoisted = self.ast().hoisted_vars.contains(&s);
                         match self.fcx.last().unwrap().evolved.get(&key) {
+                            Some(&t) if hoisted => (t, false),
                             Some(&t) => (self.types.union(&[t, UNDEFINED]), false),
                             None => {
                                 self.fcx().evolving.push((key, *name_span, Vec::new(), EV_LET));

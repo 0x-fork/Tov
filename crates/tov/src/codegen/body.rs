@@ -4596,7 +4596,11 @@ impl<'c, 'a> Gen<'c, 'a> {
                     return v;
                 }
                 let name = match &ast.expr(*callee).kind {
-                    ExprKind::Ident(s) => self.sym(*s).to_string(),
+                    ExprKind::Ident(s) => match self.sym(*s) {
+                        "WeakMap" => "Map".to_string(),
+                        "WeakSet" => "Set".to_string(),
+                        n => n.to_string(),
+                    },
                     _ => String::new(),
                 };
                 if name == "Array" && self.facts(self.cur_m()).filled_arrays.contains(&e) {

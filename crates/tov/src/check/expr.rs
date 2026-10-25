@@ -3872,7 +3872,13 @@ impl<'a> Checker<'a> {
             }
         }
         let ExprKind::Ident(s) = self.ast().expr(callee).kind else { return ERROR };
-        let name = self.name(s).to_string();
+        // (a `WeakMap` / `WeakSet`: a `Map` / `Set` of its keys by identity; with no collector to
+        // drop them, the difference can't be seen)
+        let name = match self.name(s) {
+            "WeakMap" => "Map".to_string(),
+            "WeakSet" => "Set".to_string(),
+            n => n.to_string(),
+        };
         let tscope = self.tscope();
         let targs: Vec<TyId> = type_args.iter().map(|&t| self.resolve_type(t, &tscope)).collect();
         let from_exp = |c: &mut Self, pick: &dyn Fn(&Ty) -> bool| exp.and_then(|e| c.flat_members(e).into_iter().find(|&m| pick(c.types.get(m))));

@@ -74,6 +74,8 @@ impl<'c, 'a> Gen<'c, 'a> {
                     "    tv_int n = tv_arr_len(*v);\n    if (n == 0) {{ tv_sb_push_cstr(sb, \"[]\"); return; }}\n    tv_sb_add_char(sb, '[');\n    for (tv_int i = 0; i < n; i++) {{\n        if (i) tv_sb_add_char(sb, ',');\n        tvg_js_nl(sb, ind, lvl + 1);\n        {w}(sb, &(({ect} *)tv_arr_data(*v))[i], ind, lvl + 1);\n    }}\n    tvg_js_nl(sb, ind, lvl);\n    tv_sb_add_char(sb, ']');\n"
                 )
             }
+            // (a `Map` of other keys than strings: no object's, and JSON's `{}` as JavaScript's)
+            Ty::Map(k, _) if !self.c.types.is_string(k) => "    (void)v; (void)ind; (void)lvl;\n    tv_sb_push_cstr(sb, \"{}\");\n".to_string(),
             Ty::Map(k, val) => {
                 let (kd, vd) = (self.desc(k), self.desc(val));
                 let w = self.json_writer(val);

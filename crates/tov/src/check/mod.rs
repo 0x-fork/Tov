@@ -1028,7 +1028,7 @@ impl<'a> Checker<'a> {
                             cyclic: cd.cyclic,
                             resolved: false,
                         });
-                        Arc::make_mut(&mut self.class_names).push(self.interner.get(cd.name).to_string());
+                        Arc::make_mut(&mut self.class_names).push(self.interner.get(cd.name).split('#').next().unwrap_or("").to_string());
                         let decl = Decl::Class(self.classes.len() as u32 - 1);
                         // A class is both a type and a value (`new C()`, `C.staticMember`).
                         if builtins::is_builtin_type(self.interner.get(cd.name)) {
@@ -2928,8 +2928,8 @@ impl<'a> Checker<'a> {
         match text {
             // (the read-only views are the types themselves: Tov doesn't check writes through them)
             "Array" | "ReadonlyArray" => Some(if arity(self, 1) { self.types.array(targs[0]) } else { ERROR }),
-            "Map" | "ReadonlyMap" => Some(if arity(self, 2) { self.types.intern(Ty::Map(targs[0], targs[1])) } else { ERROR }),
-            "Set" | "ReadonlySet" => Some(if arity(self, 1) { self.types.intern(Ty::Set(targs[0])) } else { ERROR }),
+            "Map" | "ReadonlyMap" | "WeakMap" => Some(if arity(self, 2) { self.types.intern(Ty::Map(targs[0], targs[1])) } else { ERROR }),
+            "Set" | "ReadonlySet" | "WeakSet" => Some(if arity(self, 1) { self.types.intern(Ty::Set(targs[0])) } else { ERROR }),
             // (a generator's result, its return and `next` types being `void`/`undefined`)
             "Generator" | "IterableIterator" | "Iterator" | "Iterable" if !targs.is_empty() => Some(self.types.intern(Ty::Gen(targs[0]))),
             // (without its `T`: of anything, as TypeScript's `AsyncGenerator` is of `any`)
@@ -3096,6 +3096,8 @@ impl<'a> Checker<'a> {
                 }
                 Some(self.types.intern(Ty::Map(STR, targs[1])))
             }
+            // (in TypeScript, any object: held as an `unknown`, tested by what it holds)
+            "object" | "Object" if self.ts_module() => Some(UNKNOWN),
             "object" | "Object" => {
                 self.report(
                     Diagnostic::new("X0030", name_span, format!("`{text}` is not supported"))

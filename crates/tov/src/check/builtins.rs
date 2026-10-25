@@ -6,7 +6,7 @@ use crate::ast::{Arg, ExprKind};
 
 pub(super) const BUILTIN_TYPES: &[&str] = &[
     "int", "i64", "f64", "number", "f32", "i8", "i16", "i32", "u8", "u16", "u32", "u64", "bool", "boolean", "string", "never", "unknown", "Js", "undefined", "void", "Array", "Map",
-    "Set", "ReadonlyArray", "ReadonlyMap", "ReadonlySet", "Promise", "Record", "ReturnType", "Awaited", "NonNullable", "Readonly", "Partial", "Required", "Pick", "Omit", "bigint", "decimal", "Uint8Array", "Int8Array", "Uint16Array", "Int16Array", "Uint32Array", "Int32Array", "Float32Array", "Float64Array",
+    "Set", "ReadonlyArray", "ReadonlyMap", "ReadonlySet", "WeakMap", "WeakSet", "Promise", "Record", "ReturnType", "Awaited", "NonNullable", "Readonly", "Partial", "Required", "Pick", "Omit", "bigint", "decimal", "Uint8Array", "Int8Array", "Uint16Array", "Int16Array", "Uint32Array", "Int32Array", "Float32Array", "Float64Array",
 ];
 
 /// JavaScript's typed arrays: Tov arrays of the element type (a number stored wraps into it).
@@ -1245,7 +1245,8 @@ impl<'a> Checker<'a> {
             // (written as what it holds; `allow_class`: written, not parsed into)
             Ty::Unknown => allow_class,
             Ty::Array(e) => self.json_ok_in(e, allow_class, seen),
-            Ty::Map(k, v) => k == STR && self.json_ok_in(v, allow_class, seen),
+            // (a `Map` of other keys is written as JavaScript writes any `Map`, `{}`)
+            Ty::Map(k, v) => (k == STR && self.json_ok_in(v, allow_class, seen)) || (k != STR && allow_class),
             Ty::Record(fs) => {
                 let fs = self.types.fields(fs).to_vec();
                 fs.iter().all(|f| self.json_ok_in(f.ty, allow_class, seen))
