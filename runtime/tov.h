@@ -427,7 +427,7 @@ static inline unsigned char *tv_arrbuf_data(const tv_arrbuf *b) { return b->ext 
  * elements stay 16-byte aligned), with room for at least one word (where the elements' count
  * goes once they move out, see tv_arr_make_unique). Small ones come from the small-object free
  * lists: a tree of little arrays is made and dropped without malloc. */
-enum { TV_ARRBUF_SMALL = 256 };
+enum { TV_ARRBUF_SMALL = (TV_SMALL_CLASSES - 1) * 8 };
 static inline size_t tv_arrbuf_block(size_t data) {
     size_t s = sizeof(tv_arrbuf) + (data < 8 ? 8 : data);
     return s < data ? SIZE_MAX : (s + 15) & ~(size_t)15;

@@ -557,7 +557,7 @@ TV_STR_LIT(tv_lit_false, "false");
 /* Small strings (header + bytes + NUL <= TV_SMALL_MAX) come from the small-object free lists;
  * larger ones from malloc. The class follows from the length alone, so freeing needs no flag.
  * (Plain malloc under AddressSanitizer, so it sees every string.) */
-enum { TV_SMALL_MAX = 256 };
+enum { TV_SMALL_MAX = (TV_SMALL_CLASSES - 1) * 8 };
 #if defined(__SANITIZE_ADDRESS__) || (defined(__has_feature) && __has_feature(address_sanitizer))
 #define TV_PLAIN_ALLOC 1
 #endif
