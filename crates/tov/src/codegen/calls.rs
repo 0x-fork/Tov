@@ -1537,8 +1537,8 @@ impl<'c, 'a> Gen<'c, 'a> {
                         let Ty::Array(rt) = self.tget(res_ty) else { unreachable!() };
                         let rd = self.desc(rt);
                         let v = self.coerce(r, res_ty);
-                        let n = self.fresh("c");
-                        self.line(format!("tv_arr {n} = tv_arr_concat({}, {}, {rd}); tv_arr_release({}, {rd}); {} = {n};", res.code, v.code, res.code, res.code));
+                        // (appended in place: concatenating a new array each time was quadratic)
+                        self.line(format!("tv_arr_extend(&{}, {rd}, {});", res.code, v.code));
                     }
                     "filter" => {
                         let c = self.truthy_val(r);
