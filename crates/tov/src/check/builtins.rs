@@ -254,7 +254,7 @@ pub(super) fn property(types: &Types, ty: TyId, name: &str) -> Option<TyId> {
     }
 }
 
-const ARRAY_METHODS: &[&str] = &[
+pub(super) const ARRAY_METHODS: &[&str] = &[
     "push", "pop", "shift", "unshift", "splice", "map", "filter", "forEach", "reduce", "some", "every", "find", "findIndex", "indexOf", "lastIndexOf", "includes", "join", "slice", "concat",
     "reverse", "sort", "at", "flatMap", "fill", "entries", "keys", "flat", "toString",
 ];

@@ -4259,6 +4259,19 @@ impl<'a> Checker<'a> {
                     self.pending_call = Some(e);
                     return self.expect_matcher(subject, &mtext, name_span, args, span);
                 }
+                // `m.map(f)` on a match, an array in JavaScript: `m.items.map(f)`
+                if matches!(*self.types.get(base), Ty::Class(..))
+                    && base == self.builtin_class("RegExpExecArray")
+                    && self.class_member(base, name).is_none()
+                    && builtins::ARRAY_METHODS.contains(&mtext.as_str())
+                    && let Some(items) = self.interner.lookup("items")
+                {
+                    self.rewrites.elem_methods.push((self.cur, callee, items));
+                    for a in args {
+                        self.expr(a.expr, None);
+                    }
+                    return ERROR;
+                }
                 // Methods of class instances.
                 if self.class_of(base).is_some()
                     && let Some(super::class::ClassMemberRef::Method(mm)) = self.class_member(base, name)
