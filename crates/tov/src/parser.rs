@@ -885,6 +885,10 @@ impl<'a> Parser<'a> {
                 self.ast.exports.push(ExportSpec { from, names, star: false, namespace: None });
                 return;
             }
+            // (`export type * from "m"`: its types, which `export *` brings too)
+            if self.at_word("type") && self.nth(1) == Tok::Star {
+                self.bump();
+            }
             // `export * from "m"`, `export * as ns from "m"`
             if self.at(Tok::Star) {
                 self.bump();
@@ -1821,27 +1825,34 @@ impl<'a> Parser<'a> {
     fn const_item(&mut self, start: Span, exported: bool) {
         let mutable = matches!(self.kind(), Tok::Let | Tok::Var);
         self.bump(); // const / let / var
-        if self.at(Tok::LBrace) || self.at(Tok::LBracket) {
-            // `const [lo, hi] = f()`: a module variable each (the value in a hidden one)
-            let pat = self.pattern();
-            let ty = if self.eat(Tok::Colon) { Some(self.ty()) } else { None };
-            if !self.expect(Tok::Eq, "(module constants need a value)") {
-                self.recover_line();
-                return;
-            }
-            let init = self.assign();
-            self.terminator();
-            let mut binds = Vec::new();
-            self.bindings(&pat, ty, init, &mut binds);
-            for (name, name_span, ty, init, hidden) in binds {
-                let span = start.to(self.expr_span(init));
-                self.ast.items.push(Item { kind: ItemKind::Const { name, name_span, ty, init, mutable: mutable && !hidden }, span, exported: exported && !hidden });
-            }
-            return;
-        }
         // (`let lo = 0, hi = n`: a module variable each)
         let mut start = start;
         loop {
+            if self.at(Tok::LBrace) || self.at(Tok::LBracket) {
+                // `const [lo, hi] = f()`: a module variable each (the value in a hidden one)
+                let pat = self.pattern();
+                let ty = if self.eat(Tok::Colon) { Some(self.ty()) } else { None };
+                if !self.expect(Tok::Eq, "(module constants need a value)") {
+                    self.recover_line();
+                    return;
+                }
+                let init = self.assign();
+                let more = self.eat(Tok::Comma);
+                if !more {
+                    self.terminator();
+                }
+                let mut binds = Vec::new();
+                self.bindings(&pat, ty, init, &mut binds);
+                for (name, name_span, ty, init, hidden) in binds {
+                    let span = start.to(self.expr_span(init));
+                    self.ast.items.push(Item { kind: ItemKind::Const { name, name_span, ty, init, mutable: mutable && !hidden }, span, exported: exported && !hidden });
+                }
+                if !more {
+                    return;
+                }
+                start = self.cur_span();
+                continue;
+            }
             let Some((name, name_span)) = self.ident("a constant name") else {
                 self.recover_line();
                 return;
@@ -3860,6 +3871,23 @@ impl<'a> Parser<'a> {
             _ => false,
         };
         self.bump();
+        let Some(mut stmts) = self.declarator(mutable, start) else {
+            return self.mk_stmt(StmtKind::Error, start);
+        };
+        let first = stmts.remove(0);
+        self.more_stmts.extend(stmts);
+        // `let a = 1, b = 2`, `const x = f(), [y, z] = g()`: one statement each
+        while self.eat(Tok::Comma) {
+            let s = self.cur_span();
+            let Some(more) = self.declarator(mutable, s) else { break };
+            self.more_stmts.extend(more);
+        }
+        first
+    }
+
+    /// One declarator of a `let`/`const`: its statements (a destructuring one's hidden
+    /// variable, then one per name); None after reporting a malformed one.
+    fn declarator(&mut self, mutable: bool, start: Span) -> Option<Vec<StmtId>> {
         if self.at(Tok::LBrace) || self.at(Tok::LBracket) {
             // `const [a, b] = e`, `let { x, y } = e`: a hidden variable, then one per name
             let pat = self.pattern();
@@ -3867,38 +3895,22 @@ impl<'a> Parser<'a> {
             if !self.at(Tok::Eq) {
                 let span = self.cur_span();
                 self.err("P0001", span, "a destructuring declaration needs a value: `const [a, b] = e`");
-                return self.mk_stmt(StmtKind::Error, start);
+                return None;
             }
             self.bump();
             let init = self.assign();
             let mut out = Vec::new();
             self.destructure(&pat, mutable, ty, init, &mut out);
-            let first = out.remove(0);
-            self.more_stmts.extend(out);
-            return first;
+            return Some(out);
         }
         let Some((name, name_span)) = self.ident("a variable name") else {
             self.recover_line();
-            return self.mk_stmt(StmtKind::Error, start);
+            return None;
         };
         let ty = if self.eat(Tok::Colon) { Some(self.ty()) } else { None };
         let init = if self.eat(Tok::Eq) { Some(self.assign()) } else { None };
         let span = start.to(self.prev_span());
-        let first = self.mk_stmt(StmtKind::Let { mutable, name, name_span, ty, init }, span);
-        // `let a = 1, b = 2`: one statement each
-        while self.eat(Tok::Comma) {
-            let s = self.cur_span();
-            let Some((name, name_span)) = self.ident("a variable name") else {
-                self.recover_line();
-                break;
-            };
-            let ty = if self.eat(Tok::Colon) { Some(self.ty()) } else { None };
-            let init = if self.eat(Tok::Eq) { Some(self.assign()) } else { None };
-            let span = s.to(self.prev_span());
-            let st = self.mk_stmt(StmtKind::Let { mutable, name, name_span, ty, init }, span);
-            self.more_stmts.push(st);
-        }
-        first
+        Some(vec![self.mk_stmt(StmtKind::Let { mutable, name, name_span, ty, init }, span)])
     }
 
     /// A hidden variable for destructuring (`__d1`, ...).
@@ -4110,6 +4122,38 @@ impl<'a> Parser<'a> {
                 }
                 return self.mk_stmt(StmtKind::ForOf { mutable, name, name_span, iter, body }, span);
             }
+        }
+        // `for (key in obj)`, `for (x of xs)` of a variable declared before: each in a hidden
+        // one, assigned to it first in the body
+        if self.at(Tok::Ident) && !is_await && (self.nth(1) == Tok::In || self.toks.get(self.pos + 1).is_some_and(|t| t.kind == Tok::Ident && self.text(*t) == "of")) {
+            let is_in = self.nth(1) == Tok::In;
+            let (name, name_span) = self.ident("a loop variable").unwrap();
+            let kw = self.cur_span();
+            self.bump(); // in / of
+            let iter = self.expr();
+            let iter = if is_in {
+                let (object, keys) = (self.interner.intern("Object"), self.interner.intern("keys"));
+                let isp = self.expr_span(iter);
+                let o = self.mk_expr(ExprKind::Ident(object), kw);
+                let callee = self.mk_expr(ExprKind::Member { obj: o, name: keys, name_span: kw, optional: false }, kw);
+                let keys = self.mk_expr(ExprKind::Call { callee, type_args: Vec::new(), args: vec![Arg { expr: iter, by_ref: None }], optional: false }, isp);
+                self.ast.for_in_keys.push(keys);
+                keys
+            } else {
+                iter
+            };
+            self.expect(Tok::RParen, "to close the `for` header");
+            let body = self.single_stmt();
+            let span = start.to(self.prev_span());
+            let tmp = self.fresh_name();
+            let hidden = Span::new(start.file, start.start + 1, start.start + 2);
+            let target = self.mk_expr(ExprKind::Ident(name), name_span);
+            let src = self.mk_expr(ExprKind::Ident(tmp), hidden);
+            let set = self.mk_expr(ExprKind::Assign(AssignOp::Assign, target, src), name_span);
+            let set = self.mk_stmt(StmtKind::Expr(set), name_span);
+            let bspan = self.ast.stmts[body as usize].span;
+            let body = self.mk_stmt(StmtKind::Block(vec![set, body]), bspan);
+            return self.mk_stmt(StmtKind::ForOf { mutable: false, name: tmp, name_span: hidden, iter, body }, span);
         }
         if is_await {
             let span = self.cur_span();

@@ -202,7 +202,7 @@ extern const tv_type tv_type_i8, tv_type_i16, tv_type_i32, tv_type_u8, tv_type_u
 
 /* A function with no effect but its result, read from its arguments and memory: a call whose
  * result goes unused is dropped, one of the same arguments made once (strings never change). */
-#define __attribute__((pure))
+#define TV_PURE __attribute__((pure))
 
 typedef struct tv_strbuf {
     int32_t rc;        /* the count (TV_STR_COUNT bits) and what's known of the text (TV_STR_ASCII
@@ -259,7 +259,7 @@ extern const tv_type tv_type_gen;
 static inline bool tv_str_eq(tv_str a, tv_str b) {
     return a.p == b.p || (a.p->len == b.p->len && memcmp(a.p->data, b.p->data, (size_t)b.p->len) == 0);
 }
-int tv_str_cmp_long(tv_str a, tv_str b);
+TV_PURE int tv_str_cmp_long(tv_str a, tv_str b);
 /* byte order == code point order (inline: short strings, `a < b` of keys or numbers' text, mostly
  * differ in their first bytes) */
 static inline int tv_str_cmp(tv_str a, tv_str b) {
@@ -280,7 +280,7 @@ static inline int tv_str_cmp1(tv_str s, unsigned char c) {
     if (b != c) return b < c ? -1 : 1;
     return s.p->len > 1;
 }
-uint64_t tv_str_hash(tv_str s);
+TV_PURE uint64_t tv_str_hash(tv_str s);
 static inline tv_int tv_str_byte_len(tv_str s) { return s.p->len; }
 
 /* JavaScript's view of a string: UTF-16 code units. An ASCII string's unit indexes are its byte
@@ -303,7 +303,7 @@ static inline tv_int tv_str_length(tv_str s) {
     const tv_uview *v = tv_uview_last;
     return v->p == s.p && v->len >= 0 ? v->len : tv_str_wide_length(s.p);
 }
-tv_int tv_str_char_code_at_slow(tv_str s, tv_int i);
+TV_PURE tv_int tv_str_char_code_at_slow(tv_str s, tv_int i);
 /* s.charCodeAt(i); out of range -1 (JavaScript's NaN: it fails every comparison with a code) */
 static inline tv_int tv_str_char_code_at(tv_str s, tv_int i) {
     const tv_strbuf *p = s.p;
@@ -391,7 +391,7 @@ struct tv_arr;
 struct tv_arr tv_str_chars(tv_str s);           /* one string per Unicode scalar value */
 tv_int tv_str_char_count(tv_str s);
 tv_str tv_str_slice(tv_str s, tv_int start, tv_int end, bool has_end, const char *loc);
-bool tv_str_includes(tv_str s, tv_str needle);
+TV_PURE bool tv_str_includes(tv_str s, tv_str needle);
 tv_str tv_str_substring_slow(tv_str s, tv_int start, tv_int end, bool has_end);
 /* Immortal one-character strings for printable ASCII (32..127). */
 typedef struct { int32_t rc; int32_t len; char data[4]; } tv_small_strbuf;
@@ -444,12 +444,12 @@ static inline bool tv_str_ends_with(tv_str s, tv_str suffix) {
     return suffix.p->len <= s.p->len && memcmp(s.p->data + s.p->len - suffix.p->len, suffix.p->data, (size_t)suffix.p->len) == 0;
 }
 tv_str tv_str_substr(tv_str s, tv_int start, tv_int count, bool has_count);
-tv_int tv_str_index_of(tv_str s, tv_str needle);            /* unit index or -1 */
-tv_int tv_str_index_of_from(tv_str s, tv_str needle, tv_int from);
-tv_int tv_str_last_index_of(tv_str s, tv_str needle, tv_int from, bool has_from);
-bool tv_str_includes_at(tv_str s, tv_str needle, tv_int from);
-bool tv_str_starts_with_at(tv_str s, tv_str prefix, tv_int pos);
-bool tv_str_ends_with_at(tv_str s, tv_str suffix, tv_int end);
+TV_PURE tv_int tv_str_index_of(tv_str s, tv_str needle);            /* unit index or -1 */
+TV_PURE tv_int tv_str_index_of_from(tv_str s, tv_str needle, tv_int from);
+TV_PURE tv_int tv_str_last_index_of(tv_str s, tv_str needle, tv_int from, bool has_from);
+TV_PURE bool tv_str_includes_at(tv_str s, tv_str needle, tv_int from);
+TV_PURE bool tv_str_starts_with_at(tv_str s, tv_str prefix, tv_int pos);
+TV_PURE bool tv_str_ends_with_at(tv_str s, tv_str suffix, tv_int end);
 struct tv_arr tv_str_split(tv_str s, tv_str sep);
 struct tv_arr tv_str_split_limit(tv_str s, tv_str sep, double limit); /* s.split(sep, limit) */           /* "" separator splits into UTF-16 units */
 tv_str tv_str_trim(tv_str s);
