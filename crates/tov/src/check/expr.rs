@@ -2295,7 +2295,7 @@ impl<'a> Checker<'a> {
             Ty::Array(e) => {
                 self.index_type(index);
                 // (in TypeScript a typed array's element is a number: `bytes[i]` reads an `int`)
-                let e = if self.ts_module() { promoted(e) } else { e };
+                let e = if self.ts_module() { if e == F32 { F64 } else { promoted(e) } } else { e };
                 // (an element that may already be `null`: past the end it's that, keeping the
                 // element type TypeScript gives the read)
                 if absent && !self.types.has_nullish(e) { self.types.optional(e) } else { e }
@@ -3905,7 +3905,7 @@ impl<'a> Checker<'a> {
                     // (elements are numbers, converted as they're stored: `new Uint8Array([300])` wraps)
                     // (`new Uint8Array([0.5, x / 2])`: of numbers, then, not integers)
                     let floats = matches!(&self.ast().expr(a.expr).kind, ExprKind::Array(xs) if !xs.iter().all(|&x| self.is_int_literal(x)));
-                    let hint = elem.map(|e| self.types.array(if floats && promoted(e) == INT { F64 } else { promoted(e) }));
+                    let hint = elem.map(|e| self.types.array(if (floats && promoted(e) == INT) || (typed.is_some() && self.types.is_float(e)) { F64 } else { promoted(e) }));
                     let t = self.expr(a.expr, if typed.is_some() { hint } else { Some(INT) });
                     let s = self.ast().expr(a.expr).span;
                     let base = self.types.without_undefined(t);

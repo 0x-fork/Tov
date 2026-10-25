@@ -1710,7 +1710,22 @@ impl<'c, 'a> Gen<'c, 'a> {
             Ty::Gen(_) | Ty::AsyncGen(_) => format!("tv_inspect_value(sb, &tv_type_gen, &({place}), {depth})"),
             Ty::Array(e) => {
                 let d = self.desc(e);
-                format!("tv_inspect_arr(sb, {place}, {d}, {depth})")
+                // (in TypeScript, an array of sized numbers is a typed array: `Int32Array(2) [ 1, 2 ]`)
+                let name = match self.tget(e) {
+                    Ty::I8 => "Int8Array", Ty::U8 => "Uint8Array", Ty::U8C => "Uint8ClampedArray", Ty::I16 => "Int16Array",
+                    Ty::U16 => "Uint16Array", Ty::I32 => "Int32Array", Ty::U32 => "Uint32Array", Ty::F32 => "Float32Array",
+                    _ => "",
+                };
+                // (a descriptor's formatter is made outside any function: the program's own modules say)
+                let ts = match self.bodies.last() {
+                    Some(b) => self.js_ints(b.m),
+                    None => (0..self.c.modules.len() as u32).any(|m| !self.c.modules[m as usize].builtin && !self.c.modules[m as usize].std && self.js_ints(m)),
+                };
+                if !name.is_empty() && ts {
+                    format!("tv_inspect_typed_arr(sb, {place}, {d}, {depth}, \"{name}\")")
+                } else {
+                    format!("tv_inspect_arr(sb, {place}, {d}, {depth})")
+                }
             }
             Ty::Map(k, v) => {
                 let (kd, vd) = (self.desc(k), self.desc(v));

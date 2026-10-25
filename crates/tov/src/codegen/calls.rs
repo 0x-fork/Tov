@@ -2379,6 +2379,11 @@ impl<'c, 'a> Gen<'c, 'a> {
                 self.build_spread(&elems, ty)
             }
             (Some("Array"), "from") => self.array_from(args, ty, span),
+            (Some(n), "from") if crate::check::typed_array_elem(n).is_some() => self.new_array(args, ty, span),
+            (Some(n), "of") if crate::check::typed_array_elem(n).is_some() => {
+                let elems: Vec<ExprId> = args.iter().map(|a| a.expr).collect();
+                self.build_spread(&elems, ty)
+            }
             (Some("Array"), "isArray") => {
                 let v = self.expr(args[0].expr);
                 match self.tget(v.ty) {

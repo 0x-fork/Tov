@@ -677,6 +677,7 @@ void tv_set_inspect(tv_sb *sb, tv_map m, const tv_type *kt, int depth);         
  * argument; containers pass depth + 1 to their elements' inspect callbacks. */
 void tv_inspect_str(tv_sb *sb, tv_str s, int depth);   /* depth 0 = top level: unquoted */
 void tv_inspect_arr(tv_sb *sb, tv_arr a, const tv_type *t, int depth);
+void tv_inspect_typed_arr(tv_sb *sb, tv_arr a, const tv_type *t, int depth, const char *name); /* name: a typed array's, NULL for an array */
 /* console.log formatting of a record: fields in declaration order. */
 void tv_inspect_record(tv_sb *sb, int depth, size_t n, const char *const *names, const tv_type *const *types, const void *const *fields);
 void tv_inspect_tuple(tv_sb *sb, int depth, size_t n, const tv_type *const *types, const void *const *fields);   /* [A, B]: as an array */

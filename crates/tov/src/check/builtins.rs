@@ -190,7 +190,7 @@ pub(super) fn is_type_keyword(name: &str) -> bool {
 }
 
 pub(super) fn is_builtin_ns(name: &str) -> bool {
-    matches!(name, "Math" | "console" | "JSON" | "process" | "performance" | "Promise" | "BigInt" | "Array" | "Number" | "String" | "Object")
+    matches!(name, "Math" | "console" | "JSON" | "process" | "performance" | "Promise" | "BigInt" | "Array" | "Number" | "String" | "Object") || typed_array_elem(name).is_some()
 }
 
 pub(super) fn is_builtin_fn(name: &str) -> bool {
@@ -846,6 +846,41 @@ impl<'a> Checker<'a> {
                 self.array_lit(&elems, exp, span)
             }
             "Array" if name == "from" => self.array_from(args, exp, span),
+            // `Float64Array.from(xs)`, `Uint8Array.of(1, 2)`: as `new Float64Array(xs)` / of those numbers
+            n if typed_array_elem(n).is_some() && matches!(name, "from" | "of") => {
+                let el = typed_array_elem(n).unwrap();
+                let int_el = super::expr::promoted(el) == INT;
+                if name == "of" {
+                    for a in args {
+                        let hint = if !int_el { Some(F64) } else if self.is_int_literal(a.expr) { Some(INT) } else { None };
+                        let t = self.expr(a.expr, hint);
+                        if t != ERROR && !self.types.is_numeric(t) {
+                            let shown = self.show(t);
+                            let s = self.ast().expr(a.expr).span;
+                            self.report(Diagnostic::new("T0001", s, format!("`{n}.of` takes numbers, found `{shown}`")));
+                        }
+                    }
+                } else if args.len() != 1 {
+                    self.report(Diagnostic::new("T0201", span, format!("`{n}.from` takes 1 argument (an array or set of numbers), found {}", args.len())));
+                    self.check_args_loose(args);
+                } else {
+                    let src = args[0].expr;
+                    let floats = int_el && matches!(&self.ast().expr(src).kind, ExprKind::Array(xs) if !xs.iter().all(|&x| self.is_int_literal(x)));
+                    let hint = self.types.array(if floats || !int_el { F64 } else { INT });
+                    let t = self.expr(src, Some(hint));
+                    let base = self.types.without_undefined(t);
+                    match *self.types.get(base) {
+                        Ty::Array(e) | Ty::Set(e) if self.types.is_numeric(e) => {}
+                        Ty::Error => {}
+                        _ => {
+                            let shown = self.show(t);
+                            let s = self.ast().expr(src).span;
+                            self.report(Diagnostic::new("T0001", s, format!("`{n}.from` takes an array or set of numbers, found `{shown}`")));
+                        }
+                    }
+                }
+                self.types.array(el)
+            }
             // `Object.is(a, b)`: `===`, except that NaN is NaN and 0 isn't -0
             "Object" if name == "is" && args.len() == 2 => {
                 let a = self.expr(args[0].expr, None);

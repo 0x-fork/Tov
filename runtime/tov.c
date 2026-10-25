@@ -3912,10 +3912,15 @@ static bool tv_is_number_type(const tv_type *t) {
            t == &tv_type_i32 || t == &tv_type_u8 || t == &tv_type_u16 || t == &tv_type_u32 || t == &tv_type_u64;
 }
 
-void tv_inspect_arr(tv_sb *sb, tv_arr a, const tv_type *t, int depth) {
+void tv_inspect_arr(tv_sb *sb, tv_arr a, const tv_type *t, int depth) { tv_inspect_typed_arr(sb, a, t, depth, NULL); }
+
+void tv_inspect_typed_arr(tv_sb *sb, tv_arr a, const tv_type *t, int depth, const char *name) {
     int64_t n = tv_arr_len(a);
-    if (n == 0) { tv_sb_push(sb, "[]", 2); return; }
-    if (!tv_inspect_enter(sb, depth, "[Array]")) return;
+    char open[48] = "[";
+    /* (a typed array: `Uint8Array(3) [ 1, 2, 3 ]`, as Node shows it) */
+    if (name) snprintf(open, sizeof open, "%s(%lld) [", name, (long long)n);
+    if (n == 0) { tv_sb_push_cstr(sb, open); tv_sb_push_char(sb, ']'); return; }
+    if (!tv_inspect_enter(sb, depth, name ? "[Object]" : "[Array]")) return;
     tv_pieces out = {0};
     int64_t shown = n < TV_MAX_ARRAY_LENGTH ? n : TV_MAX_ARRAY_LENGTH;
     for (int64_t i = 0; i < shown; i++) { /* formatProperty: indentation + 2 per entry */
@@ -3925,7 +3930,7 @@ void tv_inspect_arr(tv_sb *sb, tv_arr a, const tv_type *t, int depth) {
         tv_pieces_mark(&out);
     }
     if (shown < n) tv_push_more_items(&out, n - shown);
-    tv_reduce_to_single_string(sb, &out, "[", "]", true, depth + 1, tv_is_number_type(t));
+    tv_reduce_to_single_string(sb, &out, open, "]", true, depth + 1, tv_is_number_type(t));
 }
 
 static void tv_inspect_map_impl(tv_sb *sb, tv_map m, const tv_type *kt, const tv_type *vt, int depth, bool is_set) {
@@ -4094,7 +4099,8 @@ static bool tv_f32_eq(const void *a, const void *b) { return *(const float *)a =
 static uint64_t tv_f32_hash(const void *p) { return tv_f64_hash(&(double){(double)*(const float *)p}); }
 static void tv_f32_to_str(tv_sb *sb, const void *p) {
     char buf[40];
-    tv_sb_push(sb, buf, tv_fmt_number(buf, (double)*(const float *)p, true));
+    /* (read as a number, as a Float32Array's element is in JavaScript: 0.1f is 0.10000000149011612) */
+    tv_sb_push(sb, buf, tv_fmt_number(buf, (double)*(const float *)p, false));
 }
 static void tv_f32_inspect(tv_sb *sb, const void *p, int depth) {
     (void)depth;
