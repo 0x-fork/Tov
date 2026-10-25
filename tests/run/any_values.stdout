@@ -1,0 +1,26 @@
+3 4 5 7 6
+6 7.211102550927978
+4
+3 c null true STR undefined
+{"a":[1,2,{"b":"c"}],"n":null,"t":true,"s":"str"}
+4 6 {"a":[1,2,{"b":"c"},9],"n":null,"t":true,"s":"str","extra":5}
+number
+number
+object
+number
+number 1
+string two
+boolean true
+object null
+undefined undefined
+object {"k":1}
+7 43
+53 35 15 2 true true true false -5 5 -4 9 1
+4
+dflt or undefined true
+11 v 11 {"count":11,"key":"v"}
+5 hi bob
+42
+6.5
+n:30
+hello, world 6 Hello 2 true 16

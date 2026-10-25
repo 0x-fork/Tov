@@ -17,6 +17,7 @@ mod genfn;
 pub(crate) mod body;
 mod calls;
 mod clone;
+mod anyval;
 mod dynval;
 mod frame;
 pub(crate) mod class;
@@ -260,6 +261,14 @@ pub(crate) struct Gen<'c, 'a> {
     /// The types put into `unknown`s, and whether code asks one what it holds (see dynval.rs).
     pub(crate) dyn_types: Vec<TyId>,
     pub(crate) dyn_tables: bool,
+    /// Code works on an `any`, and the helpers converting one to a type (see anyval.rs).
+    pub(crate) any_tables: bool,
+    pub(crate) any_convs: FxMap<TyId, String>,
+    /// The `any` switches as last made, and how many boxed types they cover.
+    pub(crate) any_code: String,
+    pub(crate) any_covered: Option<usize>,
+    /// The statement being made (where a conversion from an `any` traps).
+    pub(crate) stmt_span: Option<Span>,
     /// Types some code retains (copies with a count increment), and the recursive-alias boxes
     /// defined: a box type no retained value can reach is never shared, so it has no count.
     pub(crate) rc_roots: FxSet<TyId>,
@@ -430,6 +439,11 @@ impl<'c, 'a> Gen<'c, 'a> {
             uses_inspect: false,
             dyn_types: Vec::new(),
             dyn_tables: false,
+            any_tables: false,
+            any_convs: FxMap::default(),
+            any_code: String::new(),
+            any_covered: None,
+            stmt_span: None,
             rc_roots: FxSet::default(),
             rc_helper_depth: 0,
             rec_boxes: Vec::new(),
@@ -525,6 +539,8 @@ impl<'c, 'a> Gen<'c, 'a> {
             Ty::BoolLit(_) => Ty::Bool,
             // (a recursive alias for an array: the array, see `flatten_recs`)
             Ty::Rec(..) if let Some(&b) = self.rec_flat.get(&t) => *self.c.types.get(b),
+            // (`any` is held as `unknown` is: a `tv_dyn`)
+            Ty::Any => Ty::Unknown,
             t => t,
         }
     }
@@ -688,8 +704,17 @@ impl<'c, 'a> Gen<'c, 'a> {
                 continue;
             }
             if !self.refresh_dispatchers() && self.queue.is_empty() && self.class_work.is_empty() {
+                // (the `any` switches, over every type boxed so far: what they call is made too,
+                // and may box more)
+                if self.any_dispatch() {
+                    continue;
+                }
                 break;
             }
+        }
+        if !self.any_code.is_empty() {
+            let code = std::mem::take(&mut self.any_code);
+            self.helpers_after.push(code);
         }
         let classes_before = self.class_list.len();
         let tables = self.emit_class_tables();
@@ -976,7 +1001,7 @@ impl<'c, 'a> Gen<'c, 'a> {
             Ty::Decimal => "tv_dec".into(),
             // (a class given as a value: nothing at run time, each call's code is its own)
             Ty::StrLit(_) | Ty::Undefined | Ty::Null | Ty::Void | Ty::Never | Ty::Error | Ty::ClassObj(_) => "tv_unit".into(),
-            Ty::Unknown => "tv_dyn".into(),
+            Ty::Unknown | Ty::Any => "tv_dyn".into(),
             Ty::Array(_) => "tv_arr".into(),
             Ty::Promise(..) => "tv_promise *".into(),
             Ty::Gen(_) | Ty::AsyncGen(_) => "tv_gen *".into(),

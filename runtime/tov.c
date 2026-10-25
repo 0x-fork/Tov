@@ -6580,8 +6580,10 @@ static void tv_dynp_release(void *p) { tv_dyn_release(*(tv_dyn *)p); }
 bool tv_dyn_is_num(const tv_type *t) {
     return t == &tv_type_f64 || t == &tv_type_int || t == &tv_type_f32 || t == &tv_type_i32 || t == &tv_type_u32 || t == &tv_type_i16 || t == &tv_type_u16 || t == &tv_type_i8 || t == &tv_type_u8 || t == &tv_type_u64;
 }
-double tv_dyn_number(tv_dyn d) {
-    const void *p = tv_dyn_data(d);
+static double tv_num_of(const tv_type *t, const void *p);
+double tv_dyn_number(tv_dyn d) { return tv_num_of(d.t, tv_dyn_data(d)); }
+static double tv_num_of(const tv_type *t, const void *p) {
+    tv_dyn d = {t, NULL};
     if (d.t == &tv_type_f64) return *(const double *)p;
     if (d.t == &tv_type_int) return (double)*(const tv_int *)p;
     if (d.t == &tv_type_f32) return (double)*(const float *)p;
@@ -7789,6 +7791,367 @@ bool tv_jp_dyn(tv_jp *p, tv_dyn *out) {
     }
     }
 }
+
+/* ================================================================== any */
+
+/* *p (of type t) === x */
+bool tv_any_eq_raw(const tv_type *t, const void *p, tv_dyn x) {
+    if (tv_dyn_is_num(t) && tv_dyn_is_num(x.t)) return tv_num_of(t, p) == tv_dyn_number(x);
+    if (t != x.t) return false;
+    if (!x.b) return t->size == 0 || t == &tv_type_null;
+    return t->eq ? t->eq(p, x.b->data) : memcmp(p, x.b->data, t->size) == 0;
+}
+
+/* TypeScript's `any` is an `unknown` (a tv_dyn) that every operation is allowed on; what the
+ * runtime knows of (strings, numbers, JSON's arrays and objects) is handled here, and the
+ * program's own types by generated code (see codegen/anyval.rs). */
+
+static inline bool tv_any_nullish(tv_dyn d) { return d.t == &tv_type_undefined || d.t == &tv_type_null; }
+static inline tv_dyn tv_any_undef(void) { return (tv_dyn){&tv_type_undefined, NULL}; }
+
+/* ToNumber */
+double tv_any_num(tv_dyn d) {
+    if (tv_dyn_is_num(d.t)) return tv_dyn_number(d);
+    if (d.t == &tv_type_str) return tv_js_number(*(const tv_str *)tv_dyn_data(d));
+    if (d.t == &tv_type_bool) return *(const bool *)tv_dyn_data(d) ? 1 : 0;
+    if (d.t == &tv_type_null) return 0;
+    if (d.t == &tv_type_dynarr) {
+        tv_arr a = *(const tv_arr *)tv_dyn_data(d);
+        if (tv_arr_len(a) == 0) return 0;
+        if (tv_arr_len(a) == 1) return tv_any_num(((const tv_dyn *)tv_arr_data(a))[0]);
+    }
+    return NAN;
+}
+
+/* String(d), owned */
+tv_str tv_any_str(tv_dyn d) {
+    if (d.t == &tv_type_str) {
+        tv_str s = *(const tv_str *)tv_dyn_data(d);
+        tv_str_retain(s);
+        return s;
+    }
+    tv_sb sb = {0};
+    d.t->to_str(&sb, tv_dyn_data(d));
+    return tv_str_from_sb(&sb);
+}
+
+/* A property key: String(k) */
+tv_str tv_any_key(tv_dyn k) { return tv_any_str(k); }
+
+/* (a primitive, to `+`: not an object, which becomes its string) */
+static bool tv_any_prim_num(tv_dyn d) {
+    return tv_dyn_is_num(d.t) || d.t == &tv_type_bool || tv_any_nullish(d);
+}
+
+tv_dyn tv_any_add(tv_dyn a, tv_dyn b) {
+    if (tv_any_prim_num(a) && tv_any_prim_num(b)) {
+        if (a.t == &tv_type_int && b.t == &tv_type_int) {
+            tv_int x = *(const tv_int *)tv_dyn_data(a), y = *(const tv_int *)tv_dyn_data(b), r;
+            if (!__builtin_add_overflow(x, y, &r) && (uint64_t)r + (UINT64_C(1) << 53) <= (UINT64_C(1) << 54)) return tv_dyn_box(&tv_type_int, &r);
+        }
+        double r = tv_any_num(a) + tv_any_num(b);
+        return tv_dyn_box(&tv_type_f64, &r);
+    }
+    tv_str x = tv_any_str(a), y = tv_any_str(b);
+    tv_str r = tv_str_concat(x, y);
+    tv_str_release(x);
+    tv_str_release(y);
+    return tv_dyn_box(&tv_type_str, &r);
+}
+
+/* a < b (`le`: a <= b), JavaScript's: strings by their units, anything else as numbers */
+bool tv_any_lt(tv_dyn a, tv_dyn b, bool le) {
+    if (a.t == &tv_type_str && b.t == &tv_type_str) {
+        int c = tv_str_cmp(*(const tv_str *)tv_dyn_data(a), *(const tv_str *)tv_dyn_data(b));
+        return le ? c <= 0 : c < 0;
+    }
+    double x = tv_any_num(a), y = tv_any_num(b);
+    return le ? x <= y : x < y;
+}
+
+/* a == b */
+bool tv_any_loose_eq(tv_dyn a, tv_dyn b) {
+    if (tv_any_nullish(a) || tv_any_nullish(b)) return tv_any_nullish(a) && tv_any_nullish(b);
+    bool an = tv_dyn_is_num(a.t) || a.t == &tv_type_bool, bn = tv_dyn_is_num(b.t) || b.t == &tv_type_bool;
+    if ((an && (bn || b.t == &tv_type_str)) || (bn && a.t == &tv_type_str)) return tv_any_num(a) == tv_any_num(b);
+    return tv_dyn_eq(a, b);
+}
+
+_Noreturn void tv_any_nullish_trap(tv_dyn d, tv_str key, const char *loc) {
+    tv_sb sb = {0};
+    tv_sb_push_cstr(&sb, "TypeError: Cannot read properties of ");
+    tv_sb_push_cstr(&sb, d.t == &tv_type_null ? "null" : "undefined");
+    tv_sb_push_cstr(&sb, " (reading '");
+    tv_sb_push_str(&sb, key);
+    tv_sb_push_cstr(&sb, "')");
+    tv_sb_add_char(&sb, 0);
+    tv_trap(sb.data, loc);
+}
+
+_Noreturn void tv_any_type_trap(const char *want, tv_dyn d, const char *loc) {
+    tv_sb sb = {0};
+    tv_sb_push_cstr(&sb, "TypeError: an `any` holding ");
+    if (tv_any_nullish(d)) tv_sb_push_cstr(&sb, d.t == &tv_type_null ? "null" : "undefined");
+    else {
+        tv_sb_push_cstr(&sb, "a value");
+        if (d.t == &tv_type_str) tv_sb_push_cstr(&sb, " of type string");
+        else if (tv_dyn_is_num(d.t)) tv_sb_push_cstr(&sb, " of type number");
+        else if (d.t == &tv_type_bool) tv_sb_push_cstr(&sb, " of type boolean");
+    }
+    tv_sb_push_cstr(&sb, " was used as ");
+    tv_sb_push_cstr(&sb, want);
+    tv_sb_add_char(&sb, 0);
+    tv_trap(sb.data, loc);
+}
+
+static tv_dyn tv_any_box_str(tv_str s) { return tv_dyn_box(&tv_type_str, &s); }
+static tv_dyn tv_any_box_int(tv_int i) { return tv_dyn_box(&tv_type_int, &i); }
+static tv_dyn tv_any_box_bool(bool b) { return tv_dyn_box(&tv_type_bool, &b); }
+
+/* o.k of what the runtime knows of; false: not one of those (the program's types are next) */
+bool tv_any_get_rt(tv_dyn d, tv_str k, tv_dyn *out, const char *loc) {
+    if (tv_any_nullish(d)) tv_any_nullish_trap(d, k, loc);
+    static const char len_s[] = "length";
+    bool is_len = k.p->len == 6 && memcmp(k.p->data, len_s, 6) == 0;
+    if (d.t == &tv_type_str) {
+        if (is_len) { *out = tv_any_box_int(tv_str_length(*(const tv_str *)tv_dyn_data(d))); return true; }
+        *out = tv_any_undef();
+        return true;
+    }
+    if (d.t == &tv_type_dynarr) {
+        if (is_len) { *out = tv_any_box_int(tv_arr_len(*(const tv_arr *)tv_dyn_data(d))); return true; }
+        *out = tv_any_undef();
+        return true;
+    }
+    if (d.t == &tv_type_dynobj) {
+        tv_dyn *v = tv_map_get(*(const tv_map *)tv_dyn_data(d), &tv_type_str, &tv_type_dyn, &k);
+        if (v) { tv_dyn_retain(*v); *out = *v; } else *out = tv_any_undef();
+        return true;
+    }
+    return false;
+}
+
+/* o[i] for an integer i of what the runtime knows of */
+bool tv_any_at_rt(tv_dyn d, tv_int i, tv_dyn *out) {
+    if (d.t == &tv_type_str) {
+        tv_str s = *(const tv_str *)tv_dyn_data(d);
+        if (i < 0 || i >= tv_str_length(s)) { *out = tv_any_undef(); return true; }
+        tv_str c = tv_str_char_at(s, i);
+        *out = tv_any_box_str(c);
+        return true;
+    }
+    if (d.t == &tv_type_dynarr) {
+        tv_arr a = *(const tv_arr *)tv_dyn_data(d);
+        if (i < 0 || i >= tv_arr_len(a)) { *out = tv_any_undef(); return true; }
+        tv_dyn v = ((const tv_dyn *)tv_arr_data(a))[i];
+        tv_dyn_retain(v);
+        *out = v;
+        return true;
+    }
+    return false;
+}
+
+/* o.k = v (v moved) of what the runtime knows of */
+bool tv_any_set_rt(tv_dyn d, tv_str k, tv_dyn v, const char *loc) {
+    if (tv_any_nullish(d)) {
+        tv_dyn_release(v);
+        tv_sb sb = {0};
+        tv_sb_push_cstr(&sb, "TypeError: Cannot set properties of ");
+        tv_sb_push_cstr(&sb, d.t == &tv_type_null ? "null" : "undefined");
+        tv_sb_push_cstr(&sb, " (setting '");
+        tv_sb_push_str(&sb, k);
+        tv_sb_push_cstr(&sb, "')");
+        tv_sb_add_char(&sb, 0);
+        tv_trap(sb.data, loc);
+    }
+    if (d.t == &tv_type_dynobj) {
+        tv_str_retain(k);
+        tv_map_set((tv_map *)tv_dyn_data(d), &tv_type_str, &tv_type_dyn, &k, &v);
+        return true;
+    }
+    if (d.t == &tv_type_str || d.t == &tv_type_dynarr || tv_dyn_is_num(d.t) || d.t == &tv_type_bool) {
+        /* (a primitive's property, or an array's own: dropped, as sloppy JavaScript does) */
+        tv_dyn_release(v);
+        return true;
+    }
+    return false;
+}
+
+/* o[i] = v (v moved) */
+bool tv_any_set_at_rt(tv_dyn d, tv_int i, tv_dyn v) {
+    if (d.t == &tv_type_dynarr) {
+        tv_arr *a = (tv_arr *)tv_dyn_data(d);
+        if (i < 0) { tv_dyn_release(v); return true; }
+        while (tv_arr_len(*a) < i) {
+            tv_dyn u = tv_any_undef();
+            tv_arr_push(a, &tv_type_dyn, &u);
+        }
+        if (i == tv_arr_len(*a)) tv_arr_push(a, &tv_type_dyn, &v);
+        else {
+            tv_arr_make_unique(a, &tv_type_dyn, tv_arr_len(*a));
+            tv_dyn *slot = &((tv_dyn *)tv_arr_data(*a))[i];
+            tv_dyn_release(*slot);
+            *slot = v;
+        }
+        return true;
+    }
+    return false;
+}
+
+/* (the argument `i` of a call on an `any`, `undefined` past the end) */
+static inline tv_dyn tv_any_arg(int n, const tv_dyn *a, int i) { return i < n ? a[i] : tv_any_undef(); }
+static inline bool tv_any_has(int n, const tv_dyn *a, int i) { return i < n && a[i].t != &tv_type_undefined; }
+static tv_int tv_any_int_arg(int n, const tv_dyn *a, int i, tv_int dflt) {
+    if (!tv_any_has(n, a, i)) return dflt;
+    double x = tv_any_num(a[i]);
+    if (x != x) return 0;
+    if (x >= 9.0e15) return (tv_int)9.0e15;
+    if (x <= -9.0e15) return -(tv_int)9.0e15;
+    return (tv_int)x;
+}
+static tv_str tv_any_str_arg(int n, const tv_dyn *a, int i) { return tv_any_str(tv_any_arg(n, a, i)); }
+
+/* o.k(...args) of a string or one of JSON's arrays; false: no such method here */
+bool tv_any_invoke_rt(tv_dyn d, tv_str k, int n, const tv_dyn *a, tv_dyn *out, const char *loc) {
+    if (tv_any_nullish(d)) tv_any_nullish_trap(d, k, loc);
+    char name[24];
+    if (k.p->len >= (int32_t)sizeof name) return false;
+    memcpy(name, k.p->data, (size_t)k.p->len);
+    name[k.p->len] = 0;
+    if (!strcmp(name, "toString") && n == 0) { *out = tv_any_box_str(tv_any_str(d)); return true; }
+    if (d.t == &tv_type_str) {
+        tv_str s = *(const tv_str *)tv_dyn_data(d);
+        tv_int len = tv_str_length(s);
+#define TV_SARG(i) tv_str x##i = tv_any_str_arg(n, a, i)
+#define TV_SREL(i) tv_str_release(x##i)
+        if (!strcmp(name, "toUpperCase")) { *out = tv_any_box_str(tv_str_to_upper(s)); return true; }
+        if (!strcmp(name, "toLowerCase")) { *out = tv_any_box_str(tv_str_to_lower(s)); return true; }
+        if (!strcmp(name, "trim")) { *out = tv_any_box_str(tv_str_trim(s)); return true; }
+        if (!strcmp(name, "trimStart")) { *out = tv_any_box_str(tv_str_trim_start(s)); return true; }
+        if (!strcmp(name, "trimEnd")) { *out = tv_any_box_str(tv_str_trim_end(s)); return true; }
+        if (!strcmp(name, "charAt")) { *out = tv_any_box_str(tv_str_char_at(s, tv_any_int_arg(n, a, 0, 0))); return true; }
+        if (!strcmp(name, "charCodeAt")) {
+            tv_int c = tv_str_char_code_at(s, tv_any_int_arg(n, a, 0, 0));
+            if (c < 0) { double nan = NAN; *out = tv_dyn_box(&tv_type_f64, &nan); } else *out = tv_any_box_int(c);
+            return true;
+        }
+        if (!strcmp(name, "slice")) { *out = tv_any_box_str(tv_str_slice(s, tv_any_int_arg(n, a, 0, 0), tv_any_int_arg(n, a, 1, len), true, loc)); return true; }
+        if (!strcmp(name, "substring")) { *out = tv_any_box_str(tv_str_substring(s, tv_any_int_arg(n, a, 0, 0), tv_any_int_arg(n, a, 1, len), true)); return true; }
+        if (!strcmp(name, "substr")) { *out = tv_any_box_str(tv_str_substr(s, tv_any_int_arg(n, a, 0, 0), tv_any_int_arg(n, a, 1, 0), tv_any_has(n, a, 1))); return true; }
+        if (!strcmp(name, "indexOf")) { TV_SARG(0); *out = tv_any_box_int(tv_str_index_of_from(s, x0, tv_any_int_arg(n, a, 1, 0))); TV_SREL(0); return true; }
+        if (!strcmp(name, "lastIndexOf")) { TV_SARG(0); *out = tv_any_box_int(tv_str_last_index_of(s, x0, tv_any_int_arg(n, a, 1, 0), tv_any_has(n, a, 1))); TV_SREL(0); return true; }
+        if (!strcmp(name, "includes")) { TV_SARG(0); *out = tv_any_box_bool(tv_str_includes_at(s, x0, tv_any_int_arg(n, a, 1, 0))); TV_SREL(0); return true; }
+        if (!strcmp(name, "startsWith")) { TV_SARG(0); *out = tv_any_box_bool(tv_str_starts_with_at(s, x0, tv_any_int_arg(n, a, 1, 0))); TV_SREL(0); return true; }
+        if (!strcmp(name, "endsWith")) { TV_SARG(0); *out = tv_any_box_bool(tv_str_ends_with_at(s, x0, tv_any_int_arg(n, a, 1, len))); TV_SREL(0); return true; }
+        if (!strcmp(name, "repeat")) { *out = tv_any_box_str(tv_str_repeat(s, tv_any_int_arg(n, a, 0, 0), loc)); return true; }
+        if (!strcmp(name, "padStart") || !strcmp(name, "padEnd")) {
+            tv_str fill = tv_any_has(n, a, 1) ? tv_any_str(a[1]) : tv_str_from(" ", 1);
+            tv_int w = tv_any_int_arg(n, a, 0, 0);
+            *out = tv_any_box_str(name[3] == 'S' ? tv_str_pad_start(s, w, fill) : tv_str_pad_end(s, w, fill));
+            tv_str_release(fill);
+            return true;
+        }
+        if ((!strcmp(name, "replace") || !strcmp(name, "replaceAll")) && n >= 2 && a[0].t == &tv_type_str && a[1].t == &tv_type_str) {
+            tv_str x = *(const tv_str *)tv_dyn_data(a[0]), y = *(const tv_str *)tv_dyn_data(a[1]);
+            *out = tv_any_box_str(name[7] == 'A' ? tv_str_replace_all(s, x, y) : tv_str_replace(s, x, y));
+            return true;
+        }
+        if (!strcmp(name, "concat")) {
+            tv_str r = s;
+            tv_str_retain(r);
+            for (int i = 0; i < n; i++) {
+                tv_str x = tv_any_str(a[i]), t = tv_str_concat(r, x);
+                tv_str_release(x);
+                tv_str_release(r);
+                r = t;
+            }
+            *out = tv_any_box_str(r);
+            return true;
+        }
+        if (!strcmp(name, "split") && n >= 1 && a[0].t == &tv_type_str) {
+            tv_arr parts = tv_str_split(s, *(const tv_str *)tv_dyn_data(a[0]));
+            tv_int m = tv_arr_len(parts);
+            tv_arr r = tv_arr_fresh();
+            for (tv_int i = 0; i < m; i++) {
+                tv_str p = ((const tv_str *)tv_arr_data(parts))[i];
+                tv_str_retain(p);
+                tv_dyn v = tv_any_box_str(p);
+                tv_arr_push(&r, &tv_type_dyn, &v);
+            }
+            tv_arr_release(parts, &tv_type_str);
+            *out = tv_dyn_box(&tv_type_dynarr, &r);
+            return true;
+        }
+        if (!strcmp(name, "at")) {
+            tv_int i = tv_any_int_arg(n, a, 0, 0);
+            if (i < 0) i += len;
+            *out = i < 0 || i >= len ? tv_any_undef() : tv_any_box_str(tv_str_char_at(s, i));
+            return true;
+        }
+        if (!strcmp(name, "localeCompare")) {
+            TV_SARG(0);
+            int c = tv_str_cmp(s, x0);
+            TV_SREL(0);
+            *out = tv_any_box_int(c < 0 ? -1 : c > 0);
+            return true;
+        }
+#undef TV_SARG
+#undef TV_SREL
+        return false;
+    }
+    if (d.t == &tv_type_dynarr) {
+        tv_arr *ar = (tv_arr *)tv_dyn_data(d);
+        if (!strcmp(name, "push")) {
+            for (int i = 0; i < n; i++) {
+                tv_dyn v = a[i];
+                tv_dyn_retain(v);
+                tv_arr_push(ar, &tv_type_dyn, &v);
+            }
+            *out = tv_any_box_int(tv_arr_len(*ar));
+            return true;
+        }
+        if (!strcmp(name, "pop")) {
+            tv_dyn v;
+            *out = tv_arr_pop(ar, &tv_type_dyn, &v) ? v : tv_any_undef();
+            return true;
+        }
+        if (!strcmp(name, "join")) {
+            tv_str sep = tv_any_has(n, a, 0) ? tv_any_str(a[0]) : tv_str_from(",", 1);
+            *out = tv_any_box_str(tv_arr_join(*ar, &tv_type_dyn, sep));
+            tv_str_release(sep);
+            return true;
+        }
+        if (!strcmp(name, "indexOf") || !strcmp(name, "includes")) {
+            tv_int r = -1, m = tv_arr_len(*ar);
+            tv_dyn x = tv_any_arg(n, a, 0);
+            for (tv_int i = 0; i < m; i++)
+                if (tv_dyn_eq(((const tv_dyn *)tv_arr_data(*ar))[i], x)) { r = i; break; }
+            *out = name[1] == 'n' && name[2] == 'c' ? tv_any_box_bool(r >= 0) : tv_any_box_int(r);
+            return true;
+        }
+        if (!strcmp(name, "slice")) {
+            tv_arr r = tv_arr_slice(*ar, &tv_type_dyn, tv_any_int_arg(n, a, 0, 0), tv_any_int_arg(n, a, 1, 0), tv_any_has(n, a, 0), tv_any_has(n, a, 1));
+            *out = tv_dyn_box(&tv_type_dynarr, &r);
+            return true;
+        }
+        return false;
+    }
+    if (d.t == &tv_type_dynobj && !strcmp(name, "hasOwnProperty") && n >= 1) {
+        tv_str key = tv_any_str(a[0]);
+        *out = tv_any_box_bool(tv_map_has(*(const tv_map *)tv_dyn_data(d), &tv_type_str, &tv_type_dyn, &key));
+        tv_str_release(key);
+        return true;
+    }
+    return false;
+}
+
+/* The length of what for...of over an `any` iterates; -1: not a string or JSON's array */
+tv_int tv_any_len_rt(tv_dyn d) {
+    if (d.t == &tv_type_dynarr) return tv_arr_len(*(const tv_arr *)tv_dyn_data(d));
+    if (d.t == &tv_type_str) return tv_str_length(*(const tv_str *)tv_dyn_data(d));
+    return -1;
+}
+
 
 bool tv_jp_end(tv_jp *p) {
     if (tv_jp_peek(p) == 0) return true;

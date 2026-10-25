@@ -262,6 +262,20 @@ impl<'c, 'a> Gen<'c, 'a> {
                 let f = self.js_callee(*callee);
                 self.js_call(f, None, args, true, ty)
             }
+            Callee::Any { method } => {
+                let loc = self.loc(span);
+                match (&ast.expr(*callee).kind, method) {
+                    (ExprKind::Member { obj, .. }, Some(name)) => {
+                        let o = self.expr(*obj);
+                        let n = self.sym(name).to_string();
+                        self.any_call(o, Some(&n), args, ty, &loc)
+                    }
+                    _ => {
+                        let f = self.expr(*callee);
+                        self.any_call(f, None, args, ty, &loc)
+                    }
+                }
+            }
             Callee::SuperCtor(base) => {
                 let base = self.inst(base);
                 self.super_ctor_call(base, args, &params);
@@ -3807,7 +3821,7 @@ impl<'c, 'a> Gen<'c, 'a> {
                 let sv = self.coerce(s.clone(), F64);
                 (format!("(fabs(({}) - ({})) < pow(10.0, -({digits})) / 2.0)", x.code, sv.code), Some(x))
             }
-            "toBeUndefined" | "toBeDefined" if s.ty == UNKNOWN => {
+            "toBeUndefined" | "toBeDefined" if s.ty == UNKNOWN || s.ty == ANY => {
                 let t = format!("(({}).t != &tv_type_undefined)", s.code);
                 (if name == "toBeUndefined" { format!("!({t})") } else { t }, None)
             }

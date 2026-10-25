@@ -1863,10 +1863,15 @@ impl<'a> Checker<'a> {
                 // (`x: any`: a type parameter of its own, bound by each call to what it's given, as
                 // TypeScript's `any` takes anything; `xs: any[]` an array of one)
                 let ts = c.ts_module();
+                let body_span = c.ast().stmt(f.body).span;
                 for p in f.params.iter().filter(|_| ts) {
                     let mut anys = Vec::new();
                     if let Some(t) = p.ty {
-                        c.any_uses(t, &mut anys);
+                        // (unless the body uses it as JavaScript does, a property of it read or
+                        // set, it called: then an `any`, checked as it's used)
+                        if !c.used_dynamically(t, body_span, p.name) {
+                            c.any_uses(t, &mut anys);
+                        }
                     }
                     for at in anys {
                         let name = c.interner.lookup("any").unwrap_or(p.name);
@@ -2636,6 +2641,39 @@ impl<'a> Checker<'a> {
         self.types.union(&out)
     }
 
+    /// A local or parameter of written type `te` (`any`, `any[]`) is used in `region` as a
+    /// JavaScript value of no fixed type is: a property of it (of an element, for `any[]`) read
+    /// or set, it called or indexed.
+    pub(super) fn used_dynamically(&self, te: ast::TypeId, region: Span, name: Sym) -> bool {
+        let is_any = |c: &Self, t: ast::TypeId| matches!(&c.ast().ty(t).kind, TypeExprKind::Named { ns: None, name, args, .. } if args.is_empty() && c.name(*name) == "any");
+        let elems = match &self.ast().ty(te).kind {
+            _ if is_any(self, te) => false,
+            TypeExprKind::Array(e) if is_any(self, *e) => true,
+            TypeExprKind::Union(ms) if ms.iter().any(|&m| is_any(self, m)) => false,
+            // (`Record<string, any>`, `Map<K, any>`: holding `any`s, as written)
+            _ => return true,
+        };
+        let ast = self.ast();
+        let inside = |s: Span| s.file == region.file && s.start >= region.start && s.end <= region.end;
+        let is_name = |e: ExprId| matches!(ast.expr(e).kind, ast::ExprKind::Ident(n) if n == name);
+        let hit = |e: ExprId| if elems { matches!(ast.expr(e).kind, ast::ExprKind::Index { obj, .. } if is_name(obj)) } else { is_name(e) };
+        ast.exprs.iter().any(|x| {
+            inside(x.span)
+                && match x.kind {
+                    ast::ExprKind::Member { obj, .. } => hit(obj),
+                    ast::ExprKind::Call { callee, .. } => hit(callee),
+                    ast::ExprKind::Index { obj, .. } => !elems && hit(obj),
+                    // (given other values: of whatever type each is)
+                    ast::ExprKind::Assign(_, t, _) => !elems && is_name(t),
+                    ast::ExprKind::Update { target, .. } => hit(target),
+                    // (asked its type, computed with: by what it holds)
+                    ast::ExprKind::Typeof(x) | ast::ExprKind::Unary(_, x) => hit(x),
+                    ast::ExprKind::Binary(op, l, r) => !matches!(op, ast::BinOp::Eq | ast::BinOp::Ne | ast::BinOp::And | ast::BinOp::Or | ast::BinOp::Nullish) && (hit(l) || hit(r)),
+                    _ => false,
+                }
+        })
+    }
+
     /// Whether a written type mentions `any` (`any`, `any[]`, `Record<string, any>`).
     fn mentions_any(&self, t: ast::TypeId) -> bool {
         match &self.ast().ty(t).kind {
@@ -3086,6 +3124,7 @@ impl<'a> Checker<'a> {
             "Generator" | "IterableIterator" | "Iterator" | "Iterable" if !targs.is_empty() => Some(self.types.intern(Ty::Gen(targs[0]))),
             // (without its `T`: of anything, as TypeScript's `AsyncGenerator` is of `any`)
             "AsyncGenerator" | "AsyncIterableIterator" | "AsyncIterator" | "AsyncIterable" => Some(self.types.intern(Ty::AsyncGen(targs.first().copied().unwrap_or(UNKNOWN)))),
+            "any" if self.ts_module() => Some(ANY),
             "any" => {
                 self.report(
                     Diagnostic::new("X0001", name_span, "`any` is not supported")
@@ -3305,6 +3344,10 @@ impl<'a> Checker<'a> {
 
     fn assignable_in(&mut self, src: TyId, dst: TyId, top: bool, assuming: &mut Vec<(TyId, TyId)>) -> bool {
         if src == dst || src == ERROR || dst == ERROR || src == NEVER || dst == UNKNOWN {
+            return true;
+        }
+        // (`any` goes anywhere, and anything into one: converted, and checked, when it runs)
+        if src == ANY || dst == ANY {
             return true;
         }
         if assuming.contains(&(src, dst)) {
@@ -3535,7 +3578,7 @@ impl<'a> Checker<'a> {
 
     /// Can values of these types ever be equal?
     fn comparable(&mut self, a: TyId, b: TyId) -> bool {
-        if a == ERROR || b == ERROR || a == UNKNOWN || b == UNKNOWN || a == JS || b == JS {
+        if a == ERROR || b == ERROR || a == UNKNOWN || b == UNKNOWN || a == JS || b == JS || a == ANY || b == ANY {
             return true;
         }
         // (a parameter's `any`: compared with anything, as TypeScript's is)
@@ -3563,7 +3606,7 @@ impl<'a> Checker<'a> {
 
     fn expect_assignable(&mut self, found: TyId, expected: TyId, span: Span, context: Option<String>) -> bool {
         if self.assignable(found, expected) {
-            if found == JS && self.spec.on {
+            if (found == JS || found == ANY) && self.spec.on {
                 // (converted from JavaScript, where it may be any number)
                 self.spec_poison(expected);
             }

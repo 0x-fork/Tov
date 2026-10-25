@@ -1181,6 +1181,32 @@ bool tv_jp_skip(tv_jp *p);                             /* any value */
 bool tv_jp_end(tv_jp *p);                              /* only spaces left */
 bool tv_jp_dyn(tv_jp *p, tv_dyn *out);                  /* any JSON value, as an `unknown` */
 extern const struct tv_type tv_type_dynarr, tv_type_dynobj; /* (its arrays and objects: unknown[], Record<string, unknown>) */
+
+/* `any` (see tov.c): conversions and operators, and what the runtime knows of strings and JSON's
+ * arrays and objects (false/-1: not one of those; the program's own types are generated). */
+double tv_any_num(tv_dyn d);                                   /* ToNumber */
+tv_str tv_any_str(tv_dyn d);                                   /* String(d), owned */
+tv_str tv_any_key(tv_dyn k);                                   /* a property key, owned */
+tv_dyn tv_any_add(tv_dyn a, tv_dyn b);                         /* a + b, owned */
+bool tv_any_lt(tv_dyn a, tv_dyn b, bool le);                   /* a < b, or a <= b */
+bool tv_any_loose_eq(tv_dyn a, tv_dyn b);                      /* a == b */
+_Noreturn void tv_any_nullish_trap(tv_dyn d, tv_str key, const char *loc);
+_Noreturn void tv_any_type_trap(const char *want, tv_dyn d, const char *loc);
+bool tv_any_get_rt(tv_dyn d, tv_str k, tv_dyn *out, const char *loc);
+bool tv_any_at_rt(tv_dyn d, tv_int i, tv_dyn *out);
+bool tv_any_set_rt(tv_dyn d, tv_str k, tv_dyn v, const char *loc);   /* v moved */
+bool tv_any_set_at_rt(tv_dyn d, tv_int i, tv_dyn v);                  /* v moved */
+bool tv_any_invoke_rt(tv_dyn d, tv_str k, int n, const tv_dyn *a, tv_dyn *out, const char *loc);
+tv_int tv_any_len_rt(tv_dyn d);
+bool tv_any_eq_raw(const tv_type *t, const void *p, tv_dyn x);    /* *p (a t) === x */
+static inline bool tv_any_int_key(tv_dyn k, tv_int *i) {
+    if (k.t == &tv_type_int) { *i = *(const tv_int *)tv_dyn_data(k); return true; }
+    if (tv_dyn_is_num(k.t)) {
+        double x = tv_dyn_number(k);
+        if (x >= 0 && x < 9.0e15 && x == (double)(tv_int)x) { *i = (tv_int)x; return true; }
+    }
+    return false;
+}
 bool tv_jp_fail(tv_jp *p, const char *expected);       /* records "expected X at position N"; returns false */
 bool tv_jp_find_key(tv_jp *p, const char *key, tv_str *val);  /* string value of key in the object at the cursor (not consumed) */
 tv_str tv_jp_error(tv_jp *p);

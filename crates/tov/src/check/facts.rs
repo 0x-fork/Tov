@@ -60,6 +60,8 @@ pub enum Callee {
     Js { method: Option<Sym> },
     /// `new C(...)` on a JavaScript constructor.
     JsNew,
+    /// A call on an `any`: `f(...)`, or `obj.name(...)` (a method of what it holds).
+    Any { method: Option<Sym> },
 }
 
 #[derive(Clone, Debug)]

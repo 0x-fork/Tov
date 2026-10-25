@@ -1,0 +1,13 @@
+1 string 3 false
+2 object 2 true
+0 undefined none false
+2 xx 2 3
+x=1&y=two&z=true
+2 2 a|b
+101 undefined fallback
+true false 3,1,2 102 7
+true false
+10 5
+NOW A STRING
+5 0,s1,2,s3,4 3 true
+6 3

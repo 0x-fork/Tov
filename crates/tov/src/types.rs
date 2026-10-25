@@ -112,6 +112,9 @@ pub enum Ty {
     Promise(TyId, TyId),
     /// A JavaScript value from an npm package (dynamically typed; see runtime/js.h).
     Js,
+    /// TypeScript's `any`: a value of any type, as `unknown`'s (a `tv_dyn`), that every
+    /// operation is allowed on (checked when it runs; see codegen/anyval.rs).
+    Any,
     /// A function type's last parameters as one tuple type (`(...args: A) => R`, `A extends
     /// unknown[]`): once `A` is a tuple, its elements are the parameters (see `func_throws`).
     Spread(TyId),
@@ -196,6 +199,7 @@ prims! {
     DECIMAL = 19 => Ty::Decimal,
     NULL = 20 => Ty::Null,
     U8C = 21 => Ty::U8C,
+    ANY = 22 => Ty::Any,
 }
 
 impl Default for Types {
@@ -468,6 +472,10 @@ impl Types {
             return members[0];
         }
         let mut out: Vec<TyId> = Vec::with_capacity(members.len() + 2);
+        // (`any` takes in every other type)
+        if members.contains(&ANY) && !members.contains(&ERROR) {
+            return ANY;
+        }
         for &m in members {
             match *self.get(m) {
                 Ty::Error => return ERROR,
@@ -778,6 +786,7 @@ impl Display<'_> {
             Ty::Error => out.push_str("<error>"),
             Ty::Never => out.push_str("never"),
             Ty::Unknown => out.push_str("unknown"),
+            Ty::Any => out.push_str("any"),
             Ty::Js => out.push_str("Js"),
             Ty::Spread(t) => {
                 out.push_str("...");

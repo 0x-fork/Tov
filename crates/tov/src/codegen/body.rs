@@ -474,7 +474,7 @@ impl<'c, 'a> Gen<'c, 'a> {
         self.unwind_range(prev, depth);
     }
 
-    fn release_all_temps(&mut self) {
+    pub(crate) fn release_all_temps(&mut self) {
         let mut lines = Vec::new();
         let all: Vec<(String, TyId)> = self.b().temps.iter().flat_map(|s| s.iter().cloned()).collect();
         for (name, ty) in all.into_iter().rev() {
@@ -3207,6 +3207,7 @@ impl<'c, 'a> Gen<'c, 'a> {
     pub(crate) fn stmt(&mut self, s: StmtId) {
         // (a loop's body that's one statement: `for (...) m.set(k, (m.get(k) ?? 0) + 1)`)
         let m = self.cur_m();
+        self.stmt_span = Some(self.ast(m).stmt(s).span);
         if matches!(self.ast(m).stmt(s).kind, StmtKind::Expr(_)) && self.map_count(&[s], 0).is_some() {
             return;
         }
@@ -3710,6 +3711,17 @@ impl<'c, 'a> Gen<'c, 'a> {
                 let uniq = self.fresh("");
                 let var = format!("v_{}_{}", self.sym(*name), uniq);
                 match self.tget(coll_ty) {
+                    // (an `any`: what it holds, a string or an array, each)
+                    Ty::Unknown => {
+                        self.any_used();
+                        let span = self.ast(m).stmt(s).span;
+                        let (idx, n) = (self.fresh("i"), self.fresh("n"));
+                        let loc = self.loc(span);
+                        self.line(format!("tv_int {n} = tvg_any_len({sn}); if ({n} < 0) tv_trap(\"TypeError: this value is not iterable\", {loc});"));
+                        self.open(&format!("for (tv_int {idx} = 0; {idx} < {n}; {idx}++) {{"));
+                        self.line(format!("tv_dyn {var} = ({{ tv_dyn k_ = tv_dyn_box(&tv_type_int, &{idx}); tv_dyn r_ = tvg_any_at({sn}, k_, {loc}); tv_dyn_release(k_); r_; }});"));
+                        self.b().iter_release = Some(format!("tv_dyn_release({var});"));
+                    }
                     Ty::Js => {
                         let span = self.ast(m).stmt(s).span;
                         let arr = self.js_array_of(&sn, span);
@@ -4503,6 +4515,14 @@ impl<'c, 'a> Gen<'c, 'a> {
             ExprKind::Binary(op, l, r) => self.binary(*op, *l, *r, ty, span),
             ExprKind::Assign(op, t, v) => self.assign(*op, *t, *v, span),
             ExprKind::Update { inc, prefix, target } => {
+                // (`o.n++` of an `any`, `x++` of one: a number, stored as an `any`)
+                let any_obj = match ast.expr(*target).kind {
+                    ExprKind::Member { obj, .. } | ExprKind::Index { obj, .. } if self.ty(obj) == ANY => Some(obj),
+                    _ => None,
+                };
+                if any_obj.is_some() || self.ty(*target) == ANY && any_obj.is_none() && !matches!(ast.expr(*target).kind, ExprKind::Member { .. } | ExprKind::Index { .. }) {
+                    return self.any_update(*target, *inc, *prefix, span);
+                }
                 let p = self.place(*target);
                 let ct = self.ctype(p.ty);
                 let loc = self.loc(span);
@@ -5110,6 +5130,18 @@ impl<'c, 'a> Gen<'c, 'a> {
         if to == JS {
             return self.js_of(v);
         }
+        // (`any` is held as `unknown` is)
+        if (from == ANY && to == UNKNOWN) || (from == UNKNOWN && to == ANY) {
+            return Val { ty: to, ..v };
+        }
+        if to == ANY {
+            let b = self.box_dyn(v);
+            return Val { ty: ANY, ..b };
+        }
+        if from == ANY {
+            let loc = self.any_loc();
+            return self.any_to(v, to, &loc);
+        }
         if to == UNKNOWN {
             return self.box_dyn(v);
         }
@@ -5511,6 +5543,13 @@ impl<'c, 'a> Gen<'c, 'a> {
             let loc = self.loc(span);
             return self.dyn_cast(v, to, &loc);
         }
+        if v.ty == ANY {
+            if to == UNKNOWN {
+                return Val { ty: to, ..v };
+            }
+            let loc = self.loc(span);
+            return self.any_to(v, to, &loc);
+        }
         if let (Ty::Class(fc, _), Ty::Class(tc, _)) = (self.tget(v.ty), self.tget(to))
             && !self.c.class_descends(fc, tc)
         {
@@ -5667,7 +5706,7 @@ impl<'c, 'a> Gen<'c, 'a> {
     }
 
     fn typeof_str(&mut self, v: Val) -> Val {
-        if v.ty == UNKNOWN {
+        if v.ty == UNKNOWN || v.ty == ANY {
             return self.dyn_typeof(v);
         }
         let name = |types: &Types, t: TyId| -> &'static str {
@@ -5809,6 +5848,9 @@ impl<'c, 'a> Gen<'c, 'a> {
         if v.ty == UNKNOWN {
             return format!("({{ tv_dyn d_ = {}; d_.t != &tv_type_undefined && d_.t != &tv_type_null; }})", v.code);
         }
+        if v.ty == ANY {
+            return format!("tv_dyn_truthy({})", v.code);
+        }
         let v = if matches!(self.tget(v.ty), Ty::Rec(..)) { return "true".into() } else { v };
         // (present: neither `undefined` nor `null`)
         let absent: Vec<String> = [UNDEFINED, NULL].iter().filter_map(|&n| self.tag_of(v.ty, n)).map(|k| self.u_is(&v.code, v.ty, k)).collect();
@@ -5848,6 +5890,18 @@ impl<'c, 'a> Gen<'c, 'a> {
             UnOp::BitNot if ty == BIGINT => {
                 let v = self.expr(x);
                 self.tmp(BIGINT, &format!("tv_big_not({})", v.code), true)
+            }
+            // (of an `any`: its ToNumber)
+            UnOp::Neg | UnOp::Plus | UnOp::BitNot if self.ty(x) == ANY => {
+                let v = self.expr(x);
+                let n = format!("tv_any_num({})", v.code);
+                let code = match op {
+                    UnOp::Neg => format!("(-{n})"),
+                    UnOp::Plus => n,
+                    _ => format!("((tv_int)~tv_f64_to_i32({n}))"),
+                };
+                let t = if op == UnOp::BitNot { INT } else { F64 };
+                self.coerce(Val::plain(code, t), ty)
             }
             UnOp::Neg => {
                 let v = self.expr(x);
@@ -5978,6 +6032,12 @@ impl<'c, 'a> Gen<'c, 'a> {
 
     fn binary(&mut self, op: BinOp, l: ExprId, r: ExprId, ty: TyId, span: Span) -> Val {
         use BinOp::*;
+        // (with an `any` operand: JavaScript's operator on what it holds)
+        if matches!(op, Add | Sub | Mul | Div | Rem | Pow | BitAnd | BitOr | BitXor | Shl | Shr | UShr | Lt | Gt | Le | Ge) && (self.ty(l) == ANY || self.ty(r) == ANY) {
+            let a = self.expr(l);
+            let b = self.expr(r);
+            return self.any_binop(op, a, b, ty);
+        }
         match op {
             // `a || b`, `a && b` as values (not both `bool`): `a` if it decides, else `b`
             And | Or if ty != BOOL => {
@@ -5994,7 +6054,9 @@ impl<'c, 'a> Gen<'c, 'a> {
                 self.line(format!("{ct} {res};"));
                 self.open(&format!("if ({}{c}) {{", if op == Or { "" } else { "!" }));
                 // (the left value decides: its truthy members for `||`, its falsy ones for `&&`)
-                let keep = if op == Or {
+                let keep = if lty == ANY {
+                    ANY
+                } else if op == Or {
                     self.c.types.without_nullish(lty)
                 } else {
                     let ms: Vec<TyId> = self.members(lty).into_iter().filter(|&m| m == UNDEFINED || m == NULL || m == BOOL || self.c.types.is_primitive(m)).collect();
@@ -6085,7 +6147,7 @@ impl<'c, 'a> Gen<'c, 'a> {
                 };
                 if let Some((x, want)) = typeof_lit {
                     let xt = self.ty(x);
-                    if xt != UNKNOWN && xt != JS && self.c.types.without_undefined(xt) != JS {
+                    if xt != UNKNOWN && xt != ANY && xt != JS && self.c.types.without_undefined(xt) != JS {
                         let v = self.expr_held(x);
                         let want = self.sym(want).to_string();
                         let t = self.typeof_test(&v, &want);
@@ -6111,7 +6173,9 @@ impl<'c, 'a> Gen<'c, 'a> {
                 }
                 let lv = self.expr_before(l, &[r]);
                 let rv = self.expr(r);
-                let eq = self.equality(lv, rv, true);
+                // (`==` of an `any`: JavaScript's loose equality, `"5" == 5`)
+                let strict = !(matches!(op, LooseEq | LooseNe) && (lv.ty == ANY || rv.ty == ANY));
+                let eq = self.equality(lv, rv, strict);
                 Val::plain(if matches!(op, Eq | LooseEq) { eq } else { format!("(!{eq})") }, BOOL)
             }
             Lt | Gt | Le | Ge => {
@@ -6565,9 +6629,14 @@ impl<'c, 'a> Gen<'c, 'a> {
     /// `a === b` as a C boolean.
     pub(crate) fn equality(&mut self, a: Val, b: Val, strict: bool) -> String {
         let (ta, tb) = (a.ty, b.ty);
-        if ta == UNKNOWN || tb == UNKNOWN {
+        // (`==` with an `any`: JavaScript's loose equality)
+        if !strict && (ta == ANY || tb == ANY) && !matches!(self.tget(if ta == ANY { tb } else { ta }), Ty::Undefined | Ty::Null | Ty::Void) {
+            let (x, y) = (self.coerce(a, ANY), self.coerce(b, ANY));
+            return format!("tv_any_loose_eq({}, {})", x.code, y.code);
+        }
+        if ta == UNKNOWN || tb == UNKNOWN || ta == ANY || tb == ANY {
             // (against `undefined`/`null`: what it holds; `==` takes either)
-            let (d, other) = if ta == UNKNOWN { (a, b) } else { (b, a) };
+            let (d, other) = if ta == UNKNOWN || ta == ANY { (a, b) } else { (b, a) };
             if matches!(self.tget(other.ty), Ty::Undefined | Ty::Null | Ty::Void) {
                 let what = if self.tget(other.ty) == Ty::Null { "tv_type_null" } else { "tv_type_undefined" };
                 return if strict {
@@ -6660,6 +6729,13 @@ impl<'c, 'a> Gen<'c, 'a> {
 
     fn member(&mut self, e: ExprId, obj: ExprId, name: crate::intern::Sym, optional: bool, ty: TyId, span: Span) -> Val {
         let m = self.cur_m();
+        // (a property of what an `any` holds)
+        if self.ty(obj) == ANY {
+            let base = self.expr(obj);
+            let loc = self.loc(span);
+            let text = self.sym(name).to_string();
+            return self.any_member(base, &text, optional, ty, &loc);
+        }
         if self.facts(m).asserted_reads.contains(&e) {
             let base = self.expr(obj);
             let loc = self.loc(span);
@@ -6952,6 +7028,12 @@ impl<'c, 'a> Gen<'c, 'a> {
 
     fn index(&mut self, e: ExprId, obj: ExprId, index: ExprId, optional: bool, ty: TyId, span: Span) -> Val {
         let ot = self.ty(obj);
+        if ot == ANY {
+            let base = self.expr(obj);
+            let iv = self.expr(index);
+            let loc = self.loc(span);
+            return self.any_index(base, iv, optional, ty, &loc);
+        }
         // (`({ "&": "&amp;", "<": "&lt;" })[c]`: a dictionary of constants, only read: made once)
         if let Some(lit) = self.const_dict(obj) {
             // (a few string keys: compared one by one, no map at all)
@@ -7718,7 +7800,7 @@ impl<'c, 'a> Gen<'c, 'a> {
     /// isn't taken, so an async function can keep it in a register: see frame.rs), anything else
     /// through a pointer, so what reaching it costs (an index's bounds check, a copy on write)
     /// happens once.
-    fn place_lvalue(&mut self, p: &Place) -> String {
+    pub(crate) fn place_lvalue(&mut self, p: &Place) -> String {
         if p.lv.starts_with(|c: char| c.is_ascii_alphabetic() || c == '_') && p.lv.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
             return p.lv.clone();
         }
@@ -7883,6 +7965,12 @@ impl<'c, 'a> Gen<'c, 'a> {
     fn assign(&mut self, op: AssignOp, target: ExprId, value: ExprId, span: Span) -> Val {
         // a JavaScript property: assigned in JavaScript
         let m = self.cur_m();
+        // (a property of what an `any` holds)
+        if let ExprKind::Member { obj, .. } | ExprKind::Index { obj, .. } = self.ast(m).expr(target).kind
+            && self.ty(obj) == ANY
+        {
+            return self.any_assign(op, target, value, span);
+        }
         if let ExprKind::Member { obj, .. } | ExprKind::Index { obj, .. } = self.ast(m).expr(target).kind {
             let ot = self.ty(obj);
             if self.c.types.without_undefined(ot) == JS {
@@ -7892,6 +7980,43 @@ impl<'c, 'a> Gen<'c, 'a> {
                 };
                 let ty = self.ty(target);
                 return self.js_assign(&js_op, target, value, ty, span);
+            }
+        }
+        // (`x op= v` of an `any`: the operator on what it holds, stored as an `any`)
+        if let AssignOp::Op(b) = op
+            && !matches!(b, BinOp::Nullish | BinOp::And | BinOp::Or)
+            && !matches!(self.ast(m).expr(target).kind, ExprKind::Member { .. } | ExprKind::Index { .. })
+        {
+            let p = self.place(target);
+            // (`n += x` of an `any` `x`: computed by what it holds, stored as `n`'s type)
+            if p.ty != ANY && !p.weak && self.ty(value) == ANY {
+                let lv = self.place_lvalue(&p);
+                let cur = Val::plain(lv.clone(), p.ty);
+                let rv = self.expr(value);
+                let rt = self.c.any_binary(b, p.ty, ANY);
+                let r = self.any_binop(b, cur, rv, rt);
+                let r = self.coerce(r, p.ty);
+                let r = self.own(r);
+                let code = self.consume(r);
+                let ct = self.ctype(p.ty);
+                let nv = self.fresh("n");
+                let rel = self.release_code(p.ty, &lv);
+                let rel = if rel.is_empty() { String::new() } else { format!("{rel}; ") };
+                self.line(format!("{ct} {nv} = {code}; {rel}{lv} = {nv};"));
+                return Val::plain(lv, p.ty);
+            }
+            if p.ty == ANY && !p.weak {
+                let lv = self.place_lvalue(&p);
+                let cur = Val::plain(lv.clone(), ANY);
+                let rv = self.expr(value);
+                let rt = self.c.any_binary(b, ANY, rv.ty);
+                let r = self.any_binop(b, cur, rv, rt);
+                let d = self.coerce(r, ANY);
+                let d = self.own(d);
+                let code = self.consume(d);
+                let nv = self.fresh("n");
+                self.line(format!("tv_dyn {nv} = {code}; tv_dyn_release({lv}); {lv} = {nv};"));
+                return Val::plain(lv, ANY);
             }
         }
         // `s = s + a + b`, `s = `${s}...``, `s = s.concat(a)`: appended in place (see

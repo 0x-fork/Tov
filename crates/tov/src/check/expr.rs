@@ -313,11 +313,18 @@ impl<'a> Checker<'a> {
                 self.assign(*op, *t, *v, span)
             }
             ExprKind::Update { target, .. } => {
+                // (`o.n++` of an `any`: on what it holds)
+                if let ExprKind::Member { obj, .. } | ExprKind::Index { obj, .. } = self.ast().expr(*target).kind
+                    && self.expr_type_peek(obj) == Some(ANY)
+                {
+                    self.expr(*target, None);
+                    return ANY;
+                }
                 if let Some(t) = self.keyed_place(e, *target, None) {
                     return t;
                 }
                 let Some(place) = self.place(*target, false) else { return ERROR };
-                if !self.types.is_num_like(place.ty) && place.ty != ERROR && place.ty != BIGINT {
+                if !self.types.is_num_like(place.ty) && place.ty != ERROR && place.ty != BIGINT && place.ty != ANY {
                     let msg = format!("`++`/`--` need a number, found `{}`", self.show(place.ty));
                     self.report(Diagnostic::new("T0501", span, msg));
                 }
@@ -942,6 +949,9 @@ impl<'a> Checker<'a> {
                     return F64;
                 }
                 let t = self.expr(x, exp);
+                if t == ANY {
+                    return F64;
+                }
                 if t != ERROR && !self.types.is_num_like(t) && t != BIGINT && self.to_primitive(x, t) {
                     return F64;
                 }
@@ -966,7 +976,7 @@ impl<'a> Checker<'a> {
                 if t == ERROR || self.types.is_num_like(t) {
                     return t;
                 }
-                if self.types.is_string(t) {
+                if self.types.is_string(t) || t == ANY {
                     return F64;
                 }
                 if t == BOOL {
@@ -985,7 +995,7 @@ impl<'a> Checker<'a> {
             }
             UnOp::BitNot => {
                 let t = self.expr(x, exp.filter(|&e| e == BIGINT || self.types.is_int(e)));
-                if self.types.is_float(t) {
+                if self.types.is_float(t) || t == ANY {
                     return INT; // ToInt32, as in JavaScript
                 }
                 if t != ERROR && !self.types.is_int(t) && t != BIGINT {
@@ -1032,6 +1042,10 @@ impl<'a> Checker<'a> {
                 if want_bool || (tl == BOOL && tr == BOOL) || tl == ERROR || tr == ERROR {
                     return BOOL;
                 }
+                // (either operand's value, one of no fixed type)
+                if tl == ANY || tr == ANY {
+                    return ANY;
+                }
                 let kept = if op == Or { self.truthy_part(tl) } else { self.falsy_part(tl) };
                 match kept {
                     NEVER => tr,
@@ -1061,6 +1075,9 @@ impl<'a> Checker<'a> {
             Eq | Ne | LooseEq | LooseNe => self.equality(e, l, r, span),
             Lt | Gt | Le | Ge => {
                 let (tl, tr) = self.numeric_pair(l, r, None);
+                if tl == ANY || tr == ANY {
+                    return self.any_binary(op, tl, tr);
+                }
                 let (tl, tr) = self.primitive_pair(l, r, tl, tr);
                 if tl == BIGINT || tr == BIGINT {
                     // bigint with bigint, or with a number (compared exactly, as in JavaScript)
@@ -1093,6 +1110,9 @@ impl<'a> Checker<'a> {
             }
             Add => {
                 let (tl, tr) = self.numeric_pair(l, r, exp);
+                if tl == ANY || tr == ANY {
+                    return self.any_binary(op, tl, tr);
+                }
                 if self.types.is_stringish(tl) || self.types.is_stringish(tr) {
                     for (t, x) in [(tl, l), (tr, r)] {
                         if !self.printable(t) {
@@ -1113,6 +1133,9 @@ impl<'a> Checker<'a> {
             }
             Sub | Mul | Rem | Pow => {
                 let (tl, tr) = self.numeric_pair(l, r, exp);
+                if tl == ANY || tr == ANY {
+                    return self.any_binary(op, tl, tr);
+                }
                 let (tl, tr) = self.primitive_pair(l, r, tl, tr);
                 if tl == DECIMAL || tr == DECIMAL {
                     return self.decimal_arith(op, l, r, tl, tr, span);
@@ -1137,6 +1160,9 @@ impl<'a> Checker<'a> {
             }
             Div => {
                 let (tl, tr) = self.numeric_pair(l, r, None);
+                if tl == ANY || tr == ANY {
+                    return self.any_binary(op, tl, tr);
+                }
                 let (tl, tr) = self.primitive_pair(l, r, tl, tr);
                 if tl == DECIMAL || tr == DECIMAL {
                     return self.decimal_arith(op, l, r, tl, tr, span);
@@ -1157,6 +1183,9 @@ impl<'a> Checker<'a> {
                 let (tl, tr) = self.numeric_pair(l, r, exp);
                 if tl == ERROR || tr == ERROR {
                     return ERROR;
+                }
+                if tl == ANY || tr == ANY {
+                    return self.any_binary(op, tl, tr);
                 }
                 if tl == BIGINT || tr == BIGINT {
                     if op == UShr {
@@ -1202,7 +1231,7 @@ impl<'a> Checker<'a> {
                 let tl = self.expr(l, None);
                 let Some(c) = self.instanceof_class(r) else { return BOOL };
                 let members = self.flat_members(tl);
-                let possible = tl == ERROR || tl == UNKNOWN || members.iter().any(|&m| match self.class_of(m) {
+                let possible = tl == ERROR || tl == UNKNOWN || tl == ANY || members.iter().any(|&m| match self.class_of(m) {
                     Some((mc, _)) => self.class_descends(mc, c) || self.class_descends(c, mc),
                     None => false,
                 });
@@ -1212,6 +1241,21 @@ impl<'a> Checker<'a> {
                 }
                 BOOL
             }
+        }
+    }
+
+    /// The result of `op` with an `any` operand, JavaScript's for what it holds: `+` a string
+    /// with a string, else an `any` (a number or a string); arithmetic a number (a float: it may
+    /// hold one); bitwise operators an integer; comparisons a `boolean`.
+    pub(crate) fn any_binary(&mut self, op: BinOp, tl: TyId, tr: TyId) -> TyId {
+        use BinOp::*;
+        match op {
+            Add if self.types.is_stringish(tl) || self.types.is_stringish(tr) => STR,
+            Add => ANY,
+            Sub | Mul | Div | Rem | Pow => F64,
+            BitAnd | BitOr | BitXor | Shl | Shr | UShr => INT,
+            Lt | Gt | Le | Ge | Eq | Ne | LooseEq | LooseNe | In | Instanceof => BOOL,
+            And | Or | Nullish => self.types.union(&[tl, tr]),
         }
     }
 
@@ -1592,6 +1636,17 @@ impl<'a> Checker<'a> {
             let _ = (op, span);
             return JS;
         }
+        // `o.name = v`, `o[k] op= v` of an `any`: set on what it holds
+        if let Some(obj) = js_obj
+            && self.expr_type_peek(obj) == Some(ANY)
+        {
+            self.expr(target, None);
+            let v = self.expr(value, Some(ANY));
+            if let AssignOp::Op(b) = op {
+                let _ = self.any_binary(b, ANY, v);
+            }
+            return if matches!(op, AssignOp::Assign) { v } else { ANY };
+        }
         self.map_place = false;
         let place = self.place(target, false);
         let map_key = std::mem::take(&mut self.map_place);
@@ -1600,6 +1655,23 @@ impl<'a> Checker<'a> {
             return ERROR;
         };
         let vspan = self.ast().expr(value).span;
+        // (`x op= v` of an `any`: the operator on what it holds, the result an `any` again)
+        if place.ty == ANY && let AssignOp::Op(b) = op {
+            let tv = self.expr(value, None);
+            let _ = self.any_binary(b, ANY, tv);
+            return ANY;
+        }
+        // (`n += x` of an `any` `x`: the operator on what it holds, the result stored as the
+        // target's type, checked)
+        if let AssignOp::Op(b) = op
+            && !matches!(b, BinOp::Nullish | BinOp::And | BinOp::Or)
+            && self.expr_type_peek(value) == Some(ANY)
+        {
+            let tv = self.expr(value, None);
+            let r = self.any_binary(b, place.ty, tv);
+            self.expect_assignable(r, place.ty, vspan, None);
+            return place.ty;
+        }
         match op {
             AssignOp::Assign => {
                 let wrap = self.is_elem_place(target);
@@ -2300,6 +2372,10 @@ impl<'a> Checker<'a> {
             self.types.without_undefined(t)
         };
         let base = self.array_alias(base);
+        if base == ANY {
+            self.expr(index, None);
+            return ANY;
+        }
         if base == JS {
             let it = self.expr(index, None);
             if !(self.types.is_numeric(it) || self.assignable(it, STR) || it == JS || it == ERROR) {
@@ -2498,6 +2574,10 @@ impl<'a> Checker<'a> {
             // a JavaScript property (`undefined` if there's none; a getter can throw)
             self.js_read_throw(e, span);
             return JS;
+        }
+        // (a property of what an `any` holds: `undefined` if it has none)
+        if t == ANY {
+            return ANY;
         }
         // `req.params` in a `routes` handler: `{ id: string }` for "/users/:id".
         if self.name(name) == "params"
@@ -2871,6 +2951,8 @@ impl<'a> Checker<'a> {
     }
 
     fn object(&mut self, fields: &[crate::ast::ObjField], exp: Option<TyId>, span: Span) -> TyId {
+        // (where an `any` is wanted: JavaScript's object, keys added and removed as it runs)
+        let exp = if exp == Some(ANY) { Some(self.types.intern(Ty::Map(STR, ANY))) } else { exp };
         let as_const = std::mem::take(&mut self.as_const);
         let mut seen = HashSet::default();
         for f in fields {
@@ -3343,6 +3425,8 @@ impl<'a> Checker<'a> {
     }
 
     pub(super) fn array_lit(&mut self, elems: &[ExprId], exp: Option<TyId>, span: Span) -> TyId {
+        // (where an `any` is wanted: an array that takes anything)
+        let exp = if exp == Some(ANY) { Some(self.types.array(ANY)) } else { exp };
         // `[lo, hi]` where a tuple `[number, number]` is expected
         if let Some(t) = exp.and_then(|e| self.flat_members(e).into_iter().find(|&m| self.tuple_of(m).is_some_and(|f| f.len() == elems.len())))
             && !elems.iter().any(|&x| matches!(self.ast().expr(x).kind, ExprKind::Spread(_)))
@@ -3903,6 +3987,10 @@ impl<'a> Checker<'a> {
                 let text = format!("new {}", self.src(self.ast().expr(callee).span));
                 return self.js_call(e, None, &text, args, span, true);
             }
+            if t == ANY {
+                self.report(Diagnostic::new("U0030", span, "`new` on an `any` is not supported yet; construct the class by name"));
+                return ERROR;
+            }
         }
         let ExprKind::Ident(s) = self.ast().expr(callee).kind else { return ERROR };
         // (a `WeakMap` / `WeakSet`: a `Map` / `Set` of its keys by identity; with no collector to
@@ -4256,6 +4344,9 @@ impl<'a> Checker<'a> {
                     let desc = format!("{}.{mtext}", self.src(self.ast().expr(obj).span));
                     return self.js_call(e, Some(name), &desc, args, span, false);
                 }
+                if recv == ANY {
+                    return self.any_call(e, Some(name), args, span);
+                }
                 let base = if mopt {
                     self.types.without_nullish(recv)
                 } else {
@@ -4603,6 +4694,9 @@ impl<'a> Checker<'a> {
         if t == JS {
             return self.js_call(e, None, &text, args, span, false);
         }
+        if t == ANY {
+            return self.any_call(e, None, args, span);
+        }
         self.rec_call(e, Callee::Value);
         self.pending_call = Some(e);
         self.set_call_spec_from(callee);
@@ -4662,6 +4756,7 @@ impl<'a> Checker<'a> {
             Ty::Array(e) | Ty::Set(e) | Ty::Gen(e) => Some(e),
             Ty::Str | Ty::StrLit(_) => Some(STR),
             Ty::Error => Some(ERROR),
+            Ty::Any => Some(ANY),
             _ => self.iterator_of(t),
         }
     }
@@ -4915,8 +5010,20 @@ impl<'a> Checker<'a> {
                     _ => None,
                 },
             },
-            ExprKind::Member { obj, .. } | ExprKind::Index { obj, .. } => (self.expr_type_peek(obj) == Some(JS)).then_some(JS),
+            ExprKind::Member { obj, name, .. } => match self.expr_type_peek(obj) {
+                Some(JS) => Some(JS),
+                Some(ANY) => Some(ANY),
+                // (`this.opts.x = v` with `opts: any`)
+                Some(t) => self.field_of(t, name).filter(|&f| f == ANY),
+                None => None,
+            },
+            ExprKind::Index { obj, .. } => match self.expr_type_peek(obj) {
+                Some(JS) => Some(JS),
+                Some(ANY) => Some(ANY),
+                _ => None,
+            },
             ExprKind::Paren(x) => self.expr_type_peek(x),
+            ExprKind::This => self.lookup(super::THIS_SYM).map(|(_, t)| t),
             _ => None,
         }
     }
@@ -4997,6 +5104,34 @@ impl<'a> Checker<'a> {
         let err = self.builtin_class("JsError");
         self.on_throw(err, span, Some(desc), Some(e));
         JS
+    }
+
+    /// A call on an `any` (`f(x)`, `o.m(x)`): what it holds is called with the arguments
+    /// as `any`s; the result is one, and the call can throw.
+    fn any_call(&mut self, e: ExprId, method: Option<Sym>, args: &[Arg], span: Span) -> TyId {
+        for a in args {
+            if let Some(s) = a.by_ref {
+                self.report(Diagnostic::new("T0904", s, "a call on an `any` takes values, not `&` references"));
+            }
+            match self.ast().expr(a.expr).kind {
+                ExprKind::Spread(x) => {
+                    let t = self.expr(x, None);
+                    let base = self.types.without_undefined(t);
+                    if t != ANY && t != ERROR && !matches!(self.types.get(base), Ty::Array(_)) {
+                        let shown = self.show(t);
+                        let s = self.ast().expr(x).span;
+                        self.report(Diagnostic::new("T0001", s, format!("expected an array to spread, found `{shown}`")));
+                    }
+                }
+                _ => {
+                    self.expr(a.expr, Some(ANY));
+                }
+            }
+        }
+        self.rec_call(e, Callee::Any { method });
+        let err = self.error_class();
+        self.on_throw(err, span, Some("this call on an `any`"), Some(e));
+        ANY
     }
 
     fn types_without_undef(&self, t: TyId) -> TyId {
@@ -5719,9 +5854,10 @@ impl<'a> Checker<'a> {
                                 let Some((target, ty)) = self.target_of(*x) else { return Vec::new() };
                                 let kind = self.name(lit).to_string();
                                 let members = self.flat_members(ty);
-                                let mut keep: Vec<TyId> = members.iter().copied().filter(|&m| m != UNKNOWN && (typeof_name(&self.types, m) == Some(kind.as_str())) == eq).collect();
+                                let mut keep: Vec<TyId> = members.iter().copied().filter(|&m| m != UNKNOWN && m != ANY && (typeof_name(&self.types, m) == Some(kind.as_str())) == eq).collect();
                                 // (`unknown`: the type of that kind, or still `unknown` where it isn't)
-                                if members.contains(&UNKNOWN) {
+                                let dynt = if members.contains(&ANY) { ANY } else { UNKNOWN };
+                                if members.contains(&UNKNOWN) || members.contains(&ANY) {
                                     let of_kind = match kind.as_str() {
                                         "number" => Some(F64),
                                         "string" => Some(STR),
@@ -5732,7 +5868,7 @@ impl<'a> Checker<'a> {
                                     };
                                     match (eq, of_kind) {
                                         (true, Some(t)) => keep.push(t),
-                                        _ => keep.push(UNKNOWN),
+                                        _ => keep.push(dynt),
                                     }
                                 }
                                 vec![target.with(self.types.union(&keep))]
@@ -5777,7 +5913,7 @@ impl<'a> Checker<'a> {
                 let mut keep = Vec::new();
                 for m in self.flat_members(ty) {
                     // (`unknown` that's a `C`: one, if `C` isn't generic)
-                    if m == UNKNOWN {
+                    if m == UNKNOWN || m == ANY {
                         self.resolve_class(c);
                         if positive && self.classes[c as usize].params.is_empty() {
                             keep.push(self.classes[c as usize].this_ty);

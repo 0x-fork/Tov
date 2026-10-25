@@ -130,6 +130,23 @@ impl<'a> Checker<'a> {
         }
     }
 
+    /// The smallest block holding `span` (the module, at its top level).
+    pub(super) fn enclosing_block(&self, span: Span) -> Span {
+        let ast = self.ast();
+        let mut best: Option<Span> = None;
+        for st in &ast.stmts {
+            if let StmtKind::Block(_) = st.kind
+                && st.span.file == span.file
+                && st.span.start <= span.start
+                && st.span.end >= span.end
+                && best.is_none_or(|b| st.span.end - st.span.start < b.end - b.start)
+            {
+                best = Some(st.span);
+            }
+        }
+        best.unwrap_or(Span::new(span.file, 0, u32::MAX))
+    }
+
     /// Does a closure in `init` refer to `name`?
     fn closure_refers(&self, init: ExprId, name: Sym) -> bool {
         let ast = self.ast();
@@ -284,7 +301,7 @@ impl<'a> Checker<'a> {
                 let tscope = self.tscope();
                 // (`const x: any = v`, a `test.each` row's `(xs: any[]) => ...`: `v`'s type, as if
                 // unannotated)
-                let ty = &ty.filter(|&te| !(init.is_some() && self.mentions_any(te)));
+                let ty = &ty.filter(|&te| !(init.is_some() && self.mentions_any(te) && !self.used_dynamically(te, self.enclosing_block(span), *name)));
                 let (t, promotable) = match (ty, init) {
                     (Some(te), init) => {
                         let declared = self.resolve_type(*te, &tscope);
@@ -674,6 +691,8 @@ impl<'a> Checker<'a> {
                     Ty::Map(k, v) => self.tuple_ty(&[k, v]),
                     // a JavaScript iterable (an array, a Set, a generator...)
                     Ty::Js => JS,
+                    // (what an `any` holds: a string's characters, an array's elements)
+                    Ty::Any => ANY,
                     _ => {
                         let msg = format!("`for...of` needs an array or set, found `{}`", self.show(t));
                         self.report(Diagnostic::new("T0402", ispan, msg));

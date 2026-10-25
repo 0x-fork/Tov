@@ -1181,7 +1181,9 @@ impl<'a> Checker<'a> {
                 if exp == Some(VOID) {
                     return VOID;
                 }
-                let Some(target) = exp.filter(|&x| x != ERROR && x != UNKNOWN) else {
+                // (TypeScript's `any` where nothing says what it is)
+                let exp = if self.ts_module() && exp.is_none_or(|x| x == UNKNOWN) { Some(ANY) } else { exp };
+                let Some(target) = exp.filter(|&x| x != ERROR) else {
                     if exp != Some(ERROR) {
                         self.report(
                             Diagnostic::new("T0841", span, "`JSON.parse` needs to know what type to produce")
@@ -1243,7 +1245,8 @@ impl<'a> Checker<'a> {
             // A generic `T`: the instantiated type is written (functions come out as `null`).
             Ty::Param(_) => true,
             // (written as what it holds; `allow_class`: written, not parsed into)
-            Ty::Unknown => allow_class,
+            Ty::Unknown => true,
+            Ty::Any => true,
             Ty::Array(e) => self.json_ok_in(e, allow_class, seen),
             // (a `Map` of other keys is written as JavaScript writes any `Map`, `{}`)
             Ty::Map(k, v) => (k == STR && self.json_ok_in(v, allow_class, seen)) || (k != STR && allow_class),

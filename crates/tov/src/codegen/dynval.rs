@@ -11,6 +11,8 @@ impl<'c, 'a> Gen<'c, 'a> {
     pub(crate) fn box_dyn(&mut self, v: Val) -> Val {
         let from = v.ty;
         match self.tget(from) {
+            // (an `unknown` or `any` already: itself)
+            Ty::Unknown => return Val { ty: UNKNOWN, ..v },
             Ty::Undefined | Ty::Void | Ty::Never => return Val::plain("((tv_dyn){&tv_type_undefined, NULL})", UNKNOWN),
             Ty::Null => return Val::plain("((tv_dyn){&tv_type_null, NULL})", UNKNOWN),
             Ty::StrLit(_) => {
@@ -258,6 +260,14 @@ impl<'c, 'a> Gen<'c, 'a> {
                 let _ = writeln!(has, "    if (d.t == {d}) return {};", tests.join(" || "));
             }
         }
+        // (JSON's arrays and objects, `any`'s: of `unknown`s)
+        let _ = writeln!(json, "    if (v->t == &tv_type_dynarr) {{ tv_arr a = *(const tv_arr *)tv_dyn_data(*v); tv_int n = tv_arr_len(a); if (n == 0) {{ tv_sb_push_cstr(sb, \"[]\"); return; }} tv_sb_add_char(sb, '['); for (tv_int i = 0; i < n; i++) {{ if (i) tv_sb_add_char(sb, ','); tvg_js_nl(sb, ind, lvl + 1); const tv_dyn *e = &((const tv_dyn *)tv_arr_data(a))[i]; if (e->t == &tv_type_undefined) tv_sb_push_cstr(sb, \"null\"); else tvg_dyn_json(sb, e, ind, lvl + 1); }} tvg_js_nl(sb, ind, lvl); tv_sb_add_char(sb, ']'); return; }}");
+        let _ = writeln!(json, "    if (v->t == &tv_type_dynobj) {{ tv_map m = *(const tv_map *)tv_dyn_data(*v); tv_int i = 0; void *kp, *vp; bool first = true; tv_sb_add_char(sb, '{{'); while (tv_map_next(m, &tv_type_str, &tv_type_dyn, &i, &kp, &vp)) {{ const tv_dyn *e = vp; if (e->t == &tv_type_undefined) continue; if (!first) tv_sb_add_char(sb, ','); first = false; tvg_js_nl(sb, ind, lvl + 1); tv_json_quote(sb, *(tv_str *)kp); if (ind.p->len) tv_sb_add(sb, \": \", 2); else tv_sb_add_char(sb, ':'); tvg_dyn_json(sb, e, ind, lvl + 1); }} if (!first) tvg_js_nl(sb, ind, lvl); tv_sb_add_char(sb, '}}'); return; }}");
+        let _ = writeln!(json, "    if (v->t == &tv_type_str) {{ tv_json_quote(sb, *(const tv_str *)tv_dyn_data(*v)); return; }}");
+        let _ = writeln!(json, "    if (tv_dyn_is_num(v->t)) {{ tv_json_number(sb, tv_dyn_number(*v)); return; }}");
+        let _ = writeln!(json, "    if (v->t == &tv_type_bool) {{ if (*(const bool *)tv_dyn_data(*v)) tv_sb_add(sb, \"true\", 4); else tv_sb_add(sb, \"false\", 5); return; }}");
+        let _ = writeln!(arrays, "    if (d.t == &tv_type_dynarr) return true;");
+        let _ = writeln!(has, "    if (d.t == &tv_type_dynobj) return tv_map_has(*(tv_map *)tv_dyn_data(d), &tv_type_str, &tv_type_dyn, &key);");
         let (u, n) = (self.lit(b"undefined"), self.lit(b"object"));
         let code = format!(
             "static tv_str tvg_dyn_typeof(tv_dyn d) {{\n    if (d.t == &tv_type_undefined) return {u};\n    if (d.t == &tv_type_null) return {n};\n{kinds}    return {n};\n}}\n\

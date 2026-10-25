@@ -249,6 +249,8 @@ impl<'c, 'a> Gen<'c, 'a> {
             Ty::Decimal => "    return tv_jp_decimal(p, out);\n".into(),
             Ty::Bool => "    char c = tv_jp_peek(p);\n    if (c == 't') { if (!tv_jp_word(p, \"true\")) return false; *out = true; return true; }\n    if (c == 'f') { if (!tv_jp_word(p, \"false\")) return false; *out = false; return true; }\n    return tv_jp_fail(p, \"a boolean\");\n".into(),
             Ty::Str => "    tv_str s;\n    if (!tv_jp_string(p, &s)) return false;\n    tv_str_release(*out);\n    *out = s;\n    return true;\n".into(),
+            // (`any`, `unknown`: JSON's value as itself, its objects maps of their keys)
+            Ty::Unknown => "    tv_dyn d;\n    if (!tv_jp_dyn(p, &d)) return false;\n    tv_dyn_release(*out);\n    *out = d;\n    return true;\n".into(),
             Ty::StrLit(s) => {
                 let text = self.sym(s).to_string();
                 let want = c_string(format!("\"{text}\"").as_bytes());
