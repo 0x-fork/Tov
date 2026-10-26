@@ -153,6 +153,14 @@ export class RegExpExecArray {
   }
 }
 
+/** A tag's strings (`` tag`a${x}b` ``): the cooked ones, and `raw`. */
+export type TemplateStringsArray = string[] & { raw: string[] }
+export function __tagged(cooked: string[], raw: string[]): TemplateStringsArray {
+  const a = cooked as unknown as TemplateStringsArray
+  a.raw = raw
+  return a
+}
+
 /** (a regular expression literal: JavaScript checks its pattern before the program runs, so
  * making it can't throw; an invalid one traps) */
 export function __reLiteral(pattern: string, flags: string): RegExp {

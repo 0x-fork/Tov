@@ -20,7 +20,7 @@ pub fn parse(src: &str, file: FileId, interner: &mut Interner) -> (Ast, Vec<Diag
             lexed.tokens[i].kind = Tok::Ident;
         }
     }
-    let mut p = Parser { src, toks: lexed.tokens, strings: lexed.strings, pos: 0, file, interner, ast: Ast::default(), diags, script_stmts: Vec::new(), defaults: Vec::new(), more_stmts: Vec::new(), hidden: 0, prologue: Vec::new(), index_sig: None, mapped: None, const_strs: Vec::new(), call_sig: None, local_fns: Vec::new(), prop_defaults: false, var_frames: Vec::new(), extra_members: Vec::new(), generic_arrows: Vec::new(), local_types: Vec::new(), local_type_items: Vec::new(), local_classes: Vec::new(), runtime_tests: false, chai: false, lifted: Vec::new(), classes: Vec::new(), overload_rets: Vec::new(), fn_exprs: Vec::new() };
+    let mut p = Parser { src, toks: lexed.tokens, strings: lexed.strings, template_errs: lexed.template_errs, pos: 0, file, interner, ast: Ast::default(), diags, script_stmts: Vec::new(), defaults: Vec::new(), more_stmts: Vec::new(), hidden: 0, prologue: Vec::new(), index_sig: None, mapped: None, const_strs: Vec::new(), call_sig: None, local_fns: Vec::new(), prop_defaults: false, var_frames: Vec::new(), extra_members: Vec::new(), generic_arrows: Vec::new(), local_types: Vec::new(), local_type_items: Vec::new(), local_classes: Vec::new(), runtime_tests: false, chai: false, lifted: Vec::new(), classes: Vec::new(), overload_rets: Vec::new(), fn_exprs: Vec::new() };
     p.ast.iterator_sym = Some(p.interner.intern("__iterator"));
     // (`// @ts-expect-error`: the next line's start)
     let mut at = 0usize;
@@ -305,6 +305,9 @@ fn slot_records(ast: &mut Ast, interner: &mut Interner) {
 
 struct Parser<'a> {
     src: &'a str,
+    /// Invalid escapes in template text by its string (see lexer::Lexed): reported for untagged
+    /// templates.
+    template_errs: Vec<(u32, Diagnostic)>,
     toks: Vec<Token>,
     strings: Vec<String>,
     pos: usize,
@@ -3272,6 +3275,75 @@ impl<'a> Parser<'a> {
     }
 
     /// `f(args)`; `Array(n)` / `Array<T>(n)` is `new Array(n)`, as in JavaScript.
+    /// An untagged template's invalid escapes, reported.
+    /// (copied, not taken: a speculative parse that reads the template first is undone)
+    fn template_errors(&mut self, val: u32) {
+        let ds: Vec<Diagnostic> = self.template_errs.iter().filter(|e| e.0 == val).map(|e| e.1.clone()).collect();
+        self.diags.extend(ds);
+    }
+
+    /// A template's raw text (for `String.raw` and a tag's `strings.raw`): between its `` ` `` or
+    /// `}` and its `` ` `` or `${`, line ends as `\n`.
+    fn template_raw(&self, t: Token) -> String {
+        let text = self.text(t);
+        let body = text.get(1..).unwrap_or("");
+        let body = body.strip_suffix("${").or_else(|| body.strip_suffix('`')).unwrap_or(body);
+        body.replace("\r\n", "\n").replace('\r', "\n")
+    }
+
+    /// `` tag`a${x}b` ``: `String.raw` is the template of the raw text; any other tag is called
+    /// with the strings (an array holding `raw` too, `__tagged`'s) and the values.
+    fn tagged_template(&mut self, tag: ExprId, start: Span) -> ExprId {
+        let t = self.bump();
+        let mut cooked = vec![self.strings[t.val as usize].clone()];
+        let mut raw = vec![self.template_raw(t)];
+        let mut exprs = Vec::new();
+        if t.kind == Tok::TemplateHead {
+            loop {
+                exprs.push(self.expr());
+                match self.kind() {
+                    Tok::TemplateMiddle | Tok::TemplateTail => {
+                        let tail = self.at(Tok::TemplateTail);
+                        let t = self.bump();
+                        cooked.push(self.strings[t.val as usize].clone());
+                        raw.push(self.template_raw(t));
+                        if tail {
+                            break;
+                        }
+                    }
+                    _ => {
+                        let msg = format!("expected `}}` to close the template substitution, found {}", self.found());
+                        let span = self.cur_span();
+                        self.err("P0001", span, msg);
+                        cooked.push(String::new());
+                        raw.push(String::new());
+                        break;
+                    }
+                }
+            }
+        }
+        let span = start.to(self.prev_span());
+        let is_raw = matches!(&self.ast.exprs[tag as usize].kind, ExprKind::Member { obj, name, .. }
+            if self.interner.get(*name) == "raw" && matches!(self.ast.exprs[*obj as usize].kind, ExprKind::Ident(s) if self.interner.get(s) == "String"));
+        if is_raw {
+            return self.mk_expr(ExprKind::Template(raw, exprs), span);
+        }
+        let strs = |p: &mut Self, xs: Vec<String>| {
+            let items = xs.iter().map(|x| {
+                let s = p.interner.intern(x);
+                p.mk_expr(ExprKind::Str(s), span)
+            }).collect();
+            p.mk_expr(ExprKind::Array(items), span)
+        };
+        let (c, r) = (strs(self, cooked), strs(self, raw));
+        let f = self.interner.intern("__tagged");
+        let callee = self.mk_expr(ExprKind::Ident(f), span);
+        let strings = self.mk_expr(ExprKind::Call { callee, type_args: Vec::new(), args: vec![Arg { expr: c, by_ref: None }, Arg { expr: r, by_ref: None }], optional: false }, span);
+        let mut args = vec![Arg { expr: strings, by_ref: None }];
+        args.extend(exprs.into_iter().map(|expr| Arg { expr, by_ref: None }));
+        self.mk_expr(ExprKind::Call { callee: tag, type_args: Vec::new(), args, optional: false }, span)
+    }
+
     fn call_or_new(&mut self, callee: ExprId, type_args: Vec<TypeId>, args: Vec<Arg>, span: Span) -> ExprId {
         if matches!(self.ast.exprs[callee as usize].kind, ExprKind::Ident(s) if self.interner.get(s) == "Array") {
             return self.mk_expr(ExprKind::New { callee, type_args, args }, span);
@@ -4733,10 +4805,8 @@ impl<'a> Parser<'a> {
                     let span = start.to(self.prev_span());
                     e = self.mk_expr(ExprKind::Update { inc, prefix: false, target: e }, span);
                 }
-                Tok::TemplateFull | Tok::TemplateHead if !self.tok().nl_before => {
-                    let span = self.cur_span();
-                    self.err("X0022", span, "tagged template literals are not supported");
-                    self.primary();
+                Tok::TemplateFull | Tok::TemplateHead => {
+                    e = self.tagged_template(e, start);
                 }
                 Tok::Lt if self.adjacent() && matches!(self.ast.exprs[e as usize].kind, ExprKind::Ident(_) | ExprKind::Member { .. }) => {
                     // `f<int>(x)`: explicit type arguments, only when followed by a call.
@@ -4947,11 +5017,13 @@ impl<'a> Parser<'a> {
             }
             Tok::TemplateFull => {
                 let t = self.bump();
+                self.template_errors(t.val);
                 let s = self.strings[t.val as usize].clone();
                 self.mk_expr(ExprKind::Template(vec![s], Vec::new()), start)
             }
             Tok::TemplateHead => {
                 let t = self.bump();
+                self.template_errors(t.val);
                 let mut parts = vec![self.strings[t.val as usize].clone()];
                 let mut exprs = Vec::new();
                 loop {
@@ -4959,10 +5031,12 @@ impl<'a> Parser<'a> {
                     match self.kind() {
                         Tok::TemplateMiddle => {
                             let t = self.bump();
+                            self.template_errors(t.val);
                             parts.push(self.strings[t.val as usize].clone());
                         }
                         Tok::TemplateTail => {
                             let t = self.bump();
+                            self.template_errors(t.val);
                             parts.push(self.strings[t.val as usize].clone());
                             break;
                         }

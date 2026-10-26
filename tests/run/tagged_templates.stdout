@@ -1,0 +1,10 @@
+a\nbworldc\t42
+C:\Users\${name}\file
+[hello ]<world>[, you are ]<42>[!
+] raw=hello |, you are |!\n
+[plain] raw=plain
+SELECT * FROM t WHERE a = $1 AND b = $2 [1,"x"]
+<p>hi</p>
+\unicode and \xyz \u{zz}
+12
+2 0 a_b_c1+2 

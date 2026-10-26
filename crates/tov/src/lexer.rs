@@ -233,10 +233,13 @@ pub struct Token {
 pub struct Lexed {
     pub tokens: Vec<Token>,
     pub strings: Vec<String>,
+    /// Invalid escapes in template text, by the text's string: errors only when the template
+    /// isn't tagged (a tag gets the raw text).
+    pub template_errs: Vec<(u32, Diagnostic)>,
 }
 
 pub fn lex(src: &str, file: FileId, diags: &mut Vec<Diagnostic>) -> Lexed {
-    let mut lx = Lexer { src: src.as_bytes(), text: src, pos: 0, file, diags, tokens: Vec::new(), strings: Vec::new(), braces: Vec::new() };
+    let mut lx = Lexer { src: src.as_bytes(), text: src, pos: 0, file, diags, tokens: Vec::new(), strings: Vec::new(), braces: Vec::new(), template_errs: Vec::new(), pending: Vec::new() };
     lx.run();
     let mut tokens = lx.tokens;
     // `type` is a keyword only where it starts a declaration (`type X = ...`, `type X<T>`,
@@ -255,7 +258,7 @@ pub fn lex(src: &str, file: FileId, diags: &mut Vec<Diagnostic>) -> Lexed {
             tokens[i].kind = Tok::Ident;
         }
     }
-    Lexed { tokens, strings: lx.strings }
+    Lexed { tokens, strings: lx.strings, template_errs: lx.template_errs }
 }
 
 struct Lexer<'a> {
@@ -268,6 +271,9 @@ struct Lexer<'a> {
     strings: Vec<String>,
     /// For each open `{`: true if it opened a template substitution `${`.
     braces: Vec<bool>,
+    template_errs: Vec<(u32, Diagnostic)>,
+    /// The current template text's invalid escapes.
+    pending: Vec<Diagnostic>,
 }
 
 impl Lexer<'_> {
@@ -502,6 +508,7 @@ impl Lexer<'_> {
             if self.pos >= self.src.len() {
                 self.err("L0002", start, self.pos, "unterminated template literal");
                 self.strings.push(value);
+                self.take_template_errs();
                 let kind = if head { Tok::TemplateFull } else { Tok::TemplateTail };
                 self.push(kind, start, nl, self.strings.len() as u32 - 1);
                 return;
@@ -510,6 +517,7 @@ impl Lexer<'_> {
             if c == b'`' {
                 self.pos += 1;
                 self.strings.push(value);
+                self.take_template_errs();
                 let kind = if head { Tok::TemplateFull } else { Tok::TemplateTail };
                 self.push(kind, start, nl, self.strings.len() as u32 - 1);
                 return;
@@ -518,20 +526,34 @@ impl Lexer<'_> {
                 self.pos += 2;
                 self.braces.push(true);
                 self.strings.push(value);
+                self.take_template_errs();
                 let kind = if head { Tok::TemplateHead } else { Tok::TemplateMiddle };
                 self.push(kind, start, nl, self.strings.len() as u32 - 1);
                 return;
             }
             if c == b'\\' {
                 self.pos += 1;
+                let before = self.diags.len();
                 if let Some(ch) = self.escape() {
                     value.push(ch);
+                }
+                if self.diags.len() > before {
+                    let ds: Vec<Diagnostic> = self.diags.drain(before..).collect();
+                    self.pending.extend(ds);
                 }
                 continue;
             }
             let ch = self.text[self.pos..].chars().next().unwrap();
             value.push(ch);
             self.pos += ch.len_utf8();
+        }
+    }
+
+    /// The pending escape errors, kept for the template text just pushed.
+    fn take_template_errs(&mut self) {
+        let idx = self.strings.len() as u32 - 1;
+        for d in std::mem::take(&mut self.pending) {
+            self.template_errs.push((idx, d));
         }
     }
 
