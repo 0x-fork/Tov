@@ -10,6 +10,7 @@
 #include <stdbool.h>
 #endif
 #include <stddef.h>
+#include <stdint.h>
 
 #ifdef __cplusplus
 extern "C" {
@@ -83,6 +84,29 @@ JS_EXPORT void *TVPropertyName(JSContextRef ctx, const char *utf8);
  * proxies), without entering the engine when it's a plain property; NULL with *exception set
  * if it throws. */
 JS_EXPORT JSValueRef TVGetProperty(JSContextRef ctx, JSValueRef value, void *name, JSValueRef *exception);
+/* Where a read found the property, for the next read of the same name to take it from an object
+ * of the same shape without a call (TVReadCached); zeroed, nothing yet. The shape is kept alive
+ * while it's here, so its ID isn't another's. */
+#define TOV_API_PROPERTY_CACHE 1
+typedef struct TVPropertyCache {
+    uint32_t shape;            /* the object's structure ID */
+    int32_t offset;            /* > 0: bytes from the object; < 0: from its out-of-line storage */
+    void *structure;
+} TVPropertyCache;
+/* TVGetProperty, keeping in `cache` where the property was when it's an object's own data
+ * property (and a shape whose properties don't move: no dictionary, no proxy). */
+JS_EXPORT JSValueRef TVGetPropertyCached(JSContextRef ctx, JSValueRef value, void *name, TVPropertyCache *cache, JSValueRef *exception);
+/* The cached property of `value`, read in place; NULL if `value` isn't an object of that shape. */
+static inline JSValueRef TVReadCached(JSValueRef value, const TVPropertyCache *cache)
+{
+    uintptr_t bits = (uintptr_t)value;
+    /* (a cell: not a number nor another immediate; its structure ID is its first word, and the
+     * pointer to its out-of-line storage the next) */
+    if (!bits || (bits & 0xfffe000000000002ull) || !cache->shape || *(const uint32_t *)bits != cache->shape)
+        return NULL;
+    const char *base = cache->offset > 0 ? (const char *)bits : *(const char *const *)(bits + 8);
+    return *(const JSValueRef *)(base + cache->offset);
+}
 JS_EXPORT void TVReleaseStickyLock(JSContextRef ctx);
 
 #ifdef __cplusplus

@@ -252,6 +252,43 @@ JSValueRef TVGetProperty(JSContextRef ctx, JSValueRef value, void* name, JSValue
     return toRef(globalObject, result);
 }
 
+JSValueRef TVGetPropertyCached(JSContextRef ctx, JSValueRef value, void* name, TVPropertyCache* cache, JSValueRef* exception)
+{
+#if CPU(ADDRESS64)
+    static_assert(JSObject::butterflyOffset() == 8 && !JSCell::structureIDOffset());
+    JSGlobalObject* globalObject = toJS(ctx);
+    VM& vm = globalObject->vm();
+    TovLockScope locker(vm);
+    JSValue base = toJS(globalObject, value);
+    if (JSObject* object = base.getObject()) {
+        Structure* structure = object->structure();
+        PropertyName property(static_cast<UniquedStringImpl*>(name));
+        unsigned attributes;
+        PropertyOffset offset;
+        if (!structure->isDictionary() && !structure->typeInfo().overridesGetOwnPropertySlot()
+            && isValidOffset(offset = structure->get(vm, property, attributes))
+            && !(attributes & static_cast<unsigned>(PropertyAttribute::AccessorOrCustomAccessorOrValue))) {
+            const char* slot = std::bit_cast<const char*>(object->locationForOffset(offset));
+            int32_t delta = isInlineOffset(offset)
+                ? static_cast<int32_t>(slot - std::bit_cast<const char*>(object))
+                : static_cast<int32_t>(slot - std::bit_cast<const char*>(object->butterfly()));
+            if (cache->structure != structure) {
+                gcProtect(structure);
+                if (cache->structure)
+                    gcUnprotect(static_cast<Structure*>(cache->structure));
+                cache->structure = structure;
+            }
+            cache->shape = structure->id().bits();
+            cache->offset = delta;
+            return toRef(globalObject, object->getDirect(offset));
+        }
+    }
+#else
+    UNUSED_PARAM(cache);
+#endif
+    return TVGetProperty(ctx, value, name, exception);
+}
+
 #if (CPU(ARM64) || CPU(X86_64)) && CPU(ADDRESS64) && !ENABLE(C_LOOP)
 /* A call of a JavaScript function (not a host one) with up to six arguments and no more
  * parameters than that: into its machine code directly, the arguments in registers, as the

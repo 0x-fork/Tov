@@ -1957,14 +1957,27 @@ static JSObjectRef tv_js_make_fn(const char *params_prefix, uint32_t n, tv_sb *b
     return f;
 }
 
+#ifdef TOV_API_PROPERTY_CACHE
+_Static_assert(sizeof(((tv_js_name *)0)->cache) == sizeof(TVPropertyCache), "tv_js_name's cache is a TVPropertyCache");
+#endif
+
 JSValueRef tv_js_name_get(JSValueRef obj, tv_js_name *k, JSValueRef *exc) {
+#ifdef TOV_API_PROPERTY_CACHE
+    /* from an object of the shape the last read found it in: where it was */
+    JSValueRef c = TVReadCached(obj, (TVPropertyCache *)&k->cache);
+    if (c) return c;
+#endif
     JSContextRef ctx = tv_js();
 #ifdef TV_JSC_OWN
     /* read where it is, without a call into the engine (null and undefined throw as `o.name`
      * words it, by way of the compiled reader below) */
     if (!JSValueIsUndefined(ctx, obj) && !JSValueIsNull(ctx, obj)) {
         if (!k->id) k->id = TVPropertyName(ctx, k->text);
+#ifdef TOV_API_PROPERTY_CACHE
+        JSValueRef r = TVGetPropertyCached(ctx, obj, k->id, (TVPropertyCache *)&k->cache, exc);
+#else
         JSValueRef r = TVGetProperty(ctx, obj, k->id, exc);
+#endif
         return *exc ? NULL : r;
     }
 #endif
