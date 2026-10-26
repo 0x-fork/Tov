@@ -234,7 +234,8 @@ impl Val {
 }
 
 /// (module, item, type arguments) of a function instance.
-type InstanceKey = (u32, u32, Vec<(u32, TyId)>);
+/// (module, item, type arguments, parameters fixed to an arrow's C function)
+type InstanceKey = (u32, u32, Vec<(u32, TyId)>, Vec<(usize, String)>);
 
 /// A generic function instance to emit.
 struct Instance {
@@ -242,6 +243,8 @@ struct Instance {
     item: u32,
     subst: FxMap<u32, TyId>,
     cname: String,
+    /// Parameters fixed to an arrow's C function (see `instance_with`).
+    direct: Vec<(usize, String)>,
 }
 
 /// A generic instantiation's type arguments (parameter → type), sorted.
@@ -435,6 +438,19 @@ pub(crate) struct Gen<'c, 'a> {
     /// Frame structs of async functions.
     /// The accumulator loop for the function `function_body` emits next (see `tre_candidate`).
     pub(crate) pending_tre: Option<body::Tre>,
+    /// The next body's `direct_fns`.
+    pub(crate) pending_direct: Option<FxMap<u32, String>>,
+    /// How many instances specialized for arrows each function has (they're capped).
+    pub(crate) direct_counts: FxMap<(u32, u32), usize>,
+    /// Each arrow's most recently made C function and its pointer type (stack closures too).
+    pub(crate) arrow_last: FxMap<(u32, ExprId), (String, String)>,
+    /// The array local the current statement stores an element of (`xs[i] = ...`).
+    pub(crate) store_arr: Option<u32>,
+    /// While a self-recursive function's copy is emitted: its own calls go to this function
+    /// instead ((module, item, type arguments) → the next copy; see `emit_function`).
+    pub(crate) recur: Option<(u32, u32, Vec<(u32, TyId)>, String)>,
+    /// Functions' parameters never assigned (by index), for `direct_args`.
+    pub(crate) unassigned_params: FxMap<(u32, u32), Vec<bool>>,
     /// The program calls fetch(): main installs TLS (and the build links it).
     uses_tls: bool,
     pub(crate) uses_regexp: bool,
@@ -568,6 +584,12 @@ impl<'c, 'a> Gen<'c, 'a> {
             last_children: Vec::new(),
             agen_helpers: FxMap::default(),
             pending_tre: None,
+            pending_direct: None,
+            direct_counts: FxMap::default(),
+            arrow_last: FxMap::default(),
+            store_arr: None,
+            recur: None,
+            unassigned_params: FxMap::default(),
             uses_tls: false,
             uses_regexp: false,
             frame_defs: Vec::new(),
@@ -2085,16 +2107,31 @@ impl<'c, 'a> Gen<'c, 'a> {
 
     /// C name of a function instance, queueing it for emission.
     pub(crate) fn instance(&mut self, m: u32, item: u32, subst: FxMap<u32, TyId>) -> String {
+        self.instance_with(m, item, subst, Vec::new())
+    }
+
+    /// `instance`, specialized: each parameter in `direct` is always passed a closure of that C
+    /// function (an arrow written at the call site), so calls through it are direct calls the C
+    /// compiler can inline (`bench(name, () => s.includes("x"))`, `retry(() => fetchOnce())`).
+    pub(crate) fn instance_with(&mut self, m: u32, item: u32, subst: FxMap<u32, TyId>, direct: Vec<(usize, String)>) -> String {
         let mut key_args: Vec<(u32, TyId)> = subst.iter().map(|(&k, &v)| (k, v)).collect();
         key_args.sort();
-        let key = (m, item, key_args);
+        if direct.is_empty()
+            && let Some((rm, ri, ra, next)) = &self.recur
+            && *rm == m
+            && *ri == item
+            && *ra == key_args
+        {
+            return next.clone();
+        }
+        let key = (m, item, key_args, direct.clone());
         if let Some(n) = self.instances.get(&key) {
             return n.clone();
         }
         let ItemKind::Function(f) = &self.ast(m).items[item as usize].kind else { unreachable!() };
         let name = self.sym(f.name);
         let base = if name == "<script>" { format!("f{m}_script_") } else { format!("f{m}_{name}") };
-        let cname = if subst.is_empty() { base } else { format!("{base}_{}", self.instances.len()) };
+        let cname = if subst.is_empty() && direct.is_empty() { base } else { format!("{base}_{}", self.instances.len()) };
         self.instances.insert(key, cname.clone());
         // Prototype now, body later.
         let sig = self.c.sigs[&(m, item)].clone();
@@ -2104,7 +2141,7 @@ impl<'c, 'a> Gen<'c, 'a> {
             let proto = self.fn_proto(&cname, &sig.params, sig.ret, &subst, false);
             let _ = writeln!(self.protos, "static {proto};");
         }
-        self.queue.push(Instance { m, item, subst, cname: cname.clone() });
+        self.queue.push(Instance { m, item, subst, cname: cname.clone(), direct });
         cname
     }
 
@@ -2178,6 +2215,62 @@ impl<'c, 'a> Gen<'c, 'a> {
             self.emit_async_function(inst);
             return;
         }
+        // A small function calling itself: three copies of it too, each calling the next and the
+        // last the function, so the C compiler inlines the recursion a few levels deep (as GCC
+        // does a function into itself; clang won't): fewer calls, `fib` twice as fast.
+        let copies = if inst.direct.is_empty() && self.recur.is_none() && self.small_self_recursive(inst.m, inst.item) { 3 } else { 0 };
+        let mut key_args: Vec<(u32, TyId)> = inst.subst.iter().map(|(&k, &v)| (k, v)).collect();
+        key_args.sort();
+        if copies > 0 {
+            let sig = self.c.sigs[&(inst.m, inst.item)].clone();
+            for k in 1..=copies {
+                let proto = self.fn_proto(&format!("{}_r{k}", inst.cname), &sig.params, sig.ret, &inst.subst, false);
+                let _ = writeln!(self.protos, "static {proto};");
+            }
+            self.recur = Some((inst.m, inst.item, key_args.clone(), format!("{}_r1", inst.cname)));
+        }
+        self.emit_function_body(&inst);
+        if copies > 0 {
+            for k in 1..=copies {
+                let next = if k < copies { format!("{}_r{}", inst.cname, k + 1) } else { inst.cname.clone() };
+                self.recur = Some((inst.m, inst.item, key_args.clone(), next));
+                let copy = Instance { m: inst.m, item: inst.item, subst: inst.subst.clone(), cname: format!("{}_r{k}", inst.cname), direct: Vec::new() };
+                self.emit_function_body(&copy);
+            }
+            self.recur = None;
+        }
+    }
+
+    /// Whether module function (m, item) calls itself, small enough to copy (see
+    /// `emit_function`): no closures in it, a few dozen expressions.
+    fn small_self_recursive(&mut self, m: u32, item: u32) -> bool {
+        let ItemKind::Function(f) = &self.ast(m).items[item as usize].kind else { return false };
+        let body = f.body;
+        let ast = self.ast(m);
+        let mut exprs = Vec::new();
+        body::collect_exprs_stmt(ast, body, &mut exprs);
+        if exprs.len() > 60 {
+            return false;
+        }
+        let facts = self.facts(m);
+        let mut calls_self = false;
+        for &e in &exprs {
+            match &ast.expr(e).kind {
+                ExprKind::Arrow(_) | ExprKind::Await(_) | ExprKind::Yield(..) => return false,
+                ExprKind::Call { .. } => {
+                    if let Some(c) = facts.calls.get(&e)
+                        && matches!(c.callee, crate::check::Callee::Fn(cm, ci) if cm == m && ci == item)
+                    {
+                        calls_self = true;
+                    }
+                }
+                _ => {}
+            }
+        }
+        calls_self
+    }
+
+    fn emit_function_body(&mut self, inst: &Instance) {
         let ItemKind::Function(f) = &self.ast(inst.m).items[inst.item as usize].kind else { return };
         let sig = self.c.sigs[&(inst.m, inst.item)].clone();
         let proto = self.fn_proto(&inst.cname, &sig.params, sig.ret, &inst.subst, false);
@@ -2203,11 +2296,22 @@ impl<'c, 'a> Gen<'c, 'a> {
             let _ = writeln!(self.protos, "static {lproto};");
             self.pending_tre = Some(body::Tre { entry: None, ..t.clone() });
             let lcode = self.function_body(inst.m, inst.subst.clone(), &params, ret, body::FnBodyKind::Block(f.body), Some(entry_unique.clone()), None, None);
-            let _ = writeln!(self.funcs, "static {lproto} {{\n{lcode}}}\n");
+            // (a self-recursive function's copy: its loop inlined into the one before it too)
+            let inl = if self.recur.is_some() && inst.cname.rsplit_once("_r").is_some_and(|(_, k)| k.chars().all(|c| c.is_ascii_digit())) { "inline " } else { "" };
+            let _ = writeln!(self.funcs, "static {inl}{lproto} {{\n{lcode}}}\n");
             self.pending_tre = Some(body::Tre { entry: Some(looper), ..t });
         }
+        if !inst.direct.is_empty() {
+            self.pending_direct = Some(inst.direct.iter().filter_map(|(i, c)| params.get(*i).map(|p| (p.0, c.clone()))).collect());
+        }
         let code = self.function_body(inst.m, inst.subst.clone(), &params, ret, body::FnBodyKind::Block(f.body), Some(entry_unique), None, None);
-        let attr = self.callback_inline(&params.iter().map(|p| crate::types::FnParam { ty: p.1, inout: p.2, optional: false }).collect::<Vec<_>>(), &code, &inst.cname);
+        let mut attr = self.callback_inline(&params.iter().map(|p| crate::types::FnParam { ty: p.1, inout: p.2, optional: false }).collect::<Vec<_>>(), &code, &inst.cname);
+        // (a self-recursive function with copies: the function itself is called, each copy
+        // meant to be inlined into the one before it)
+        if self.recur.is_some() {
+            let copy = inst.cname.rsplit_once("_r").is_some_and(|(_, k)| k.chars().all(|c| c.is_ascii_digit()));
+            attr = if copy { "inline " } else { "" };
+        }
         let _ = writeln!(self.funcs, "static {attr}{proto} {{\n{code}}}\n");
     }
 

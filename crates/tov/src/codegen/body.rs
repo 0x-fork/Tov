@@ -140,6 +140,16 @@ pub(crate) struct Body {
     /// `const` array locals whose length never changes in the function (see `fixed_lens`).
     /// Arrays of a fixed length: (length, where in the source it holds from).
     pub fixed: Option<FxMap<u32, (u64, u32)>>,
+    /// Function-typed locals (parameters) known to hold one arrow's function: called directly
+    /// (an instance specialized for the arrows passed at its call site, see `Gen::instance_with`).
+    pub direct_fns: FxMap<u32, String>,
+    /// In a counted loop's unchecked copy: `xs[i - 1]` read from a local holding what the last
+    /// round stored to `xs[i]` (see `carry_plan`): (array, the storing statement, the local,
+    /// the array's data pointer, the loop index's access).
+    pub carry: Option<(u32, StmtId, String, String, String)>,
+    /// `string[]` locals used only to push strings onto, join and count (see `builder_local`):
+    /// a string builder each (key → (builder, count, separator)).
+    pub builders: FxMap<u32, (String, String, String)>,
 }
 
 /// A `for` loop emitted twice (see `Gen::version_plan`): its index local, whether its test is
@@ -339,6 +349,9 @@ impl<'c, 'a> Gen<'c, 'a> {
             owned_locals: FxSet::default(),
             moves: None,
             fixed: None,
+            direct_fns: FxMap::default(),
+            carry: None,
+            builders: FxMap::default(),
         });
     }
 
@@ -551,6 +564,9 @@ impl<'c, 'a> Gen<'c, 'a> {
             owned_locals: FxSet::default(),
             moves: None,
             fixed: None,
+            direct_fns: self.pending_direct.take().unwrap_or_default(),
+            carry: None,
+            builders: FxMap::default(),
         };
         for (i, &(key, ty, inout)) in params.iter().enumerate() {
             let access = if inout { format!("(*p{i})") } else { format!("p{i}") };
@@ -1360,6 +1376,10 @@ impl<'c, 'a> Gen<'c, 'a> {
     // ------------------------------------------------------------ closures analysis
 
     /// Which locals must live in heap cells, and which arrows can keep their environment on the stack.
+    pub(crate) fn analyze_closures_pub(&mut self, m: u32, kind: &FnBodyKind) -> (FxSet<u32>, FxSet<ExprId>, FxSet<u32>) {
+        self.analyze_closures(m, kind)
+    }
+
     fn analyze_closures(&mut self, m: u32, kind: &FnBodyKind) -> (FxSet<u32>, FxSet<ExprId>, FxSet<u32>) {
         let ast = self.ast(m);
         let mut exprs = Vec::new();
@@ -2576,6 +2596,177 @@ impl<'c, 'a> Gen<'c, 'a> {
     /// `xs[index]` in a versioned loop's unchecked copy: the element's C lvalue, through the
     /// local holding the array's elements (every access to it, so the C compiler sees one base),
     /// unchecked at `i + k` and checked against the length elsewhere.
+    /// A counted loop stepping `i` by one whose body stores `xs[i] = ...` once a round, at its top
+    /// level, reading `xs[i - 1]` only up to there (`curr[i] = min(curr[i - 1] + 1, ...)`): the
+    /// value stored can be carried to the next round in a local instead of read back from memory
+    /// (GCC's predictive commoning, which clang doesn't do: a store-to-load wait each round on
+    /// x86). No `continue` (the store would be skipped), no other element stores (they might be
+    /// to the same array), no calls but `Math`'s. (array, the storing statement)
+    fn carry_plan(&mut self, body: StmtId, step: Option<ExprId>, ik: u32) -> Option<(u32, StmtId)> {
+        let m = self.cur_m();
+        let ast = self.ast(m);
+        let step = step?;
+        let local = |g: &Self, e: ExprId| match (&ast.expr(e).kind, g.facts(m).idents.get(&e)) {
+            (ExprKind::Ident(_), Some(IdentFact::Local(k))) => Some(*k),
+            _ => None,
+        };
+        let steps_by_one = match &ast.expr(step).kind {
+            ExprKind::Update { inc: true, target, .. } => local(self, *target) == Some(ik),
+            ExprKind::Assign(AssignOp::Op(crate::ast::BinOp::Add), t, v) => local(self, *t) == Some(ik) && matches!(ast.expr(*v).kind, ExprKind::Int(1)),
+            _ => false,
+        };
+        if !steps_by_one {
+            return None;
+        }
+        let StmtKind::Block(ss) = &ast.stmt(body).kind else { return None };
+        let ss = ss.clone();
+        // (no `continue` anywhere in it)
+        let mut stack = vec![body];
+        while let Some(st) = stack.pop() {
+            match &ast.stmt(st).kind {
+                StmtKind::Continue(_) => return None,
+                StmtKind::Block(xs) => stack.extend(xs.iter().copied()),
+                StmtKind::If(_, t, e) => {
+                    stack.push(*t);
+                    stack.extend(e.iter().copied());
+                }
+                StmtKind::While(_, b) | StmtKind::DoWhile(b, _) | StmtKind::ForOf { body: b, .. } | StmtKind::For { body: b, .. } => stack.push(*b),
+                StmtKind::Switch(..) | StmtKind::Try { .. } => return None,
+                _ => {}
+            }
+        }
+        // the store
+        let (j, xk) = ss.iter().enumerate().find_map(|(j, &st)| {
+            let StmtKind::Expr(e) = &ast.stmt(st).kind else { return None };
+            let ExprKind::Assign(AssignOp::Assign, t, _) = &ast.expr(*e).kind else { return None };
+            let ExprKind::Index { obj, index, optional: false } = &ast.expr(*t).kind else { return None };
+            (local(self, *index) == Some(ik)).then_some(())?;
+            local(self, *obj).map(|k| (j, k))
+        })?;
+        let xt = self.b().locals.get(&xk)?.ty;
+        let Ty::Array(et) = self.tget(xt) else { return None };
+        if !matches!(self.tget(et), Ty::Int | Ty::F64 | Ty::F32 | Ty::I8 | Ty::I16 | Ty::I32 | Ty::U8 | Ty::U8C | Ty::U16 | Ty::U32 | Ty::U64 | Ty::Bool) {
+            return None;
+        }
+        let mut all = Vec::new();
+        collect_exprs_stmt(ast, body, &mut all);
+        let store_target = match &ast.stmt(ss[j]).kind {
+            StmtKind::Expr(e) => match &ast.expr(*e).kind {
+                ExprKind::Assign(_, t, _) => *t,
+                _ => return None,
+            },
+            _ => return None,
+        };
+        for &e in &all {
+            match &ast.expr(e).kind {
+                ExprKind::Assign(_, t, _) | ExprKind::Update { target: t, .. } if *t != store_target && matches!(ast.expr(*t).kind, ExprKind::Index { .. }) => return None,
+                ExprKind::Assign(_, t, _) | ExprKind::Update { target: t, .. } if local(self, *t) == Some(xk) || local(self, *t) == Some(ik) => return None,
+                ExprKind::Call { callee, .. } => {
+                    let math = matches!(&ast.expr(*callee).kind, ExprKind::Member { obj, .. } if matches!(ast.expr(*obj).kind, ExprKind::Ident(n) if self.sym(n) == "Math"));
+                    if !math {
+                        return None;
+                    }
+                }
+                _ => {}
+            }
+        }
+        // (`xs[i - 1]` read only up to the store)
+        let mut after = Vec::new();
+        for &st in &ss[j + 1..] {
+            collect_exprs_stmt(ast, st, &mut after);
+        }
+        for &e in &after {
+            if let ExprKind::Index { obj, index, .. } = &ast.expr(e).kind
+                && local(self, *obj) == Some(xk)
+                && self.index_offset(*index, ik) != Some(0)
+            {
+                return None;
+            }
+        }
+        Some((xk, ss[j]))
+    }
+
+    /// A `string[]` local made empty (`const parts: string[] = []`) and then only pushed one
+    /// string at a time onto (`parts.push(s)`), joined with one literal separator
+    /// (`parts.join("")`) and counted (`parts.length`), by its function itself (no closure, no
+    /// other use): a string builder holds the joined text instead of an array of strings, the
+    /// separator written as each string is pushed after the first. Its separator, or None.
+    pub(crate) fn builder_local(&mut self, key: u32, init: ExprId, ty: TyId) -> Option<String> {
+        let m = self.cur_m();
+        let Ty::Array(et) = self.tget(ty) else { return None };
+        if !self.c.types.is_string(et) || matches!(self.tget(et), Ty::StrLit(_)) {
+            return None;
+        }
+        let ast = self.ast(m);
+        if !matches!(&ast.expr(init).kind, ExprKind::Array(xs) if xs.is_empty()) {
+            return None;
+        }
+        let root = self.b().root.or(self.b().arrow_root)?;
+        let mut all = Vec::new();
+        collect_exprs_stmt(ast, root, &mut all);
+        // (uses inside closures: not this function's alone)
+        let mut in_arrows: FxSet<ExprId> = FxSet::default();
+        for &e in &all {
+            if let ExprKind::Arrow(f) = &ast.expr(e).kind {
+                let mut xs = Vec::new();
+                match &f.body {
+                    ArrowBody::Expr(x) => collect_exprs_expr(ast, *x, &mut xs),
+                    ArrowBody::Block(b) => collect_exprs_stmt(ast, *b, &mut xs),
+                }
+                in_arrows.extend(xs);
+            }
+        }
+        let facts = self.facts(m);
+        let is_k = |e: ExprId| matches!(ast.expr(e).kind, ExprKind::Ident(_)) && matches!(facts.idents.get(&e), Some(IdentFact::Local(k)) if *k == key);
+        let mut allowed: FxSet<ExprId> = FxSet::default();
+        let mut sep: Option<String> = None;
+        let mut targets: FxSet<ExprId> = FxSet::default();
+        for &e in &all {
+            match &ast.expr(e).kind {
+                ExprKind::Assign(_, t, _) | ExprKind::Update { target: t, .. } => {
+                    targets.insert(*t);
+                }
+                _ => {}
+            }
+        }
+        for &e in &all {
+            match &ast.expr(e).kind {
+                ExprKind::Call { callee, args, optional: false, .. } => {
+                    let ExprKind::Member { obj, name, optional: false, .. } = &ast.expr(*callee).kind else { continue };
+                    if !is_k(*obj) {
+                        continue;
+                    }
+                    match self.c.interner.get(*name) {
+                        "push" if args.len() == 1 && args[0].by_ref.is_none() && !matches!(ast.expr(args[0].expr).kind, ExprKind::Spread(_)) => {}
+                        "join" if args.len() <= 1 => {
+                            let s = match args.first().map(|a| &ast.expr(a.expr).kind) {
+                                None => ",".to_string(),
+                                Some(ExprKind::Str(x)) => self.c.interner.get(*x).to_string(),
+                                _ => return None,
+                            };
+                            if sep.as_ref().is_some_and(|p| *p != s) {
+                                return None;
+                            }
+                            sep = Some(s);
+                        }
+                        _ => return None,
+                    }
+                    allowed.insert(*obj);
+                }
+                ExprKind::Member { obj, name, .. } if is_k(*obj) && self.c.interner.get(*name) == "length" && !targets.contains(&e) => {
+                    allowed.insert(*obj);
+                }
+                _ => {}
+            }
+        }
+        for &e in &all {
+            if is_k(e) && (!allowed.contains(&e) || in_arrows.contains(&e)) {
+                return None;
+            }
+        }
+        Some(sep.unwrap_or_else(|| ",".into()))
+    }
+
     fn versioned_index(&mut self, obj: ExprId, index: ExprId, span: Span) -> Option<String> {
         let m = self.cur_m();
         let Some(IdentFact::Local(xk)) = self.ident_fact(m, obj) else { return None };
@@ -3280,17 +3471,47 @@ impl<'c, 'a> Gen<'c, 'a> {
             }
             StmtKind::Expr(e) => {
                 self.push_temps();
+                // (`xs[i] = ...`: what the statement stores into, for `Math.min`'s order)
+                let stored = match &ast.expr(*e).kind {
+                    ExprKind::Assign(_, t, _) => match &ast.expr(*t).kind {
+                        ExprKind::Index { obj, .. } => match self.ident_fact(m, *obj) {
+                            Some(IdentFact::Local(k)) => Some(k),
+                            _ => None,
+                        },
+                        _ => None,
+                    },
+                    _ => None,
+                };
+                let outer_store = std::mem::replace(&mut self.store_arr, stored);
                 let v = self.expr(*e);
+                self.store_arr = outer_store;
                 // Keep side effects (and traps) of plain expression values. (A clock read has none:
                 // `performance.now();` alone is nothing.)
                 if !v.owned && !is_trivial(&v.code) && v.code != "tv_performance_now()" {
                     self.line(format!("(void)({});", v.code));
                 }
                 self.pop_temps();
+                if let Some((_, sid, cv, d, i)) = self.b().carry.clone()
+                    && sid == s
+                {
+                    self.line(format!("{cv} = {d}[{i} + 0];"));
+                }
             }
             StmtKind::Let { mutable, name, name_span, init, .. } => {
                 let ty = self.facts(m).bindings.get(&s).copied().unwrap_or(ERROR);
                 let ty = self.inst(ty);
+                // (`const parts: string[] = []`, only pushed onto, joined and counted: a builder)
+                if let Some(i) = init
+                    && let Some(sep) = self.builder_local(name_span.start, *i, ty)
+                {
+                    let (sb, n) = (self.fresh("bsb"), self.fresh("bn"));
+                    self.line(format!("tv_sb {sb} = {{0}}; tv_int {n} = 0;"));
+                    self.b().scopes.last_mut().unwrap().releases.push(format!("tv_sb_free(&{sb});"));
+                    self.b().builders.insert(name_span.start, (sb, n, sep));
+                    let _ = mutable;
+                    let _ = name;
+                    return;
+                }
                 let uniq = self.fresh("");
                 let cname = format!("v_{}_{}", self.sym(*name), uniq);
                 let ct = self.ctype(ty);
@@ -3568,9 +3789,20 @@ impl<'c, 'a> Gen<'c, 'a> {
                         ptrs.push((xk, d, n));
                     }
                     let fast_cont = self.fresh("cont");
+                    // (`xs[i] = f(xs[i - 1], ...)`: last round's value from a local, not memory)
+                    if let Some((xk, sid)) = self.carry_plan(*body, *step, plan.ik)
+                        && let Some((_, d, n)) = ptrs.iter().find(|p| p.0 == xk).cloned()
+                        && let xt = self.b().locals[&xk].ty
+                        && let Ty::Array(et) = self.tget(xt)
+                    {
+                        let (ect, cv, i) = (self.ctype(et), self.fresh("cy"), self.b().locals[&plan.ik].access.clone());
+                        self.line(format!("{ect} {cv} = (uint64_t)({i} - 1) < (uint64_t){n} ? {d}[{i} - 1] : 0;"));
+                        self.b().carry = Some((xk, sid, cv, d, i));
+                    }
                     self.b().versioned.push((vec![plan.ik], ptrs));
                     self.for_loop(*cond, *step, *body, &fast_cont, bounds, Some(plan.ik), None);
                     self.b().versioned.pop();
+                    self.b().carry = None;
                     self.close("} else {");
                     self.b().indent += 1;
                     self.for_loop(*cond, *step, *body, &cont, bounds, nowrap, None);
@@ -5418,14 +5650,13 @@ impl<'c, 'a> Gen<'c, 'a> {
         // (a match as `string[]`: its elements, a group that took no part as "" where the array
         // can't hold `undefined`)
         if let (Ty::Class(..), Ty::Array(te)) = (tf, tt)
-            && self.c.interner.lookup("items").is_some_and(|items| self.class_field(from, items).is_some())
+            && let Some(items) = self.c.interner.lookup("items")
             && let teb = self.c.types.without_undefined(te)
             && self.c.types.is_string(teb)
             && self.c.class_names.get(match tf { Ty::Class(d, _) => d as usize, _ => 0 }).is_some_and(|n| n == "RegExpExecArray")
+            && let Some(it) = self.c.field_of_pub(from, items)
         {
-            let items = self.c.interner.lookup("items").unwrap();
             let span = self.stmt_span.unwrap_or(crate::source::Span::new(crate::source::FileId(0), 0, 0));
-            let it = self.class_field(from, items).unwrap().ty;
             let iv = self.class_field_read(v, items, it, span);
             if self.c.assignable_pub(it, to) {
                 return self.coerce(iv, to);
@@ -7087,6 +7318,14 @@ impl<'c, 'a> Gen<'c, 'a> {
 
     fn member(&mut self, e: ExprId, obj: ExprId, name: crate::intern::Sym, optional: bool, ty: TyId, span: Span) -> Val {
         let m = self.cur_m();
+        // (a builder's count)
+        if !optional
+            && self.sym(name) == "length"
+            && let Some(IdentFact::Local(k)) = self.ident_fact(m, obj)
+            && let Some((_, n, _)) = self.b().builders.get(&k).cloned()
+        {
+            return Val::plain(n, INT);
+        }
         // `s.slice(a, b).length` (substring, substr): the length alone, no string made
         if !optional && self.sym(name) == "length"
             && let Some(v) = self.sub_len(obj)
@@ -8336,6 +8575,14 @@ impl<'c, 'a> Gen<'c, 'a> {
         let m = self.cur_m();
         let ot = self.ty(obj);
         let Ty::Array(et) = self.tget(ot) else { return None };
+        if let Some((xk, _, cv, _, _)) = self.b().carry.clone()
+            && let Some(IdentFact::Local(k)) = self.ident_fact(m, obj)
+            && k == xk
+            && let Some(ik) = self.b().versioned.last().and_then(|v| v.0.first().copied())
+            && self.index_offset(index, ik) == Some(-1)
+        {
+            return Some(self.narrowed_to(Val::plain(cv, et), ty));
+        }
         if !self.b().versioned.is_empty()
             && let Some(lv) = self.versioned_index(obj, index, span)
         {
@@ -9610,8 +9857,9 @@ impl<'c, 'a> Gen<'c, 'a> {
         }
         let proto = self.fn_proto(cname, &ps, ret, &FxMap::default(), true);
         let _ = writeln!(self.protos, "static {proto};");
+        let cast = self.fn_ptr_type_pub(&ps, ret);
+        self.arrow_last.insert((m, e), (cname.to_string(), cast.clone()));
         if !stack {
-            let cast = self.fn_ptr_type_pub(&ps, ret);
             self.arrow_fns.entry((m, e)).or_default().push((cname.to_string(), cast));
             self.arrow_protos.insert(cname.to_string(), proto.clone());
         }
@@ -9643,6 +9891,11 @@ impl<'c, 'a> Gen<'c, 'a> {
         if f.is_async {
             self.emit_async_arrow(cname, m, subst, &params, ret, kind, env_locals);
             return;
+        }
+        // (a captured local that holds one arrow's function: called directly in here too)
+        let direct: FxMap<u32, String> = captures.iter().filter_map(|(k, _, _)| self.b().direct_fns.get(k).map(|c| (*k, c.clone()))).collect();
+        if !direct.is_empty() {
+            self.pending_direct = Some(direct);
         }
         let code = self.arrow_body(m, subst, &params, ret, kind, env_locals);
         let _ = writeln!(self.funcs, "static {proto} {{\n    (void)env_;\n{code}}}\n");
@@ -9762,6 +10015,9 @@ impl<'c, 'a> Gen<'c, 'a> {
             owned_locals: FxSet::default(),
             moves: None,
             fixed: None,
+            direct_fns: self.pending_direct.take().unwrap_or_default(),
+            carry: None,
+            builders: FxMap::default(),
         };
         for (i, &(key, ty, inout)) in params.iter().enumerate() {
             let access = if inout { format!("(*p{i})") } else { format!("p{i}") };

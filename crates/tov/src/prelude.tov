@@ -126,19 +126,54 @@ export class RegExp {
 }
 
 /** A match: its groups (`m[0]` is the whole match; a group that didn't take part is
- * `undefined`), where it starts, the string searched, and the named groups. */
+ * `undefined`), where it starts, the string searched, and the named groups. Made from where each
+ * group starts and ends (`_p`): a group's string is cut out when it's read (`m[1]`, `__at`), all
+ * of them when `items` is (`[...m]`, `m.map`). A global match's strings come ready (`_items`, no
+ * positions). */
 export class RegExpExecArray {
-  items: (string | undefined)[]
+  _items: (string | undefined)[] | undefined
+  _p: int[]
+  _h: int
   index: int
   input: string
   groups: Record<string, string> | undefined
-  constructor(items: (string | undefined)[], index: int, input: string, groups: Record<string, string> | undefined) {
-    this.items = items
+  constructor(items: (string | undefined)[] | undefined, p: int[], h: int, index: int, input: string, groups: Record<string, string> | undefined) {
+    this._items = items
+    this._p = p
+    this._h = h
     this.index = index
     this.input = input
     this.groups = groups
   }
-  get length(): int { return this.items.length }
+  get items(): (string | undefined)[] {
+    const ready = this._items
+    if (ready !== undefined) return ready
+    const p = this._p
+    const n = p.length >> 1
+    const xs: (string | undefined)[] = new Array(n)
+    for (let k = 0; k < n; k++) xs[k] = p[2 * k]! < 0 ? undefined : this.input.slice(p[2 * k]!, p[2 * k + 1]!)
+    this._items = xs
+    return xs
+  }
+  /** `m[i] = s` */
+  __put(i: int, v: string | undefined): string | undefined {
+    const xs = this.items
+    xs[i] = v
+    return v
+  }
+  /** `m[i]`: group i's string, cut out of the input */
+  __at(i: int): string | undefined {
+    const ready = this._items
+    if (ready !== undefined) return i >= 0 && i < ready.length ? ready[i] : undefined
+    const p = this._p
+    if (i < 0 || 2 * i + 1 >= p.length) return undefined
+    const a = p[2 * i]!
+    return a < 0 ? undefined : this.input.slice(a, p[2 * i + 1]!)
+  }
+  get length(): int {
+    const ready = this._items
+    return ready !== undefined ? ready.length : this._p.length >> 1
+  }
   join(separator?: string): string {
     const parts: string[] = []
     for (const x of this.items) parts.push(x ?? "")
@@ -147,6 +182,8 @@ export class RegExpExecArray {
   slice(start?: int, end?: int): (string | undefined)[] {
     return this.items.slice(start ?? 0, end ?? this.items.length)
   }
+  /** (JSON.stringify: an array, as JavaScript's match is) */
+  toJSON(): (string | undefined)[] { return this.items }
   /** `[...m]`, `for (const g of m)`: the groups in order */
   *[Symbol.iterator](): Generator<string | undefined> {
     for (const x of this.items) yield x
@@ -180,20 +217,17 @@ export function __reInvalid(message: string): never {
 
 /** (the match `p` of expression `h` in `s` as a RegExpExecArray) */
 export function __reMatchOf(h: int, s: string, p: int[]): RegExpExecArray {
-  const n = p.length >> 1
-  const items: (string | undefined)[] = new Array(n)
-  for (let k = 0; k < n; k++) items[k] = p[2 * k]! < 0 ? undefined : s.slice(p[2 * k]!, p[2 * k + 1]!)
   const names = __native.reNames(h)
   let groups: Record<string, string> | undefined = undefined
   for (let i = 1; i < names.length; i++) {
     const name = names[i]!
     if (name === "") continue
     const g: Record<string, string> = groups ?? {}
-    const v = items[i]
-    if (v !== undefined) g[name] = v
+    const a = p[2 * i]!
+    if (a >= 0) g[name] = s.slice(a, p[2 * i + 1]!)
     groups = g
   }
-  return new RegExpExecArray(items, p[0]!, s, groups)
+  return new RegExpExecArray(undefined, p, h, p[0]!, s, groups)
 }
 
 /** (what a replacement string's `$&`, `$1`, `$<name>`, ... stand for) */
@@ -852,7 +886,7 @@ export function __reMatch(s: string, re: RegExp): RegExpExecArray | null {
     re.lastIndex = 0
     if (found.length === 0) return null
     const items: (string | undefined)[] = found
-    return new RegExpExecArray(items, -1, s, undefined)
+    return new RegExpExecArray(items, [], -1, -1, s, undefined)
   }
   const all: (string | undefined)[] = []
   let from = 0
@@ -864,7 +898,7 @@ export function __reMatch(s: string, re: RegExp): RegExpExecArray | null {
   }
   re.lastIndex = 0
   if (all.length === 0) return null
-  return new RegExpExecArray(all, -1, s, undefined)
+  return new RegExpExecArray(all, [], -1, -1, s, undefined)
 }
 
 /** `s.matchAll(re)`: every match (the `g` flag is required, as in JavaScript). */

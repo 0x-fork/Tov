@@ -1389,14 +1389,24 @@ impl<'c, 'a> Gen<'c, 'a> {
             let fields: Vec<CField> = fields.into_iter().filter(|f| !self.sym(f.name).starts_with('#')).collect();
             // (a prelude class showing as Node shows it: a `Date` as its ISO time)
             let shown = self.c.interner.lookup("__inspect").filter(|&m| matches!(self.c.class_member(*t, m), Some(crate::check::class::ClassMemberRef::Method(..))));
-            let is_match = cls == "RegExpExecArray" && ["items", "index", "input", "groups"].iter().all(|n| fields.iter().any(|f| self.sym(f.name) == *n));
-            if is_match {
+            // (a match: its strings and named groups as its getters make them, then where it is)
+            let items_sym = self.c.interner.lookup("items");
+            let match_items = match items_sym {
+                Some(i) if cls == "RegExpExecArray" && ["index", "input", "groups"].iter().all(|n| fields.iter().any(|f| self.sym(f.name) == *n)) => {
+                    self.c.field_of_pub(*t, i).filter(|&it| matches!(self.tget(it), Ty::Array(_))).map(|it| (i, it))
+                }
+                _ => None,
+            };
+            if let Some((items_sym, it)) = match_items {
                 let get = |g: &mut Self, n: &str| fields.iter().find(|f| g.sym(f.name) == n).cloned().unwrap();
-                let (items, index, input, groups) = (get(self, "items"), get(self, "index"), get(self, "input"), get(self, "groups"));
-                let Ty::Array(et) = self.tget(items.ty) else { unreachable!() };
+                let (index, input, groups) = (get(self, "index"), get(self, "input"), get(self, "groups"));
+                let Ty::Array(et) = self.tget(it) else { unreachable!() };
                 let (ed, gd) = (self.desc(et), self.desc(groups.ty));
-                let (il, xl, nl, gl) = (self.field_lv_of("x", *t, &items), self.field_lv_of("x", *t, &index), self.field_lv_of("x", *t, &input), self.field_lv_of("x", *t, &groups));
-                let _ = writeln!(b, "    tv_inspect_match(sb, {il}, {ed}, {xl}, {nl}, &({gl}), {gd}, depth);");
+                let (xl, nl, gl) = (self.field_lv_of("x", *t, &index), self.field_lv_of("x", *t, &input), self.field_lv_of("x", *t, &groups));
+                let ict = self.ctype(it);
+                let ic = self.method_call_code("x", *t, items_sym, false, Vec::new());
+                let ir = self.release_code(it, "it_");
+                let _ = writeln!(b, "    {ict} it_ = {ic};\n    tv_inspect_match(sb, it_, {ed}, {xl}, {nl}, &({gl}), {gd}, depth);\n    {ir};");
             } else if let Some(m) = shown {
                 let call = self.method_call_code("x", *t, m, false, Vec::new());
                 let _ = writeln!(b, "    (void)depth;\n    tv_str s = {call};\n    tv_sb_push_str(sb, s);\n    tv_str_release(s);");

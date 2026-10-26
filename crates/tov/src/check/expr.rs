@@ -2379,9 +2379,11 @@ impl<'a> Checker<'a> {
                     }
                     Ty::Error => return None,
                     // `m[2] = s` of a match: its element (`m.items[2]`, rewritten so)
-                    Ty::Class(..) if let Some((items, el)) = match_items => {
+                    Ty::Class(..) if let Some((_, el)) = match_items => {
                         self.index_type(*index);
-                        self.rewrites.elems.push((self.cur, e, items, 0));
+                        if let Some(put) = self.interner.lookup("__put") {
+                            self.rewrites.elems.push((self.cur, e, put, 3));
+                        }
                         el
                     }
                     // `edge[1] += w`: the tuple's element, a field (`edge.1`, rewritten so)
@@ -2572,8 +2574,10 @@ impl<'a> Checker<'a> {
             // (in TypeScript a match's elements are strings: a group that took no part reads as
             // "", which tests as JavaScript's `undefined` does, `if (m[2])`, `m[2] || d`)
             let ts = self.ts_module() && !optional;
-            if let Some(items) = self.interner.lookup("items") {
-                self.rewrites.elems.push((self.cur, e, items, if ts { 2 } else { !absent as u8 }));
+            // (`m?.[1]`, in a chain: `m?.items[1]`; else `m.__at(1)`, that group's string alone)
+            let target = if optional { self.interner.lookup("items").map(|s| (s, 10)) } else { self.interner.lookup("__at").map(|s| (s, 0)) };
+            if let Some((sym, base)) = target {
+                self.rewrites.elems.push((self.cur, e, sym, base + if ts { 2 } else { !absent as u8 }));
             }
             return if absent && !ts { self.types.optional(STR) } else { STR };
         }

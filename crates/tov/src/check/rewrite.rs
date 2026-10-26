@@ -475,33 +475,65 @@ pub fn apply(modules: &mut [Module], rw: &Rewrites) -> bool {
         }
         changed = true;
     }
-    for &(m, at, items, present) in &rw.elems {
-        // `m[i]` → `m.items[i]` (`!` when it's read as present)
+    for &(m, at, sym, present) in &rw.elems {
         let ast = &mut modules[m as usize].ast;
-        let ExprKind::Index { obj, optional, .. } = ast.exprs[at as usize].kind else { continue };
-        if matches!(ast.exprs[obj as usize].kind, ExprKind::Member { name, .. } if name == items) {
+        let ExprKind::Index { obj, index, optional } = ast.exprs[at as usize].kind else { continue };
+        let span = ast.exprs[obj as usize].span;
+        let at_span = ast.exprs[at as usize].span;
+        if present == 3 {
+            // `m[i] = s` (an assignment) → `m.__put(i, s)`
+            let Some(asg) = (0..ast.exprs.len()).find(|&x| matches!(ast.exprs[x].kind, ExprKind::Assign(crate::ast::AssignOp::Assign, t, _) if t == at)) else { continue };
+            let ExprKind::Assign(_, _, value) = ast.exprs[asg].kind else { continue };
+            ast.exprs.push(crate::ast::Expr { kind: ExprKind::Member { obj, name: sym, name_span: span, optional: false }, span });
+            let callee = ast.exprs.len() as ExprId - 1;
+            ast.exprs[asg].kind = ExprKind::Call { callee, type_args: Vec::new(), args: vec![Arg { expr: index, by_ref: None }, Arg { expr: value, by_ref: None }], optional: false };
+            changed = true;
             continue;
         }
-        let span = ast.exprs[obj as usize].span;
-        // (`m?.[1]`: `m?.items[1]`, the chain short-circuited where `m` isn't there)
-        ast.exprs.push(crate::ast::Expr { kind: ExprKind::Member { obj, name: items, name_span: span, optional }, span });
-        let member = ast.exprs.len() as ExprId - 1;
-        let at_span = ast.exprs[at as usize].span;
-        if let ExprKind::Index { obj, .. } = &mut ast.exprs[at as usize].kind {
-            *obj = member;
+        if present >= 10 {
+            // `m?.[i]` → `m?.items[i]`
+            if matches!(ast.exprs[obj as usize].kind, ExprKind::Member { name, .. } if name == sym) {
+                continue;
+            }
+            ast.exprs.push(crate::ast::Expr { kind: ExprKind::Member { obj, name: sym, name_span: span, optional }, span });
+            let member = ast.exprs.len() as ExprId - 1;
+            if let ExprKind::Index { obj, .. } = &mut ast.exprs[at as usize].kind {
+                *obj = member;
+            }
+            let present = present - 10;
+            if present == 1 {
+                let index = std::mem::replace(&mut ast.exprs[at as usize].kind, ExprKind::Error);
+                ast.exprs.push(crate::ast::Expr { kind: index, span: at_span });
+                let inner = ast.exprs.len() as ExprId - 1;
+                ast.exprs[at as usize].kind = ExprKind::NonNull(inner);
+            } else if present == 2 {
+                let index = std::mem::replace(&mut ast.exprs[at as usize].kind, ExprKind::Error);
+                ast.exprs.push(crate::ast::Expr { kind: index, span: at_span });
+                let inner = ast.exprs.len() as ExprId - 1;
+                ast.exprs.push(crate::ast::Expr { kind: ExprKind::Template(vec![String::new()], Vec::new()), span: at_span });
+                let dflt = ast.exprs.len() as ExprId - 1;
+                ast.exprs[at as usize].kind = ExprKind::Binary(crate::ast::BinOp::Nullish, inner, dflt);
+            }
+            changed = true;
+            continue;
         }
-        if present == 1 {
-            let index = std::mem::replace(&mut ast.exprs[at as usize].kind, ExprKind::Error);
-            ast.exprs.push(crate::ast::Expr { kind: index, span: at_span });
+        // `m[i]` → `m.__at(i)` (`!` when it's read as present, `?? ""` where it's a string)
+        // (`m?.[1]`: `m?.__at(1)`, the chain short-circuited where `m` isn't there)
+        ast.exprs.push(crate::ast::Expr { kind: ExprKind::Member { obj, name: sym, name_span: span, optional }, span });
+        let callee = ast.exprs.len() as ExprId - 1;
+        let call = ExprKind::Call { callee, type_args: Vec::new(), args: vec![Arg { expr: index, by_ref: None }], optional: false };
+        if present == 0 {
+            ast.exprs[at as usize].kind = call;
+        } else {
+            ast.exprs.push(crate::ast::Expr { kind: call, span: at_span });
             let inner = ast.exprs.len() as ExprId - 1;
-            ast.exprs[at as usize].kind = ExprKind::NonNull(inner);
-        } else if present == 2 {
-            let index = std::mem::replace(&mut ast.exprs[at as usize].kind, ExprKind::Error);
-            ast.exprs.push(crate::ast::Expr { kind: index, span: at_span });
-            let inner = ast.exprs.len() as ExprId - 1;
-            ast.exprs.push(crate::ast::Expr { kind: ExprKind::Template(vec![String::new()], Vec::new()), span: at_span });
-            let dflt = ast.exprs.len() as ExprId - 1;
-            ast.exprs[at as usize].kind = ExprKind::Binary(crate::ast::BinOp::Nullish, inner, dflt);
+            if present == 1 {
+                ast.exprs[at as usize].kind = ExprKind::NonNull(inner);
+            } else {
+                ast.exprs.push(crate::ast::Expr { kind: ExprKind::Template(vec![String::new()], Vec::new()), span: at_span });
+                let dflt = ast.exprs.len() as ExprId - 1;
+                ast.exprs[at as usize].kind = ExprKind::Binary(crate::ast::BinOp::Nullish, inner, dflt);
+            }
         }
         changed = true;
     }

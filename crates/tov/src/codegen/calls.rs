@@ -2,7 +2,7 @@
 
 use super::body::is_mutating_method;
 use super::{c_string, Gen, Val};
-use crate::ast::{Arg, BinOp, ExprId, ExprKind};
+use crate::ast::{Arg, BinOp, ExprId, ExprKind, StmtId};
 use crate::check::Callee;
 use crate::hash::FxMap;
 use crate::source::Span;
@@ -64,13 +64,15 @@ impl<'c, 'a> Gen<'c, 'a> {
                     let t = self.inst(*t);
                     subst.insert(*p, t);
                 }
-                let cname = self.instance(fm, fi, subst);
                 if self.is_async_fn(fm, fi) {
+                    let cname = self.instance(fm, fi, subst);
                     let argv = self.args(args, &params, Some((fm, fi)));
                     let ret = self.inst(fact.ret);
                     return self.spawn_call(&cname, &argv, ret, ty);
                 }
                 let mut argv = self.args(&args[..args.len().min(params.len())], &params, Some((fm, fi)));
+                let direct = self.direct_args(fm, fi, args, &params);
+                let cname = self.instance_with(fm, fi, subst, direct);
                 if let Some(rest) = fact.rest {
                     // `...xs`: the remaining arguments become one array.
                     let rest = self.inst(rest);
@@ -138,6 +140,22 @@ impl<'c, 'a> Gen<'c, 'a> {
                 {
                     let argv = self.args(args, &fps, None);
                     let mut all = vec!["NULL".to_string()];
+                    all.extend(argv);
+                    return self.finish_call(&format!("{cname}({})", all.join(", ")), fret, ty);
+                }
+                // (`f(x)` of a parameter always passed one arrow: its C function, called directly)
+                if !*optional
+                    && let Some(crate::check::IdentFact::Local(k)) = self.ident_fact(m, *callee)
+                    && let Some(cname) = self.b().direct_fns.get(&k).cloned()
+                    && let cty = self.ty(*callee)
+                    && let Ty::Func(ps, fret, _) = self.tget(cty)
+                {
+                    let ps = self.c.types.params(ps).to_vec();
+                    let fv = self.expr(*callee);
+                    let fvn = self.fresh("fn");
+                    self.line(format!("tv_fn {fvn} = {};", fv.code));
+                    let argv = self.args(args, &ps, None);
+                    let mut all = vec![format!("{fvn}.env")];
                     all.extend(argv);
                     return self.finish_call(&format!("{cname}({})", all.join(", ")), fret, ty);
                 }
@@ -624,6 +642,62 @@ impl<'c, 'a> Gen<'c, 'a> {
 
     /// `f` naming a `const f = (...) => ...` that captures nothing (a module's, or a local's made
     /// as one C function): that function, its parameters and its result.
+    /// The parameters of a call of function (fm, fi) its instance can be specialized for: each
+    /// passed an arrow written here (or a parameter of this instance already fixed to one), of
+    /// exactly the parameter's C type, and never assigned in the function. (Sync functions only,
+    /// and at most 64 such instances of a function.)
+    fn direct_args(&mut self, fm: u32, fi: u32, args: &[Arg], params: &[FnParam]) -> Vec<(usize, String)> {
+        if self.is_gen_fn(fm, fi) || self.is_async_fn(fm, fi) {
+            return Vec::new();
+        }
+        let m = self.cur_m();
+        let mut out = Vec::new();
+        for (i, a) in args.iter().enumerate().take(params.len()) {
+            let pt = params[i].ty;
+            if params[i].inout || a.by_ref.is_some() {
+                continue;
+            }
+            let Ty::Func(ps, ret, _) = self.tget(pt) else { continue };
+            let ps = self.c.types.params(ps).to_vec();
+            let want = self.fn_ptr_type(&ps, ret);
+            let cname = match &self.ast(m).expr(a.expr).kind {
+                ExprKind::Arrow(f) if !f.is_async => self.arrow_last.get(&(m, a.expr)).filter(|(_, cast)| *cast == want).map(|(c, _)| c.clone()),
+                ExprKind::Ident(_) if self.ty(a.expr) == pt => match self.ident_fact(m, a.expr) {
+                    Some(crate::check::IdentFact::Local(k)) => self.b().direct_fns.get(&k).cloned(),
+                    _ => None,
+                },
+                _ => None,
+            };
+            let Some(cname) = cname else { continue };
+            if !self.param_unassigned(fm, fi, i) {
+                continue;
+            }
+            out.push((i, cname));
+        }
+        if !out.is_empty() {
+            let n = self.direct_counts.entry((fm, fi)).or_default();
+            if *n >= 64 {
+                return Vec::new();
+            }
+            *n += 1;
+        }
+        out
+    }
+
+    /// Whether function (fm, fi) never assigns its parameter i (nor a nested closure does).
+    fn param_unassigned(&mut self, fm: u32, fi: u32, i: usize) -> bool {
+        if let Some(v) = self.unassigned_params.get(&(fm, fi)) {
+            return v.get(i).copied().unwrap_or(false);
+        }
+        let crate::ast::ItemKind::Function(f) = &self.ast(fm).items[fi as usize].kind else { return false };
+        let (keys, body): (Vec<u32>, StmtId) = (f.params.iter().map(|p| p.span.start).collect(), f.body);
+        let (_, _, mutated) = self.analyze_closures_pub(fm, &super::body::FnBodyKind::Block(body));
+        let v: Vec<bool> = keys.iter().map(|k| !mutated.contains(k)).collect();
+        let r = v.get(i).copied().unwrap_or(false);
+        self.unassigned_params.insert((fm, fi), v);
+        r
+    }
+
     fn direct_arrow(&mut self, f: ExprId) -> Option<(String, Vec<FnParam>, TyId)> {
         let m = self.cur_m();
         if !matches!(self.ast(m).expr(f).kind, ExprKind::Ident(_)) {
@@ -1083,6 +1157,23 @@ impl<'c, 'a> Gen<'c, 'a> {
     /// A built-in method call. `given` is an already-evaluated receiver (for `x?.m()`).
     #[allow(clippy::too_many_arguments)]
     fn method_on(&mut self, given: Option<Val>, obj: ExprId, recv: TyId, name: &str, args: &[Arg], params: &[FnParam], ty: TyId, span: Span) -> Val {
+        // (a builder's push and join: see `builder_local`)
+        if given.is_none()
+            && let Some(crate::check::IdentFact::Local(k)) = self.ident_fact(self.cur_m(), obj)
+            && let Some((sb, n, sep)) = self.b().builders.get(&k).cloned()
+        {
+            if name == "push" {
+                let v = self.expr(args[0].expr);
+                let v = self.coerce(v, STR);
+                if !sep.is_empty() {
+                    let lit = c_string(sep.as_bytes());
+                    self.line(format!("if ({n} > 0) tv_sb_push(&{sb}, {lit}, {});", sep.len()));
+                }
+                self.line(format!("tv_sb_push_str(&{sb}, {}); {n}++;", v.code));
+                return Val::plain(n, INT);
+            }
+            return self.tmp(STR, &format!("tv_str_from({sb}.data ? {sb}.data : \"\", {sb}.len)"), true);
+        }
         // `new Array<T>(n).fill(v)`: made with n copies of v, each element written once
         if given.is_none() && name == "fill" && args.len() == 1
             && !matches!(self.ast(self.cur_m()).expr(args[0].expr).kind, ExprKind::Spread(_))
@@ -3412,7 +3503,36 @@ impl<'c, 'a> Gen<'c, 'a> {
         if matches!(name, "min" | "max") && args.is_empty() {
             return Val::plain(if name == "min" { "((double)INFINITY)" } else { "(-(double)INFINITY)" }, F64);
         }
-        let vals: Vec<Val> = args.iter().map(|a| self.expr(a.expr)).collect();
+        let mut vals: Vec<Val> = args.iter().map(|a| self.expr(a.expr)).collect();
+        // (`Math.min(a, b, c)` is the same in any order: the arguments that read what the loop
+        // carries from one round to the next, `curr[i - 1]` of `curr[i] = Math.min(...)`, taken
+        // last, so the round's chain of work through them is one compare, not three; only when
+        // nothing in them has an effect, as they're then read in another order)
+        if matches!(name, "min" | "max") && vals.len() >= 3 {
+            let m = self.cur_m();
+            let carried: Vec<u32> = self.store_arr.into_iter().chain(self.b().carry.as_ref().map(|c| c.0)).collect();
+            let ast = self.ast(m);
+            let pure = args.iter().all(|a| {
+                let mut xs = Vec::new();
+                super::body::collect_exprs_expr(ast, a.expr, &mut xs);
+                xs.iter().all(|&x| !matches!(ast.expr(x).kind, ExprKind::Call { .. } | ExprKind::New { .. } | ExprKind::Assign(..) | ExprKind::Update { .. } | ExprKind::Await(_) | ExprKind::Yield { .. }))
+            });
+            if pure && !carried.is_empty() {
+                let reads_carried: Vec<bool> = args
+                    .iter()
+                    .map(|a| {
+                        let mut xs = Vec::new();
+                        super::body::collect_exprs_expr(ast, a.expr, &mut xs);
+                        xs.iter().any(|&x| matches!(&ast.expr(x).kind, ExprKind::Index { obj, .. } if matches!(self.ident_fact(m, *obj), Some(crate::check::IdentFact::Local(k)) if carried.contains(&k))))
+                    })
+                    .collect();
+                if reads_carried.iter().any(|&r| r) && reads_carried.iter().any(|&r| !r) {
+                    let mut order: Vec<usize> = (0..vals.len()).collect();
+                    order.sort_by_key(|&i| reads_carried[i]);
+                    vals = order.into_iter().map(|i| vals[i].clone()).collect();
+                }
+            }
+        }
         let f64s: Vec<String> = vals.iter().map(|v| self.coerce(v.clone(), F64).code).collect();
         let loc = self.loc(span);
         let code = match name {
