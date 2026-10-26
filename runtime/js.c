@@ -494,6 +494,31 @@ static JSValueRef tv_jsc_eval(JSContextRef ctx, uint32_t i, bool *cached, JSValu
     return r;
 }
 
+#ifdef __linux__
+/* The pages of the caches' files the engine has mapped (each module's), let go: the engine reads
+ * a module's bytecode where it's mapped, and as it decodes its functions the kernel maps each page
+ * touched with its neighbors (64 KB around it), so by the time the program first idles most of
+ * every file is resident, ~27 MB for the media server Cap runs. What it decodes later is read
+ * again from the page cache (the files are read-only to it, and replaced by renaming, never
+ * rewritten): serving every route afterwards brought back ~5 MB. */
+static void tv_jsc_drop_pages(void) {
+    if (tv_jsc.state <= 0) return;
+    FILE *m = fopen("/proc/self/maps", "r");
+    if (!m) return;
+    size_t dl = strlen(tv_jsc.dir);
+    char line[1400];
+    while (fgets(line, sizeof line, m)) {
+        char *path = strchr(line, '/');
+        if (!path) continue;
+        size_t n = strcspn(path, "\n");
+        unsigned long a, b;
+        if (n > dl + 4 && !memcmp(path, tv_jsc.dir, dl) && !memcmp(path + n - 4, ".jsc", 4) && sscanf(line, "%lx-%lx", &a, &b) == 2)
+            madvise((void *)a, b - a, MADV_DONTNEED);
+    }
+    fclose(m);
+}
+#endif
+
 /* Writes modules' caches (in the writing process, in an engine of its own). */
 static void tv_jsc_write(const uint32_t *modules, size_t n) {
     JSContextGroupRef group = JSContextGroupCreate();
@@ -943,6 +968,9 @@ static void tv_js_idle(bool deep) {
 #endif
 #if defined(TV_JSC_OWN) || defined(__APPLE__)
     tv_jsc_flush();
+#endif
+#if defined(TV_JSC_OWN) && defined(__linux__)
+    if (deep) tv_jsc_drop_pages();
 #endif
 }
 
