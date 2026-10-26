@@ -672,11 +672,21 @@ impl<'a> Parser<'a> {
     // ---------------------------------------------------------------- items
 
     fn module(&mut self) {
+        // (a `var` in a top-level block or `for` head is one variable of the module, as in a
+        // function: declared first)
+        self.var_frames.push((1, false, Vec::new()));
         while !self.at(Tok::Eof) {
             let start = self.pos;
             self.item();
             if self.pos == start {
                 self.bump();
+            }
+        }
+        let (_, _, vars) = self.var_frames.pop().unwrap();
+        if !vars.is_empty() {
+            let decls = self.hoist_vars(vars, Vec::new());
+            for d in decls.into_iter().rev() {
+                self.script_stmts.insert(0, (0, d));
             }
         }
         self.finish_script();
@@ -3247,8 +3257,19 @@ impl<'a> Parser<'a> {
         if vars.is_empty() {
             return body;
         }
+        let names: Vec<Sym> = params.iter().map(|p| p.name).collect();
+        let mut decls = self.hoist_vars(vars, names);
+        if let StmtKind::Block(ss) = &mut self.ast.stmts[body as usize].kind {
+            decls.append(ss);
+            *ss = decls;
+        }
+        body
+    }
+
+    /// The `var`s hoisted out of their blocks: a declaration of each (once per name, and none of
+    /// a name in `seen`), each `var` itself now an assignment (or nothing, without a value).
+    fn hoist_vars(&mut self, vars: Vec<StmtId>, mut seen: Vec<Sym>) -> Vec<StmtId> {
         let mut decls = Vec::new();
-        let mut seen: Vec<Sym> = params.iter().map(|p| p.name).collect();
         for v in vars {
             let StmtKind::Let { name, name_span, ty, init, .. } = self.ast.stmts[v as usize].kind else { continue };
             if !seen.contains(&name) {
@@ -3267,11 +3288,7 @@ impl<'a> Parser<'a> {
                 None => StmtKind::Block(Vec::new()),
             };
         }
-        if let StmtKind::Block(ss) = &mut self.ast.stmts[body as usize].kind {
-            decls.append(ss);
-            *ss = decls;
-        }
-        body
+        decls
     }
 
     /// `f(args)`; `Array(n)` / `Array<T>(n)` is `new Array(n)`, as in JavaScript.
