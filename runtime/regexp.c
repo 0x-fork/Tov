@@ -34,6 +34,7 @@ typedef struct tv_re {
     uint8_t *bc;
     tv_str key;      /* flags, '/', source */
     int ncap;
+    int nalloc;      /* the capture array's length: 2 * ncap, and the engine's loop counters after */
     int flags;
     char flag_text[12];
     /* One character of a set, or a run of them (`\s+`, `[^a-z]`, `,`): on ASCII text, found by
@@ -53,6 +54,11 @@ typedef struct tv_re {
     struct tv_re_lin *lin; /* a sequence matched without the engine, or NULL (see tv_re_lin_parse) */
     /* bc's and bc1's matchers compiled by `tov build` (for ASCII text), or NULL: see tv_rejit_add */
     lre_jit_fn jit, jit1;
+    /* the JIT tier (see tv_re_pcre_build): pstate 0 not tried yet, 1 compiled, 2 not for it */
+    void *pc, *md;
+    int uses;
+    uint8_t pstate;
+    bool fixup;
 } tv_re;
 
 /* The matchers `tov build` compiled from the program's patterns: (key, the bytecode each was
@@ -378,9 +384,9 @@ static void tv_re_skip_branch(const char *src, size_t n, size_t *ip) {
         char c = src[i];
         if (c == '\\') { i += 2; continue; }
         if (c == '[') {
+            /* (`[]` and `[^]` are whole classes in JavaScript) */
             i++;
             if (i < n && src[i] == '^') i++;
-            if (i < n && src[i] == ']') i++;
             while (i < n && src[i] != ']') i += src[i] == '\\' ? 2 : 1;
             i++;
             continue;
@@ -546,9 +552,835 @@ static bool tv_re_first_parse(tv_re *r, const char *src, size_t n) {
     return true;
 }
 
+/* ------------------------------------------------------------------ the JIT tier (PCRE2)
+ *
+ * An expression used a few times on ASCII text is translated into PCRE2's syntax and compiled
+ * by its JIT (vendor/pcre2), when that matches exactly as JavaScript does; else it stays with
+ * libregexp. On ASCII text every character an atom may match is one of 128, so each class,
+ * escape and literal becomes an explicit set (classes found by asking libregexp itself about
+ * each of the 128), and the anchors become what JavaScript means by them: nothing of PCRE2's
+ * own reading of a pattern is left. Where the two engines differ is in loops:
+ *  - JavaScript rejects an iteration that matches nothing (when no more are required) and goes
+ *    on backtracking into it, where PCRE2 leaves the loop: the same once the empty way through
+ *    the loop's body is its last one (`empty_last` below), and else the expression stays.
+ *  - JavaScript clears a loop body's groups at each iteration, PCRE2 keeps the last values:
+ *    the match is the same (unless a backreference reads such a group, then the expression
+ *    stays), and the groups are found again by libregexp at the match's start (`fixup`).
+ *  - A backreference to a group in a loop must read the group set in the same iteration.
+ * Lookbehinds holding groups or backreferences, quantified lookarounds, modifiers, and bounds
+ * past PCRE2's stay with libregexp too. */
+#define PCRE2_CODE_UNIT_WIDTH 8
+#define PCRE2_STATIC 1
+#include "pcre2.h"
+
+enum { RN_EMPTY, RN_SET, RN_SEQ, RN_ALT, RN_GROUP, RN_LOOK, RN_QUANT, RN_ASSERT, RN_BACKREF };
+typedef struct {
+    uint8_t kind;
+    bool lazy, neg, behind;
+    uint8_t akind;      /* RN_ASSERT: 0 ^, 1 $, 2 \b, 3 \B */
+    int cap;            /* RN_GROUP: capture number, 0 when not capturing; RN_BACKREF: the group */
+    int min, max;       /* RN_QUANT (max -1: no limit) */
+    int child, next, parent;
+    int last;           /* the last node of this one's subtree (nodes are numbered in source order) */
+    bool nullable, empty_last, consumes;
+    int caps;           /* capture groups in the subtree, this node included */
+    uint64_t set[2];
+} tv_rn;
+
+typedef struct {
+    const unsigned char *s;
+    size_t n, i;
+    bool ic, u, v, m, dotall;
+    tv_rn *nodes;
+    int nn, capn;
+    int ngroups, group_seen;
+    const unsigned char **names; /* each group's name (NULL when unnamed), names_len[k] bytes */
+    int *names_len;
+    bool has_names;
+    bool fail;
+} tv_rp;
+
+#define TV_RP_FAIL(p) ((p)->fail = true)
+static int tv_rp_node(tv_rp *p, int kind) {
+    if (p->nn == p->capn) {
+        p->capn = p->capn ? p->capn * 2 : 64;
+        p->nodes = tv_realloc(p->nodes, (size_t)p->capn * sizeof(tv_rn));
+    }
+    tv_rn *x = &p->nodes[p->nn];
+    memset(x, 0, sizeof *x);
+    x->kind = (uint8_t)kind;
+    x->child = x->next = x->parent = -1;
+    return p->nn++;
+}
+
+static void tv_rp_add(tv_rp *p, int parent, int *tail, int child) {
+    p->nodes[child].parent = parent;
+    if (*tail < 0) p->nodes[parent].child = child;
+    else p->nodes[*tail].next = child;
+    *tail = child;
+}
+
+static void tv_set_add(uint64_t set[2], int c) {
+    if (c >= 0 && c < 128) set[c >> 6] |= 1ull << (c & 63);
+}
+
+static bool tv_set_has(const uint64_t set[2], int c) {
+    return (set[c >> 6] >> (c & 63)) & 1;
+}
+
+/* A literal character's set on ASCII text (`cp` a code point, or a UTF-16 unit without u). */
+static void tv_rp_char_set(const tv_rp *p, uint32_t cp, uint64_t set[2]) {
+    set[0] = set[1] = 0;
+    if (cp < 128) {
+        tv_set_add(set, (int)cp);
+        if (p->ic && ((cp | 32) >= 'a' && (cp | 32) <= 'z')) tv_set_add(set, (int)(cp ^ 32));
+    } else if (p->ic && (p->u || p->v)) {
+        /* (with u, case folding: the long s and the Kelvin sign fold to ASCII letters) */
+        if (cp == 0x17F) tv_set_add(set, 's'), tv_set_add(set, 'S');
+        if (cp == 0x212A) tv_set_add(set, 'k'), tv_set_add(set, 'K');
+    }
+}
+
+/* What libregexp itself matches of the 128 ASCII characters with the atom text[0, len) (a class
+ * or an escape), with the expression's flags: false when it can't say. Answers are kept. */
+typedef struct { char *text; size_t len; int flags; uint64_t set[2]; } tv_probe_entry;
+static tv_probe_entry *tv_probes;
+static size_t tv_nprobes, tv_cap_probes;
+
+static bool tv_re_probe(const char *text, size_t len, int flags, uint64_t set[2]) {
+    flags &= LRE_FLAG_IGNORECASE | LRE_FLAG_UNICODE | LRE_FLAG_UNICODE_SETS;
+    for (size_t k = 0; k < tv_nprobes; k++) {
+        tv_probe_entry *e = &tv_probes[k];
+        if (e->len == len && e->flags == flags && !memcmp(e->text, text, len)) {
+            set[0] = e->set[0], set[1] = e->set[1];
+            return true;
+        }
+    }
+    char err[64];
+    int blen;
+    char *z = tv_alloc(len + 1); /* (libregexp reads up to a NUL) */
+    memcpy(z, text, len);
+    z[len] = 0;
+    uint8_t *bc = lre_compile(&blen, err, sizeof err, z, len, flags | LRE_FLAG_STICKY, NULL);
+    if (!bc || lre_get_capture_count(bc) != 1) {
+        free(bc);
+        tv_free(z);
+        return false;
+    }
+    static uint8_t all[128];
+    for (int c = 0; c < 128; c++) all[c] = (uint8_t)c;
+    set[0] = set[1] = 0;
+    bool ok = true;
+    uint8_t **cap = tv_alloc((size_t)lre_get_alloc_count(bc) * sizeof(uint8_t *) + sizeof(uint8_t *));
+    for (int c = 0; c < 128 && ok; c++) {
+        int ret = lre_exec(cap, bc, all, c, 128, 0, NULL);
+        if (ret == 1) {
+            if (cap[1] - cap[0] != 1) ok = false; /* (a class of strings: `\q{ab}`) */
+            else tv_set_add(set, c);
+        } else if (ret < 0) {
+            ok = false;
+        }
+    }
+    free(bc);
+    tv_free(cap);
+    if (!ok) {
+        tv_free(z);
+        return false;
+    }
+    if (tv_nprobes == tv_cap_probes) {
+        tv_cap_probes = tv_cap_probes ? tv_cap_probes * 2 : 32;
+        tv_probes = tv_realloc(tv_probes, tv_cap_probes * sizeof *tv_probes);
+    }
+    tv_probe_entry *e = &tv_probes[tv_nprobes++];
+    e->text = z;
+    e->len = len;
+    e->flags = flags;
+    e->set[0] = set[0], e->set[1] = set[1];
+    return true;
+}
+
+static int tv_rp_hex(int c) {
+    if (c >= '0' && c <= '9') return c - '0';
+    if ((c | 32) >= 'a' && (c | 32) <= 'f') return (c | 32) - 'a' + 10;
+    return -1;
+}
+
+/* n hex digits at i, or -1 */
+static long tv_rp_hexn(const tv_rp *p, size_t i, int n) {
+    long v = 0;
+    for (int k = 0; k < n; k++) {
+        if (i + (size_t)k >= p->n) return -1;
+        int d = tv_rp_hex(p->s[i + (size_t)k]);
+        if (d < 0) return -1;
+        v = v * 16 + d;
+    }
+    return v;
+}
+
+/* A UTF-8 sequence at i: its code point, *len its bytes */
+static uint32_t tv_rp_utf8(const tv_rp *p, size_t i, size_t *len) {
+    const unsigned char *d = p->s + i;
+    uint32_t c = d[0];
+    size_t l = 1;
+    if (c >= 0xF0 && i + 3 < p->n) c = ((c & 7) << 18) | ((d[1] & 63u) << 12) | ((d[2] & 63u) << 6) | (d[3] & 63u), l = 4;
+    else if (c >= 0xE0 && i + 2 < p->n) c = ((c & 15) << 12) | ((d[1] & 63u) << 6) | (d[2] & 63u), l = 3;
+    else if (c >= 0xC0 && i + 1 < p->n) c = ((c & 31) << 6) | (d[1] & 63u), l = 2;
+    *len = l;
+    return c;
+}
+
+static int tv_rp_set_node(tv_rp *p, const uint64_t set[2]) {
+    int x = tv_rp_node(p, RN_SET);
+    p->nodes[x].set[0] = set[0];
+    p->nodes[x].set[1] = set[1];
+    return x;
+}
+
+/* The group a name stands for (1-based), or -1 (also when two groups share it) */
+static int tv_rp_named(const tv_rp *p, const unsigned char *name, size_t len) {
+    int found = -1;
+    for (int k = 1; k <= p->ngroups; k++) {
+        if (p->names[k] && (size_t)p->names_len[k] == len && !memcmp(p->names[k], name, len)) {
+            if (found >= 0) return -1;
+            found = k;
+        }
+    }
+    return found;
+}
+
+/* The groups and their names, before parsing (a backreference may come before its group). */
+static void tv_rp_scan_groups(tv_rp *p) {
+    int count = 0;
+    for (size_t pass = 0; pass < 2; pass++) {
+        int k = 0;
+        int depth = 0; /* inside a class (nested with v) */
+        for (size_t i = 0; i < p->n; i++) {
+            unsigned char c = p->s[i];
+            if (c == '\\') { i++; continue; }
+            if (depth) {
+                if (c == ']') depth--;
+                else if (c == '[' && p->v) depth++;
+                continue;
+            }
+            if (c == '[') { depth = 1; continue; }
+            if (c != '(') continue;
+            if (i + 1 < p->n && p->s[i + 1] == '?') {
+                if (i + 2 < p->n && p->s[i + 2] == '<' && i + 3 < p->n && p->s[i + 3] != '=' && p->s[i + 3] != '!') {
+                    k++;
+                    if (pass) {
+                        size_t a = i + 3, b = a;
+                        while (b < p->n && p->s[b] != '>') {
+                            if (p->s[b] == '\\') TV_RP_FAIL(p); /* (escapes in a group's name) */
+                            b++;
+                        }
+                        p->names[k] = p->s + a;
+                        p->names_len[k] = (int)(b - a);
+                        p->has_names = true;
+                    }
+                }
+                continue;
+            }
+            k++;
+            if (pass) p->names[k] = NULL;
+        }
+        if (!pass) {
+            count = k;
+            p->ngroups = count;
+            p->names = tv_alloc((size_t)(count + 1) * sizeof *p->names);
+            p->names_len = tv_alloc((size_t)(count + 1) * sizeof *p->names_len);
+            memset(p->names, 0, (size_t)(count + 1) * sizeof *p->names);
+        }
+    }
+}
+
+static int tv_rp_alt(tv_rp *p);
+
+/* A quantifier at i: true with its bounds, i past it (not past a lazy `?`) */
+static bool tv_rp_quant(tv_rp *p, int *min, int *max) {
+    if (p->i >= p->n) return false;
+    unsigned char c = p->s[p->i];
+    if (c == '*') { *min = 0, *max = -1, p->i++; return true; }
+    if (c == '+') { *min = 1, *max = -1, p->i++; return true; }
+    if (c == '?') { *min = 0, *max = 1, p->i++; return true; }
+    if (c != '{') return false;
+    size_t j = p->i + 1;
+    long a = 0, b;
+    size_t d0 = j;
+    while (j < p->n && p->s[j] >= '0' && p->s[j] <= '9') { a = a * 10 + (p->s[j] - '0'); if (a > 1000000) a = 1000000; j++; }
+    if (j == d0) return false;
+    if (j < p->n && p->s[j] == '}') {
+        b = a;
+    } else if (j < p->n && p->s[j] == ',') {
+        j++;
+        size_t d1 = j;
+        b = 0;
+        while (j < p->n && p->s[j] >= '0' && p->s[j] <= '9') { b = b * 10 + (p->s[j] - '0'); if (b > 1000000) b = 1000000; j++; }
+        if (j == d1) b = -1;
+        if (j >= p->n || p->s[j] != '}') return false;
+    } else {
+        return false;
+    }
+    p->i = j + 1;
+    if (a > 65535 || b > 65535) TV_RP_FAIL(p);
+    *min = (int)a, *max = (int)b;
+    return true;
+}
+
+/* An escape after the backslash at p->i - 1: an atom or assertion node, or -1 */
+static int tv_rp_escape(tv_rp *p) {
+    if (p->i >= p->n) { TV_RP_FAIL(p); return -1; }
+    unsigned char c = p->s[p->i];
+    uint64_t set[2] = {0, 0};
+    size_t at = p->i - 1;
+    switch (c) {
+    case 'b': case 'B': {
+        p->i++;
+        int x = tv_rp_node(p, RN_ASSERT);
+        p->nodes[x].akind = c == 'b' ? 2 : 3;
+        return x;
+    }
+    case 'd': case 'D': case 'w': case 'W': case 's': case 'S':
+        p->i++;
+        if (p->ic) {
+            if (!tv_re_probe((const char *)p->s + at, 2, (p->ic ? LRE_FLAG_IGNORECASE : 0) | (p->u ? LRE_FLAG_UNICODE : 0) | (p->v ? LRE_FLAG_UNICODE_SETS : 0), set)) { TV_RP_FAIL(p); return -1; }
+            return tv_rp_set_node(p, set);
+        }
+        for (int k = 0; k < 128; k++) {
+            bool in = (c | 32) == 'd' ? (k >= '0' && k <= '9')
+                    : (c | 32) == 'w' ? ((k | 32) >= 'a' && (k | 32) <= 'z') || (k >= '0' && k <= '9') || k == '_'
+                    : (k >= 9 && k <= 13) || k == ' ';
+            if (in != (c < 'a')) tv_set_add(set, k);
+        }
+        return tv_rp_set_node(p, set);
+    case 'p': case 'P':
+        if (p->u || p->v) {
+            size_t j = p->i + 1;
+            if (j >= p->n || p->s[j] != '{') { TV_RP_FAIL(p); return -1; }
+            while (j < p->n && p->s[j] != '}') j++;
+            if (j >= p->n) { TV_RP_FAIL(p); return -1; }
+            p->i = j + 1;
+            if (!tv_re_probe((const char *)p->s + at, p->i - at, (p->ic ? LRE_FLAG_IGNORECASE : 0) | (p->u ? LRE_FLAG_UNICODE : 0) | (p->v ? LRE_FLAG_UNICODE_SETS : 0), set)) { TV_RP_FAIL(p); return -1; }
+            return tv_rp_set_node(p, set);
+        }
+        break;
+    case 'k':
+        if (p->u || p->v || p->has_names) {
+            if (p->i + 1 >= p->n || p->s[p->i + 1] != '<') { TV_RP_FAIL(p); return -1; }
+            size_t a = p->i + 2, b = a;
+            while (b < p->n && p->s[b] != '>') b++;
+            if (b >= p->n) { TV_RP_FAIL(p); return -1; }
+            int g = tv_rp_named(p, p->s + a, b - a);
+            if (g < 0) { TV_RP_FAIL(p); return -1; }
+            p->i = b + 1;
+            int x = tv_rp_node(p, RN_BACKREF);
+            p->nodes[x].cap = g;
+            return x;
+        }
+        break;
+    case '0':
+        if (p->i + 1 < p->n && p->s[p->i + 1] >= '0' && p->s[p->i + 1] <= '9') { TV_RP_FAIL(p); return -1; }
+        p->i++;
+        tv_rp_char_set(p, 0, set);
+        return tv_rp_set_node(p, set);
+    case 'f': p->i++; tv_rp_char_set(p, '\f', set); return tv_rp_set_node(p, set);
+    case 'n': p->i++; tv_rp_char_set(p, '\n', set); return tv_rp_set_node(p, set);
+    case 'r': p->i++; tv_rp_char_set(p, '\r', set); return tv_rp_set_node(p, set);
+    case 't': p->i++; tv_rp_char_set(p, '\t', set); return tv_rp_set_node(p, set);
+    case 'v': p->i++; tv_rp_char_set(p, '\v', set); return tv_rp_set_node(p, set);
+    case 'c':
+        if (p->i + 1 < p->n && ((p->s[p->i + 1] | 32) >= 'a' && (p->s[p->i + 1] | 32) <= 'z')) {
+            tv_rp_char_set(p, p->s[p->i + 1] & 31, set);
+            p->i += 2;
+            return tv_rp_set_node(p, set);
+        }
+        if (p->u || p->v) { TV_RP_FAIL(p); return -1; }
+        /* (Annex B: the backslash is itself, and the `c` comes next) */
+        tv_rp_char_set(p, '\\', set);
+        return tv_rp_set_node(p, set);
+    case 'x': {
+        long h = tv_rp_hexn(p, p->i + 1, 2);
+        if (h >= 0) {
+            p->i += 3;
+            tv_rp_char_set(p, (uint32_t)h, set);
+            return tv_rp_set_node(p, set);
+        }
+        if (p->u || p->v) { TV_RP_FAIL(p); return -1; }
+        break;
+    }
+    case 'u': {
+        if ((p->u || p->v) && p->i + 1 < p->n && p->s[p->i + 1] == '{') {
+            size_t j = p->i + 2;
+            long cp = 0;
+            while (j < p->n && tv_rp_hex(p->s[j]) >= 0) { cp = cp * 16 + tv_rp_hex(p->s[j]); if (cp > 0x10FFFF) cp = 0x110000; j++; }
+            if (j >= p->n || p->s[j] != '}' || cp > 0x10FFFF) { TV_RP_FAIL(p); return -1; }
+            p->i = j + 1;
+            tv_rp_char_set(p, (uint32_t)cp, set);
+            return tv_rp_set_node(p, set);
+        }
+        long h = tv_rp_hexn(p, p->i + 1, 4);
+        if (h >= 0) {
+            p->i += 5;
+            /* (with u, a surrogate pair written as two escapes is one character) */
+            if ((p->u || p->v) && h >= 0xD800 && h <= 0xDBFF && p->i + 1 < p->n && p->s[p->i] == '\\' && p->s[p->i + 1] == 'u') {
+                long lo = tv_rp_hexn(p, p->i + 2, 4);
+                if (lo >= 0xDC00 && lo <= 0xDFFF) {
+                    p->i += 6;
+                    h = 0x10000 + ((h - 0xD800) << 10) + (lo - 0xDC00);
+                }
+            }
+            tv_rp_char_set(p, (uint32_t)h, set);
+            return tv_rp_set_node(p, set);
+        }
+        if (p->u || p->v) { TV_RP_FAIL(p); return -1; }
+        break;
+    }
+    default:
+        if (c >= '1' && c <= '9') {
+            size_t j = p->i;
+            long g = 0;
+            while (j < p->n && p->s[j] >= '0' && p->s[j] <= '9') { g = g * 10 + (p->s[j] - '0'); if (g > 100000) g = 100000; j++; }
+            if (g > p->ngroups) { TV_RP_FAIL(p); return -1; } /* (Annex B octal and identity escapes) */
+            p->i = j;
+            int x = tv_rp_node(p, RN_BACKREF);
+            p->nodes[x].cap = (int)g;
+            return x;
+        }
+        break;
+    }
+    /* the character itself */
+    size_t len;
+    uint32_t cp = tv_rp_utf8(p, p->i, &len);
+    p->i += len;
+    if (!(p->u || p->v) && cp >= 0x10000) {
+        /* (two UTF-16 units: the first an atom of its own) */
+        tv_rp_char_set(p, 0xD800, set);
+        int x = tv_rp_set_node(p, set);
+        TV_RP_FAIL(p); /* (rare: not worth splitting into two atoms here) */
+        return x;
+    }
+    tv_rp_char_set(p, cp, set);
+    return tv_rp_set_node(p, set);
+}
+
+/* A term: an assertion, or an atom and its quantifier. -1 at the end of an alternative. */
+static int tv_rp_term(tv_rp *p) {
+    if (p->i >= p->n || p->fail) return -1;
+    unsigned char c = p->s[p->i];
+    if (c == '|' || c == ')') return -1;
+    int atom = -1;
+    bool look = false;
+    uint64_t set[2] = {0, 0};
+    if (c == '^' || c == '$') {
+        p->i++;
+        int x = tv_rp_node(p, RN_ASSERT);
+        p->nodes[x].akind = c == '^' ? 0 : 1;
+        return x;
+    } else if (c == '(') {
+        p->i++;
+        int x;
+        if (p->i < p->n && p->s[p->i] == '?') {
+            unsigned char d = p->i + 1 < p->n ? p->s[p->i + 1] : 0;
+            if (d == ':') {
+                x = tv_rp_node(p, RN_GROUP);
+                p->i += 2;
+            } else if (d == '=' || d == '!') {
+                x = tv_rp_node(p, RN_LOOK);
+                p->nodes[x].neg = d == '!';
+                p->i += 2;
+                look = true;
+            } else if (d == '<' && p->i + 2 < p->n && (p->s[p->i + 2] == '=' || p->s[p->i + 2] == '!')) {
+                x = tv_rp_node(p, RN_LOOK);
+                p->nodes[x].neg = p->s[p->i + 2] == '!';
+                p->nodes[x].behind = true;
+                p->i += 3;
+                look = true;
+            } else if (d == '<') {
+                x = tv_rp_node(p, RN_GROUP);
+                p->nodes[x].cap = ++p->group_seen;
+                while (p->i < p->n && p->s[p->i] != '>') p->i++;
+                p->i++;
+            } else {
+                TV_RP_FAIL(p); /* (modifiers) */
+                return -1;
+            }
+        } else {
+            x = tv_rp_node(p, RN_GROUP);
+            p->nodes[x].cap = ++p->group_seen;
+        }
+        int inner = tv_rp_alt(p);
+        if (p->fail || p->i >= p->n || p->s[p->i] != ')') { TV_RP_FAIL(p); return -1; }
+        p->i++;
+        int tail = -1;
+        tv_rp_add(p, x, &tail, inner);
+        atom = x;
+    } else if (c == '.') {
+        p->i++;
+        for (int k = 0; k < 128; k++)
+            if (p->dotall || (k != '\n' && k != '\r')) tv_set_add(set, k);
+        atom = tv_rp_set_node(p, set);
+    } else if (c == '[') {
+        size_t j = p->i + 1;
+        int depth = 1;
+        if (j < p->n && p->s[j] == '^') j++;
+        while (j < p->n && depth) {
+            unsigned char d = p->s[j];
+            if (d == '\\') { j += 2; continue; }
+            if (d >= 0xF0 && !(p->u || p->v)) { TV_RP_FAIL(p); return -1; } /* (UTF-16 halves) */
+            if (d == ']') depth--;
+            else if (d == '[' && p->v) depth++;
+            j++;
+        }
+        if (depth) { TV_RP_FAIL(p); return -1; }
+        if (!tv_re_probe((const char *)p->s + p->i, j - p->i, (p->ic ? LRE_FLAG_IGNORECASE : 0) | (p->u ? LRE_FLAG_UNICODE : 0) | (p->v ? LRE_FLAG_UNICODE_SETS : 0), set)) { TV_RP_FAIL(p); return -1; }
+        p->i = j;
+        atom = tv_rp_set_node(p, set);
+    } else if (c == '\\') {
+        p->i++;
+        atom = tv_rp_escape(p);
+        if (atom < 0) return -1;
+        if (p->nodes[atom].kind == RN_ASSERT) return atom;
+    } else if (c == '*' || c == '+' || c == '?') {
+        TV_RP_FAIL(p);
+        return -1;
+    } else {
+        size_t len;
+        uint32_t cp = tv_rp_utf8(p, p->i, &len);
+        if (!(p->u || p->v) && cp >= 0x10000) { TV_RP_FAIL(p); return -1; }
+        p->i += len;
+        tv_rp_char_set(p, cp, set);
+        atom = tv_rp_set_node(p, set);
+    }
+    int min, max;
+    size_t before = p->i;
+    if (tv_rp_quant(p, &min, &max)) {
+        if (look) { TV_RP_FAIL(p); return -1; } /* (Annex B's quantified lookaheads) */
+        int q = tv_rp_node(p, RN_QUANT);
+        p->nodes[q].min = min;
+        p->nodes[q].max = max;
+        if (p->i < p->n && p->s[p->i] == '?') p->nodes[q].lazy = true, p->i++;
+        int tail = -1;
+        tv_rp_add(p, q, &tail, atom);
+        return q;
+    }
+    p->i = before;
+    return atom;
+}
+
+static int tv_rp_seq(tv_rp *p) {
+    int seq = tv_rp_node(p, RN_SEQ), tail = -1;
+    for (;;) {
+        int t = tv_rp_term(p);
+        if (t < 0) break;
+        tv_rp_add(p, seq, &tail, t);
+    }
+    return seq;
+}
+
+static int tv_rp_alt(tv_rp *p) {
+    int first = tv_rp_seq(p);
+    if (p->fail || p->i >= p->n || p->s[p->i] != '|') return first;
+    int alt = tv_rp_node(p, RN_ALT), tail = -1;
+    tv_rp_add(p, alt, &tail, first);
+    while (!p->fail && p->i < p->n && p->s[p->i] == '|') {
+        p->i++;
+        tv_rp_add(p, alt, &tail, tv_rp_seq(p));
+    }
+    return alt;
+}
+
+/* nullable, empty_last, consumes, caps and last, bottom-up */
+static void tv_rp_analyze(tv_rp *p, int x) {
+    tv_rn *n = &p->nodes[x];
+    n->last = x;
+    n->caps = n->kind == RN_GROUP && n->cap ? 1 : 0;
+    for (int c = n->child; c >= 0; c = p->nodes[c].next) {
+        tv_rp_analyze(p, c);
+        n = &p->nodes[x];
+        if (p->nodes[c].last > n->last) n->last = p->nodes[c].last;
+        n->caps += p->nodes[c].caps;
+    }
+    n = &p->nodes[x];
+    const tv_rn *k = n->child >= 0 ? &p->nodes[n->child] : NULL;
+    switch (n->kind) {
+    case RN_EMPTY: case RN_ASSERT: case RN_LOOK: case RN_BACKREF:
+        n->nullable = n->empty_last = true;
+        n->consumes = n->kind == RN_BACKREF;
+        /* (a negative lookaround's groups are never set once it holds, in either engine) */
+        if (n->kind == RN_LOOK && n->neg) n->caps = 0;
+        break;
+    case RN_SET:
+        n->nullable = n->empty_last = false;
+        n->consumes = true;
+        break;
+    case RN_GROUP:
+        n->nullable = k->nullable, n->empty_last = k->empty_last, n->consumes = k->consumes;
+        break;
+    case RN_SEQ:
+        n->nullable = n->empty_last = true;
+        n->consumes = false;
+        for (int c = n->child; c >= 0; c = p->nodes[c].next) {
+            const tv_rn *e = &p->nodes[c];
+            n->nullable &= e->nullable;
+            n->empty_last &= e->empty_last;
+            n->consumes |= e->consumes;
+        }
+        break;
+    case RN_ALT:
+        n->nullable = false;
+        n->empty_last = true;
+        n->consumes = false;
+        for (int c = n->child; c >= 0; c = p->nodes[c].next) {
+            const tv_rn *e = &p->nodes[c];
+            n->consumes |= e->consumes;
+            if (e->nullable) {
+                n->nullable = true;
+                /* (an alternative that may be empty, with others after it) */
+                if (e->next >= 0 || !e->empty_last) n->empty_last = false;
+            }
+        }
+        break;
+    case RN_QUANT:
+        n->consumes = k->consumes && n->max != 0;
+        n->nullable = n->min == 0 || k->nullable;
+        if (n->min == 0) n->empty_last = !n->lazy || !n->consumes;
+        else n->empty_last = k->empty_last;
+        if (k->nullable && (!k->empty_last || k->caps)) TV_RP_FAIL(p);
+        break;
+    }
+}
+
+/* Whether node x lies inside node a's subtree */
+static bool tv_rp_within(const tv_rp *p, int x, int a) {
+    for (; x >= 0; x = p->nodes[x].parent)
+        if (x == a) return true;
+    return false;
+}
+
+/* The checks over the whole tree: loops' groups (fixup), backreferences, lookbehinds. */
+static void tv_rp_check(tv_rp *p, bool *fixup) {
+    int *group_node = tv_alloc((size_t)(p->ngroups + 1) * sizeof(int));
+    for (int g = 0; g <= p->ngroups; g++) group_node[g] = -1;
+    for (int x = 0; x < p->nn; x++)
+        if (p->nodes[x].kind == RN_GROUP && p->nodes[x].cap && p->nodes[x].cap <= p->ngroups) group_node[p->nodes[x].cap] = x;
+    for (int x = 0; x < p->nn && !p->fail; x++) {
+        const tv_rn *n = &p->nodes[x];
+        if (n->kind == RN_QUANT && (n->max > 1 || n->max < 0)) {
+            const tv_rn *k = &p->nodes[n->child];
+            if (k->caps - (k->kind == RN_GROUP && k->cap ? 1 : 0) > 0) *fixup = true;
+        }
+        if (n->kind == RN_LOOK && n->behind) {
+            for (int y = x + 1; y <= n->last; y++)
+                if ((p->nodes[y].kind == RN_GROUP && p->nodes[y].cap) || p->nodes[y].kind == RN_BACKREF) TV_RP_FAIL(p);
+        }
+        if (n->kind != RN_BACKREF) continue;
+        int g = group_node[n->cap];
+        if (g < 0) { TV_RP_FAIL(p); break; }
+        /* the loops around the group */
+        bool looped = false;
+        for (int a = p->nodes[g].parent; a >= 0; a = p->nodes[a].parent) {
+            const tv_rn *q = &p->nodes[a];
+            if (q->kind == RN_QUANT && (q->max > 1 || q->max < 0)) {
+                looped = true;
+                if (!tv_rp_within(p, x, a)) TV_RP_FAIL(p); /* (read after the loop) */
+            }
+        }
+        if (!looped || p->fail) continue;
+        /* in the same iteration: after the group, which nothing between their common ancestor
+         * and it makes optional */
+        if (x <= p->nodes[g].last) { TV_RP_FAIL(p); continue; }
+        int lca = p->nodes[g].parent;
+        while (lca >= 0 && !tv_rp_within(p, x, lca)) lca = p->nodes[lca].parent;
+        for (int a = p->nodes[g].parent; a >= 0 && a != lca; a = p->nodes[a].parent) {
+            const tv_rn *q = &p->nodes[a];
+            if (q->kind == RN_ALT || (q->kind == RN_QUANT && q->min == 0) || q->kind == RN_LOOK) TV_RP_FAIL(p);
+        }
+    }
+    tv_free(group_node);
+}
+
+static void tv_rp_emit_set(tv_sb *sb, const uint64_t set[2]) {
+    int count = 0, one = -1;
+    for (int c = 0; c < 128; c++)
+        if (tv_set_has(set, c)) count++, one = c;
+    char tmp[16];
+    if (count == 0) {
+        tv_sb_push(sb, "[^\\x00-\\xff]", 12);
+        return;
+    }
+    if (count == 1) {
+        snprintf(tmp, sizeof tmp, "\\x%02x", one);
+        tv_sb_push(sb, tmp, 4);
+        return;
+    }
+    if (count == 128) {
+        tv_sb_push(sb, "[\\x00-\\xff]", 11);
+        return;
+    }
+    tv_sb_push_char(sb, '[');
+    for (int c = 0; c < 128;) {
+        if (!tv_set_has(set, c)) { c++; continue; }
+        int d = c;
+        while (d + 1 < 128 && tv_set_has(set, d + 1)) d++;
+        snprintf(tmp, sizeof tmp, "\\x%02x", c);
+        tv_sb_push(sb, tmp, 4);
+        if (d > c) {
+            snprintf(tmp, sizeof tmp, "-\\x%02x", d);
+            tv_sb_push(sb, tmp, 5);
+        }
+        c = d + 1;
+    }
+    tv_sb_push_char(sb, ']');
+}
+
+static void tv_rp_emit(const tv_rp *p, int x, tv_sb *sb) {
+    const tv_rn *n = &p->nodes[x];
+    char tmp[48];
+    switch (n->kind) {
+    case RN_EMPTY: break;
+    case RN_SET: tv_rp_emit_set(sb, n->set); break;
+    case RN_SEQ:
+        for (int c = n->child; c >= 0; c = p->nodes[c].next) tv_rp_emit(p, c, sb);
+        break;
+    case RN_ALT:
+        for (int c = n->child; c >= 0; c = p->nodes[c].next) {
+            if (c != n->child) tv_sb_push_char(sb, '|');
+            tv_rp_emit(p, c, sb);
+        }
+        break;
+    case RN_GROUP:
+        tv_sb_push(sb, n->cap ? "(" : "(?:", n->cap ? 1 : 3);
+        tv_rp_emit(p, n->child, sb);
+        tv_sb_push_char(sb, ')');
+        break;
+    case RN_LOOK:
+        if (n->behind) tv_sb_push(sb, n->neg ? "(?<!" : "(?<=", 4);
+        else tv_sb_push(sb, n->neg ? "(?!" : "(?=", 3);
+        tv_rp_emit(p, n->child, sb);
+        tv_sb_push_char(sb, ')');
+        break;
+    case RN_ASSERT:
+        switch (n->akind) {
+        case 0: if (p->m) tv_sb_push(sb, "(?<![^\\n\\r])", 12); else tv_sb_push(sb, "\\A", 2); break;
+        case 1: if (p->m) tv_sb_push(sb, "(?![^\\n\\r])", 11); else tv_sb_push(sb, "\\z", 2); break;
+        case 2: tv_sb_push(sb, "\\b", 2); break;
+        default: tv_sb_push(sb, "\\B", 2); break;
+        }
+        break;
+    case RN_BACKREF:
+        snprintf(tmp, sizeof tmp, p->ic ? "(?i:\\g{%d})" : "(?:\\g{%d})", n->cap);
+        tv_sb_push(sb, tmp, strlen(tmp));
+        break;
+    case RN_QUANT: {
+        const tv_rn *k = &p->nodes[n->child];
+        bool wrap = !(k->kind == RN_SET || k->kind == RN_GROUP || k->kind == RN_BACKREF);
+        if (wrap) tv_sb_push(sb, "(?:", 3);
+        tv_rp_emit(p, n->child, sb);
+        if (wrap) tv_sb_push_char(sb, ')');
+        if (n->max < 0) snprintf(tmp, sizeof tmp, "{%d,}", n->min);
+        else snprintf(tmp, sizeof tmp, "{%d,%d}", n->min, n->max);
+        tv_sb_push(sb, tmp, strlen(tmp));
+        if (n->lazy) tv_sb_push_char(sb, '?');
+        break;
+    }
+    }
+}
+
+/* PCRE2's state for the program: one JIT stack for every expression (single-threaded). */
+static pcre2_match_context *tv_pcre_mctx;
+static pcre2_jit_stack *tv_pcre_stack;
+static int tv_pcre_enabled = -1;
+
+/* Compiles r for the JIT tier (r->pstate 1), or gives up on it (2). */
+static void tv_re_pcre_build(tv_re *r) {
+    r->pstate = 2;
+    if (tv_pcre_enabled < 0) {
+        const char *e = getenv("TOV_REGEXP_ENGINE");
+        tv_pcre_enabled = !(e && !strcmp(e, "interpreter"));
+    }
+    if (!tv_pcre_enabled) return;
+    const char *key = r->key.p->data;
+    size_t klen = (size_t)tv_str_byte_len(r->key);
+    const char *slash = memchr(key, '/', klen);
+    if (!slash) return;
+    tv_rp p = {0};
+    p.s = (const unsigned char *)slash + 1;
+    p.n = klen - (size_t)(slash + 1 - key);
+    p.ic = r->flags & LRE_FLAG_IGNORECASE;
+    p.u = r->flags & LRE_FLAG_UNICODE;
+    p.v = r->flags & LRE_FLAG_UNICODE_SETS;
+    p.m = r->flags & LRE_FLAG_MULTILINE;
+    p.dotall = r->flags & LRE_FLAG_DOTALL;
+    tv_rp_scan_groups(&p);
+    int root = p.fail ? -1 : tv_rp_alt(&p);
+    if (!p.fail && p.i != p.n) TV_RP_FAIL(&p);
+    if (!p.fail && p.ngroups + 1 != r->ncap) TV_RP_FAIL(&p);
+    if (!p.fail && p.group_seen != p.ngroups) TV_RP_FAIL(&p);
+    bool fixup = false;
+    if (!p.fail) tv_rp_analyze(&p, root);
+    if (!p.fail) tv_rp_check(&p, &fixup);
+    tv_sb sb = {0};
+    if (!p.fail) tv_rp_emit(&p, root, &sb);
+    tv_free(p.nodes);
+    tv_free(p.names);
+    tv_free(p.names_len);
+    if (p.fail) {
+        tv_sb_free(&sb);
+        return;
+    }
+    int err;
+    PCRE2_SIZE erroff;
+    uint32_t opts = PCRE2_MATCH_UNSET_BACKREF | PCRE2_NEVER_UTF | PCRE2_NEVER_UCP | PCRE2_NEVER_BACKSLASH_C | PCRE2_NO_UTF_CHECK;
+    if (r->flags & LRE_FLAG_STICKY) opts |= PCRE2_ANCHORED;
+    pcre2_code *code = pcre2_compile((PCRE2_SPTR)(sb.data ? sb.data : ""), sb.len, opts, &err, &erroff, NULL);
+    tv_sb_free(&sb);
+    if (!code) return;
+    uint32_t ncap = 0;
+    pcre2_pattern_info(code, PCRE2_INFO_CAPTURECOUNT, &ncap);
+    if ((int)ncap + 1 != r->ncap || pcre2_jit_compile(code, PCRE2_JIT_COMPLETE) != 0) {
+        pcre2_code_free(code);
+        return;
+    }
+    if (!tv_pcre_mctx) {
+        tv_pcre_mctx = pcre2_match_context_create(NULL);
+        tv_pcre_stack = pcre2_jit_stack_create(64 * 1024, 64 * 1024 * 1024, NULL);
+        if (!tv_pcre_mctx || !tv_pcre_stack) {
+            pcre2_code_free(code);
+            return;
+        }
+        pcre2_jit_stack_assign(tv_pcre_mctx, NULL, tv_pcre_stack);
+    }
+    r->pc = code;
+    r->md = pcre2_match_data_create_from_pattern(code, NULL);
+    r->fixup = fixup;
+    r->pstate = 1;
+}
+
+/* After this many matches an expression is compiled for the JIT tier. */
+enum { TV_PCRE_AFTER = 3 };
+
+/* The match at or after `from` by the JIT tier: 1 found, 0 none, -1 when it can't say (a limit
+ * of PCRE2's reached: libregexp, which has none, answers instead). */
+static int tv_re_pcre_find(const tv_re *r, uint8_t **cap, const uint8_t *buf, tv_int n, tv_int from, bool want_groups) {
+    pcre2_match_data *md = r->md;
+    int rc = pcre2_jit_match(r->pc, buf, (PCRE2_SIZE)n, (PCRE2_SIZE)from, 0, md, tv_pcre_mctx);
+    if (rc == PCRE2_ERROR_NOMATCH) return 0;
+    if (rc <= 0) return -1;
+    PCRE2_SIZE *ov = pcre2_get_ovector_pointer(md);
+    if (r->fixup && want_groups && r->ncap > 1) {
+        /* (the groups as JavaScript leaves them: found again from where the match starts) */
+        int ret = lre_exec(cap, r->bc, buf, (int)ov[0], (int)n, 0, NULL);
+        if (ret == 1 && cap[0] == buf + ov[0]) return 1;
+        return -1;
+    }
+    int k = 2 * r->ncap;
+    for (int j = 0; j < k; j++) cap[j] = ov[j] == PCRE2_UNSET ? NULL : (uint8_t *)buf + ov[j];
+    return 1;
+}
+
 /* The next match at or after `from` (UTF-16 units of the text in buf: bytes when ASCII), into
- * cap (2 * ncap pointers); false when there's none. */
-static bool tv_re_find(const tv_re *r, uint8_t **cap, const uint8_t *buf, tv_int n, tv_int from, bool ascii, int type) {
+ * cap (r->nalloc pointers); false when there's none. Without want_groups only the whole match's
+ * bounds need be right. */
+static bool tv_re_find_in(tv_re *r, uint8_t **cap, const uint8_t *buf, tv_int n, tv_int from, bool ascii, int type, bool want_groups) {
     if (from < 0 || from > n) return false;
     if (r->simple && ascii) {
         for (tv_int i = from; i < n; i++) {
@@ -568,6 +1400,13 @@ static bool tv_re_find(const tv_re *r, uint8_t **cap, const uint8_t *buf, tv_int
         return false;
     }
     if (r->lin && ascii) return tv_re_lin_find(r->lin, cap, buf, n, from);
+    if (ascii && r->pstate != 2) {
+        if (r->pstate == 0 && ++r->uses >= TV_PCRE_AFTER) tv_re_pcre_build(r);
+        if (r->pstate == 1) {
+            int found = tv_re_pcre_find(r, cap, buf, n, from, want_groups);
+            if (found >= 0) return found;
+        }
+    }
     if (r->bc1 && ascii) {
         /* only where a match can start, each tried alone */
         bool ml = r->flags & LRE_FLAG_MULTILINE;
@@ -600,6 +1439,10 @@ static bool tv_re_find(const tv_re *r, uint8_t **cap, const uint8_t *buf, tv_int
     int ret = r->jit && type == 0 ? lre_exec_jit(r->jit, cap, r->bc, buf, (int)from, (int)n, NULL) : lre_exec(cap, r->bc, buf, (int)from, (int)n, type, NULL);
     if (ret == LRE_RET_MEMORY_ERROR) tv_trap("out of memory in a regular expression", NULL);
     return ret == 1;
+}
+
+static bool tv_re_find(tv_re *r, uint8_t **cap, const uint8_t *buf, tv_int n, tv_int from, bool ascii, int type) {
+    return tv_re_find_in(r, cap, buf, n, from, ascii, type, true);
 }
 
 static tv_re *tv_res;
@@ -735,7 +1578,14 @@ tv_int tv_native_reCompile(tv_str source, tv_str flags) {
         char err1[64];
         r->bc1 = lre_compile(&len1, err1, sizeof err1, src, src_len, re_flags | LRE_FLAG_STICKY, NULL);
     }
+    r->nalloc = 2 * r->ncap;
+    if (lre_get_alloc_count(bc) > r->nalloc) r->nalloc = lre_get_alloc_count(bc);
+    if (r->bc1 && lre_get_alloc_count(r->bc1) > r->nalloc) r->nalloc = lre_get_alloc_count(r->bc1);
     r->jit = r->jit1 = NULL;
+    r->pc = r->md = NULL;
+    r->uses = 0;
+    r->pstate = 0;
+    r->fixup = false;
     for (size_t k = 0; k < tv_nrejits; k++) {
         const tv_rejit *j = &tv_rejits[k];
         if (j->klen != (size_t)key.p->len || memcmp(j->key, key.p->data, j->klen)) continue;
@@ -794,7 +1644,7 @@ tv_arr tv_native_reExec(tv_int h, tv_str s, tv_int from) {
     tv_re *r = &tv_res[h];
     int ncap = r->ncap;
     uint8_t *on_stack[16];
-    uint8_t **cap = 2 * ncap <= 16 ? on_stack : tv_alloc((size_t)(2 * ncap) * sizeof(uint8_t *) + 1);
+    uint8_t **cap = r->nalloc <= 16 ? on_stack : tv_alloc((size_t)r->nalloc * sizeof(uint8_t *));
     bool ascii = tv_str_is_ascii(s);
     tv_int n;
     uint16_t *units = NULL;
@@ -844,7 +1694,7 @@ tv_int tv_native_reTest(tv_int h, tv_str s, tv_int from) {
     }
     int ncap = r->ncap;
     uint8_t *on_stack[16];
-    uint8_t **cap = 2 * ncap <= 16 ? on_stack : tv_alloc((size_t)(2 * ncap) * sizeof(uint8_t *) + 1);
+    uint8_t **cap = r->nalloc <= 16 ? on_stack : tv_alloc((size_t)r->nalloc * sizeof(uint8_t *));
     bool ascii = tv_str_is_ascii(s);
     tv_int n, end = -1;
     uint16_t *units = NULL;
@@ -859,7 +1709,7 @@ tv_int tv_native_reTest(tv_int h, tv_str s, tv_int from) {
         type = 1;
         shift = 1;
     }
-    if (tv_re_find(r, cap, buf, n, from, ascii, type)) end = (tv_int)((cap[1] - buf) >> shift);
+    if (tv_re_find_in(r, cap, buf, n, from, ascii, type, false)) end = (tv_int)((cap[1] - buf) >> shift);
     tv_free(units);
     if (cap != on_stack) tv_free(cap);
     return end;
@@ -886,7 +1736,7 @@ static tv_str tv_re_slice(tv_str s, const tv_re_text *t, tv_int a, tv_int b) {
     return t->ascii ? tv_str_from(s.p->data + a, (size_t)(b - a)) : tv_str_slice(s, a, b, true, NULL);
 }
 /* Where the search goes on after a match (past an empty one: the next character). */
-static tv_int tv_re_next(const tv_re *r, const tv_re_text *t, tv_int p0, tv_int p1) {
+static tv_int tv_re_next(tv_re *r, const tv_re_text *t, tv_int p0, tv_int p1) {
     if (p1 > p0) return p1;
     if ((r->flags & (LRE_FLAG_UNICODE | LRE_FLAG_UNICODE_SETS)) && !t->ascii && p1 + 1 < t->n && t->units[p1] >= 0xD800 && t->units[p1] <= 0xDBFF) return p1 + 2;
     return p1 + 1;
@@ -898,7 +1748,7 @@ tv_arr tv_native_reSplit(tv_int h, tv_str s, tv_int max) {
     tv_re *r = &tv_res[h];
     tv_arr out = tv_arr_fresh();
     if (max == 0) return out;
-    uint8_t **cap = tv_alloc((size_t)(2 * r->ncap) * sizeof(uint8_t *) + 1);
+    uint8_t **cap = tv_alloc((size_t)r->nalloc * sizeof(uint8_t *));
     tv_re_text t = tv_re_text_of(s);
     if (t.n == 0) {
         if (!tv_re_find(r, cap, t.buf, 0, 0, t.ascii, t.type)) { tv_str_retain(s); tv_arr_push(&out, &tv_type_str, &s); }
@@ -940,7 +1790,7 @@ tv_arr tv_native_reExecInto(tv_int h, tv_str s, tv_int from, tv_arr p) {
     int ncap = r->ncap;
     if (!(p.p->rc == 1 && !p.p->ext && p.p->cap >= 2 * ncap)) return tv_native_reExec(h, s, from);
     uint8_t *on_stack[16];
-    uint8_t **cap = 2 * ncap <= 16 ? on_stack : tv_alloc((size_t)(2 * ncap) * sizeof(uint8_t *) + 1);
+    uint8_t **cap = r->nalloc <= 16 ? on_stack : tv_alloc((size_t)r->nalloc * sizeof(uint8_t *));
     tv_re_text t = tv_re_text_of(s);
     tv_arr out;
     if (tv_re_find(r, cap, t.buf, t.n, from, t.ascii, t.type)) {
@@ -970,7 +1820,7 @@ void tv_re_iter_init(tv_re_iter *it, tv_int h, tv_str s) {
     it->type = t.type;
     it->shift = t.shift;
     it->from = 0;
-    it->cap = 2 * r->ncap <= 16 ? it->on_stack : tv_alloc((size_t)(2 * r->ncap) * sizeof(uint8_t *) + 1);
+    it->cap = r->nalloc <= 16 ? it->on_stack : tv_alloc((size_t)r->nalloc * sizeof(uint8_t *));
 }
 
 bool tv_re_iter_next(tv_re_iter *it, tv_int pos[2]) {
@@ -1086,7 +1936,7 @@ tv_str tv_native_reReplace(tv_int h, tv_str s, tv_str rep) {
     bool global = r->flags & LRE_FLAG_GLOBAL;
     bool dollar = memchr(rep.p->data, '$', (size_t)tv_str_byte_len(rep)) != NULL;
     uint8_t *on_stack[16];
-    uint8_t **cap = 2 * r->ncap <= 16 ? on_stack : tv_alloc((size_t)(2 * r->ncap) * sizeof(uint8_t *) + 1);
+    uint8_t **cap = r->nalloc <= 16 ? on_stack : tv_alloc((size_t)r->nalloc * sizeof(uint8_t *));
     tv_re_text t = tv_re_text_of(s);
     /* (ASCII text and a plain replacement: the matches found first, then the result written at
      * its size, no builder to grow and copy) */

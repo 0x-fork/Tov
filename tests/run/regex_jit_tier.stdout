@@ -1,0 +1,24 @@
+"\\b\\w[^]??|"/i 0:[""] test=true | 0:[""] test=true | 0:[""] test=true |
+"a[]|b[^]c"/ 1:["bxc"] test=true | 0:["b\nc"] test=true | null test=false |
+"(?:(a)|b)+"/ 0:["ab",null] test=true | 0:["ba","a"] test=true | 0:["bab",null] test=true |
+"(a*)+"/ 0:["aa","aa"] test=true | 0:["",""] test=true | 0:["",""] test=true |
+"(?:|a)?b"/ 0:["ab"] test=true | 0:["b"] test=true |
+"(?:a*?)*x"/ 0:["aax"] test=true | 0:["x"] test=true |
+"(?:(a)\\1)+"/ 0:["aaaa","a"] test=true | 0:["aa","a"] test=true |
+"\\[(?:[^\\[\\]`]|(?<a>`+)[^`]+\\k<a>(?!`))*?\\]\\((?:\\\\[\\s\\S]|[^\\\\()]|\\((?:\\\\[\\s\\S]|[^\\\\()])*\\))*\\)"/g 4:["[a `b` c](http://x.y/(z))",null] 34:["[d](e)",null] null test=true | 0:["[`x`](y)","`"] null test=true |
+"(?<=ab)c|(?<!x)d"/ 2:["c"] test=true | null test=false | 0:["d"] test=true |
+"^b|c$"/m 3:["b"] test=true | 2:["b"] test=true | 0:["c"] test=true | 1:["c"] test=true |
+"a.b"/ null test=false | null test=false | 0:["a b"] test=true |
+"a.b"/s 0:["a\rb"] test=true | 0:["a\nb"] test=true |
+"[a-z]+\\d"/i 0:["XyZ9"] test=true | 0:["a1"] test=true |
+"\\u{61}+"/u 1:["aaa"] test=true |
+"\\x41|\\u0042|\\cJ"/ 1:["A"] test=true | 0:["B"] test=true | 1:["\n"] test=true |
+"foo"/y 0:["foo"] 3:["foo"] null test=true | null test=false |
+"(\\w)(\\d)?"/g 0:["a1","a","1"] 2:["b","b",null] 4:["c3","c","3"] null test=true |
+"(\\b)( {1,3}1\\s[a-c]|(^c{0,2}?[ab]?)*?|b{0,}(\\d+c[^]*[^a]){1,}\\S{1,}?)(?<n8>\\4{1,}|(\\x61{1,3}(?:){0,2}?(?:\\w?a[\\w-]?\\b|\\x61{1,}[^\\n])[\\w-])$|a*((\\5{0,2}x{1,}?){1,}\\d*\\B|1{0,}\\s*?(?:_b{0,}\\3?))*c{0,2}\\3+){1,}1"/ 0:["aaa_1","","",null,null,"aaa_",null,"_",null] test=true | 1:["1","","",null,null,"",null,null,null] test=true |
+"^(?:[ \\t]*(?:\\n|$))+"/ 0:["  \n\t\n"] test=true | 0:["\n"] test=true | 0:[""] test=true |
+"(?:\\n(?!(a)|b)c)*"/ 0:["\nc\nc",null] test=true | 0:["",null] test=true |
+"x{2,3}?y|z{0,0}w"/ 0:["xxxy"] test=true | 0:["w"] test=true |
+"(?:a|ab)(?:c|bcd)(d*)"/ 0:["abcd",""] test=true |
+"\\p{Lu}+\\P{L}"/u 2:["CD1"] test=true | 0:["XY "] test=true |
+"[\\p{P}\\p{S}]+"/u 1:["*_~"] test=true |

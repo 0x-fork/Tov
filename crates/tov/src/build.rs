@@ -969,30 +969,46 @@ impl TlsArchive {
 }
 
 /// A 128-bit content hash (two independent 64-bit lanes), hex-encoded. For cache keys, not security.
-/// The regular expression library's objects (runtime/regexp.c and QuickJS's libregexp), compiled
-/// once per compiler and flags.
+/// The regular expression library's objects (runtime/regexp.c, QuickJS's libregexp and PCRE2),
+/// compiled once per compiler and flags, in parallel.
 fn regexp_objects(cc: &str, flags: &[&str], c_dir: &Path, key: &str) -> Result<Vec<PathBuf>, BuildError> {
-    let units = ["regexp.c", "libregexp.c", "libunicode.c", "cutils.c"];
-    let objs: Vec<PathBuf> = units.iter().map(|u| c_dir.join(format!("re-{key}-{}.o", u.trim_end_matches(".c")))).collect();
+    let mut units: Vec<&str> = vec!["regexp.c", "libregexp.c", "libunicode.c", "cutils.c"];
+    units.extend(codegen::REGEXP_FILES.iter().map(|f| f.0).filter(|n| n.starts_with("pcre2/src/") && n.ends_with(".c")));
+    let stem = |u: &str| Path::new(u).file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
+    let objs: Vec<PathBuf> = units.iter().map(|u| c_dir.join(format!("re-{key}-{}.o", stem(u)))).collect();
     if objs.iter().all(|o| cached(o)) {
         return Ok(objs);
     }
     let fail = |what: String| BuildError::Message(format!("can't build the regular expression library: {what}"));
     let dir = c_dir.join(format!("re-{key}.tmp{}", tmp_tag()));
-    std::fs::create_dir_all(&dir).map_err(|e| fail(format!("{e}")))?;
     for (name, text) in codegen::REGEXP_FILES.iter().copied().chain([("tov.h", codegen::RUNTIME_H)]) {
-        std::fs::write(dir.join(name), text).map_err(|e| fail(format!("{e}")))?;
+        let path = dir.join(name);
+        std::fs::create_dir_all(path.parent().unwrap_or(&dir)).map_err(|e| fail(format!("{e}")))?;
+        std::fs::write(&path, text).map_err(|e| fail(format!("{e}")))?;
     }
-    let result = (|| {
-        for (unit, obj) in units.iter().zip(&objs) {
-            let tmp = obj.with_extension(format!("tmp{}.o", tmp_tag()));
-            let mut cmd = Command::new(cc);
-            cmd.args(flags).args(["-w", "-ffunction-sections", "-fdata-sections", "-c", "-o"]).arg(&tmp).arg(format!("-I{}", dir.display())).arg(dir.join(unit));
-            run_cc(cmd, cc, &dir.join(unit))?;
-            std::fs::rename(&tmp, obj).map_err(|e| fail(format!("can't move it into the cache: {e}")))?;
+    let pcre = dir.join("pcre2/src");
+    let result = std::thread::scope(|scope| {
+        let jobs: Vec<_> = units
+            .iter()
+            .zip(&objs)
+            .filter(|(_, obj)| !cached(obj))
+            .map(|(unit, obj)| {
+                let (dir, pcre) = (&dir, &pcre);
+                scope.spawn(move || -> Result<(), BuildError> {
+                    let tmp = obj.with_extension(format!("tmp{}.o", tmp_tag()));
+                    let mut cmd = Command::new(cc);
+                    cmd.args(flags).args(["-w", "-ffunction-sections", "-fdata-sections", "-DHAVE_CONFIG_H", "-c", "-o"]).arg(&tmp);
+                    cmd.arg(format!("-I{}", dir.display())).arg(format!("-I{}", pcre.display())).arg(dir.join(unit));
+                    run_cc(cmd, cc, &dir.join(unit))?;
+                    std::fs::rename(&tmp, obj).map_err(|e| BuildError::Message(format!("can't build the regular expression library: can't move it into the cache: {e}")))
+                })
+            })
+            .collect();
+        for j in jobs {
+            j.join().map_err(|_| fail("a compiler thread panicked".into()))??;
         }
         Ok(objs.clone())
-    })();
+    });
     let _ = std::fs::remove_dir_all(&dir);
     result
 }
