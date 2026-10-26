@@ -978,13 +978,16 @@ JSContextRef tv_js_start(void) {
      * survives a full collection, not four times (the engine's choice on a machine with 16 GB or
      * more, for a browser), marked by two threads, not one per core (more spin more than they
      * mark on a server's small heap): Cap's media server probes at 86 MB, not 130, peaking at 126
-     * MB, not 164, on 10% more CPU, still a quarter less than Bun's */
+     * MB, not 164, on 10% more CPU, still a quarter less than Bun's; and a young generation of
+     * 4 MB, not the 1 MB an API context starts with (a loop calling into an npm package a million
+     * times collected 1,200 times, not 300: a quarter slower) */
     static const char *const options[][2] = {
         {"JSC_useSharedArrayBuffer", "1"},
         {"JSC_numberOfDFGCompilerThreads", "1"},
         {"JSC_numberOfFTLCompilerThreads", "1"},
         {"JSC_heapGrowthMaxIncrease", "1"},
         {"JSC_numberOfGCMarkers", "2"},
+        {"JSC_smallHeapSize", "4194304"},
     };
     enum { noptions = sizeof options / sizeof options[0] };
     bool set[noptions];

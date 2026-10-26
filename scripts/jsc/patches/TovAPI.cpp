@@ -13,6 +13,11 @@
 #include "InitializeThreading.h"
 #include "IntlCache.h"
 #include "JSCInlines.h"
+#include "FunctionCodeBlock.h"
+#include "LLIntThunks.h"
+#include "ScriptExecutableInlines.h"
+#include "VMEntryScopeInlines.h"
+#include "VMInlines.h"
 #include "JSGenericTypedArrayViewInlines.h"
 #include "JSTypedArrays.h"
 #include "TopExceptionScope.h"
@@ -247,6 +252,52 @@ JSValueRef TVGetProperty(JSContextRef ctx, JSValueRef value, void* name, JSValue
     return toRef(globalObject, result);
 }
 
+#if (CPU(ARM64) || CPU(X86_64)) && CPU(ADDRESS64) && !ENABLE(C_LOOP)
+/* A call of a JavaScript function (not a host one) with up to six arguments and no more
+ * parameters than that: into its machine code directly, the arguments in registers, as the
+ * engine's own repeated calls (CachedCall::callWithArguments) go; no argument buffer, call frame
+ * built in memory, nor count taken on the code. Empty when it can't (or the callee throws). */
+static JSValue tovCallDirect(VM& vm, JSFunction* fn, JSValue thisValue, size_t argumentCount, const JSValueRef arguments[], bool& handled)
+{
+    handled = false;
+    FunctionExecutable* executable = fn->jsExecutable();
+    JSScope* functionScope = fn->scope();
+    JSGlobalObject* realm = functionScope->realm();
+    VMEntryScope entryScope(vm, realm);
+    if (!vm.isSafeToRecurseSoft() || vm.disallowVMEntryCount) [[unlikely]]
+        return { };
+    auto throwScope = DECLARE_THROW_SCOPE(vm);
+    CodeBlock* codeBlock = nullptr;
+    {
+        DeferTraps deferTraps(vm); // (not jettisoned before it runs)
+        executable->prepareForExecution<FunctionExecutable>(vm, fn, functionScope, CodeSpecializationKind::CodeForCall, codeBlock);
+        if (throwScope.exception()) [[unlikely]] {
+            handled = true;
+            return { };
+        }
+    }
+    if (codeBlock->numParameters() > static_cast<unsigned>(argumentCount + 1))
+        return { };
+    codeBlock->m_shouldAlwaysBeInlined = false;
+    void* entry = executable->generatedJITCodeAddressForCall();
+    handled = true;
+    auto a = [&](size_t i) { return toJS(realm, arguments[i]); };
+    auto clobberizeValidator = makeScopeExit([&] {
+        vm.didEnterVM = true;
+    });
+    throwScope.release();
+    switch (argumentCount) {
+    case 0: return JSValue::decode(vmEntryToJavaScriptWith0Arguments(entry, &vm, codeBlock, fn, thisValue, nullptr));
+    case 1: return JSValue::decode(vmEntryToJavaScriptWith1Arguments(entry, &vm, codeBlock, fn, thisValue, nullptr, a(0)));
+    case 2: return JSValue::decode(vmEntryToJavaScriptWith2Arguments(entry, &vm, codeBlock, fn, thisValue, nullptr, a(0), a(1)));
+    case 3: return JSValue::decode(vmEntryToJavaScriptWith3Arguments(entry, &vm, codeBlock, fn, thisValue, nullptr, a(0), a(1), a(2)));
+    case 4: return JSValue::decode(vmEntryToJavaScriptWith4Arguments(entry, &vm, codeBlock, fn, thisValue, nullptr, a(0), a(1), a(2), a(3)));
+    case 5: return JSValue::decode(vmEntryToJavaScriptWith5Arguments(entry, &vm, codeBlock, fn, thisValue, nullptr, a(0), a(1), a(2), a(3), a(4)));
+    default: return JSValue::decode(vmEntryToJavaScriptWith6Arguments(entry, &vm, codeBlock, fn, thisValue, nullptr, a(0), a(1), a(2), a(3), a(4), a(5)));
+    }
+}
+#endif
+
 JSValueRef TVCall(JSContextRef ctx, JSObjectRef function, JSObjectRef thisObject, size_t argumentCount, const JSValueRef arguments[], JSValueRef* exception)
 {
     JSGlobalObject* globalObject = toJS(ctx);
@@ -254,6 +305,24 @@ JSValueRef TVCall(JSContextRef ctx, JSObjectRef function, JSObjectRef thisObject
     TovLockScope locker(vm);
     auto scope = DECLARE_TOP_EXCEPTION_SCOPE(vm);
     JSObject* callee = toJS(function);
+#if (CPU(ARM64) || CPU(X86_64)) && CPU(ADDRESS64) && !ENABLE(C_LOOP)
+    if (argumentCount <= 6) {
+        if (auto* fn = dynamicDowncast<JSFunction>(callee); fn && !fn->isHostFunction()) {
+            bool handled;
+            JSValue thisValue = thisObject ? JSValue(toJS(thisObject)) : JSValue(globalObject->globalThis());
+            JSValue result = tovCallDirect(vm, fn, thisValue, argumentCount, arguments, handled);
+            if (handled) {
+                if (Exception* thrown = scope.exception()) [[unlikely]] {
+                    if (exception)
+                        *exception = toRef(globalObject, thrown->value());
+                    scope.clearException();
+                    return nullptr;
+                }
+                return toRef(globalObject, result);
+            }
+        }
+    }
+#endif
     auto callData = JSC::getCallData(callee);
     if (callData.type == CallData::Type::None) [[unlikely]]
         return JSObjectCallAsFunction(ctx, function, thisObject, argumentCount, arguments, exception);
