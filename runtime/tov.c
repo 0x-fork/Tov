@@ -4198,6 +4198,23 @@ tv_str tv_str_substring_slow(tv_str s, tv_int start, tv_int end, bool has_end) {
     return a <= b ? tv_str_units(s, a, b) : tv_str_units(s, b, a);
 }
 
+/* The length of s.slice (kind 0), s.substring (1) or s.substr (2) of these arguments, nothing made:
+ * the clamped unit positions' difference (a cut surrogate pair's half is still one unit). */
+tv_int tv_str_sub_len(tv_str s, int kind, tv_int start, tv_int end, bool has_end) {
+    int64_t len = tv_str_length(s), a, b;
+    switch (kind) {
+    case 0:
+        a = tv_clamp_index(start, len), b = has_end ? tv_clamp_index(end, len) : len;
+        return b > a ? b - a : 0;
+    case 1:
+        a = tv_clamp0(start, len), b = has_end ? tv_clamp0(end, len) : len;
+        return a <= b ? b - a : a - b;
+    default:
+        a = tv_clamp_index(start, len), b = !has_end ? len : end <= 0 ? a : end > len - a ? len : a + end;
+        return b - a;
+    }
+}
+
 tv_str tv_str_substr(tv_str s, tv_int start, tv_int count, bool has_count) {
     int64_t len = tv_str_length(s);
     int64_t a = tv_clamp_index(start, len);
@@ -4251,6 +4268,17 @@ tv_int tv_str_index_of_from(tv_str s, tv_str needle, tv_int from) {
 }
 
 tv_int tv_str_last_index_of(tv_str s, tv_str needle, tv_int from, bool has_from) {
+    if (!has_from && tv_str_is_ascii(s)) {
+        /* (ASCII text, from the end: byte positions are its unit positions) */
+        size_t n = (size_t)s.p->len, nn = (size_t)needle.p->len;
+        if (nn > n) return -1;
+        if (nn == 0) return (tv_int)n;
+        const char *h = s.p->data, *nd = needle.p->data;
+        char c0 = nd[0];
+        for (size_t k = n - nn + 1; k-- > 0;)
+            if (h[k] == c0 && (nn == 1 || tv_mem_eq(h + k, nd, nn))) return (tv_int)k;
+        return -1;
+    }
     int64_t len = tv_str_length(s);
     int64_t start = !has_from || from > len ? len : from < 0 ? 0 : from;
     if (needle.p->len == 0) return start;
@@ -4261,7 +4289,7 @@ tv_int tv_str_last_index_of(tv_str s, tv_str needle, tv_int from, bool has_from)
     if (k > n - nn) k = n - nn;
     const char *h = s.p->data, *nd = needle.p->data;
     for (;;) {
-        if (h[k] == nd[0] && memcmp(h + k, nd, nn) == 0) return tv_byte_to_unit(s, k);
+        if (h[k] == nd[0] && tv_mem_eq(h + k, nd, nn)) return tv_byte_to_unit(s, k);
         if (k == 0) return -1;
         k--;
     }
@@ -4273,7 +4301,7 @@ bool tv_str_starts_with_at(tv_str s, tv_str prefix, tv_int pos) {
     bool mid = false;
     size_t b = pos <= 0 ? 0 : tv_unit_to_byte(s, pos, &mid);
     if (mid) return prefix.p->len == 0;
-    return (size_t)prefix.p->len <= (size_t)s.p->len - b && memcmp(s.p->data + b, prefix.p->data, (size_t)prefix.p->len) == 0;
+    return (size_t)prefix.p->len <= (size_t)s.p->len - b && tv_mem_eq(s.p->data + b, prefix.p->data, (size_t)prefix.p->len);
 }
 
 bool tv_str_ends_with_at(tv_str s, tv_str suffix, tv_int end) {
@@ -4281,7 +4309,7 @@ bool tv_str_ends_with_at(tv_str s, tv_str suffix, tv_int end) {
     size_t e = end <= 0 ? 0 : tv_unit_to_byte(s, end, &mid);
     if (mid) return suffix.p->len == 0;
     size_t nn = (size_t)suffix.p->len;
-    return nn <= e && memcmp(s.p->data + e - nn, suffix.p->data, nn) == 0;
+    return nn <= e && tv_mem_eq(s.p->data + e - nn, suffix.p->data, nn);
 }
 
 
@@ -4853,17 +4881,60 @@ static tv_arrbuf *tv_arrbuf_new(size_t esize, int64_t cap) {
     return b;
 }
 
+/* tv_mem_eq for n >= 16: up to 64 bytes by blocks overlapping the end, longer 64 at a time. */
+typedef uint8_t tv_v16 __attribute__((vector_size(16), aligned(1)));
+static inline tv_v16 tv_v16_at(const char *p) { tv_v16 x; memcpy(&x, p, 16); return x; }
+static inline uint64_t tv_v16_any(tv_v16 d) { uint64_t w[2]; memcpy(w, &d, 16); return w[0] | w[1]; }
+#define TV_V16X(a, b, k) (tv_v16_at((a) + (k)) ^ tv_v16_at((b) + (k)))
+bool tv_mem_eq_long(const char *a, const char *b, size_t n) {
+    if (n <= 32) return !tv_v16_any(TV_V16X(a, b, 0) | TV_V16X(a, b, n - 16));
+    if (n <= 64) return !tv_v16_any(TV_V16X(a, b, 0) | TV_V16X(a, b, 16) | TV_V16X(a, b, n - 32) | TV_V16X(a, b, n - 16));
+    /* (differences or-ed together, looked at once every 256 bytes: the look is a long chain) */
+    tv_v16 acc = TV_V16X(a, b, n - 16);
+    size_t i = 0;
+    for (; i + 64 <= n; i += 64) {
+        acc |= TV_V16X(a, b, i) | TV_V16X(a, b, i + 16) | TV_V16X(a, b, i + 32) | TV_V16X(a, b, i + 48);
+        if ((i & 255) == 192 && tv_v16_any(acc)) return false;
+    }
+    for (; i + 16 <= n; i += 16) acc |= TV_V16X(a, b, i);
+    return !tv_v16_any(acc);
+}
+
+/* The retains of the descriptors of objects (a class's instances, a boxed record): a pointer
+ * to a count first, 32 or 64 bits, or NULL. Copies of them retain inline, not by calls. */
+void tv_retain_rc32(void *p) {
+    int32_t *o = *(int32_t **)p;
+    if (o) (*o)++;
+}
+void tv_retain_rc64(void *p) {
+    int64_t *o = *(int64_t **)p;
+    if (o) (*o)++;
+}
+
+/* Retains n elements of type t at d, t's retain known to be set. */
+static void tv_retain_n(unsigned char *d, int64_t n, const tv_type *t) {
+    if (t == &tv_type_str) {
+        /* (strings retained here, not through calls: an immortal literal's is a test) */
+        const tv_str *xs = (const tv_str *)(const void *)d;
+        for (int64_t i = 0; i < n; i++) tv_str_retain(xs[i]);
+    } else if (t->retain == tv_retain_rc32) {
+        int32_t **xs = (int32_t **)(void *)d;
+        for (int64_t i = 0; i < n; i++) if (xs[i]) (*xs[i])++;
+    } else if (t->retain == tv_retain_rc64) {
+        int64_t **xs = (int64_t **)(void *)d;
+        for (int64_t i = 0; i < n; i++) if (xs[i]) (*xs[i])++;
+    } else {
+        size_t es = t->size;
+        for (int64_t i = 0; i < n; i++) t->retain(d + (size_t)i * es);
+    }
+}
+
 /* Copies n elements and retains the copies. */
 static void tv_copy_retain(unsigned char *dst, const unsigned char *src, int64_t n, const tv_type *t) {
     size_t es = t->size;
     if (!es || n <= 0) return;
     memcpy(dst, src, (size_t)n * es);
-    if (t == &tv_type_str) {
-        /* (strings retained here, not through calls: an immortal literal's is a test) */
-        const tv_str *xs = (const tv_str *)(const void *)dst;
-        for (int64_t i = 0; i < n; i++) tv_str_retain(xs[i]);
-    } else if (t->retain)
-        for (int64_t i = 0; i < n; i++) t->retain(dst + (size_t)i * es);
+    if (t->retain) tv_retain_n(dst, n, t);
 }
 
 void tv_arrbuf_release_slow(tv_arrbuf *TV_NOESCAPE p, const tv_type *t) {
@@ -5236,7 +5307,7 @@ tv_arr tv_arr_make(const tv_type *t, tv_int n, const void *elem, const char *loc
         uint64_t w;
         memcpy(&w, elem, 8);
         for (tv_int i = 0; i < n; i++) memcpy(d + (size_t)i * 8, &w, 8);
-        if (t->retain) for (tv_int i = 0; i < n; i++) t->retain(d + (size_t)i * 8);
+        if (t->retain) tv_retain_n(d, n, t);
     } else {
         for (tv_int i = 0; i < n; i++) tv_copy_retain(d + (size_t)i * es, elem, 1, t);
     }
@@ -5437,7 +5508,7 @@ void tv_arr_sort(tv_arr *a, const tv_type *t, double (*cmp)(void *ctx, const voi
         } \
         return -1; } while (0)
 #define TV_EQ_PLAIN(a, b) ((a) == (b))
-#define TV_EQ_STR(a, b) ((a).p == (b).p || ((a).p->len == (b).p->len && memcmp((a).p->data, (b).p->data, (size_t)(b).p->len) == 0))
+#define TV_EQ_STR(a, b) tv_str_eq(a, b)
 static tv_int tv_arr_find(tv_arr a, const tv_type *t, const void *elem, bool last) {
     int64_t n = tv_arr_len(a);
     size_t es = t->size;
@@ -5612,15 +5683,8 @@ static inline __attribute__((always_inline)) uint64_t tv_key_hash(const tv_type 
 /* Map keys use SameValueZero: like === except NaN equals NaN. */
 static inline bool tv_key_eq(const tv_type *kt, const void *a, const void *b) {
     if (kt == &tv_type_str) {
-        /* (keys are mostly short: compared here rather than by a call to memcmp) */
-        const tv_strbuf *x = ((const tv_str *)a)->p, *y = ((const tv_str *)b)->p;
-        if (x == y) return true;
-        if (x->len != y->len) return false;
-        size_t n = (size_t)x->len;
-        if (n > 16) return memcmp(x->data, y->data, n) == 0;
-        for (size_t i = 0; i < n; i++)
-            if (x->data[i] != y->data[i]) return false;
-        return true;
+        /* (keys are mostly short: compared inline rather than by a call to memcmp) */
+        return tv_str_eq(*(const tv_str *)a, *(const tv_str *)b);
     }
     if (kt == &tv_type_int) return *(const int64_t *)a == *(const int64_t *)b;
     if (kt == &tv_type_f64) {
@@ -5998,18 +6062,18 @@ static tv_arr tv_map_column(tv_map mm, const tv_type *kt, const tv_type *vt, boo
     size_t off = values ? L.voff : 8, es = t->size;
     tv_arrbuf *b = tv_arrbuf_new(es, m->count);
     int64_t j = 0;
-    /* (a word each, a string's or a number's: copied and retained here, not through calls) */
-    if (es == 8 && (t == &tv_type_str || !t->retain)) {
+    /* (a word each, a string's, an object's or a number's: copied here, then retained together,
+     * not through calls) */
+    if (es == 8 && (t == &tv_type_str || !t->retain || t->retain == tv_retain_rc32 || t->retain == tv_retain_rc64)) {
         uint64_t *out = (uint64_t *)(void *)tv_arrbuf_data(b);
-        bool str = t == &tv_type_str;
         for (int64_t i = 0; i < m->used; i++) {
             unsigned char *e = tv_entry(m, L, i);
             if (!tv_entry_hash(e)) continue;
             uint64_t w;
             memcpy(&w, e + off, 8);
             out[j++] = w;
-            if (str) tv_str_retain(*(tv_str *)(void *)&w);
         }
+        if (t->retain) tv_retain_n((unsigned char *)out, j, t);
         return tv_arr_of(b, j);
     }
     for (int64_t i = 0; i < m->used; i++) {

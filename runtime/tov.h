@@ -254,10 +254,27 @@ static inline bool tv_gen_next(tv_gen *g) {   /* true once it's finished (nothin
 static inline void tv_gen_retain(tv_gen *g) { if (g) g->rc++; }
 void tv_gen_release(tv_gen *g);
 extern const tv_type tv_type_gen;
+/* Whether n bytes at a and b are equal: under 16 inline (two overlapping words, or a few bytes),
+ * longer by 16-byte vectors (tv.c). Faster than memcmp's call for the lengths strings have. */
+TV_PURE bool tv_mem_eq_long(const char *a, const char *b, size_t n);
+static inline bool tv_mem_eq(const char *a, const char *b, size_t n) {
+    if (n >= 16) return tv_mem_eq_long(a, b, n);
+    if (n >= 8) {
+        uint64_t x, y, u, v;
+        memcpy(&x, a, 8), memcpy(&y, b, 8), memcpy(&u, a + n - 8, 8), memcpy(&v, b + n - 8, 8);
+        return !((x ^ y) | (u ^ v));
+    }
+    if (n >= 4) {
+        uint32_t x, y, u, v;
+        memcpy(&x, a, 4), memcpy(&y, b, 4), memcpy(&u, a + n - 4, 4), memcpy(&v, b + n - 4, 4);
+        return !((x ^ y) | (u ^ v));
+    }
+    return n == 0 || (a[0] == b[0] && a[n >> 1] == b[n >> 1] && a[n - 1] == b[n - 1]);
+}
 /* (inline: against a literal, whose length and bytes are constants, it's a length test and a
  * few word compares) */
 static inline bool tv_str_eq(tv_str a, tv_str b) {
-    return a.p == b.p || (a.p->len == b.p->len && memcmp(a.p->data, b.p->data, (size_t)b.p->len) == 0);
+    return a.p == b.p || (a.p->len == b.p->len && tv_mem_eq(a.p->data, b.p->data, (size_t)b.p->len));
 }
 TV_PURE int tv_str_cmp_long(tv_str a, tv_str b);
 /* byte order == code point order (inline: short strings, `a < b` of keys or numbers' text, mostly
@@ -438,14 +455,15 @@ static inline tv_str tv_str_substring(tv_str s, tv_int start, tv_int end, bool h
 /* (inline: against a literal, whose length and bytes are constants, a length test and a word
  * compare) */
 static inline bool tv_str_starts_with(tv_str s, tv_str prefix) {
-    return prefix.p->len <= s.p->len && memcmp(s.p->data, prefix.p->data, (size_t)prefix.p->len) == 0;
+    return prefix.p->len <= s.p->len && tv_mem_eq(s.p->data, prefix.p->data, (size_t)prefix.p->len);
 }
 static inline bool tv_str_ends_with(tv_str s, tv_str suffix) {
-    return suffix.p->len <= s.p->len && memcmp(s.p->data + s.p->len - suffix.p->len, suffix.p->data, (size_t)suffix.p->len) == 0;
+    return suffix.p->len <= s.p->len && tv_mem_eq(s.p->data + s.p->len - suffix.p->len, suffix.p->data, (size_t)suffix.p->len);
 }
 tv_str tv_str_substr(tv_str s, tv_int start, tv_int count, bool has_count);
 TV_PURE tv_int tv_str_index_of(tv_str s, tv_str needle);            /* unit index or -1 */
 TV_PURE tv_int tv_str_index_of_from(tv_str s, tv_str needle, tv_int from);
+TV_PURE tv_int tv_str_sub_len(tv_str s, int kind, tv_int start, tv_int end, bool has_end);
 TV_PURE tv_int tv_str_last_index_of(tv_str s, tv_str needle, tv_int from, bool has_from);
 TV_PURE bool tv_str_includes_at(tv_str s, tv_str needle, tv_int from);
 TV_PURE bool tv_str_starts_with_at(tv_str s, tv_str prefix, tv_int pos);
@@ -572,6 +590,10 @@ void tv_arr_release_slow(tv_arr a, const tv_type *t);
 #else
 #define TV_NOESCAPE
 #endif
+/* The retains of object descriptors (a count first in the object, 32 or 64 bits): copies of
+ * arrays of them retain inline when the descriptor's retain is one of these. */
+void tv_retain_rc32(void *p);
+void tv_retain_rc64(void *p);
 void tv_arrbuf_release_slow(tv_arrbuf *TV_NOESCAPE p, const tv_type *t);
 void tv_arrbuf_free_block(tv_arrbuf *TV_NOESCAPE p, size_t es);
 /* Frees an array's blocks, its elements released: inline when they follow the header and the

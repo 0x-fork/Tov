@@ -3281,8 +3281,9 @@ impl<'c, 'a> Gen<'c, 'a> {
             StmtKind::Expr(e) => {
                 self.push_temps();
                 let v = self.expr(*e);
-                // Keep side effects (and traps) of plain expression values.
-                if !v.owned && !is_trivial(&v.code) {
+                // Keep side effects (and traps) of plain expression values. (A clock read has none:
+                // `performance.now();` alone is nothing.)
+                if !v.owned && !is_trivial(&v.code) && v.code != "tv_performance_now()" {
                     self.line(format!("(void)({});", v.code));
                 }
                 self.pop_temps();
@@ -7052,8 +7053,46 @@ impl<'c, 'a> Gen<'c, 'a> {
 
     // ------------------------------------------------------------ members and indexing
 
+    /// `.length` of `call`, when it's a string's slice, substring or substr of int arguments:
+    /// tv_str_sub_len's answer.
+    fn sub_len(&mut self, call: ExprId) -> Option<Val> {
+        let ast = self.ast(self.cur_m());
+        let ExprKind::Call { callee, args, optional: false, type_args } = &ast.expr(call).kind else { return None };
+        let ExprKind::Member { obj: recv, name: mn, optional: false, .. } = &ast.expr(*callee).kind else { return None };
+        let kind = match self.sym(*mn) {
+            "slice" => 0,
+            "substring" => 1,
+            "substr" => 2,
+            _ => return None,
+        };
+        let (recv, args) = (*recv, args.iter().map(|a| (a.expr, a.by_ref.is_some())).collect::<Vec<_>>());
+        let rt = self.ty(recv);
+        if !type_args.is_empty() || args.len() > 2 || args.iter().any(|&(x, r)| r || self.ty(x) != INT) || !matches!(self.tget(rt), Ty::Str | Ty::StrLit(_)) {
+            return None;
+        }
+        let s = self.expr(recv);
+        let s = self.coerce(s, STR);
+        let mut ints = Vec::new();
+        for &(x, _) in &args {
+            let v = self.expr(x);
+            ints.push(self.int_code(v));
+        }
+        let a = ints.first().cloned().unwrap_or_else(|| "0".into());
+        let (b, has_b) = match ints.get(1) {
+            Some(b) => (b.clone(), "true"),
+            None => ("0".into(), "false"),
+        };
+        Some(Val::plain(format!("tv_str_sub_len({}, {kind}, {a}, {b}, {has_b})", s.code), INT))
+    }
+
     fn member(&mut self, e: ExprId, obj: ExprId, name: crate::intern::Sym, optional: bool, ty: TyId, span: Span) -> Val {
         let m = self.cur_m();
+        // `s.slice(a, b).length` (substring, substr): the length alone, no string made
+        if !optional && self.sym(name) == "length"
+            && let Some(v) = self.sub_len(obj)
+        {
+            return v;
+        }
         // (a property of what an `any` holds)
         if self.ty(obj) == ANY {
             let base = self.expr(obj);

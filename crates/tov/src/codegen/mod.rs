@@ -2010,8 +2010,25 @@ impl<'c, 'a> Gen<'c, 'a> {
             let (rt, rl) = if rc {
                 let r = self.retain_code(t, &format!("*({ct} *)p"));
                 let l = self.release_code(t, &format!("*({ct} *)p"));
-                let _ = writeln!(self.helpers, "static void {key}_rt(void *p) {{ {r}; }}\nstatic void {key}_rl(void *p) {{ {l}; }}");
-                (format!("{key}_rt"), format!("{key}_rl"))
+                // (an object's retain is the runtime's own, so copies of arrays of them retain
+                // inline: a count first, 32 bits for a class's instance, 64 for a boxed record)
+                let shared = match self.tget(t) {
+                    Ty::Class(..) => Some("tv_retain_rc32"),
+                    Ty::Union(_) if self.niche_rec(t).is_none() && self.niche(t).is_some() => Some("tv_retain_rc32"),
+                    Ty::Record(_) if self.is_obj(t) => Some("tv_retain_rc64"),
+                    _ => None,
+                };
+                match shared {
+                    Some(f) => {
+                        let _ = writeln!(self.helpers, "static void {key}_rl(void *p) {{ {l}; }}");
+                        let _ = r;
+                        (f.to_string(), format!("{key}_rl"))
+                    }
+                    None => {
+                        let _ = writeln!(self.helpers, "static void {key}_rt(void *p) {{ {r}; }}\nstatic void {key}_rl(void *p) {{ {l}; }}");
+                        (format!("{key}_rt"), format!("{key}_rl"))
+                    }
+                }
             } else {
                 ("NULL".into(), "NULL".into())
             };
