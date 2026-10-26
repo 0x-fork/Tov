@@ -1,0 +1,10 @@
+import { Buffer } from "node:buffer"
+
+function main() {
+  let value: int = 9223372036854775807
+  for (let i = 0; i < 1; i++) {
+    try Buffer.isBuffer(0)
+    value++
+  }
+  console.log(value)
+}

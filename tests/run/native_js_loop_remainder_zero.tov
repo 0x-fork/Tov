@@ -1,0 +1,11 @@
+import { Buffer } from "node:buffer"
+
+function main() {
+  let value: int = 1
+  const divisor: int = 0
+  for (let i = 0; i < 1; i++) {
+    try Buffer.isBuffer(0)
+    value %= divisor
+  }
+  console.log(value)
+}

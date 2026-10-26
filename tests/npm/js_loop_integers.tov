@@ -1,0 +1,49 @@
+import { add, recordZero, zeroResults, recordValue, valueResults } from "cjs-math"
+
+function wide() {
+  let up: int = 9007199254740992
+  let down: int = -9007199254740992
+  let product: int = 4503599627370497
+  for (let i = 0; i < 1; i++) {
+    try add(i, 1)
+    up++
+    down--
+    product *= 3
+  }
+  console.log(up, down, product)
+}
+
+function intermediates() {
+  const base: int = 4503599627370496
+  const large: int = 9007199254740993
+  for (let i = 0; i < 1; i++) {
+    // The result is small, but each multiplication must keep all 64 integer bits.
+    try recordValue((base + 1) * 3 - base * 3)
+    try recordValue(large % 2)
+  }
+}
+
+function zeros() {
+  const zero: int = 0
+  let flipped: int = 0
+  for (let i = 0; i < 3; i++) {
+    try recordZero(-zero)
+    try recordZero(-i * 0)
+    try recordZero((i - 1) % 1)
+    flipped *= -1
+    try recordZero(flipped)
+  }
+  // Floating-point negative zero remains observable.
+  const floating: f64 = 0.0
+  for (let i = 0; i < 3; i++) {
+    try recordZero(-floating)
+  }
+}
+
+function main() {
+  wide()
+  intermediates()
+  console.log(try valueResults())
+  zeros()
+  console.log(try zeroResults())
+}

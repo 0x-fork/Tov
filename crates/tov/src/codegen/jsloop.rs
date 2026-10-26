@@ -350,6 +350,13 @@ impl<'c, 'a> Gen<'c, 'a> {
             ExprKind::Update { inc, target, .. } => {
                 let (inc, target) = (*inc, *target);
                 let tt = self.ty(target);
+                if tt == INT {
+                    let super::range::R::In(lo, hi) = self.int_range(target) else { return false };
+                    let step = if inc { 1 } else { -1 };
+                    if !Self::jl_exact_int(lo, hi) || !Self::jl_exact_int(lo + step, hi + step) {
+                        return false;
+                    }
+                }
                 if self.jl_kind(tt) != Some(Kind::Num) || !self.jl_local(target, lw) {
                     return false;
                 }
@@ -360,6 +367,9 @@ impl<'c, 'a> Gen<'c, 'a> {
                 let (op, target, value) = (*op, *target, *value);
                 let (tt, vt) = (self.ty(target), self.ty(value));
                 let (tk, vk) = (self.jl_kind(tt), self.jl_kind(vt));
+                if tt == INT && !self.jl_int_assign(op, target, value) {
+                    return false;
+                }
                 let ok = match op {
                     AssignOp::Assign => tk.is_some() && tk == vk,
                     AssignOp::Op(BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Rem) => tk == Some(Kind::Num) && vk == Some(Kind::Num),
@@ -418,6 +428,47 @@ impl<'c, 'a> Gen<'c, 'a> {
     }
 
     fn jl_expr(&mut self, e: ExprId, lw: &mut Lower) -> bool {
+        let int = self.ty(e) == INT;
+        if int && !matches!(self.int_range(e), super::range::R::In(lo, hi) if Self::jl_exact_int(lo, hi)) {
+            return false;
+        }
+        let native_int = int && !self.js_ints(self.cur_m());
+        // Native integers have only one zero. JavaScript's negation, product and remainder can
+        // produce -0, which must become +0 before an npm call or property access can observe it.
+        if native_int {
+            lw.src.push_str("(0 + (");
+        }
+        let ok = self.jl_expr_inner(e, lw);
+        if native_int {
+            lw.src.push_str("))");
+        }
+        ok
+    }
+
+    fn jl_exact_int(lo: i128, hi: i128) -> bool {
+        const LIMIT: i128 = (1 << 53) - 1;
+        lo >= -LIMIT && hi <= LIMIT
+    }
+
+    /// Integer assignments still have Tov's precision and trap behavior. If the existing range
+    /// analysis can't prove the operands and result exact as JavaScript numbers, keep the loop
+    /// in native code, including its overflow and zero-divisor checks.
+    fn jl_int_assign(&mut self, op: AssignOp, target: ExprId, value: ExprId) -> bool {
+        let (super::range::R::In(a, b), super::range::R::In(c, d)) = (self.int_range(target), self.int_range(value)) else { return false };
+        if !Self::jl_exact_int(a, b) || !Self::jl_exact_int(c, d) {
+            return false;
+        }
+        match op {
+            AssignOp::Assign => true,
+            AssignOp::Op(BinOp::Add) => Self::jl_exact_int(a + c, b + d),
+            AssignOp::Op(BinOp::Sub) => Self::jl_exact_int(a - d, b - c),
+            AssignOp::Op(BinOp::Mul) => [a * c, a * d, b * c, b * d].iter().all(|&n| Self::jl_exact_int(n, n)),
+            AssignOp::Op(BinOp::Rem) => c > 0 || d < 0,
+            _ => false,
+        }
+    }
+
+    fn jl_expr_inner(&mut self, e: ExprId, lw: &mut Lower) -> bool {
         let m = self.cur_m();
         let ast = self.ast(m);
         let t = self.ty(e);
