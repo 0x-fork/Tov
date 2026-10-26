@@ -221,7 +221,9 @@ def main():
         p.wait(timeout=30)
     runs = {n: [] for n in names}
     for rep in range(args.reps):
-        for n in names:
+        # (who goes first alternates: a runtime started after another's load test finds the
+        # machine as that one left it, its memory being given back, its page cache taken)
+        for n in (names if rep % 2 == 0 else names[::-1]):
             r = run_once(n, args.secs)
             runs[n].append(r)
             print(f"rep {rep + 1} {n}: " + " ".join(f"{k}={v:.1f}" if isinstance(v, float) else f"{k}={v}" for k, v in r.items()), flush=True)
