@@ -2691,6 +2691,91 @@ impl<'c, 'a> Gen<'c, 'a> {
     /// (`parts.join("")`) and counted (`parts.length`), by its function itself (no closure, no
     /// other use): a string builder holds the joined text instead of an array of strings, the
     /// separator written as each string is pushed after the first. Its separator, or None.
+    /// Whether JavaScript-valued local `key` lives only in its function's stack frame: the
+    /// function isn't async or a generator (their frames are on the heap), no closure uses the
+    /// local, and every use reads a property of it, calls a method of it, passes it as an
+    /// argument (a callee that keeps it roots it itself), compares it, or tests it.
+    pub(crate) fn js_stack_local(&mut self, key: u32) -> bool {
+        if self.b().async_fn.is_some() || self.b().gen_elem.is_some() {
+            return false;
+        }
+        let m = self.cur_m();
+        let Some(root) = self.b().root.or(self.b().arrow_root) else { return false };
+        let ast = self.ast(m);
+        let mut all = Vec::new();
+        collect_exprs_stmt(ast, root, &mut all);
+        let facts = self.facts(m);
+        let is_k = |e: ExprId| matches!(ast.expr(e).kind, ExprKind::Ident(_)) && matches!(facts.idents.get(&e), Some(IdentFact::Local(k)) if *k == key);
+        let mut in_arrows: FxSet<ExprId> = FxSet::default();
+        let mut allowed: FxSet<ExprId> = FxSet::default();
+        for &e in &all {
+            match &ast.expr(e).kind {
+                ExprKind::Arrow(f) => {
+                    let mut xs = Vec::new();
+                    match &f.body {
+                        ArrowBody::Expr(x) => collect_exprs_expr(ast, *x, &mut xs),
+                        ArrowBody::Block(b) => collect_exprs_stmt(ast, *b, &mut xs),
+                    }
+                    in_arrows.extend(xs);
+                }
+                ExprKind::Member { obj, .. } | ExprKind::Index { obj, .. } if is_k(*obj) => {
+                    allowed.insert(*obj);
+                }
+                ExprKind::Call { args, .. } | ExprKind::New { args, .. } => {
+                    for a in args {
+                        if is_k(a.expr) && a.by_ref.is_none() {
+                            allowed.insert(a.expr);
+                        }
+                    }
+                }
+                ExprKind::Binary(op, l, r) if matches!(op, BinOp::Eq | BinOp::Ne | BinOp::LooseEq | BinOp::LooseNe) => {
+                    for x in [*l, *r] {
+                        if is_k(x) {
+                            allowed.insert(x);
+                        }
+                    }
+                }
+                ExprKind::Unary(UnOp::Not, x) | ExprKind::Typeof(x) if is_k(*x) => {
+                    allowed.insert(*x);
+                }
+                _ => {}
+            }
+        }
+        // (a member written, `r.x = v`: still a read of r; r itself assigned: not this)
+        for &e in &all {
+            if let ExprKind::Assign(_, t, _) | ExprKind::Update { target: t, .. } = &ast.expr(e).kind
+                && is_k(*t)
+            {
+                return false;
+            }
+        }
+        // (conditions: `if (r)`, `while (r)`)
+        let mut conds: FxSet<ExprId> = FxSet::default();
+        let mut stmts = vec![root];
+        while let Some(st) = stmts.pop() {
+            match &ast.stmt(st).kind {
+                StmtKind::Block(xs) => stmts.extend(xs.iter().copied()),
+                StmtKind::If(c, t, e) => {
+                    conds.insert(*c);
+                    stmts.push(*t);
+                    stmts.extend(e.iter().copied());
+                }
+                StmtKind::While(c, b) | StmtKind::DoWhile(b, c) => {
+                    conds.insert(*c);
+                    stmts.push(*b);
+                }
+                StmtKind::For { init, body, .. } => {
+                    stmts.extend(init.iter().copied());
+                    stmts.push(*body);
+                }
+                StmtKind::ForOf { body, .. } => stmts.push(*body),
+                StmtKind::Try { .. } | StmtKind::Switch(..) => return false,
+                _ => {}
+            }
+        }
+        all.iter().all(|&e| !is_k(e) || ((allowed.contains(&e) || conds.contains(&e)) && !in_arrows.contains(&e)))
+    }
+
     pub(crate) fn builder_local(&mut self, key: u32, init: ExprId, ty: TyId) -> Option<String> {
         let m = self.cur_m();
         let Ty::Array(et) = self.tget(ty) else { return None };
@@ -3580,6 +3665,20 @@ impl<'c, 'a> Gen<'c, 'a> {
                     && (object || !self.b().mutated.contains(&key))
                     && !self.b().boxed.contains(&key)
                     && (self.stable_path(*i) || object && self.quiet_path(*i))
+                {
+                    self.line(format!("{ct} {cname} = {};", v.code));
+                    self.pop_temps();
+                    self.b().locals.insert(key, Local { access: cname, ty });
+                    return;
+                }
+                // `const r = lib.call(...)` of a JavaScript value read only here (its properties,
+                // passed on, compared): it stays on this function's stack, where the engine's
+                // collector finds it by itself, so it needn't be rooted (see `js_stack_local`)
+                if let (false, Some(_), Some(v)) = (*mutable, init, &value)
+                    && ty == JS
+                    && !v.owned
+                    && !self.b().boxed.contains(&key)
+                    && self.js_stack_local(key)
                 {
                     self.line(format!("{ct} {cname} = {};", v.code));
                     self.pop_temps();
