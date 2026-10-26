@@ -81,7 +81,7 @@ export class RegExp {
   readonly unicode: bool
   readonly dotAll: bool
   readonly hasIndices: bool
-  constructor(pattern: string, flags?: string) {
+  constructor(pattern: string, flags?: string) throws SyntaxError {
     this.h = __native.reCompile(pattern, flags ?? "")
     if (this.h < 0) {
       __reInvalid(__native.takeError())
@@ -397,11 +397,11 @@ export function encodeURI(s: string): string {
   return __uriEncode(s, ";,/?:@&=+$#")
 }
 
-export function decodeURIComponent(s: string): string {
+export function decodeURIComponent(s: string): string throws URIError {
   return __uriDecode(s, "")
 }
 
-export function decodeURI(s: string): string {
+export function decodeURI(s: string): string throws URIError {
   return __uriDecode(s, ";,/?:@&=+$#")
 }
 
@@ -790,24 +790,24 @@ function __reGroup(s: string, p: int[], n: int, k: int): string {
 
 /** `s.replace(p, r)` (`replaceAll`, `split`) of a pattern that's a string or a RegExp: by what it is. */
 // `x.replace(/re/, y)` and so on of an `any` (see the checker's): a string's, when it holds one.
-export function __anyReplaceRe(x: any, re: RegExp, rep: any): any {
+export function __anyReplaceRe(x: any, re: RegExp, rep: any): any throws Error {
   if (typeof x === "string" && typeof rep === "string") return __reReplace(x, re, rep)
   return x.replace(re, rep)
 }
-export function __anyReplaceAllRe(x: any, re: RegExp, rep: any): any {
+export function __anyReplaceAllRe(x: any, re: RegExp, rep: any): any throws Error {
   if (typeof x === "string" && typeof rep === "string") return __reReplace(x, re, rep)
   return x.replaceAll(re, rep)
 }
-export function __anySplitRe(x: any, re: RegExp): any {
-  if (typeof x === "string") return x.split(re)
+export function __anySplitRe(x: any, re: RegExp): any throws Error {
+  if (typeof x === "string") return __reSplit(x, re)
   return x.split(re)
 }
-export function __anyMatchRe(x: any, re: RegExp): any {
-  if (typeof x === "string") return x.match(re)
+export function __anyMatchRe(x: any, re: RegExp): any throws Error {
+  if (typeof x === "string") return __reMatch(x, re)
   return x.match(re)
 }
-export function __anySearchRe(x: any, re: RegExp): any {
-  if (typeof x === "string") return x.search(re)
+export function __anySearchRe(x: any, re: RegExp): any throws Error {
+  if (typeof x === "string") return __reSearch(x, re)
   return x.search(re)
 }
 export function __replaceSR(s: string, pat: string | RegExp, rep: string): string {

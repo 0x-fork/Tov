@@ -107,6 +107,13 @@ pub fn check_paths_with(paths: &[PathBuf], base: &Path, threads: Option<usize>) 
 /// nothing more (a few rounds: each can reach callers one level further).
 pub fn rewrite_rounds(modules: &mut [Module], interner: &mut crate::intern::Interner, sm: &SourceMap, mut rw: check::rewrite::Rewrites) {
     for _ in 0..4 {
+        if std::env::var("TOV_TRACE").is_ok() {
+            eprintln!("rewrites: {}", rw.summary());
+            for (m, e, f) in &rw.calls {
+                let sp = modules[*m as usize].ast.exprs[*e as usize].span;
+                eprintln!("  call {m} at {}..{} -> {}", sp.start, sp.end, interner.get(*f));
+            }
+        }
         if !check::rewrite::apply(modules, &rw) {
             return;
         }

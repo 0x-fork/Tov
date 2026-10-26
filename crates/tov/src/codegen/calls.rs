@@ -1172,6 +1172,11 @@ impl<'c, 'a> Gen<'c, 'a> {
                 self.line(format!("tv_sb_push_str(&{sb}, {}); {n}++;", v.code));
                 return Val::plain(n, INT);
             }
+            // (`return parts.join("")`: the builder isn't read again, its buffer becomes the
+            // string; a `finally` could still push, so not inside one)
+            if self.return_span == Some(span) && self.b().finallies.is_empty() {
+                return self.tmp(STR, &format!("tv_str_from_sb(&{sb})"), true);
+            }
             return self.tmp(STR, &format!("tv_str_from({sb}.data ? {sb}.data : \"\", {sb}.len)"), true);
         }
         // `new Array<T>(n).fill(v)`: made with n copies of v, each element written once

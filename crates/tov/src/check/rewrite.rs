@@ -114,6 +114,126 @@ pub struct Rewrites {
 }
 
 impl Rewrites {
+    /// (for TOV_TRACE: the kinds of rewrite found, with how many)
+    pub(crate) fn summary(&self) -> String {
+        let mut out = Vec::new();
+        if !self.args.is_empty() {
+            out.push(format!("args {}", self.args.len()));
+        }
+        if !self.truthy.is_empty() {
+            out.push(format!("truthy {}", self.truthy.len()));
+        }
+        if !self.has_own.is_empty() {
+            out.push(format!("has_own {}", self.has_own.len()));
+        }
+        if !self.ns_calls.is_empty() {
+            out.push(format!("ns_calls {}", self.ns_calls.len()));
+        }
+        if !self.flat_chains.is_empty() {
+            out.push(format!("flat_chains {}", self.flat_chains.len()));
+        }
+        if !self.elem_methods.is_empty() {
+            out.push(format!("elem_methods {}", self.elem_methods.len()));
+        }
+        if !self.prims.is_empty() {
+            out.push(format!("prims {}", self.prims.len()));
+        }
+        if !self.tuple_places.is_empty() {
+            out.push(format!("tuple_places {}", self.tuple_places.len()));
+        }
+        if !self.nonnulls.is_empty() {
+            out.push(format!("nonnulls {}", self.nonnulls.len()));
+        }
+        if !self.record_casts.is_empty() {
+            out.push(format!("record_casts {}", self.record_casts.len()));
+        }
+        if !self.records.is_empty() {
+            out.push(format!("records {}", self.records.len()));
+        }
+        if !self.fn_values.is_empty() {
+            out.push(format!("fn_values {}", self.fn_values.len()));
+        }
+        if !self.enum_names.is_empty() {
+            out.push(format!("enum_names {}", self.enum_names.len()));
+        }
+        if !self.rests.is_empty() {
+            out.push(format!("rests {}", self.rests.len()));
+        }
+        if !self.setters.is_empty() {
+            out.push(format!("setters {}", self.setters.len()));
+        }
+        if !self.static_calls.is_empty() {
+            out.push(format!("static_calls {}", self.static_calls.len()));
+        }
+        if !self.logical.is_empty() {
+            out.push(format!("logical {}", self.logical.len()));
+        }
+        if !self.widen_casts.is_empty() {
+            out.push(format!("widen_casts {}", self.widen_casts.len()));
+        }
+        if !self.assigns.is_empty() {
+            out.push(format!("assigns {}", self.assigns.len()));
+        }
+        if !self.identities.is_empty() {
+            out.push(format!("identities {}", self.identities.len()));
+        }
+        if !self.keyed_places.is_empty() {
+            out.push(format!("keyed_places {}", self.keyed_places.len()));
+        }
+        if !self.iterators.is_empty() {
+            out.push(format!("iterators {}", self.iterators.len()));
+        }
+        if !self.consts.is_empty() {
+            out.push(format!("consts {}", self.consts.len()));
+        }
+        if !self.items.is_empty() {
+            out.push(format!("items {}", self.items.len()));
+        }
+        if !self.awaits.is_empty() {
+            out.push(format!("awaits {}", self.awaits.len()));
+        }
+        if !self.calls.is_empty() {
+            out.push(format!("calls {}", self.calls.len()));
+        }
+        if !self.elems.is_empty() {
+            out.push(format!("elems {}", self.elems.len()));
+        }
+        if !self.rest_lits.is_empty() {
+            out.push(format!("rest_lits {}", self.rest_lits.len()));
+        }
+        if !self.rest_indexes.is_empty() {
+            out.push(format!("rest_indexes {}", self.rest_indexes.len()));
+        }
+        if !self.str_members.is_empty() {
+            out.push(format!("str_members {}", self.str_members.len()));
+        }
+        if !self.at_places.is_empty() {
+            out.push(format!("at_places {}", self.at_places.len()));
+        }
+        if !self.fn_methods.is_empty() {
+            out.push(format!("fn_methods {}", self.fn_methods.len()));
+        }
+        if !self.empty_objects.is_empty() {
+            out.push(format!("empty_objects {}", self.empty_objects.len()));
+        }
+        if !self.split_lits.is_empty() {
+            out.push(format!("split_lits {}", self.split_lits.len()));
+        }
+        if !self.method_values.is_empty() {
+            out.push(format!("method_values {}", self.method_values.len()));
+        }
+        if !self.keys.is_empty() {
+            out.push(format!("keys {}", self.keys.len()));
+        }
+        if !self.spreads.is_empty() {
+            out.push(format!("spreads {}", self.spreads.len()));
+        }
+        if !self.keyed.is_empty() {
+            out.push(format!("keyed {}", self.keyed.len()));
+        }
+        out.join(", ")
+    }
+
     pub fn is_empty(&self) -> bool {
         self.args.is_empty() && self.truthy.is_empty() && self.has_own.is_empty() && self.ns_calls.is_empty() && self.flat_chains.is_empty() && self.elem_methods.is_empty() && self.prims.is_empty() && self.tuple_places.is_empty() && self.nonnulls.is_empty() && self.record_casts.is_empty() && self.records.is_empty() && self.fn_values.is_empty() && self.enum_names.is_empty() && self.rests.is_empty() && self.setters.is_empty() && self.static_calls.is_empty() && self.logical.is_empty() && self.widen_casts.is_empty() && self.assigns.is_empty() && self.identities.is_empty() && self.keyed_places.is_empty() && self.iterators.is_empty() && self.consts.is_empty() && self.items.is_empty() && self.awaits.is_empty() && self.calls.is_empty() && self.elems.is_empty() && self.rest_lits.is_empty() && self.rest_indexes.is_empty() && self.str_members.is_empty() && self.at_places.is_empty() && self.fn_methods.is_empty() && self.empty_objects.is_empty() && self.split_lits.is_empty() && self.method_values.is_empty() && self.keys.is_empty() && self.spreads.is_empty() && self.keyed.is_empty()
     }

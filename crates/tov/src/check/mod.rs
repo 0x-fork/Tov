@@ -618,6 +618,13 @@ pub fn check_program_rewrites(modules: &[Module], interner: &mut Interner, sm: &
         rounds += 1;
         let (out, used, hits, (throws, globals), rw) = check_program_once(modules, interner, sm, threads, syms, Arc::new(spec::Spec { on, floats: floats.clone(), throwing: throwing.clone(), float_globals: float_globals.clone() }));
         if spec::more_throwing(&mut throwing, &throws) | spec::more_throwing(&mut float_globals, &globals) {
+            if std::env::var("TOV_TRACE").is_ok() {
+                eprintln!("check again: throwing {:?}, float globals {:?}", throws.len(), globals.len());
+                for (m, st) in &throws {
+                    let sp = modules[*m as usize].ast.stmts[*st as usize].span;
+                    eprintln!("  throws: module {m} at {}..{}", sp.start, sp.end);
+                }
+            }
             continue;
         }
         if on
@@ -2301,7 +2308,9 @@ impl<'a> Checker<'a> {
             result = r;
             // A body that throws where its signature was taken not to (it only calls something
             // that throws): its callers are checked again knowing it can.
-            if thrown != NEVER && f.throws.is_none() && sig.throws == NEVER {
+            // (an async function declared `Promise<T, E>`: what it throws rejects with `E`, as
+            // its signature says already)
+            if thrown != NEVER && f.throws.is_none() && sig.throws == NEVER && !(f.is_async && f.ret.is_some()) {
                 self.throw_hits.push((m, f.body));
             }
             let new: Vec<u32> = fcx.pending.difference(&promoted).copied().collect();

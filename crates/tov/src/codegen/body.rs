@@ -4120,10 +4120,13 @@ impl<'c, 'a> Gen<'c, 'a> {
                             }
                             _ => None,
                         };
+                        // (what's returned, by its span: a builder joined there gives its text up)
+                        let outer_ret = self.return_span.replace(self.ast(m).expr(*x).span);
                         let val = match held {
                             Some(l) => Val::plain(l.access, l.ty),
                             None => self.expr(*x),
                         };
+                        self.return_span = outer_ret;
                         let val = self.coerce(val, ret);
                         let code = self.consume(val);
                         let ct = self.ctype(ret);

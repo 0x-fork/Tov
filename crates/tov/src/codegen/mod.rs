@@ -446,6 +446,8 @@ pub(crate) struct Gen<'c, 'a> {
     pub(crate) arrow_last: FxMap<(u32, ExprId), (String, String)>,
     /// The array local the current statement stores an element of (`xs[i] = ...`).
     pub(crate) store_arr: Option<u32>,
+    /// The span of the expression a `return` is evaluating (see `method_on`'s builders).
+    pub(crate) return_span: Option<crate::source::Span>,
     /// While a self-recursive function's copy is emitted: its own calls go to this function
     /// instead ((module, item, type arguments) → the next copy; see `emit_function`).
     pub(crate) recur: Option<(u32, u32, Vec<(u32, TyId)>, String)>,
@@ -588,6 +590,7 @@ impl<'c, 'a> Gen<'c, 'a> {
             direct_counts: FxMap::default(),
             arrow_last: FxMap::default(),
             store_arr: None,
+            return_span: None,
             recur: None,
             unassigned_params: FxMap::default(),
             uses_tls: false,

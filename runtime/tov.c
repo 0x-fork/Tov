@@ -4231,7 +4231,7 @@ static int64_t tv_find(const char *h, size_t hn, const char *nd, size_t nn, size
     while (p <= last) {
         p = (const char *)memchr(p, first, (size_t)(last - p) + 1);
         if (!p) return -1;
-        if (memcmp(p + 1, nd + 1, nn - 1) == 0) return p - h;
+        if (tv_mem_eq(p + 1, nd + 1, nn - 1)) return p - h;
         p++;
     }
     return -1;
@@ -5966,7 +5966,7 @@ static inline __attribute__((always_inline)) void *tv_map_slot_bytes(tv_map *mp,
         if ((i & ~emask) == tag && tv_entry_hash(e) == h) {
             tv_str k;
             memcpy(&k, e + 8, sizeof k);
-            if ((size_t)k.p->len == n && memcmp(k.p->data, p, n) == 0) {
+            if ((size_t)k.p->len == n && tv_mem_eq(k.p->data, p, n)) {
                 if (given) tv_str_release(key);
                 *inserted = false;
                 return e + L.voff;
