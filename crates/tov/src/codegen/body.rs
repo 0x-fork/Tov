@@ -3505,6 +3505,10 @@ impl<'c, 'a> Gen<'c, 'a> {
                 self.line(format!("__builtin_assume(({access}).p->len == {n});"));
             }
         }
+        // (a loop that is all JavaScript's: run as one JavaScript function)
+        if self.js_loop(s) {
+            return;
+        }
         // `outer: for (...)`: `break outer` jumps past it, `continue outer` to its next round
         let label = self.ast(m).labels.iter().find(|(st, _)| *st == s).map(|x| x.1);
         let Some(label) = label else { return self.stmt_inner(s) };

@@ -23,6 +23,7 @@ mod frame;
 pub(crate) mod class;
 mod iface;
 mod js;
+mod jsloop;
 mod json;
 mod moves;
 mod writes;

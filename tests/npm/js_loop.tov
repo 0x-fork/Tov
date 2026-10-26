@@ -1,0 +1,85 @@
+import { add, fail, point, Counter } from "cjs-math"
+
+// Loops that are all JavaScript's run as one JavaScript function; the locals they change are
+// back in Tov's hands after, and an error thrown inside passes on as from Tov's own loop.
+
+// numbers and booleans changed in the loop, `continue` and `break`, a nested loop
+function sums(n: number): number {
+  let total = 0
+  let odd = 0
+  let seen = false
+  let scale = 0.5
+  for (let i = 0; i < n; i++) {
+    if (i % 2 === 0) continue
+    const p = try point(i, add(i, 1))
+    if (p.nested.ok) {
+      odd++
+    }
+    if (i > 7) break
+    total += i * 2
+    scale = scale * 2.0
+    seen = true
+    let j = 0
+    while (j < 3) {
+      j++
+      total -= 1
+    }
+  }
+  console.log("sums:", total, odd, seen, scale)
+  return total
+}
+
+// an error thrown in the third round: the caller catches it
+function failing(): number {
+  let count = 0
+  for (let i = 0; i < 10; i++) {
+    count++
+    if (i === 3) {
+      try fail("stop")
+    }
+  }
+  return count
+}
+
+// inside a `try` in the same function: run round by round, the count seen where it stopped
+function partial(): number {
+  let count = 0
+  try {
+    for (let i = 0; i < 10; i++) {
+      count++
+      if (i === 3) {
+        try fail("partial")
+      }
+    }
+  } catch (e) {
+    console.log("partial: caught at", count)
+  }
+  return count
+}
+
+function main() {
+  sums(20)
+  try {
+    console.log("never:", failing())
+  } catch (e) {
+    console.log("failing: caught", e.name, e.message)
+  }
+  partial()
+  // a JavaScript object the loop only reads, changed through its methods
+  const c = try new Counter(10)
+  for (let i = 0; i < 5; i++) {
+    try c.inc()
+  }
+  console.log("counter:", c.value)
+  // the loop of the zod benchmark's shape, a do-while too
+  let ok = 0
+  let k = 0
+  do {
+    const r = try point(k, k)
+    if (r.nested.ok) {
+      ok++
+    }
+    k++
+  } while (k < 1000)
+  console.log("ok:", ok, k)
+}

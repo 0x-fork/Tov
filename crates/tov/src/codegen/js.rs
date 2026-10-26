@@ -29,7 +29,7 @@ pub(crate) struct JsGen {
 }
 
 impl<'c, 'a> Gen<'c, 'a> {
-    fn js_used(&mut self) {
+    pub(crate) fn js_used(&mut self) {
         if !self.js.used {
             self.js.used = true;
             let make = self.js_error_factory();
@@ -786,7 +786,7 @@ impl<'c, 'a> Gen<'c, 'a> {
 }
 
 /// `.name`, `?.name`, or `["name"]` / `?.["name"]` for names that aren't identifiers.
-fn js_access(out: &mut String, name: &str, optional: bool) {
+pub(crate) fn js_access(out: &mut String, name: &str, optional: bool) {
     let ident = name.chars().next().is_some_and(|c| c.is_ascii_alphabetic() || c == '_' || c == '$') && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '$');
     match (ident, optional) {
         (true, false) => {

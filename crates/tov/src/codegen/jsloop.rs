@@ -1,0 +1,701 @@
+//! A loop that is all JavaScript's to run: calls into npm packages and the numbers and booleans
+//! around them, nothing of Tov's own (strings built, collections, closures). It runs as one
+//! JavaScript function: one call into the engine for the whole loop rather than one or more each
+//! round, and the engine's compilers see the loop with what it calls, as they would in Bun.
+
+use super::{c_string, Gen, Val};
+use crate::ast::{AssignOp, BinOp, ExprId, ExprKind, ItemKind, StmtId, StmtKind, UnOp};
+use crate::check::{Callee, IdentFact};
+use crate::hash::{FxMap, FxSet};
+use crate::types::*;
+use std::fmt::Write;
+
+/// What's passed in: an outer local (by key), or a value evaluated before the loop.
+enum Param {
+    Local(u32),
+    Expr(ExprId),
+}
+
+#[derive(Default)]
+struct Lower {
+    src: String,
+    /// Locals declared in the loop.
+    inner: FxSet<u32>,
+    /// Outer locals the loop assigns: copied in, and back out when it ends.
+    outs: Vec<u32>,
+    params: Vec<Param>,
+    /// An outer local's parameter, by key.
+    param_of: FxMap<u32, usize>,
+    /// JavaScript operations (calls, `new`, property reads, objects made).
+    ops: usize,
+    /// Inside a JavaScript operation's operands (part of its tree, not one of its own).
+    in_js: usize,
+}
+
+/// A Tov value JavaScript holds as the same value: a number, a boolean, or a JavaScript value.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Kind {
+    Num,
+    Bool,
+    Js,
+}
+
+impl<'c, 'a> Gen<'c, 'a> {
+    /// The loop `s` as one JavaScript function, if all of it is JavaScript's to run; false (and
+    /// nothing emitted) otherwise.
+    pub(crate) fn js_loop(&mut self, s: StmtId) -> bool {
+        let m = self.cur_m();
+        let ast = self.ast(m);
+        if !matches!(ast.stmt(s).kind, StmtKind::For { .. } | StmtKind::While(..) | StmtKind::DoWhile(..)) {
+            return false;
+        }
+        // (an error leaves the function, so what the loop changed is never seen half done)
+        if !self.b().handlers.is_empty() || ast.labels.iter().any(|(st, _)| *st == s) {
+            return false;
+        }
+        let mut lw = Lower::default();
+        let mut assigned = FxSet::default();
+        if !self.jl_scan(s, &mut lw.inner, &mut assigned) {
+            return false;
+        }
+        let mut outs: Vec<u32> = assigned.difference(&lw.inner).copied().collect();
+        outs.sort_unstable();
+        for &k in &outs {
+            // (an outer local the loop changes: a number or boolean nothing else holds)
+            if self.b().boxed.contains(&k) {
+                return false;
+            }
+            let Some(l) = self.b().locals.get(&k) else { return false };
+            let t = l.ty;
+            if !matches!(self.tget(t), Ty::Int | Ty::F64 | Ty::Bool) {
+                return false;
+            }
+        }
+        for &k in &outs {
+            let p = lw.params.len();
+            lw.params.push(Param::Local(k));
+            let _ = write!(lw.src, "let v{k} = a{p}; ");
+        }
+        lw.outs = outs;
+        if !self.jl_stmt(s, &mut lw) || lw.ops == 0 {
+            return false;
+        }
+        match lw.outs.len() {
+            0 => {}
+            1 => {
+                let _ = write!(lw.src, " return v{};", lw.outs[0]);
+            }
+            _ => {
+                let names: Vec<String> = lw.outs.iter().map(|k| format!("v{k}")).collect();
+                let _ = write!(lw.src, " return [{}];", names.join(", "));
+            }
+        }
+        self.js_used();
+        self.push_temps();
+        let mut argv = Vec::new();
+        for p in std::mem::take(&mut lw.params) {
+            let v = match p {
+                Param::Local(k) => {
+                    let l = self.b().locals[&k].clone();
+                    Val::plain(l.access, l.ty)
+                }
+                Param::Expr(e) => self.expr(e),
+            };
+            let j = self.js_of(v);
+            argv.push(j.code);
+        }
+        let slot = self.fresh("bmgjl");
+        let _ = writeln!(self.lits, "static JSObjectRef {slot};");
+        let argv_c = if argv.is_empty() { "NULL".to_string() } else { format!("(JSValueRef[]){{{}}}", argv.join(", ")) };
+        let (x, r) = (self.fresh("jx"), self.fresh("jr"));
+        let src = c_string(lw.src.as_bytes());
+        self.line(format!("JSValueRef {x} = NULL; JSValueRef {r} = tv_js_thunk(&{slot}, {src}, {}, {argv_c}, &{x});", argv.len()));
+        self.open(&format!("if (!{r}) tvg_err = tvg_js_make_error({x}); else {{"));
+        for (i, &k) in lw.outs.iter().enumerate() {
+            let l = self.b().locals[&k].clone();
+            let v = if lw.outs.len() == 1 {
+                r.clone()
+            } else {
+                let (ex, ev) = (self.fresh("jx"), self.fresh("j"));
+                self.line(format!("JSValueRef {ex} = NULL; JSValueRef {ev} = tv_js_index({r}, {i}, &{ex});"));
+                ev
+            };
+            match self.tget(l.ty) {
+                Ty::Bool => self.line(format!("{} = tv_js_truthy({v});", l.access)),
+                Ty::Int => {
+                    let d = self.fresh("d");
+                    self.line(format!("double {d} = 0; tv_js_as_num({v}, &{d}); {} = (tv_int){d};", l.access));
+                }
+                _ => {
+                    let d = self.fresh("d");
+                    self.line(format!("double {d} = 0; tv_js_as_num({v}, &{d}); {} = {d};", l.access));
+                }
+            }
+        }
+        self.close("}");
+        self.pop_temps();
+        self.error_check();
+        true
+    }
+
+    /// The locals the loop declares and assigns; false if it has a statement JavaScript can't run.
+    fn jl_scan(&mut self, s: StmtId, inner: &mut FxSet<u32>, assigned: &mut FxSet<u32>) -> bool {
+        let m = self.cur_m();
+        let ast = self.ast(m);
+        let mut exprs = Vec::new();
+        match &ast.stmt(s).kind {
+            StmtKind::Empty | StmtKind::Break(None) | StmtKind::Continue(None) => {}
+            StmtKind::Let { name_span, init: Some(init), .. } => {
+                inner.insert(name_span.start);
+                exprs.push(*init);
+            }
+            StmtKind::Expr(e) => exprs.push(*e),
+            StmtKind::If(c, t, e) => {
+                exprs.push(*c);
+                if !self.jl_scan(*t, inner, assigned) || e.is_some_and(|e| !self.jl_scan(e, inner, assigned)) {
+                    return false;
+                }
+            }
+            StmtKind::While(c, b) | StmtKind::DoWhile(b, c) => {
+                exprs.push(*c);
+                if !self.jl_scan(*b, inner, assigned) {
+                    return false;
+                }
+            }
+            StmtKind::For { init, cond, step, body } => {
+                exprs.extend(cond.iter().chain(step.iter()).copied());
+                if init.is_some_and(|i| !self.jl_scan(i, inner, assigned)) || !self.jl_scan(*body, inner, assigned) {
+                    return false;
+                }
+            }
+            StmtKind::Block(ss) => {
+                for &x in ss {
+                    if !self.jl_scan(x, inner, assigned) {
+                        return false;
+                    }
+                }
+            }
+            _ => return false,
+        }
+        let mut all = Vec::new();
+        for e in exprs {
+            super::body::collect_exprs_expr(ast, e, &mut all);
+        }
+        for e in all {
+            let target = match &ast.expr(e).kind {
+                ExprKind::Assign(_, t, _) => *t,
+                ExprKind::Update { target, .. } => *target,
+                _ => continue,
+            };
+            match (&ast.expr(target).kind, self.ident_fact(m, target)) {
+                (ExprKind::Ident(_), Some(IdentFact::Local(k))) => {
+                    assigned.insert(k);
+                }
+                _ => return false,
+            }
+        }
+        true
+    }
+
+    fn jl_kind(&mut self, t: TyId) -> Option<Kind> {
+        match self.tget(t) {
+            Ty::Int | Ty::F64 => Some(Kind::Num),
+            Ty::Bool | Ty::BoolLit(_) => Some(Kind::Bool),
+            Ty::Js => Some(Kind::Js),
+            _ => None,
+        }
+    }
+
+    fn jl_stmt(&mut self, s: StmtId, lw: &mut Lower) -> bool {
+        let m = self.cur_m();
+        let ast = self.ast(m);
+        match &ast.stmt(s).kind {
+            StmtKind::Empty => true,
+            StmtKind::Break(None) => {
+                lw.src.push_str("break; ");
+                true
+            }
+            StmtKind::Continue(None) => {
+                lw.src.push_str("continue; ");
+                true
+            }
+            StmtKind::Block(ss) => {
+                lw.src.push_str("{ ");
+                for &x in ss {
+                    if !self.jl_stmt(x, lw) {
+                        return false;
+                    }
+                }
+                lw.src.push_str("} ");
+                true
+            }
+            StmtKind::Let { mutable, name_span, init: Some(init), .. } => {
+                let (k, init, mutable) = (name_span.start, *init, *mutable);
+                let Some(&bt) = self.facts(m).bindings.get(&s) else { return false };
+                let bt = self.inst(bt);
+                let it = self.ty(init);
+                if self.b().boxed.contains(&k) || self.jl_kind(bt).is_none() || self.jl_kind(bt) != self.jl_kind(it) {
+                    return false;
+                }
+                let _ = write!(lw.src, "{} v{k} = ", if mutable { "let" } else { "const" });
+                if !self.jl_expr(init, lw) {
+                    return false;
+                }
+                lw.src.push_str("; ");
+                true
+            }
+            StmtKind::Expr(e) => {
+                let e = *e;
+                if !self.jl_effect(e, lw) {
+                    return false;
+                }
+                lw.src.push_str("; ");
+                true
+            }
+            StmtKind::If(c, t, e) => {
+                let (c, t, e) = (*c, *t, *e);
+                lw.src.push_str("if (");
+                if !self.jl_cond(c, lw) {
+                    return false;
+                }
+                lw.src.push_str(") ");
+                if !self.jl_stmt(t, lw) {
+                    return false;
+                }
+                if let Some(e) = e {
+                    lw.src.push_str("else ");
+                    if !self.jl_stmt(e, lw) {
+                        return false;
+                    }
+                }
+                true
+            }
+            StmtKind::While(c, b) => {
+                let (c, b) = (*c, *b);
+                lw.src.push_str("while (");
+                if !self.jl_cond(c, lw) {
+                    return false;
+                }
+                lw.src.push_str(") ");
+                self.jl_stmt(b, lw)
+            }
+            StmtKind::DoWhile(b, c) => {
+                let (c, b) = (*c, *b);
+                lw.src.push_str("do ");
+                if !self.jl_stmt(b, lw) {
+                    return false;
+                }
+                lw.src.push_str("while (");
+                if !self.jl_cond(c, lw) {
+                    return false;
+                }
+                lw.src.push_str("); ");
+                true
+            }
+            StmtKind::For { init, cond, step, body } => {
+                let (init, cond, step, body) = (*init, *cond, *step, *body);
+                lw.src.push_str("{ ");
+                if let Some(i) = init
+                    && !self.jl_stmt(i, lw)
+                {
+                    return false;
+                }
+                lw.src.push_str("for (; ");
+                if let Some(c) = cond
+                    && !self.jl_cond(c, lw)
+                {
+                    return false;
+                }
+                lw.src.push_str("; ");
+                if let Some(st) = step
+                    && !self.jl_effect(st, lw)
+                {
+                    return false;
+                }
+                lw.src.push_str(") ");
+                if !self.jl_stmt(body, lw) {
+                    return false;
+                }
+                lw.src.push_str("} ");
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// A condition: a boolean, number or JavaScript value, tested as JavaScript tests it.
+    fn jl_cond(&mut self, e: ExprId, lw: &mut Lower) -> bool {
+        let t = self.ty(e);
+        self.jl_kind(t).is_some() && self.jl_expr(e, lw)
+    }
+
+    /// An expression statement (or a `for` step): an assignment to a local, or a JavaScript
+    /// operation run for what it does.
+    fn jl_effect(&mut self, e: ExprId, lw: &mut Lower) -> bool {
+        let m = self.cur_m();
+        let ast = self.ast(m);
+        match &ast.expr(e).kind {
+            ExprKind::Paren(x) => self.jl_effect(*x, lw),
+            ExprKind::Seq(xs) => {
+                for (i, &x) in xs.clone().iter().enumerate() {
+                    if i > 0 {
+                        lw.src.push_str(", ");
+                    }
+                    if !self.jl_effect(x, lw) {
+                        return false;
+                    }
+                }
+                true
+            }
+            ExprKind::Update { inc, target, .. } => {
+                let (inc, target) = (*inc, *target);
+                let tt = self.ty(target);
+                if self.jl_kind(tt) != Some(Kind::Num) || !self.jl_local(target, lw) {
+                    return false;
+                }
+                lw.src.push_str(if inc { "++" } else { "--" });
+                true
+            }
+            ExprKind::Assign(op, target, value) => {
+                let (op, target, value) = (*op, *target, *value);
+                let (tt, vt) = (self.ty(target), self.ty(value));
+                let (tk, vk) = (self.jl_kind(tt), self.jl_kind(vt));
+                let ok = match op {
+                    AssignOp::Assign => tk.is_some() && tk == vk,
+                    AssignOp::Op(BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Rem) => tk == Some(Kind::Num) && vk == Some(Kind::Num),
+                    AssignOp::Op(BinOp::Div) => self.tget(tt) == Ty::F64 && vk == Some(Kind::Num),
+                    _ => false,
+                };
+                if !ok || !self.jl_local(target, lw) {
+                    return false;
+                }
+                lw.src.push_str(match op {
+                    AssignOp::Assign => " = ",
+                    AssignOp::Op(BinOp::Add) => " += ",
+                    AssignOp::Op(BinOp::Sub) => " -= ",
+                    AssignOp::Op(BinOp::Mul) => " *= ",
+                    AssignOp::Op(BinOp::Div) => " /= ",
+                    _ => " %= ",
+                });
+                self.jl_expr(value, lw)
+            }
+            _ => {
+                // (a JavaScript operation's result unused; nothing else is worth running)
+                let mut x = e;
+                while let ExprKind::Paren(y) | ExprKind::Try(y) = &ast.expr(x).kind {
+                    x = *y;
+                }
+                self.jl_is_op(x) && self.jl_expr(e, lw)
+            }
+        }
+    }
+
+    /// An assignment's target: a local declared in the loop, or one copied in and out.
+    fn jl_local(&mut self, e: ExprId, lw: &mut Lower) -> bool {
+        let m = self.cur_m();
+        match self.ident_fact(m, e) {
+            Some(IdentFact::Local(k)) if lw.inner.contains(&k) || lw.outs.contains(&k) => {
+                let _ = write!(lw.src, "v{k}");
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// `e` a JavaScript operation (on a JavaScript value, or making one from a literal).
+    fn jl_is_op(&mut self, e: ExprId) -> bool {
+        let m = self.cur_m();
+        let ast = self.ast(m);
+        match &ast.expr(e).kind {
+            ExprKind::Member { obj, .. } | ExprKind::Index { obj, .. } => {
+                let t = self.ty(*obj);
+                t == JS
+            }
+            ExprKind::Call { .. } => matches!(self.facts(m).calls.get(&e).map(|c| &c.callee), Some(Callee::Js { .. })),
+            ExprKind::New { .. } => matches!(self.facts(m).calls.get(&e).map(|c| &c.callee), Some(Callee::JsNew)),
+            _ => false,
+        }
+    }
+
+    fn jl_expr(&mut self, e: ExprId, lw: &mut Lower) -> bool {
+        let m = self.cur_m();
+        let ast = self.ast(m);
+        let t = self.ty(e);
+        if self.jl_is_op(e) {
+            // (the tree's root: its error is one that passes on, as it would from Tov's code)
+            if self.ty(e) != JS || (lw.in_js == 0 && !self.facts(m).throwing.contains(&e)) {
+                return false;
+            }
+            lw.ops += 1;
+            lw.in_js += 1;
+            let ok = self.jl_op(e, lw);
+            lw.in_js -= 1;
+            return ok;
+        }
+        match &ast.expr(e).kind {
+            ExprKind::Paren(x) => {
+                let x = *x;
+                lw.src.push('(');
+                let ok = self.jl_expr(x, lw);
+                lw.src.push(')');
+                ok
+            }
+            ExprKind::Try(x) => self.jl_expr(*x, lw),
+            ExprKind::Int(v) if *v < (1u64 << 53) => {
+                let _ = write!(lw.src, "{v}");
+                true
+            }
+            ExprKind::Float(x) if x.is_finite() => {
+                let _ = write!(lw.src, "{x:?}");
+                true
+            }
+            ExprKind::Bool(b) => {
+                lw.src.push_str(if *b { "true" } else { "false" });
+                true
+            }
+            ExprKind::Undefined if lw.in_js > 0 => {
+                lw.src.push_str("undefined");
+                true
+            }
+            ExprKind::Null if lw.in_js > 0 => {
+                lw.src.push_str("null");
+                true
+            }
+            ExprKind::Str(s) if lw.in_js > 0 && matches!(self.tget(t), Ty::Str | Ty::StrLit(_) | Ty::Js) => {
+                let text = crate::npm::bundle::js_string(self.sym(*s));
+                lw.src.push_str(&text);
+                true
+            }
+            // (an object literal made into a JavaScript object, as a fused call makes it)
+            ExprKind::Object(fields) if lw.in_js > 0 && matches!(self.tget(t), Ty::Record(_)) => {
+                let fields: Vec<_> = fields.iter().map(|f| (f.name, f.value)).collect();
+                lw.ops += 1;
+                lw.src.push('{');
+                for (i, (name, value)) in fields.into_iter().enumerate() {
+                    if i > 0 {
+                        lw.src.push_str(", ");
+                    }
+                    let key = crate::npm::bundle::js_string(self.sym(name));
+                    let _ = write!(lw.src, "{key}: ");
+                    if !self.jl_expr(value, lw) {
+                        return false;
+                    }
+                }
+                lw.src.push('}');
+                true
+            }
+            ExprKind::Ident(_) => self.jl_ident(e, t, lw),
+            ExprKind::Unary(op, x) => {
+                let (op, x) = (*op, *x);
+                let xt = self.ty(x);
+                let xk = self.jl_kind(xt);
+                match op {
+                    UnOp::Not if xk.is_some() => lw.src.push_str("!("),
+                    UnOp::Neg if xk == Some(Kind::Num) => lw.src.push_str("(-"),
+                    _ => return false,
+                }
+                let ok = self.jl_expr(x, lw);
+                lw.src.push(')');
+                ok
+            }
+            ExprKind::Binary(op, a, b) => {
+                let (op, a, b) = (*op, *a, *b);
+                let (at, bt) = (self.ty(a), self.ty(b));
+                let (ak, bk) = (self.jl_kind(at), self.jl_kind(bt));
+                let num = ak == Some(Kind::Num) && bk == Some(Kind::Num);
+                let text = match op {
+                    BinOp::Add if num => "+",
+                    BinOp::Sub if num => "-",
+                    BinOp::Mul if num => "*",
+                    BinOp::Rem if num => "%",
+                    BinOp::Div if num && self.tget(t) == Ty::F64 => "/",
+                    BinOp::Lt if num => "<",
+                    BinOp::Gt if num => ">",
+                    BinOp::Le if num => "<=",
+                    BinOp::Ge if num => ">=",
+                    BinOp::Eq if ak == bk && matches!(ak, Some(Kind::Num | Kind::Bool)) => "===",
+                    BinOp::Ne if ak == bk && matches!(ak, Some(Kind::Num | Kind::Bool)) => "!==",
+                    BinOp::And if ak == Some(Kind::Bool) && bk == Some(Kind::Bool) => "&&",
+                    BinOp::Or if ak == Some(Kind::Bool) && bk == Some(Kind::Bool) => "||",
+                    _ => return false,
+                };
+                lw.src.push('(');
+                if !self.jl_expr(a, lw) {
+                    return false;
+                }
+                let _ = write!(lw.src, " {text} ");
+                if !self.jl_expr(b, lw) {
+                    return false;
+                }
+                lw.src.push(')');
+                true
+            }
+            ExprKind::Cond(c, a, b) => {
+                let (c, a, b) = (*c, *a, *b);
+                let (at, bt) = (self.ty(a), self.ty(b));
+                let k = self.jl_kind(t);
+                if !matches!(k, Some(Kind::Num | Kind::Bool)) || self.jl_kind(at) != k || self.jl_kind(bt) != k {
+                    return false;
+                }
+                lw.src.push('(');
+                if !self.jl_cond(c, lw) {
+                    return false;
+                }
+                lw.src.push_str(" ? ");
+                if !self.jl_expr(a, lw) {
+                    return false;
+                }
+                lw.src.push_str(" : ");
+                if !self.jl_expr(b, lw) {
+                    return false;
+                }
+                lw.src.push(')');
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// A name: a local of the loop's, one copied in and out, or a value the loop only reads
+    /// (passed in once: nothing in the loop can change it).
+    fn jl_ident(&mut self, e: ExprId, t: TyId, lw: &mut Lower) -> bool {
+        let m = self.cur_m();
+        match self.ident_fact(m, e) {
+            Some(IdentFact::Local(k)) if lw.inner.contains(&k) || lw.outs.contains(&k) => {
+                let _ = write!(lw.src, "v{k}");
+                true
+            }
+            Some(IdentFact::Local(k)) => {
+                let Some(l) = self.b().locals.get(&k) else { return false };
+                let lt = l.ty;
+                if !matches!(self.tget(lt), Ty::Int | Ty::F64 | Ty::Bool | Ty::Js | Ty::Str) {
+                    return false;
+                }
+                let p = match lw.param_of.get(&k) {
+                    Some(&p) => p,
+                    None => {
+                        let p = lw.params.len();
+                        lw.params.push(Param::Local(k));
+                        lw.param_of.insert(k, p);
+                        p
+                    }
+                };
+                let _ = write!(lw.src, "a{p}");
+                true
+            }
+            Some(IdentFact::Npm(..)) => {
+                let _ = write!(lw.src, "a{}", lw.params.len());
+                lw.params.push(Param::Expr(e));
+                true
+            }
+            Some(IdentFact::Const(cm, item)) => {
+                let fixed = matches!(&self.ast(cm).items[item as usize].kind, ItemKind::Const { mutable: false, .. });
+                if !fixed || !matches!(self.tget(t), Ty::Int | Ty::F64 | Ty::Bool | Ty::Js | Ty::Str) {
+                    return false;
+                }
+                let _ = write!(lw.src, "a{}", lw.params.len());
+                lw.params.push(Param::Expr(e));
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// A JavaScript operation, its operands part of the same tree.
+    fn jl_op(&mut self, e: ExprId, lw: &mut Lower) -> bool {
+        let m = self.cur_m();
+        let ast = self.ast(m);
+        match &ast.expr(e).kind {
+            ExprKind::Member { obj, name, optional, .. } => {
+                let (obj, name, optional) = (*obj, *name, *optional);
+                if !self.jl_operand(obj, lw) {
+                    return false;
+                }
+                let text = self.sym(name).to_string();
+                super::js::js_access(&mut lw.src, &text, optional);
+                true
+            }
+            ExprKind::Index { obj, index, optional } => {
+                let (obj, index, optional) = (*obj, *index, *optional);
+                if !self.jl_operand(obj, lw) {
+                    return false;
+                }
+                lw.src.push_str(if optional { "?.[" } else { "[" });
+                if !self.jl_expr(index, lw) {
+                    return false;
+                }
+                lw.src.push(']');
+                true
+            }
+            ExprKind::Call { callee, args, optional, .. } => {
+                let Some(Callee::Js { method }) = self.facts(m).calls.get(&e).map(|c| c.callee.clone()) else { return false };
+                let (callee, optional) = (*callee, *optional);
+                if args.iter().any(|a| a.by_ref.is_some() || matches!(ast.expr(a.expr).kind, ExprKind::Spread(_))) {
+                    return false;
+                }
+                let args: Vec<ExprId> = args.iter().map(|a| a.expr).collect();
+                match (&ast.expr(callee).kind, method) {
+                    (ExprKind::Member { obj, name, optional: mopt, .. }, Some(_)) => {
+                        let (obj, name, mopt) = (*obj, *name, *mopt);
+                        if !self.jl_operand(obj, lw) {
+                            return false;
+                        }
+                        let text = self.sym(name).to_string();
+                        super::js::js_access(&mut lw.src, &text, mopt);
+                    }
+                    _ => {
+                        if !self.jl_operand(callee, lw) {
+                            return false;
+                        }
+                    }
+                }
+                lw.src.push_str(if optional { "?.(" } else { "(" });
+                for (i, a) in args.into_iter().enumerate() {
+                    if i > 0 {
+                        lw.src.push_str(", ");
+                    }
+                    if !self.jl_expr(a, lw) {
+                        return false;
+                    }
+                }
+                lw.src.push(')');
+                true
+            }
+            ExprKind::New { callee, args, .. } => {
+                let callee = *callee;
+                if args.iter().any(|a| a.by_ref.is_some() || matches!(ast.expr(a.expr).kind, ExprKind::Spread(_))) {
+                    return false;
+                }
+                let args: Vec<ExprId> = args.iter().map(|a| a.expr).collect();
+                lw.src.push_str("new (");
+                if !self.jl_expr(callee, lw) {
+                    return false;
+                }
+                lw.src.push_str(")(");
+                for (i, a) in args.into_iter().enumerate() {
+                    if i > 0 {
+                        lw.src.push_str(", ");
+                    }
+                    if !self.jl_expr(a, lw) {
+                        return false;
+                    }
+                }
+                lw.src.push(')');
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// A JavaScript operation's object: a name as it is, anything else in parentheses.
+    fn jl_operand(&mut self, e: ExprId, lw: &mut Lower) -> bool {
+        let m = self.cur_m();
+        if matches!(self.ast(m).expr(e).kind, ExprKind::Ident(_)) {
+            return self.jl_expr(e, lw);
+        }
+        lw.src.push('(');
+        let ok = self.jl_expr(e, lw);
+        lw.src.push(')');
+        ok
+    }
+}
