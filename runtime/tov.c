@@ -204,6 +204,17 @@ static void tv_sb_unmap(char *p, size_t size) {
     if (p) munmap(p, size);
 }
 
+/* Grows the mapping at p from `have` bytes to `size` in place, without copying its pages, when
+ * the address space after it is free (a hint, which the kernel takes when it can); NULL if not.
+ * (No other imports: each costs every program's binary its stub, fixup and symbol.) */
+static char *tv_sb_remap(char *p, size_t have, size_t size) {
+    char *end = p + have;
+    void *q = mmap(end, size - have, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON, -1, 0);
+    if (q == (void *)end) return p;
+    if (q != MAP_FAILED) munmap(q, size - have);
+    return NULL;
+}
+
 static void tv_sb_cache_flush(void) {
     os_unfair_lock_lock(&tv_sb_cache_lock);
     for (int i = 0; i < TV_SB_CACHE_SLOTS; i++)
@@ -223,6 +234,7 @@ static void tv_sb_cache_flush(void) {}
 static void tv_sb_unmap(char *p, size_t size) { (void)size; free(p); }  /* (never mapped here) */
 static size_t tv_sb_map_size(size_t cap) { return cap; }
 static char *tv_sb_map(size_t cap) { return (char *)tv_alloc(cap); }
+static char *tv_sb_remap(char *p, size_t have, size_t size) { (void)p; (void)have; (void)size; return NULL; }
 #endif
 
 static inline void tv_sb_release_buf(char *base, size_t cap) {
@@ -252,10 +264,15 @@ void tv_sb_grow(tv_sb *sb, size_t need) {
         if (old) memcpy(base + TV_STR_HDR, sb->data, sb->len);
         if (old) tv_sb_release_buf(old, sb->cap);
     } else if (TV_SB_MAPPED(cap)) {
-        base = tv_sb_map(cap);
+        base = old && TV_SB_MAPPED(sb->cap) ? tv_sb_remap(old, tv_sb_map_size(sb->cap), tv_sb_map_size(cap)) : NULL;
+        if (!base) base = tv_sb_map(cap);
+        else old = NULL;
         if (old) {
             memcpy(base + TV_STR_HDR, sb->data, sb->len);
-            tv_sb_release_buf(old, sb->cap);
+            /* (an outgrown mapped buffer goes back, not into the cache: a builder doubling to
+             * 8 MB would keep its every smaller size) */
+            if (TV_SB_MAPPED(sb->cap)) munmap(old, tv_sb_map_size(sb->cap));
+            else tv_sb_release_buf(old, sb->cap);
         }
         cap = tv_sb_map_size(cap) - TV_STR_HDR - 1;   /* (the whole of its pages) */
     } else if (old && TV_SB_SMALL(sb->cap)) {
@@ -5715,26 +5732,88 @@ static size_t tv_mapbuf_bytes(int64_t cap, tv_mlayout L) {
     bytes = tv_size_mul_add((size_t)cap * 2, sizeof(uint32_t), bytes);
     return bytes <= TV_MAPBUF_SMALL ? (bytes + 15) & ~(size_t)15 : bytes;
 }
+/* Big stores on macOS map their entries (after the header) and their index apart, not from
+ * malloc: a store the map outgrows goes straight back (its allocator keeps freed large blocks
+ * dirty, a k-mer count's every size), and the entries grow in place when they can, only the
+ * index built again. */
+#ifdef TV_SB_MAPS
+#define TV_MAPBUF_MAPPED(bytes) ((bytes) >= ((size_t)128 << 10))
+#else
+#define TV_MAPBUF_MAPPED(bytes) false
+#endif
+static size_t tv_mapbuf_entry_bytes(int64_t cap, tv_mlayout L) {
+    size_t page = (size_t)getpagesize();
+    return (sizeof(tv_mapbuf) + (size_t)cap * L.stride + page - 1) & ~(page - 1);
+}
+static size_t tv_mapbuf_index_bytes(int64_t cap) {
+    size_t page = (size_t)getpagesize();
+    return ((size_t)cap * 2 * sizeof(uint32_t) + page - 1) & ~(page - 1);
+}
+static void *tv_map_pages(size_t size) {
+    void *p = mmap(NULL, size, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON, -1, 0);
+    if (TV_UNLIKELY(p == MAP_FAILED)) tv_oom(size);
+    return p;
+}
+
 static void tv_mapbuf_free(tv_mapbuf *m, tv_mlayout L) {
     size_t bytes = tv_mapbuf_bytes(m->cap, L);
     if (bytes <= TV_MAPBUF_SMALL) tv_small_free(m, bytes);
-    else free(m);
+    else if (TV_MAPBUF_MAPPED(bytes)) {
+        munmap(m->index, tv_mapbuf_index_bytes(m->cap));
+        munmap(m, tv_mapbuf_entry_bytes(m->cap, L));
+    } else free(m);
+}
+
+static void tv_mapbuf_size(tv_mapbuf *m, int64_t cap) {
+    m->cap = cap;
+    m->mask = (uint64_t)cap * 2 - 1;
+    m->emask = ((uint64_t)1 << (64 - __builtin_clzll((uint64_t)cap))) - 1;
 }
 
 static tv_mapbuf *tv_mapbuf_new(int64_t cap, tv_mlayout L) {
     if (cap > ((int64_t)1 << 31)) tv_trap("map too large", NULL);
     size_t islots = (size_t)cap * 2;
     size_t bytes = tv_mapbuf_bytes(cap, L);
-    tv_mapbuf *m = (tv_mapbuf *)(bytes <= TV_MAPBUF_SMALL ? tv_small_alloc(bytes) : tv_alloc(bytes));
+    tv_mapbuf *m;
+    if (TV_MAPBUF_MAPPED(bytes)) { /* (fresh pages: the index is zeros already) */
+        m = (tv_mapbuf *)tv_map_pages(tv_mapbuf_entry_bytes(cap, L));
+        m->index = (uint32_t *)tv_map_pages(tv_mapbuf_index_bytes(cap));
+    } else {
+        m = (tv_mapbuf *)(bytes <= TV_MAPBUF_SMALL ? tv_small_alloc(bytes) : tv_alloc(bytes));
+        m->index = (uint32_t *)(void *)(m->entries + (size_t)cap * L.stride);
+        memset(m->index, 0, islots * sizeof(uint32_t));
+    }
     m->rc = 1;
     m->count = m->used = 0;
-    m->cap = cap;
-    m->mask = islots - 1;
-    m->index = (uint32_t *)(void *)(m->entries + (size_t)cap * L.stride);
     m->first = 0;
-    m->emask = ((uint64_t)1 << (64 - __builtin_clzll((uint64_t)cap))) - 1;
-    memset(m->index, 0, islots * sizeof(uint32_t));
+    tv_mapbuf_size(m, cap);
     return m;
+}
+
+/* A mapped store grown to `cap` entries: its pages extended in place if the address space after
+ * them is free, else moved (one copy, the old pages unmapped), and its index built again; NULL if
+ * it isn't mapped. */
+static tv_mapbuf *tv_mapbuf_grow(tv_mapbuf *m, tv_mlayout L, int64_t cap) {
+    if (!TV_MAPBUF_MAPPED(tv_mapbuf_bytes(m->cap, L)) || cap > ((int64_t)1 << 31)) return NULL;
+    size_t have = tv_mapbuf_entry_bytes(m->cap, L), want = tv_mapbuf_entry_bytes(cap, L);
+    /* (the index first: it's often what lies just after the entries, and never both at once) */
+    munmap(m->index, tv_mapbuf_index_bytes(m->cap));
+    tv_mapbuf *n = (tv_mapbuf *)(void *)tv_sb_remap((char *)m, have, want);
+    if (!n) {
+        n = (tv_mapbuf *)tv_map_pages(want);
+        memcpy(n, m, sizeof(tv_mapbuf) + (size_t)m->used * L.stride);
+        munmap(m, have);
+    }
+    tv_mapbuf_size(n, cap);
+    n->index = (uint32_t *)tv_map_pages(tv_mapbuf_index_bytes(cap));
+    for (int64_t i = n->first; i < n->used; i++) {
+        uint64_t h = tv_entry_hash(tv_entry(n, L, i));
+        if (!h) continue;
+        uint64_t pos = h & n->mask;
+        while (n->index[pos]) pos = (pos + 1) & n->mask;
+        n->index[pos] = tv_slot_of(n, h, i);
+    }
+    return n;
 }
 
 /* New buffer with the live entries of `old` (compacted). retain: clone (retain keys and
@@ -5871,8 +5950,11 @@ static unsigned char *tv_map_add(tv_map *mp, tv_mapbuf *m, tv_mlayout L, const t
     if (m->used == m->cap) {
         /* full: compact if at least half the entries are deleted, else double */
         int64_t ncap = m->count * 2 <= m->cap ? m->cap : m->cap * 2;
-        tv_mapbuf *n = tv_map_rebuild(m, L, ncap, false, kt, vt);
-        tv_mapbuf_free(m, L);
+        tv_mapbuf *n = ncap > m->cap ? tv_mapbuf_grow(m, L, ncap) : NULL;
+        if (!n) {
+            n = tv_map_rebuild(m, L, ncap, false, kt, vt);
+            tv_mapbuf_free(m, L);
+        }
         mp->p->b = m = n;
         pos = h & m->mask;
         while (m->index[pos]) pos = (pos + 1) & m->mask;
