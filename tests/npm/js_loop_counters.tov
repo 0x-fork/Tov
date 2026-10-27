@@ -1,0 +1,36 @@
+import { add, recordValue, valueResults } from "cjs-math"
+
+// Counters stepped by constants in a counted loop: run in JavaScript when where they start
+// keeps every value exact there, natively (with the same results) when it doesn't.
+function counts(start: int): string {
+  let n: int = start
+  let odd: int = start
+  for (let i = 0; i < 10; i++) {
+    try add(i, 1)
+    if (i % 2 === 1) {
+      odd += 2
+    }
+    n++
+    try recordValue(n)
+  }
+  return `${n} ${odd}`
+}
+
+function down(start: int): int {
+  let n: int = start
+  for (let i = 0; i <= 4; i++) {
+    try add(i, 0)
+    n -= 3
+  }
+  return n
+}
+
+function main() {
+  // (the counter read in JavaScript: exact there)
+  console.log(counts(0))
+  console.log(counts(9007199254740000))
+  console.log(try valueResults())
+  console.log(counts(9007199254740990))
+  console.log(counts(9223372036854775000))
+  console.log(down(0), down(-9007199254740980), down(-9223372036854775000))
+}

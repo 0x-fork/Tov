@@ -30,6 +30,21 @@ struct Lower {
     ops: usize,
     /// Inside a JavaScript operation's operands (part of its tree, not one of its own).
     in_js: usize,
+    /// Integer counters the loop steps by constants, exact because of the check on entry (see
+    /// `jl_guards`).
+    guarded: FxSet<u32>,
+}
+
+/// What `js_loop` emitted.
+#[derive(PartialEq, Eq)]
+pub(crate) enum JsLoop {
+    /// Nothing: the loop is native code's.
+    No,
+    /// The whole loop.
+    Done,
+    /// The loop when its counters' values on entry let it run in JavaScript (an `if` left open
+    /// for the caller's native loop, then `}`).
+    Guarded,
 }
 
 /// A Tov value JavaScript holds as the same value: a number, a boolean, or a JavaScript value.
@@ -41,36 +56,38 @@ enum Kind {
 }
 
 impl<'c, 'a> Gen<'c, 'a> {
-    /// The loop `s` as one JavaScript function, if all of it is JavaScript's to run; false (and
-    /// nothing emitted) otherwise.
-    pub(crate) fn js_loop(&mut self, s: StmtId) -> bool {
+    /// The loop `s` as one JavaScript function, if all of it is JavaScript's to run (nothing
+    /// emitted otherwise).
+    pub(crate) fn js_loop(&mut self, s: StmtId) -> JsLoop {
         let m = self.cur_m();
         let ast = self.ast(m);
         if !matches!(ast.stmt(s).kind, StmtKind::For { .. } | StmtKind::While(..) | StmtKind::DoWhile(..)) {
-            return false;
+            return JsLoop::No;
         }
         // (an error leaves the function, so what the loop changed is never seen half done)
         if !self.b().handlers.is_empty() || ast.labels.iter().any(|(st, _)| *st == s) {
-            return false;
+            return JsLoop::No;
         }
         let mut lw = Lower::default();
         let mut assigned = FxSet::default();
         if !self.jl_scan(s, &mut lw.inner, &mut assigned) {
-            return false;
+            return JsLoop::No;
         }
         let mut outs: Vec<u32> = assigned.difference(&lw.inner).copied().collect();
         outs.sort_unstable();
         for &k in &outs {
             // (an outer local the loop changes: a number or boolean nothing else holds)
             if self.b().boxed.contains(&k) {
-                return false;
+                return JsLoop::No;
             }
-            let Some(l) = self.b().locals.get(&k) else { return false };
+            let Some(l) = self.b().locals.get(&k) else { return JsLoop::No };
             let t = l.ty;
             if !matches!(self.tget(t), Ty::Int | Ty::F64 | Ty::Bool) {
-                return false;
+                return JsLoop::No;
             }
         }
+        let Some(guards) = self.jl_guards(s, &outs) else { return JsLoop::No };
+        lw.guarded = guards.iter().map(|g| g.0).collect();
         for &k in &outs {
             let p = lw.params.len();
             lw.params.push(Param::Local(k));
@@ -78,7 +95,7 @@ impl<'c, 'a> Gen<'c, 'a> {
         }
         lw.outs = outs;
         if !self.jl_stmt(s, &mut lw) || lw.ops == 0 {
-            return false;
+            return JsLoop::No;
         }
         match lw.outs.len() {
             0 => {}
@@ -91,6 +108,10 @@ impl<'c, 'a> Gen<'c, 'a> {
             }
         }
         self.js_used();
+        if !guards.is_empty() {
+            let checks: Vec<String> = guards.iter().map(|&(k, b)| format!("{0} >= -INT64_C({b}) && {0} <= INT64_C({b})", self.b().locals[&k].access)).collect();
+            self.open(&format!("if ({}) {{", checks.join(" && ")));
+        }
         self.push_temps();
         let mut argv = Vec::new();
         for p in std::mem::take(&mut lw.params) {
@@ -135,7 +156,101 @@ impl<'c, 'a> Gen<'c, 'a> {
         self.close("}");
         self.pop_temps();
         self.error_check();
-        true
+        if guards.is_empty() {
+            return JsLoop::Done;
+        }
+        self.close("}");
+        self.open("else {");
+        JsLoop::Guarded
+    }
+
+    /// The `int` counters of the loop's that only step by constants (`ok++`, `n += 2`) and that
+    /// range analysis can't bound, with how far from zero each may start for JavaScript's numbers
+    /// to hold every value it takes exactly. A counted loop's rounds are bounded by its
+    /// variable's range: at most K × rounds of steps, K what a round's steps add up to (none in
+    /// a loop nested in it). `None` if a counter isn't one of those; empty if there are none.
+    fn jl_guards(&mut self, s: StmtId, outs: &[u32]) -> Option<Vec<(u32, i128)>> {
+        let m = self.cur_m();
+        let ast = self.ast(m);
+        let mut all = Vec::new();
+        super::body::collect_exprs_stmt_pub(ast, s, &mut all);
+        let occurs = |g: &mut Self, k: u32| all.iter().copied().find(|&e| matches!(ast.expr(e).kind, ExprKind::Ident(_)) && g.ident_fact(m, e) == Some(IdentFact::Local(k)));
+        let mut want = Vec::new();
+        for &k in outs {
+            if self.b().locals.get(&k).is_none_or(|l| l.ty != INT) {
+                continue;
+            }
+            let Some(e) = occurs(self, k) else { continue };
+            if !matches!(self.int_range(e), super::range::R::In(lo, hi) if Self::jl_exact_int(lo, hi)) {
+                want.push(k);
+            }
+        }
+        if want.is_empty() {
+            return Some(Vec::new());
+        }
+        // (the rounds: `for (let i = a; i < n; i++)`, nothing else changing i)
+        let StmtKind::For { init: Some(init), cond: Some(cond), step: Some(step), body } = &ast.stmt(s).kind else { return None };
+        let (init, cond, step, body) = (*init, *cond, *step, *body);
+        let StmtKind::Let { name_span, .. } = &ast.stmt(init).kind else { return None };
+        let ik = name_span.start;
+        let is_i = |g: &mut Self, e: ExprId| matches!(ast.expr(e).kind, ExprKind::Ident(_)) && g.ident_fact(m, e) == Some(IdentFact::Local(ik));
+        let iv = match &ast.expr(cond).kind {
+            ExprKind::Binary(BinOp::Lt | BinOp::Le, l, _) if is_i(self, *l) => *l,
+            _ => return None,
+        };
+        let steps_up = match &ast.expr(step).kind {
+            ExprKind::Update { target, inc: true, .. } => is_i(self, *target),
+            ExprKind::Assign(AssignOp::Op(BinOp::Add), t, v) => is_i(self, *t) && matches!(ast.expr(*v).kind, ExprKind::Int(1)),
+            _ => false,
+        };
+        if !steps_up {
+            return None;
+        }
+        let mut inner = Vec::new();
+        super::body::collect_exprs_stmt_pub(ast, body, &mut inner);
+        super::body::collect_exprs_expr(ast, cond, &mut inner);
+        for &e in &inner {
+            let t = match &ast.expr(e).kind {
+                ExprKind::Assign(_, t, _) | ExprKind::Update { target: t, .. } => *t,
+                _ => continue,
+            };
+            if is_i(self, t) {
+                return None;
+            }
+        }
+        let super::range::R::In(lo, hi) = self.int_range(iv) else { return None };
+        let rounds = hi - lo + 1;
+        // (what's in a loop nested in this one runs any number of times a round)
+        let mut nested = Vec::new();
+        jl_nested(ast, body, &mut nested);
+        let nested: FxSet<ExprId> = nested.into_iter().collect();
+        let mut guards = Vec::new();
+        for k in want {
+            let mut per_round: i128 = 0;
+            for &e in &all {
+                let (t, by) = match &ast.expr(e).kind {
+                    ExprKind::Update { target, .. } => (*target, Some(1)),
+                    ExprKind::Assign(AssignOp::Op(BinOp::Add | BinOp::Sub), t, v) => match ast.expr(*v).kind {
+                        ExprKind::Int(c) if c < (1 << 32) => (*t, Some(c as i128)),
+                        _ => (*t, None),
+                    },
+                    ExprKind::Assign(_, t, _) => (*t, None),
+                    _ => continue,
+                };
+                if self.ident_fact(m, t) != Some(IdentFact::Local(k)) {
+                    continue;
+                }
+                let by = by.filter(|_| !nested.contains(&e))?;
+                per_round += by;
+            }
+            const LIMIT: i128 = (1 << 53) - 1;
+            let reach = per_round.checked_mul(rounds)?;
+            if reach > LIMIT / 2 {
+                return None;
+            }
+            guards.push((k, LIMIT - reach));
+        }
+        Some(guards)
     }
 
     /// The locals the loop declares and assigns; false if it has a statement JavaScript can't run.
@@ -350,7 +465,7 @@ impl<'c, 'a> Gen<'c, 'a> {
             ExprKind::Update { inc, target, .. } => {
                 let (inc, target) = (*inc, *target);
                 let tt = self.ty(target);
-                if tt == INT {
+                if tt == INT && !self.jl_guarded(target, lw) {
                     let super::range::R::In(lo, hi) = self.int_range(target) else { return false };
                     let step = if inc { 1 } else { -1 };
                     if !Self::jl_exact_int(lo, hi) || !Self::jl_exact_int(lo + step, hi + step) {
@@ -367,7 +482,9 @@ impl<'c, 'a> Gen<'c, 'a> {
                 let (op, target, value) = (*op, *target, *value);
                 let (tt, vt) = (self.ty(target), self.ty(value));
                 let (tk, vk) = (self.jl_kind(tt), self.jl_kind(vt));
-                if tt == INT && !self.jl_int_assign(op, target, value) {
+                // (a guarded counter's steps were checked by `jl_guards`)
+                let stepped = self.jl_guarded(target, lw) && matches!(op, AssignOp::Op(BinOp::Add | BinOp::Sub)) && matches!(ast.expr(value).kind, ExprKind::Int(_));
+                if tt == INT && !stepped && !self.jl_int_assign(op, target, value) {
                     return false;
                 }
                 let ok = match op {
@@ -429,7 +546,7 @@ impl<'c, 'a> Gen<'c, 'a> {
 
     fn jl_expr(&mut self, e: ExprId, lw: &mut Lower) -> bool {
         let int = self.ty(e) == INT;
-        if int && !matches!(self.int_range(e), super::range::R::In(lo, hi) if Self::jl_exact_int(lo, hi)) {
+        if int && !self.jl_guarded(e, lw) && !matches!(self.int_range(e), super::range::R::In(lo, hi) if Self::jl_exact_int(lo, hi)) {
             return false;
         }
         let native_int = int && !self.js_ints(self.cur_m());
@@ -443,6 +560,12 @@ impl<'c, 'a> Gen<'c, 'a> {
             lw.src.push_str("))");
         }
         ok
+    }
+
+    /// `e` names a counter exact because of the check on entry.
+    fn jl_guarded(&mut self, e: ExprId, lw: &Lower) -> bool {
+        let m = self.cur_m();
+        matches!(self.ast(m).expr(e).kind, ExprKind::Ident(_)) && matches!(self.ident_fact(m, e), Some(IdentFact::Local(k)) if lw.guarded.contains(&k))
     }
 
     fn jl_exact_int(lo: i128, hi: i128) -> bool {
@@ -748,5 +871,24 @@ impl<'c, 'a> Gen<'c, 'a> {
         let ok = self.jl_expr(e, lw);
         lw.src.push(')');
         ok
+    }
+}
+
+/// The expressions of the loops nested in `s` (a loop's body).
+fn jl_nested(ast: &crate::ast::Ast, s: StmtId, out: &mut Vec<ExprId>) {
+    match &ast.stmt(s).kind {
+        StmtKind::Block(ss) => {
+            for &x in ss {
+                jl_nested(ast, x, out);
+            }
+        }
+        StmtKind::If(_, t, e) => {
+            jl_nested(ast, *t, out);
+            if let Some(e) = e {
+                jl_nested(ast, *e, out);
+            }
+        }
+        StmtKind::While(..) | StmtKind::DoWhile(..) | StmtKind::For { .. } | StmtKind::ForOf { .. } => super::body::collect_exprs_stmt_pub(ast, s, out),
+        _ => {}
     }
 }

@@ -3506,12 +3506,19 @@ impl<'c, 'a> Gen<'c, 'a> {
             }
         }
         // (a loop that is all JavaScript's: run as one JavaScript function)
-        if self.js_loop(s) {
+        let fused = self.js_loop(s);
+        if fused == super::jsloop::JsLoop::Done {
             return;
         }
         // `outer: for (...)`: `break outer` jumps past it, `continue outer` to its next round
         let label = self.ast(m).labels.iter().find(|(st, _)| *st == s).map(|x| x.1);
-        let Some(label) = label else { return self.stmt_inner(s) };
+        let Some(label) = label else {
+            self.stmt_inner(s);
+            if fused == super::jsloop::JsLoop::Guarded {
+                self.close("}");
+            }
+            return;
+        };
         let end = self.fresh("lend");
         let at = self.b().loops.len();
         let depth = self.b().scopes.len();
