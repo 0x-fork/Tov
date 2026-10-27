@@ -9,6 +9,8 @@ const native = globalThis.__tov_native?.process;
 // a callback from the loop: then process.nextTick's queue, as Node.js's MakeCallback does
 const { callFromHost } = require('internal/bindings/task_queue');
 const complete = (fn) => callFromHost(fn);
+let setImmediate;
+const later = (fn) => (setImmediate ??= require('timers').setImmediate)(fn);
 
 // (runtime/node.c's stdio kinds)
 const IGNORE = 0;
@@ -60,10 +62,16 @@ class Process {
           specs.push([IGNORE, -1]);
       }
     }
+    // (a child gone before spawn returns, its exit found as it's watched, is reported on a later
+    // loop turn, as always: ChildProcess reads the pid and opens the pipes first)
+    let spawning = true;
+    const exited = (exitCode, signal) => complete(() => this.onexit?.(exitCode, signalName(signal)));
     const [pid, handle, fds] = native.spawn(options.file, options.args ?? [options.file], options.envPairs ?? null,
       options.cwd ?? null, specs, !!options.detached, (exitCode, signal) => {
-        complete(() => this.onexit?.(exitCode, signalName(signal)));
+        if (spawning) later(() => exited(exitCode, signal));
+        else exited(exitCode, signal);
       });
+    spawning = false;
     if (pid < 0) return pid;
     this.pid = pid;
     this.#handle = handle;
