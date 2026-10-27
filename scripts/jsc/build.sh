@@ -62,23 +62,16 @@ rm -rf "$out.tmp"
 mkdir -p "$out.tmp/lib" "$out.tmp/include/JavaScriptCore"
 jit=$(find "$build/Source/JavaScriptCore/CMakeFiles/JavaScriptCoreJIT.dir" -name '*.o')
 if [ "$os" = darwin ]; then
-    # The interpreters (LLInt, IPInt) are assembly whose handlers are found at offsets from each
-    # other: a program linked with -dead_strip mustn't drop those no symbol names, as the object
-    # (MH_SUBSECTIONS_VIA_SYMBOLS) would let it. Without the flag the section is kept whole. It's
-    # compiled to machine code on its own, outside the link-time optimization.
+    # The interpreters (LLInt, IPInt) are assembly, compiled to machine code on their own, outside
+    # the link-time optimization.
     llint="$out.tmp/LowLevelInterpreter.o"
     clang -c -O3 -x ir "$build/Source/JavaScriptCore/CMakeFiles/LowLevelInterpreterLib.dir/llint/LowLevelInterpreter.cpp.o" -o "$llint"
-    python3 -c 'import struct, sys
-b = bytearray(open(sys.argv[1], "rb").read())
-assert struct.unpack_from("<I", b, 0)[0] == 0xfeedfacf
-struct.pack_into("<I", b, 24, struct.unpack_from("<I", b, 24)[0] & ~0x2000)
-open(sys.argv[1], "wb").write(b)' "$llint"
     cp "$build/lib/libJavaScriptCore.a" "$out.tmp/libJavaScriptCore.a"
     ar -d "$out.tmp/libJavaScriptCore.a" LowLevelInterpreter.cpp.o
-    # the rest, optimized as one program (ThinLTO) into one object of machine code, which a
-    # program's link takes in atom by atom as from any object: all of the engine, and what it
-    # uses of WTF and bmalloc (which hold alternatives for other platforms), keeping what the
-    # interpreters, outside it, call (else they're the engine's own, and unused, to the optimizer)
+    # the rest, optimized as one program (ThinLTO) into one object of machine code: all of the
+    # engine, and what it uses of WTF and bmalloc (which hold alternatives for other platforms),
+    # keeping what the interpreters, outside it, call (else they're the engine's own, and unused,
+    # to the optimizer)
     nm -u "$llint" | sed 's/^/-Wl,-u,/' > "$out.tmp/llint-uses"
     # (laid out in the order of the functions programs run as they start and serve: Linux's
     # profile, with the leading underscore of macOS's symbols, as the engine's C++ names are
@@ -86,9 +79,50 @@ open(sys.argv[1], "wb").write(b)' "$llint"
     # of the engine's code, at no cost to each link that an order file there would add.)
     sed 's/^/_/' "$here/order-linux.txt" > "$out.tmp/order"
     clang -r -nostdlib -flto=thin -O3 -Wl,-mllvm,-import-instr-limit=20 -Wl,-keep_private_externs @"$out.tmp/llint-uses" -Wl,-force_load,"$out.tmp/libJavaScriptCore.a" $jit "$build/lib/libWTF.a" "$build/lib/libbmalloc.a" \
-        -Wl,-order_file,"$out.tmp/order" -Wl,-cache_path_lto,"$cache/lto-cache-$os-$arch" -o "$out.tmp/engine.o"
-    libtool -static -o "$out.tmp/lib/libtovjsc.a" "$out.tmp/engine.o" "$llint" 2> /dev/null
-    rm "$llint" "$out.tmp/llint-uses" "$out.tmp/order" "$out.tmp/libJavaScriptCore.a" "$out.tmp/engine.o"
+        -Wl,-order_file,"$out.tmp/order" -Wl,-cache_path_lto,"$cache/lto-cache-$os-$arch" -o "$out.tmp/optimized.o"
+    # Then the interpreters merged in, and only what's called from outside the engine left
+    # global: its C API, Tov's (TovAPI), and the functions the runtime calls by name
+    # (runtime/js.c). The rest is local to the object, so a program's link resolves a few hundred
+    # global symbols, not ~120,000.
+    nm -gUm "$out.tmp/optimized.o" | grep -v 'private external' | awk '{print $NF}' | grep -E '^_(JS|kJS|TV)' > "$out.tmp/exports"
+    grep -ho '"_Z[A-Za-z0-9_]*"' "$root"/runtime/*.c | tr -d '"' | sed 's/^/_/' | sort -u >> "$out.tmp/exports"
+    ld -r "$out.tmp/optimized.o" "$llint" -exported_symbols_list "$out.tmp/exports" -o "$out.tmp/engine.o"
+    # The interpreters' handlers are found at offsets from each other, in a section of their own
+    # (__jsc_int): a program linked with -dead_strip mustn't split it at its symbols and drop those
+    # no symbol names. The object comes out without MH_SUBSECTIONS_VIA_SYMBOLS (the interpreters'
+    # didn't have it), so nothing at all would be dropped: it's set again, and the section's symbols
+    # but its first made alternate entries (N_ALT_ENTRY), which don't start an atom of their own,
+    # so the section is one.
+    python3 - "$out.tmp/engine.o" <<'PY'
+import struct, sys
+b = bytearray(open(sys.argv[1], "rb").read())
+magic, _, _, filetype, ncmds, _, flags = struct.unpack_from("<IiiIIII", b, 0)
+assert magic == 0xfeedfacf and filetype == 1
+struct.pack_into("<I", b, 24, flags | 0x2000)
+off, sect, n, interp, symtab = 32, 0, 0, None, None
+for _ in range(ncmds):
+    cmd, size = struct.unpack_from("<II", b, off)
+    if cmd == 0x19:  # LC_SEGMENT_64
+        for i in range(struct.unpack_from("<I", b, off + 64)[0]):
+            s = off + 72 + i * 80
+            sect += 1
+            if b[s:s + 16].rstrip(b"\0") == b"__jsc_int":
+                interp = (sect, struct.unpack_from("<Q", b, s + 32)[0])
+    elif cmd == 0x2:  # LC_SYMTAB
+        symtab = struct.unpack_from("<II", b, off + 8)
+    off += size
+assert interp and symtab
+for i in range(symtab[1]):
+    s = symtab[0] + i * 16
+    ntype, nsect, ndesc, value = struct.unpack_from("<BBHQ", b, s + 4)
+    if nsect == interp[0] and not ntype & 0xe0 and value > interp[1]:
+        struct.pack_into("<H", b, s + 6, ndesc | 0x200)
+        n += 1
+assert n > 100
+open(sys.argv[1], "wb").write(b)
+PY
+    libtool -static -o "$out.tmp/lib/libtovjsc.a" "$out.tmp/engine.o" 2> /dev/null
+    rm "$llint" "$out.tmp/llint-uses" "$out.tmp/order" "$out.tmp/exports" "$out.tmp/libJavaScriptCore.a" "$out.tmp/optimized.o" "$out.tmp/engine.o"
     headers="$build/JavaScriptCore.framework/Headers"
 else
     {
