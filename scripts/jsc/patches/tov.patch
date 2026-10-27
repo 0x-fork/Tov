@@ -22,6 +22,62 @@ index b1734e68..9864a879 100644
  API/JSBase.cpp
  API/JSCTestRunnerUtils.cpp
  API/JSCallbackConstructor.cpp
+diff --git a/Source/JavaScriptCore/bytecode/UnlinkedFunctionExecutable.cpp b/Source/JavaScriptCore/bytecode/UnlinkedFunctionExecutable.cpp
+index 7f5960c0..67734414 100644
+--- a/Source/JavaScriptCore/bytecode/UnlinkedFunctionExecutable.cpp
++++ b/Source/JavaScriptCore/bytecode/UnlinkedFunctionExecutable.cpp
+@@ -296,6 +296,19 @@ void UnlinkedFunctionExecutable::decodeCachedCodeBlocks(VM& vm)
+     WTF::storeStoreFence();
+     m_isCached = false;
+     vm.writeBarrier(this);
++    // Tov: decoded code can be thrown away as generated code is (VM::deleteAllCode, when the
++    // program idles); the function is parsed again from its source if it runs after that.
++    vm.heap.unlinkedFunctionExecutableSpaceAndSet.set.add(this);
++}
++
++void UnlinkedFunctionExecutable::dropCachedCode()
++{
++    if (!m_isCached)
++        return;
++    RefPtr<Decoder> decoder = WTF::move(m_decoder);
++    m_unlinkedCodeBlockForConstruct.clear();
++    WTF::storeStoreFence();
++    m_isCached = false;
+ }
+ 
+ UnlinkedFunctionExecutable::RareData& UnlinkedFunctionExecutable::ensureRareDataSlow()
+diff --git a/Source/JavaScriptCore/bytecode/UnlinkedFunctionExecutable.h b/Source/JavaScriptCore/bytecode/UnlinkedFunctionExecutable.h
+index 1a5ca4ad..dc32929c 100644
+--- a/Source/JavaScriptCore/bytecode/UnlinkedFunctionExecutable.h
++++ b/Source/JavaScriptCore/bytecode/UnlinkedFunctionExecutable.h
+@@ -128,6 +128,9 @@ public:
+     SourceCode linkedSourceCode(const SourceCode&) const;
+     JS_EXPORT_PRIVATE FunctionExecutable* link(VM&, ScriptExecutable* topLevelExecutable, const SourceCode& parentSource, std::optional<int> overrideLineNumber = std::nullopt, Intrinsic = NoIntrinsic, bool isInsideOrdinaryFunction = false);
+ 
++    // Tov: forgets where its code is in the bytecode cache (it's parsed if it runs)
++    void dropCachedCode();
++
+     void clearCode(VM& vm)
+     {
+         m_unlinkedCodeBlockForCall.clear();
+diff --git a/Source/JavaScriptCore/heap/Heap.cpp b/Source/JavaScriptCore/heap/Heap.cpp
+index 67e317d5..737769d3 100644
+--- a/Source/JavaScriptCore/heap/Heap.cpp
++++ b/Source/JavaScriptCore/heap/Heap.cpp
+@@ -1180,6 +1180,13 @@ void Heap::deleteAllUnlinkedCodeBlocks(DeleteAllCodeEffort effort)
+             UnlinkedFunctionExecutable* executable = static_cast<UnlinkedFunctionExecutable*>(cell);
+             executable->clearCode(vm);
+         });
++    // Tov: and the functions still to be decoded from the bytecode cache let it go (they're
++    // parsed from their source if they run): each module's decoder holds what it has decoded
++    // until none of its functions refers to it.
++    unlinkedFunctionExecutableSpaceAndSet.space.forEachLiveCell(
++        [&] (HeapCell* cell, HeapCell::Kind) {
++            static_cast<UnlinkedFunctionExecutable*>(cell)->dropCachedCode();
++        });
+ }
+ 
+ void Heap::deleteUnmarkedCompiledCode()
 diff --git a/Source/JavaScriptCore/runtime/CachedTypes.cpp b/Source/JavaScriptCore/runtime/CachedTypes.cpp
 index a961fd18..6a69d8c9 100644
 --- a/Source/JavaScriptCore/runtime/CachedTypes.cpp
