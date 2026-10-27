@@ -10802,6 +10802,9 @@ tv_str tv_native_urlPart(tv_str href, tv_int k) {
 #include <stdarg.h>
 #include <sys/uio.h>
 #include <sys/un.h>
+#ifndef TV_KQUEUE
+#include <sys/eventfd.h>
+#endif
 
 /* ---- DNS: getaddrinfo on a few lazily started threads (64 KiB stacks), results cached */
 
@@ -11015,6 +11018,7 @@ typedef struct tv_origin {
     char *key;                 /* "host:port" */
     tv_fc *idle;               /* idle connections, most recently used first */
     int nidle;
+    int sparing;               /* spare connections being opened (tv_fc_spare) */
 } tv_origin;
 
 enum { TV_FR_HEAD, TV_FR_FIXED, TV_FR_CHUNK_SIZE, TV_FR_CHUNK_DATA, TV_FR_CHUNK_END, TV_FR_TRAILERS, TV_FR_UNTIL_CLOSE, TV_FR_DONE };
@@ -11106,6 +11110,10 @@ struct tv_fc {
     bool no_reuse;             /* a proxy refused the tunnel: its connection isn't ours to keep */
     tv_sb ctl;                 /* the CONNECT request, while it's being sent */
     size_t ctl_off;
+    bool dialing;              /* a spare the socket helper is opening (tv_fc_spare) */
+    bool spare;                /* ... and, still connecting, one waiting to join the pool */
+    int dial_rc, dial_err;     /* ... connect's result */
+    struct tv_fc *dial_next;
     char *in;
     size_t in_off, in_len, in_cap;
 };
@@ -11143,6 +11151,155 @@ static void tv_fc_rbufs_flush(void) {
     while (tv_fc_nrbufs) tv_free(tv_fc_rbufs[--tv_fc_nrbufs]);
 }
 
+/* ---- the socket helper
+
+   A JavaScript host (runtime/node.c) sets tv_fetch_offload: its thread is busy running
+   JavaScript, so a thread of its own closes finished connections (close() frees what the socket
+   still held: ~10 us for a body read partway, as media readers leave theirs) and opens spare ones
+   (tv_fc_spare). The loop doesn't wait for either. */
+bool tv_fetch_offload;
+static pthread_mutex_t tv_sk_mu = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t tv_sk_cv = PTHREAD_COND_INITIALIZER;
+static bool tv_sk_started, tv_sk_idle, tv_sk_poked;
+static int *tv_sk_closes;                    /* sockets to close */
+static size_t tv_sk_nclose, tv_sk_close_cap;
+static tv_fc *tv_sk_dials, *tv_sk_dialed;    /* spares to open, and opened (or not) */
+static tv_io tv_sk_io;                       /* the loop's: woken when spares are open */
+static int tv_sk_wake_q = -1;
+#ifndef TV_KQUEUE
+static int tv_sk_efd = -1;
+#endif
+
+static void tv_sk_wake_loop(void) {
+#ifdef TV_KQUEUE
+    struct kevent ev;
+    /* (a trigger sets the event's udata too) */
+    EV_SET(&ev, (uintptr_t)&tv_sk_io, EVFILT_USER, 0, NOTE_TRIGGER, 0, (void *)((uintptr_t)&tv_sk_io | 1));
+    kevent(tv_sk_wake_q, &ev, 1, NULL, 0, NULL);
+#else
+    uint64_t one = 1;
+    ssize_t w = write(tv_sk_efd, &one, sizeof one);
+    (void)w;
+#endif
+}
+
+/* (on the helper: connects c to its address; the loop goes on in tv_sk_ready) */
+static void tv_sk_dial_now(tv_fc *c) {
+    struct sockaddr_storage sa = c->addrs.a[c->ai];
+    if (sa.ss_family == AF_INET) ((struct sockaddr_in *)&sa)->sin_port = htons((uint16_t)c->port);
+    else if (sa.ss_family == AF_INET6) ((struct sockaddr_in6 *)&sa)->sin6_port = htons((uint16_t)c->port);
+    int fd = socket(sa.ss_family, SOCK_STREAM, 0);
+    c->dial_rc = -1;
+    if (fd < 0) { c->dial_err = errno; c->fd = -1; return; }
+    fcntl(fd, F_SETFL, fcntl(fd, F_GETFL) | O_NONBLOCK);
+    fcntl(fd, F_SETFD, FD_CLOEXEC);
+    int one = 1;
+    setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &one, sizeof one);
+#ifdef SO_NOSIGPIPE
+    setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, &one, sizeof one);
+#endif
+    c->dial_rc = connect(fd, (struct sockaddr *)&sa, c->addrs.len[c->ai]);
+    c->dial_err = c->dial_rc == 0 ? 0 : errno;
+    c->fd = fd;
+}
+
+static void *tv_sk_run(void *arg) {
+    (void)arg;
+    pthread_mutex_lock(&tv_sk_mu);
+    for (;;) {
+        while (!tv_sk_nclose && !tv_sk_dials) {
+            tv_sk_idle = true;
+            pthread_cond_wait(&tv_sk_cv, &tv_sk_mu);
+            tv_sk_idle = false;
+        }
+        tv_fc *dials = tv_sk_dials;
+        tv_sk_dials = NULL;
+        int closes[64];
+        size_t nc = tv_sk_nclose < 64 ? tv_sk_nclose : 64;
+        tv_sk_nclose -= nc;
+        memcpy(closes, tv_sk_closes + tv_sk_nclose, nc * sizeof *closes);
+        pthread_mutex_unlock(&tv_sk_mu);
+        /* (spares first: a request may be about to want one) */
+        tv_fc *done = NULL, *last = NULL;
+        for (tv_fc *c = dials, *next; c; c = next) {
+            next = c->dial_next;
+            tv_sk_dial_now(c);
+            c->dial_next = NULL;
+            if (last) last->dial_next = c;
+            else done = c;
+            last = c;
+        }
+        bool poke = false;
+        if (done) {
+            pthread_mutex_lock(&tv_sk_mu);
+            last->dial_next = tv_sk_dialed;
+            tv_sk_dialed = done;
+            poke = !tv_sk_poked;
+            tv_sk_poked = true;
+            pthread_mutex_unlock(&tv_sk_mu);
+        }
+        if (poke) tv_sk_wake_loop();
+        for (size_t i = 0; i < nc; i++) close(closes[i]);
+        pthread_mutex_lock(&tv_sk_mu);
+    }
+    return NULL;
+}
+
+static void tv_sk_ready(tv_io *h, bool readable, bool writable, bool broken);
+
+static bool tv_sk_start(void) {
+    if (tv_sk_started) return true;
+    tv_sk_io.ready = tv_sk_ready;
+    tv_sk_wake_q = tv_loop_queue();
+#ifdef TV_KQUEUE
+    struct kevent ev;
+    EV_SET(&ev, (uintptr_t)&tv_sk_io, EVFILT_USER, EV_ADD | EV_CLEAR, 0, 0, (void *)((uintptr_t)&tv_sk_io | 1));
+    if (kevent(tv_sk_wake_q, &ev, 1, NULL, 0, NULL) != 0) return false;
+#else
+    tv_sk_efd = eventfd(0, EFD_NONBLOCK | EFD_CLOEXEC);
+    if (tv_sk_efd < 0) return false;
+    tv_io_add(tv_sk_efd, &tv_sk_io, true, false);
+#endif
+    pthread_attr_t attr;
+    pthread_attr_init(&attr);
+    pthread_attr_setstacksize(&attr, 64 * 1024 > PTHREAD_STACK_MIN ? 64 * 1024 : PTHREAD_STACK_MIN);
+    pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_DETACHED);
+    pthread_t t;
+    tv_sk_started = pthread_create(&t, &attr, tv_sk_run, NULL) == 0;
+    pthread_attr_destroy(&attr);
+    return tv_sk_started;
+}
+
+static void tv_sk_wake(void) {
+    bool wake = tv_sk_idle;
+    pthread_mutex_unlock(&tv_sk_mu);
+    if (wake) pthread_cond_signal(&tv_sk_cv);
+}
+
+/* Closes a connection's socket on the helper (it leaves the loop's queue now). */
+static bool tv_sk_close(tv_fc *c) {
+    if (!tv_fetch_offload || !tv_sk_start()) return false;
+    if (c->registered) {
+#ifdef TV_KQUEUE
+        struct kevent ev[2];
+        int n = 0;
+        EV_SET(&ev[n++], c->fd, EVFILT_READ, EV_DELETE, 0, 0, NULL);
+        if (c->writing) EV_SET(&ev[n++], c->fd, EVFILT_WRITE, EV_DELETE, 0, 0, NULL);
+        kevent(tv_loop_queue(), ev, n, NULL, 0, NULL);
+#else
+        epoll_ctl(tv_loop_queue(), EPOLL_CTL_DEL, c->fd, NULL);
+#endif
+    }
+    pthread_mutex_lock(&tv_sk_mu);
+    if (tv_sk_nclose == tv_sk_close_cap) {
+        tv_sk_close_cap = tv_sk_close_cap ? tv_sk_close_cap * 2 : 64;
+        tv_sk_closes = tv_realloc(tv_sk_closes, tv_sk_close_cap * sizeof *tv_sk_closes);
+    }
+    tv_sk_closes[tv_sk_nclose++] = c->fd;
+    tv_sk_wake();
+    return true;
+}
+
 static void tv_fc_reap(void) {
     while (tv_fc_graveyard) {
         tv_fc *c = tv_fc_graveyard;
@@ -11175,8 +11332,9 @@ static void tv_fc_interest(tv_fc *c, bool read, bool write) {
 static void tv_fc_close(tv_fc *c) {
     if (c->dead) return;
     c->dead = true;
+    if (c->dialing) return; /* (the helper has it: tv_sk_ready frees it) */
     if (c->tls) { tv_tls_impl->close(c->tls, false); c->tls = NULL; }
-    if (c->fd >= 0) close(c->fd); /* also leaves the event queue */
+    if (c->fd >= 0 && !tv_sk_close(c)) close(c->fd); /* also leaves the event queue */
     c->fd = -1;
     c->next = tv_fc_graveyard;
     tv_fc_graveyard = c;
@@ -12007,6 +12165,8 @@ static void tv_fc_start_tls(tv_fc *c) {
     tv_fc_handshake(c);
 }
 
+static void tv_fc_spare(tv_fc *old, tv_fr *r);
+
 /* Connects to the resolved addresses (DNS done). */
 static void tv_fr_connect(tv_fr *r, const tv_addrs *addrs) {
     tv_fc *c = tv_alloc(sizeof *c);
@@ -12025,10 +12185,76 @@ static void tv_fr_connect(tv_fr *r, const tv_addrs *addrs) {
     }
     r->c = c;
     c->r = r;
+    /* (connecting here, the pool was empty: the next request finds one waiting) */
+    if (!c->connecting && !c->origin->sparing) tv_fc_spare(c, r);
     if (!c->connecting) { tv_fc_connected(c); return; }
     /* make the ClientHello (the key shares are the costly part) while TCP connects: it waits
      * in the TLS write buffer until the socket is writable */
     if (r->https && !r->via_proxy) tv_fc_start_tls(c);
+}
+
+/* A spare connection to the origin c was connected to, opened by the helper: a request that
+ * abandons its response (a media reader that has read what it wants of a range) ends its
+ * connection, and its program's next request to that origin, soon after, would connect again;
+ * now one is waiting in the pool, connected while the program carried on. Plain HTTP only (not
+ * through a proxy), and while the origin has nothing idle. */
+static void tv_fc_spare(tv_fc *old, tv_fr *r) {
+    tv_origin *o = old->origin;
+    if (!tv_fetch_offload || old->tls || r->https || r->via_proxy || r->unix_path.p->len || old->connecting || old->fd < 0) return;
+    if (o->nidle || o->sparing) return;
+    if (!tv_sk_start()) return;
+    tv_fc *c = tv_alloc(sizeof *c);
+    memset(c, 0, sizeof *c);
+    c->io.ready = tv_fc_ready;
+    c->fd = -1;
+    c->addrs = old->addrs;
+    c->ai = old->ai;
+    c->port = old->port;
+    c->origin = o;
+    c->dialing = true;
+    o->sparing++;
+    pthread_mutex_lock(&tv_sk_mu);
+    c->dial_next = tv_sk_dials;
+    tv_sk_dials = c;
+    tv_sk_wake();
+}
+
+/* The loop: spares the helper opened, into their origins' pools (or let go). */
+static void tv_sk_ready(tv_io *h, bool readable, bool writable, bool broken) {
+    (void)h; (void)readable; (void)writable; (void)broken;
+#ifndef TV_KQUEUE
+    uint64_t v;
+    ssize_t rd = read(tv_sk_efd, &v, sizeof v);
+    (void)rd;
+#endif
+    tv_io_quiet = true;
+    pthread_mutex_lock(&tv_sk_mu);
+    tv_fc *done = tv_sk_dialed;
+    tv_sk_dialed = NULL;
+    tv_sk_poked = false;
+    pthread_mutex_unlock(&tv_sk_mu);
+    for (tv_fc *c = done, *next; c; c = next) {
+        next = c->dial_next;
+        c->dial_next = NULL;
+        c->dialing = false;
+        c->origin->sparing--;
+        if (!c->dead && c->fd >= 0 && c->dial_rc != 0 && (c->dial_err == EINPROGRESS || c->dial_err == EINTR)) {
+            /* (it joins the pool once it's connected: tv_fc_ready) */
+            c->spare = true;
+            c->connecting = true;
+            tv_fc_interest(c, false, true);
+            continue;
+        }
+        if (c->dead || c->fd < 0 || c->dial_rc != 0) {
+            if (c->fd >= 0) close(c->fd);
+            c->fd = -1;
+            c->dead = true;
+            c->next = tv_fc_graveyard;
+            tv_fc_graveyard = c;
+            continue;
+        }
+        tv_fc_release(c, true);
+    }
 }
 
 static void tv_dns_resolved(tv_dns *d) {
@@ -12113,6 +12339,8 @@ static void tv_fr_step(tv_fr *r) {
         o->idle = c->next;
         o->nidle--;
         if (c->dead) continue;
+        /* (the last idle one taken: the next request finds one waiting) */
+        if (!o->idle && !o->sparing) tv_fc_spare(c, r);
         tv_fr_send(r, c);
         return;
     }
@@ -12253,6 +12481,18 @@ static void tv_fc_ready(tv_io *h, bool readable, bool writable, bool broken) {
     tv_fr *r = c->r;
     if (!r) {
         tv_io_quiet = true;
+        if (c->spare) {
+            /* a spare connection, connected (or not) */
+            if (!writable && !broken) return;
+            int err = 0;
+            socklen_t el = sizeof err;
+            if (getsockopt(c->fd, SOL_SOCKET, SO_ERROR, &err, &el) != 0) err = errno;
+            c->spare = false;
+            c->connecting = false;
+            if (err || broken) { tv_fc_close(c); return; }
+            tv_fc_release(c, true);
+            return;
+        }
         /* idle: the server closed it (or sent something unasked for) */
         if (readable || broken) {
             if (c->tls && !broken) {
@@ -12423,6 +12663,18 @@ static void tv_fc_ready(tv_io *h, bool readable, bool writable, bool broken) {
 /* ---- after fork (a server worker): the parent's connections, lookups and threads aren't ours */
 
 static void tv_fetch_after_fork(void) {
+    if (tv_sk_started) {
+        /* the helper isn't the child's: the next one starts it again */
+        pthread_mutex_init(&tv_sk_mu, NULL);
+        pthread_cond_init(&tv_sk_cv, NULL);
+        tv_sk_started = tv_sk_idle = tv_sk_poked = false;
+        tv_sk_nclose = 0;
+        tv_sk_dials = tv_sk_dialed = NULL;
+#ifndef TV_KQUEUE
+        if (tv_sk_efd >= 0) close(tv_sk_efd);
+        tv_sk_efd = -1;
+#endif
+    }
     pthread_mutex_init(&tv_dns_mu, NULL);
     pthread_cond_init(&tv_dns_cv, NULL);
     tv_dns_threads = tv_dns_idle = 0;
@@ -12678,6 +12930,7 @@ void tv_native_fetchAbort(tv_int id) {
         tv_fc *c = r->c;
         r->c = NULL;
         c->r = NULL;
+        tv_fc_spare(c, r);
         tv_fc_close(c);
     }
     /* a lookup keeps going (others may want it); this request stops waiting for it */

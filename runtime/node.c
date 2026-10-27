@@ -3853,6 +3853,9 @@ static void tv_node_fetch_bytes(size_t n) {
 
 static void tv_node_fetch_install(JSContextRef ctx, JSObjectRef native) {
     tv_fetch_on_bytes = tv_node_fetch_bytes;
+    /* (JavaScript keeps this thread busy) */
+    const char *off = getenv("TOV_FETCH_OFFLOAD");
+    tv_fetch_offload = !(off && strcmp(off, "0") == 0);
     JSObjectRef f = JSObjectMake(ctx, NULL, NULL);
     tv_js_def(ctx, f, "start", n_fetch_start);
     tv_js_def(ctx, f, "wait", n_fetch_wait);

@@ -1344,6 +1344,7 @@ void tv_native_fetchFree(tv_int id);
 const char *tv_native_fetchData(tv_int id, size_t *len);   /* the bytes that have arrived (NULL: none), then: */
 void tv_native_fetchTaken(tv_int id);                      /* they've been read */
 extern void (*tv_fetch_on_bytes)(size_t n);   /* response bytes as they arrive (the host's GC accounting) */
+extern bool tv_fetch_offload;   /* set by a busy host: connections are closed, and spares opened, on a thread of their own */
 void tv_native_timerUnref(tv_int id);
 
 /* TLS for fetch(): runtime/tls.c, compiled with the vendored mbedTLS into an archive that only
