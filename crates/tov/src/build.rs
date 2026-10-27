@@ -534,8 +534,11 @@ pub fn build(paths: &[PathBuf], base: &Path, opts: &Options) -> Result<Built, Bu
     // Drop the runtime functions the program doesn't use. On macOS the program runs on the main
     // thread with a 512 MiB stack (the most arm64 allows) instead of a thread of its own.
     if cfg!(target_vendor = "apple") {
-        // Only `main` is exported: the runtime's functions needn't be in the export table.
-        cmd.arg("-Wl,-dead_strip").arg("-Wl,-exported_symbol,_main");
+        // Only `main` is exported: the runtime's functions needn't be in the export table. And a
+        // library nothing left calls isn't loaded (Tov's JavaScriptCore no longer calls Foundation
+        // or CoreFoundation, which loading costs a program 0.9 ms and 4 MB as it starts; an engine
+        // built before still links them).
+        cmd.arg("-Wl,-dead_strip").arg("-Wl,-dead_strip_dylibs").arg("-Wl,-exported_symbol,_main");
         if !opts.symbols {
             cmd.arg("-Wl,-x"); // local symbols (function names) only serve debuggers and profilers
         }
@@ -806,7 +809,7 @@ fn sign_for_jit(binary: &Path, c_dir: &Path) -> Result<(), BuildError> {
 /// macOS: the main thread's stack size (the most arm64 allows).
 const LINK_STACK: &str = "-Wl,-stack_size,0x20000000";
 /// Everything that changes how programs are linked, for the binary cache key.
-const LINK_FLAGS: &str = "dead-strip; exported: _main; -x unless -g; sanitizers link without -stack_size; -Wl,-stack_size,0x20000000; Linux: --as-needed after the runtime, lld when installed";
+const LINK_FLAGS: &str = "dead-strip; dead-strip-dylibs; exported: _main; -x unless -g; sanitizers link without -stack_size; -Wl,-stack_size,0x20000000; Linux: --as-needed after the runtime, lld when installed";
 
 /// The precompiled fixed prefix (`pre-<key>.h`, with its `.pch`/`.gch` beside it) to pass as
 /// `-include`, built on first use; `None` if the compiler can't precompile it (then programs

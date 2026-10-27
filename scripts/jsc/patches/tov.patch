@@ -241,7 +241,7 @@ index 808600c4..26119403 100644
          m_defaultMicrotaskQueue->clear();
      else {
 diff --git a/Source/WTF/wtf/PlatformUse.h b/Source/WTF/wtf/PlatformUse.h
-index 0c16afbd..128cd7e4 100644
+index 0c16afbd..3c465159 100644
 --- a/Source/WTF/wtf/PlatformUse.h
 +++ b/Source/WTF/wtf/PlatformUse.h
 @@ -70,7 +70,10 @@
@@ -250,8 +250,8 @@ index 0c16afbd..128cd7e4 100644
  
 -#if PLATFORM(COCOA) || USE(GLIB)
 +// (Tov: JSCOnly too; without it every entry into the VM clears the date and Intl caches, as
-+// if the time zone had changed. On Darwin the system's notification says when it does; elsewhere
-+// the embedder does, with timeZoneDidChange: Tov when process.env.TZ is set.)
++// if the time zone had changed. The embedder says when it does, with timeZoneDidChange: Tov when
++// process.env.TZ is set.)
 +#if PLATFORM(COCOA) || USE(GLIB) || defined(BUILDING_JSCONLY__)
  #define USE_TIME_ZONE_CHANGE_NOTIFICATIONS 1
  #endif
@@ -273,7 +273,7 @@ index e29c37ed..e29ac99f 100644
  #if USE(WINDOWS_EVENT_LOOP)
      using WindowsMessageHandler = Function<bool(MSG&)>;
 diff --git a/Source/WTF/wtf/TimeZone.cpp b/Source/WTF/wtf/TimeZone.cpp
-index 1b92b5db..0b7d2178 100644
+index 1b92b5db..eed7edad 100644
 --- a/Source/WTF/wtf/TimeZone.cpp
 +++ b/Source/WTF/wtf/TimeZone.cpp
 @@ -44,7 +44,7 @@ void timeZoneDidChange()
@@ -281,10 +281,49 @@ index 1b92b5db..0b7d2178 100644
  }
  
 -#if !USE(TIME_ZONE_CHANGE_NOTIFICATIONS)
-+#if !USE(TIME_ZONE_CHANGE_NOTIFICATIONS) || (defined(BUILDING_JSCONLY__) && !OS(DARWIN) && !USE(GLIB))
++#if !USE(TIME_ZONE_CHANGE_NOTIFICATIONS) || (defined(BUILDING_JSCONLY__) && !USE(GLIB))
  void listenForTimeZoneChangeNotifications() { }
  #endif
  
+diff --git a/Source/WTF/wtf/cocoa/RuntimeApplicationChecksCocoa.mm b/Source/WTF/wtf/cocoa/RuntimeApplicationChecksCocoa.mm
+index 1c6a6ea0..a5327410 100644
+--- a/Source/WTF/wtf/cocoa/RuntimeApplicationChecksCocoa.mm
++++ b/Source/WTF/wtf/cocoa/RuntimeApplicationChecksCocoa.mm
+@@ -344,7 +344,12 @@ String applicationBundleIdentifier()
+     if (identifier.isNull())
+         identifier = bundleIdentifier();
+     ASSERT_WITH_MESSAGE(!isInAuxiliaryProcess() || !!identifier, "applicationBundleIsEqualTo() and applicationBundleStartsWith() must not be called before setApplicationBundleIdentifier() in auxiliary processes");
++#if defined(BUILDING_JSCONLY__)
++    // (Tov: a program, not an app bundle, and Foundation isn't loaded for this)
++    return identifier;
++#else
+     return identifier.isNull() ? String([[NSBundle mainBundle] bundleIdentifier]) : identifier;
++#endif
+ }
+ 
+ void setApplicationBundleIdentifier(const String& identifier)
+diff --git a/Source/WTF/wtf/cocoa/TimeZoneCocoa.cpp b/Source/WTF/wtf/cocoa/TimeZoneCocoa.cpp
+index 9aaf78f1..942b7e87 100644
+--- a/Source/WTF/wtf/cocoa/TimeZoneCocoa.cpp
++++ b/Source/WTF/wtf/cocoa/TimeZoneCocoa.cpp
+@@ -32,6 +32,10 @@
+ 
+ namespace WTF {
+ 
++// (Tov, JSCOnly: no CoreFoundation, so as on Linux the embedder says when the time zone changes:
++// Tov when process.env.TZ is set; TimeZone.cpp's listenForTimeZoneChangeNotifications)
++#if !defined(BUILDING_JSCONLY__)
++
+ static void timeZoneChangeNotification(CFNotificationCenterRef, void*, CFStringRef, const void*, CFDictionaryRef)
+ {
+     timeZoneDidChange();
+@@ -47,4 +51,6 @@ void listenForTimeZoneChangeNotifications()
+     });
+ }
+ 
++#endif
++
+ } // namespace WTF
 diff --git a/Source/WTF/wtf/generic/RunLoopGeneric.cpp b/Source/WTF/wtf/generic/RunLoopGeneric.cpp
 index 7ac74579..d9cdc825 100644
 --- a/Source/WTF/wtf/generic/RunLoopGeneric.cpp
@@ -306,3 +345,39 @@ index 7ac74579..d9cdc825 100644
  RunLoop::CycleResult RunLoop::cycle(RunLoopMode)
  {
      RunLoop::currentSingleton().runImpl(RunMode::Iterate);
+diff --git a/Source/bmalloc/bmalloc/ProcessCheck.mm b/Source/bmalloc/bmalloc/ProcessCheck.mm
+index 9beafcf7..7545b25e 100644
+--- a/Source/bmalloc/bmalloc/ProcessCheck.mm
++++ b/Source/bmalloc/bmalloc/ProcessCheck.mm
+@@ -33,6 +33,23 @@
+ 
+ namespace bmalloc {
+ 
++#if defined(BUILDING_JSCONLY__)
++// (Tov: a program's name from the C library, not from Foundation's NSBundle and NSProcessInfo,
++// whose first use, as the allocator starts, loads and starts Foundation and CoreFoundation: a
++// tenth of an npm program's start, and 4 MB. A program isn't an app bundle: no app name.)
++const char* processNameString()
++{
++    return getprogname();
++}
++
++#if BPLATFORM(COCOA) && !BPLATFORM(WATCHOS)
++bool gigacageEnabledForProcess()
++{
++    const char* name = getprogname();
++    return !strcmp(name, "jsc") || !strcmp(name, "DumpRenderTree") || !strcmp(name, "wasm") || !strncmp(name, "test", 4) || !strncmp(name, "Test", 4);
++}
++#endif
++#else
+ class ProcessNames {
+ public:
+     static NSString* getAppName()
+@@ -148,6 +165,7 @@ bool gigacageEnabledForProcess()
+     }
+ }
+ #endif // BPLATFORM(COCOA) && !BPLATFORM(WATCHOS)
++#endif // defined(BUILDING_JSCONLY__)
+ 
+ bool shouldAllowMiniMode()
+ {
