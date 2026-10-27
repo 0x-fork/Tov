@@ -78,6 +78,15 @@ static _Noreturn void tv_oom(size_t size) {
     exit(101);
 }
 
+/* `size` bytes of zeros straight from the kernel: its pages are touched (and counted) only as
+ * they're written, unlike malloc's, which zeroing would touch at once. Never freed: for tables
+ * made at first use. */
+static void *tv_zero_pages(size_t size) {
+    void *p = mmap(NULL, size, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON, -1, 0);
+    if (TV_UNLIKELY(p == MAP_FAILED)) tv_oom(size);
+    return p;
+}
+
 _Noreturn void tv_trap(const char *msg, const char *loc) {
     if (tv_test_jmp) {
         tv_test_msg.len = 0;
@@ -1027,8 +1036,14 @@ static size_t tv_fmt_i64(char *buf, int64_t v) { /* buf >= 21 bytes */
 }
 
 tv_str tv_str_from_int(tv_int v) {
-    /* (0 to 999, `String(i % 50)`, a key or a label: shared immortal strings, made on first use) */
-    static tv_small_strbuf small[1000];
+    /* (0 to 999, `String(i % 50)`, a key or a label: shared immortal strings, made on first use;
+     * their table and the cache below too, so a program's zeroed data stays one page) */
+    static tv_small_strbuf *small;
+    static struct tv_int_cached { tv_int v; tv_str s; } *cache;
+    if (TV_UNLIKELY(!small)) {
+        small = tv_zero_pages(1000 * sizeof *small + 256 * sizeof *cache);
+        cache = (struct tv_int_cached *)(void *)(small + 1000);
+    }
     if ((uint64_t)v < 1000) {
         tv_small_strbuf *b = &small[v];
         if (!b->len) {
@@ -1041,7 +1056,6 @@ tv_str tv_str_from_int(tv_int v) {
     }
     /* (others made text again and again, `String(key)` in a hash or `String(id)` as a key:
      * the last ones' text kept, by value; Tov's values live on one thread) */
-    static struct { tv_int v; tv_str s; } cache[256];
     size_t h = (size_t)(((uint64_t)v * 0x9E3779B97F4A7C15ull) >> 56);
     if (cache[h].s.p && cache[h].v == v) {
         tv_str_retain(cache[h].s);
@@ -1310,8 +1324,11 @@ laid_out:
 
 tv_str tv_str_from_f64(double v) {
     /* (a number made text again and again, by a sort comparing them as strings or `String(id)`:
-     * the last ones' text kept, by the number's bits; Tov's values live on one thread) */
-    static struct { uint64_t bits; tv_str s; } cache[256];
+     * the last ones' text kept, by the number's bits; Tov's values live on one thread. Made at
+     * the first call: 4 KB of zeros in the program's data would put its globals on a second
+     * page, for every program that can print a number, however few it prints) */
+    static struct tv_f64_cached { uint64_t bits; tv_str s; } *cache;
+    if (TV_UNLIKELY(!cache)) cache = tv_zero_pages(256 * sizeof *cache);
     uint64_t bits;
     memcpy(&bits, &v, 8);
     size_t h = (size_t)((bits * 0x9E3779B97F4A7C15ull) >> 56);
@@ -5749,11 +5766,7 @@ static size_t tv_mapbuf_index_bytes(int64_t cap) {
     size_t page = (size_t)getpagesize();
     return ((size_t)cap * 2 * sizeof(uint32_t) + page - 1) & ~(page - 1);
 }
-static void *tv_map_pages(size_t size) {
-    void *p = mmap(NULL, size, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON, -1, 0);
-    if (TV_UNLIKELY(p == MAP_FAILED)) tv_oom(size);
-    return p;
-}
+static void *tv_map_pages(size_t size) { return tv_zero_pages(size); }
 
 static void tv_mapbuf_free(tv_mapbuf *m, tv_mlayout L) {
     size_t bytes = tv_mapbuf_bytes(m->cap, L);
