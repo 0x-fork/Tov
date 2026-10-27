@@ -336,9 +336,9 @@ impl<'c, 'a> Gen<'c, 'a> {
                 for (i, _) in fs.iter().enumerate() {
                     let _ = writeln!(b, "    bool seen{i} = false;");
                 }
-                b.push_str("    if (!tv_jp_try_char(p, '}')) {\n        do {\n            tv_str k;\n            if (!tv_jp_string(p, &k)) return false;\n            if (!tv_jp_char(p, ':')) { tv_str_release(k); return false; }\n            ");
+                b.push_str("    if (!tv_jp_try_char(p, '}')) {\n        do {\n            tv_jp_k k;\n            if (!tv_jp_key(p, &k)) return false;\n            if (!tv_jp_char(p, ':')) { tv_jp_key_done(&k); return false; }\n            ");
                 // (an index signature's other keys: into `$rest`, made the first time)
-                let mut other = "{ tv_str_release(k); if (!tv_jp_skip(p)) return false; }".to_string();
+                let mut other = "{ tv_jp_key_done(&k); if (!tv_jp_skip(p)) return false; }".to_string();
                 if let Some(rf) = fs.iter().find(|f| self.sym(f.name) == "$rest")
                     && let mt = self.c.types.without_undefined(rf.ty)
                     && let Ty::Map(mk, mv) = self.tget(mt)
@@ -353,7 +353,7 @@ impl<'c, 'a> Gen<'c, 'a> {
                     let pv = self.json_parser(mv);
                     let (vct, vd, dv) = (self.ctype(mv), self.desc(mv), self.default_value(mv));
                     let rel = self.release_code(mv, "x");
-                    other = format!("{{ if (!({present})) {place} = {make}; {vct} x = {dv}; if (!{pv}(p, &x)) {{ {rel}; tv_str_release(k); return false; }} tv_map_set(&{ml}, &tv_type_str, {vd}, &k, &x); }}");
+                    other = format!("{{ if (!({present})) {place} = {make}; {vct} x = {dv}; if (!{pv}(p, &x)) {{ {rel}; tv_jp_key_done(&k); return false; }} tv_str ks = tv_jp_key_str(&k); tv_map_set(&{ml}, &tv_type_str, {vd}, &ks, &x); }}");
                 }
                 for (i, f) in fs.iter().enumerate() {
                     let n = self.sym(f.name).to_string();
@@ -364,7 +364,7 @@ impl<'c, 'a> Gen<'c, 'a> {
                     let place = self.fld(t, "*out", &n);
                     let _ = write!(
                         b,
-                        "if (k.p->len == {} && memcmp(k.p->data, {}, {}) == 0) {{ tv_str_release(k); if (!{pf}(p, &{place})) return false; seen{i} = true; }}\n            else ",
+                        "if (k.n == {} && memcmp(k.s, {}, {}) == 0) {{ tv_jp_key_done(&k); if (!{pf}(p, &{place})) return false; seen{i} = true; }}\n            else ",
                         n.len(),
                         c_string(n.as_bytes()),
                         n.len()
@@ -458,6 +458,7 @@ impl<'c, 'a> Gen<'c, 'a> {
         }
         // By first character.
         let mut string_members = Vec::new();
+        let mut numeric = Vec::new();
         for (k, &m) in ms.iter().enumerate() {
             match self.tget(m) {
                 Ty::Str | Ty::StrLit(_) => string_members.push((k, m)),
@@ -471,13 +472,24 @@ impl<'c, 'a> Gen<'c, 'a> {
                     set(self, k, m, &mut b);
                     b.push('\n');
                 }
-                _ if self.c.types.is_numeric(m) => {
-                    b.push_str("    if (c == '-' || (c >= '0' && c <= '9')) ");
-                    set(self, k, m, &mut b);
-                    b.push('\n');
-                }
+                _ if self.c.types.is_numeric(m) => numeric.push((k, m)),
                 _ => {}
             }
+        }
+        // A number: with integer and floating-point members (`int | f64`), a whole number is the
+        // integer's, any other the floating point's.
+        let int = numeric.iter().find(|(_, m)| self.c.types.is_int(*m)).copied();
+        let float = numeric.iter().find(|(_, m)| self.c.types.is_float(*m)).copied();
+        if let (Some((ki, mi)), Some((kf, mf))) = (int, float) {
+            b.push_str("    if (c == '-' || (c >= '0' && c <= '9')) {\n        size_t at = p->i;\n        double d;\n        if (!tv_jp_number(p, &d)) return false;\n        p->i = at;\n        if (d == (double)(int64_t)d) ");
+            set(self, ki, mi, &mut b);
+            b.push_str("\n        ");
+            set(self, kf, mf, &mut b);
+            b.push_str("\n    }\n");
+        } else if let Some(&(k, m)) = numeric.first() {
+            b.push_str("    if (c == '-' || (c >= '0' && c <= '9')) ");
+            set(self, k, m, &mut b);
+            b.push('\n');
         }
         if !string_members.is_empty() {
             // A string: an exact literal member, else the `string` member.

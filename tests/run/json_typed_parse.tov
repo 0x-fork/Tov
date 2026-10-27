@@ -1,0 +1,27 @@
+// Typed JSON.parse: keys read in place or, with escapes, decoded; keys in any order, with spaces,
+// and unknown ones skipped; an index signature's other keys; `int | f64` by whether the number
+// is whole; numbers at the edges of the exact fast path.
+type P = { name: string, n: f64, tags: string[] }
+type R = { id: int, [key: string]: f64 }
+
+function main() {
+  const a: P = try JSON.parse('{"na\\u006de": "x\\"y", "zzz": [1, {"q": 2}], "n": 0.1, "tags": ["a"]}')
+  console.log(a.name, a.n, a.tags.length)
+  const b: P = try JSON.parse(' { "tags" : [ ] , "n" : -0 , "name" : "" } ')
+  console.log(b.name.length, Object.is(b.n, -0), b.tags.length)
+  const r: R = try JSON.parse('{"a": 1.5, "id": 7, "b\\u0063": 2, "a": 3}')
+  console.log(r.id, JSON.stringify(r))
+  const xs: (int | f64)[] = try JSON.parse("[1, 1.5, -2, 3e2, 0.1, -0.5]")
+  console.log(xs.map((x) => `${x}`).join(" "))
+  const texts = ["1e22", "1e23", "9007199254740991", "9007199254740993", "0.30000000000000004", "4.35", "1234567890.0123456", "-12.5e3", "2.2250738585072014e-308", "5e-324", "1.7976931348623157e308", "123.456e-5"]
+  for (const t of texts) {
+    const v: f64 = try JSON.parse(t)
+    console.log(t, v, Number(t) === v)
+  }
+  try {
+    const bad: P = try JSON.parse('{"name": "x", "n": 1}')
+    console.log(bad.name)
+  } catch (e) {
+    console.log((e as Error).message)
+  }
+}

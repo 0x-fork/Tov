@@ -4637,6 +4637,12 @@ static inline void tv_el_pow5_128(int q, uint64_t *hi, uint64_t *lo) {
 /* w × 10^q correctly rounded (w != 0, exact); false when it can't be sure, or the result
  * isn't a normal double (then strtod decides). */
 static bool tv_el_parse(uint64_t w, int q, double *out) {
+    /* (a significand and a power of ten both exact as doubles: one correctly rounded operation) */
+    static const double pow10[] = { 1e0, 1e1, 1e2, 1e3, 1e4, 1e5, 1e6, 1e7, 1e8, 1e9, 1e10, 1e11, 1e12, 1e13, 1e14, 1e15, 1e16, 1e17, 1e18, 1e19, 1e20, 1e21, 1e22 };
+    if (w < (1ull << 53) && q >= -22 && q <= 22) {
+        *out = q < 0 ? (double)w / pow10[-q] : (double)w * pow10[q];
+        return true;
+    }
     if (q < -342 || q > 308) return false;
     int lz = __builtin_clzll(w);
     w <<= lz;
@@ -7696,7 +7702,7 @@ static void tv_jp_ws(tv_jp *p) {
     while (p->i < p->n && (p->s[p->i] == ' ' || p->s[p->i] == '\t' || p->s[p->i] == '\n' || p->s[p->i] == '\r')) p->i++;
 }
 
-char tv_jp_peek(tv_jp *p) {
+char tv_jp_peek_slow(tv_jp *p) {
     tv_jp_ws(p);
     return p->i < p->n ? (char)p->s[p->i] : 0;
 }
@@ -7709,15 +7715,10 @@ bool tv_jp_fail(tv_jp *p, const char *expected) {
     return false;
 }
 
-bool tv_jp_char(tv_jp *p, char c) {
+bool tv_jp_char_slow(tv_jp *p, char c) {
     if (tv_jp_peek(p) == c) { p->i++; return true; }
     char what[4] = { '\'', c, '\'', 0 };
     return tv_jp_fail(p, what);
-}
-
-bool tv_jp_try_char(tv_jp *p, char c) {
-    if (tv_jp_peek(p) == c) { p->i++; return true; }
-    return false;
 }
 
 bool tv_jp_word(tv_jp *p, const char *w) {
@@ -7755,28 +7756,32 @@ static bool tv_jp_u4(tv_jp *p, uint32_t *out) {
     return true;
 }
 
+/* Past a string's characters up to a quote, a backslash or a control character (16 bytes at a
+ * time while there's none). */
+static inline void tv_jp_plain(tv_jp *p) {
+    const unsigned char *s = p->s;
+    size_t i = p->i, n = p->n;
+    typedef unsigned char tv_v16 __attribute__((vector_size(16)));
+    while (n - i >= 16) {
+        tv_v16 v;
+        memcpy(&v, s + i, 16);
+        tv_v16 hit = (tv_v16)((v == (unsigned char)'"') | (v == (unsigned char)'\\') | (v < (unsigned char)0x20));
+        uint64_t lo, hi;
+        memcpy(&lo, &hit, 8);
+        memcpy(&hi, (const char *)&hit + 8, 8);
+        if (lo | hi) break;
+        i += 16;
+    }
+    while (i < n && s[i] != '"' && s[i] != '\\' && s[i] >= 0x20) i++;
+    p->i = i;
+}
+
 bool tv_jp_string(tv_jp *p, tv_str *out) {
     if (tv_jp_peek(p) != '"') return tv_jp_fail(p, "a string");
     p->i++;
     size_t start = p->i;
-    /* Fast path: no escapes. (8 bytes at a time: none a quote, a backslash or a control) */
-    {
-        const unsigned char *s = p->s;
-        size_t i = p->i, n = p->n;
-        typedef unsigned char tv_v16 __attribute__((vector_size(16)));
-        while (n - i >= 16) {
-            tv_v16 v;
-            memcpy(&v, s + i, 16);
-            tv_v16 hit = (tv_v16)((v == (unsigned char)'"') | (v == (unsigned char)'\\') | (v < (unsigned char)0x20));
-            uint64_t lo, hi;
-            memcpy(&lo, &hit, 8);
-            memcpy(&hi, (const char *)&hit + 8, 8);
-            if (lo | hi) break;
-            i += 16;
-        }
-        while (i < n && s[i] != '"' && s[i] != '\\' && s[i] >= 0x20) i++;
-        p->i = i;
-    }
+    /* Fast path: no escapes */
+    tv_jp_plain(p);
     if (p->i < p->n && p->s[p->i] == '"') {
         *out = tv_str_from((const char *)p->s + start, p->i - start);
         p->i++;
@@ -7820,6 +7825,25 @@ bool tv_jp_string(tv_jp *p, tv_str *out) {
     }
     tv_sb_free(&sb);
     return tv_jp_fail(p, "'\"'");
+}
+
+bool tv_jp_key(tv_jp *p, tv_jp_k *k) {
+    k->owned = false;
+    if (tv_jp_peek(p) != '"') return tv_jp_fail(p, "a string");
+    size_t start = ++p->i;
+    tv_jp_plain(p);
+    if (p->i < p->n && p->s[p->i] == '"') {
+        k->s = (const char *)p->s + start;
+        k->n = p->i++ - start;
+        return true;
+    }
+    /* (escapes: decoded) */
+    p->i = start - 1;
+    if (!tv_jp_string(p, &k->own)) return false;
+    k->owned = true;
+    k->s = k->own.p->data;
+    k->n = (size_t)k->own.p->len;
+    return true;
 }
 
 bool tv_jp_number(tv_jp *p, double *out) {

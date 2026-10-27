@@ -1219,11 +1219,29 @@ typedef struct tv_jp {
     char err[160];                                     /* first error ("" if none) */
 } tv_jp;
 void tv_jp_init(tv_jp *p, tv_str text);
-char tv_jp_peek(tv_jp *p);                             /* next non-space byte, or 0 at the end */
-bool tv_jp_char(tv_jp *p, char c);                     /* consumes c (after spaces) or fails */
-bool tv_jp_try_char(tv_jp *p, char c);                 /* consumes c if it's next */
+char tv_jp_peek_slow(tv_jp *p);
+bool tv_jp_char_slow(tv_jp *p, char c);
+/* (inline for the byte that's next, as in JSON.stringify's output, the rest out of line: spaces) */
+static inline char tv_jp_peek(tv_jp *p) {                /* next non-space byte, or 0 at the end */
+    if (__builtin_expect(p->i < p->n && p->s[p->i] > ' ', 1)) return (char)p->s[p->i];
+    return tv_jp_peek_slow(p);
+}
+static inline bool tv_jp_char(tv_jp *p, char c) {       /* consumes c (after spaces) or fails */
+    if (__builtin_expect(p->i < p->n && p->s[p->i] == (unsigned char)c, 1)) { p->i++; return true; }
+    return tv_jp_char_slow(p, c);
+}
+static inline bool tv_jp_try_char(tv_jp *p, char c) {   /* consumes c if it's next */
+    if (tv_jp_peek(p) == c) { p->i++; return true; }
+    return false;
+}
 bool tv_jp_word(tv_jp *p, const char *w);              /* null / true / false */
 bool tv_jp_string(tv_jp *p, tv_str *out);
+/* An object's key: the bytes in the input when it has no escapes (nothing allocated), else decoded
+ * into `own`; tv_jp_key_done when it's been compared, or tv_jp_key_str for it as a string. */
+typedef struct tv_jp_k { const char *s; size_t n; bool owned; tv_str own; } tv_jp_k;
+bool tv_jp_key(tv_jp *p, tv_jp_k *k);
+static inline void tv_jp_key_done(tv_jp_k *k) { if (k->owned) tv_str_release(k->own); }
+static inline tv_str tv_jp_key_str(tv_jp_k *k) { return k->owned ? k->own : tv_str_from(k->s, k->n); }
 bool tv_jp_number(tv_jp *p, double *out);
 bool tv_jp_decimal(tv_jp *p, tv_dec *out);   /* a JSON number, exactly */
 bool tv_jp_skip(tv_jp *p);                             /* any value */
