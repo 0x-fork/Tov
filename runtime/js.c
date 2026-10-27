@@ -1004,18 +1004,18 @@ JSContextRef tv_js_start(void) {
      * thread allocates stays held until the allocator scavenges it (an http server's hot paths
      * tier up at ~70 MB with the default threads, ~52 MB with one each, at the same speed; a
      * second top-tier thread costs it ~2 MB, and gets a hot loop's code a few ms sooner, behind
-     * no other function's: a million calls into zod, 95 ms to 91); and a heap let grow to about twice what
-     * survives a full collection, not four times (the engine's choice on a machine with 16 GB or
-     * more, for a browser), marked by two threads, not one per core (more spin more than they
-     * mark on a server's small heap): Cap's media server probes at 86 MB, not 130, peaking at 126
-     * MB, not 164, on 10% more CPU, still a quarter less than Bun's; and a young generation of
+     * no other function's: a million calls into zod, 95 ms to 91); a heap let grow by at most
+     * three times what survives a full collection (once twice: Cap's media server then collected
+     * so often that it probed on 5-9% more CPU, for no less memory at its peak, ~100 MB to Bun's
+     * ~160), marked by two threads, not one per core (more spin more than they mark on a
+     * server's small heap); and a young generation of
      * 4 MB, not the 1 MB an API context starts with (a loop calling into an npm package a million
      * times collected 1,200 times, not 300: a quarter slower) */
     static const char *const options[][2] = {
         {"JSC_useSharedArrayBuffer", "1"},
         {"JSC_numberOfDFGCompilerThreads", "1"},
         {"JSC_numberOfFTLCompilerThreads", "2"},
-        {"JSC_heapGrowthMaxIncrease", "1"},
+        {"JSC_heapGrowthMaxIncrease", "3"},
         {"JSC_numberOfGCMarkers", "2"},
         {"JSC_smallHeapSize", "4194304"},
     };
