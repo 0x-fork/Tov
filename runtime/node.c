@@ -3560,8 +3560,13 @@ static void tv_node_proc_ready(tv_io *h, bool readable, bool writable, bool brok
     if (p->exited) return;
     int st = 0;
     pid_t r;
+    /* The child has exited (the event is its exit, and comes once), but macOS can report it a
+     * moment before the child can be reaped: then waitpid(WNOHANG) finds nothing, and returning
+     * would lose the exit for good (a zombie, and a program waiting on it forever, as Cap's media
+     * server did on one ffprobe in a few thousand). Wait the moment out instead. */
     while ((r = waitpid(p->pid, &st, WNOHANG)) < 0 && errno == EINTR) {}
-    if (r == 0) return;
+    if (r == 0)
+        while ((r = waitpid(p->pid, &st, 0)) < 0 && errno == EINTR) {}
     tv_node_batch_flush();
     p->exited = true;
     if (p->pidfd >= 0) close(p->pidfd);
