@@ -481,14 +481,15 @@ function spawnArgs(cmdOrOptions, options) {
   cmd = cmd.map((a) => `${a}`);
   // (Bun fails at once when there's nothing to run; Node.js's spawn would say so later)
   const env = options.env ?? process.env;
-  if (which(cmd[0], { PATH: env.PATH, cwd: options.cwd }) === null) {
+  const file = which(cmd[0], { PATH: env.PATH, cwd: options.cwd });
+  if (file === null) {
     let exists = false;
     try {
       exists = fsModule().existsSync(require('path').resolve(options.cwd ?? process.cwd(), cmd[0]));
     } catch {}
     throw spawnError(cmd[0], cmd[0].includes('/') && exists ? 'EACCES' : 'ENOENT');
   }
-  return [cmd, options, env];
+  return [cmd, options, env, file];
 }
 
 // what a stdio option is for child_process ('pipe', 'inherit', 'ignore', a fd), and any input
@@ -610,7 +611,7 @@ const direct = (s) => s.length === 1 && (s[0] === 'pipe' || s[0] === 'inherit' |
 
 // Without ChildProcess and Node.js's streams between them: the process's handle, and its pipes
 // read straight into web streams
-function spawnDirect(cmd, options, env, stdin, stdout, stderr) {
+function spawnDirect(cmd, options, env, stdin, stdout, stderr, file) {
   const { Process } = require('internal/bindings/process_wrap');
   const fds = [-1, -1, -1];
   const spec = (s, i) => {
@@ -625,7 +626,8 @@ function spawnDirect(cmd, options, env, stdin, stdout, stderr) {
   }
   const handle = new Process();
   const err = handle.spawn({
-    file: cmd[0],
+    // (the path spawnArgs found: the native spawn doesn't search PATH again)
+    file: file ?? cmd[0],
     args: [options.argv0 ?? cmd[0], ...cmd.slice(1)],
     envPairs,
     cwd: options.cwd,
@@ -644,13 +646,13 @@ function spawnDirect(cmd, options, env, stdin, stdout, stderr) {
 }
 
 function spawn(cmdOrOptions, maybeOptions) {
-  const [cmd, options, env] = spawnArgs(cmdOrOptions, maybeOptions);
+  const [cmd, options, env, file] = spawnArgs(cmdOrOptions, maybeOptions);
   const io = options.stdio ?? [];
   const stdin = stdioOf(io[0] ?? options.stdin, 'ignore', true);
   const stdout = stdioOf(io[1] ?? options.stdout, 'pipe', false);
   const stderr = stdioOf(io[2] ?? options.stderr, 'inherit', false);
   if (stdin[0] !== 'pipe' && direct(stdin) && direct(stdout) && direct(stderr)) {
-    const [child, streams] = spawnDirect(cmd, options, env, stdin, stdout, stderr);
+    const [child, streams] = spawnDirect(cmd, options, env, stdin, stdout, stderr, file);
     return subprocess(new Subprocess(child, stdin, stdout, stderr, options, streams), options);
   }
   const childProcess = require('child_process');
