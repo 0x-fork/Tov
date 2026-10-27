@@ -206,6 +206,51 @@ fn apple_toolchain() -> Option<(String, String)> {
     Some((clang, sdk))
 }
 
+/// The C compiler (`$CC` or the one found), its flags and what's derived from them alone: the
+/// runtime's key and the precompiled header every program's code is compiled against.
+struct Toolchain {
+    cc: String,
+    sysroot: Option<String>,
+    /// TOV_CFLAGS: C compiler flags added (e.g. "-fsanitize=address,undefined -g" to audit memory safety)
+    extra: String,
+    base: Vec<String>,
+    rt_key: String,
+    pch: Option<PathBuf>,
+}
+
+impl Toolchain {
+    fn new(opt: &str, unchecked: bool, symbols: bool) -> Toolchain {
+        let (cc, sysroot) = c_compiler();
+        let extra = std::env::var("TOV_CFLAGS").unwrap_or_default();
+        let base = crate::rt_flags::base_flags(opt, unchecked, symbols, extra.contains("-fsanitize"), sysroot.as_deref());
+        let mut flags: Vec<&str> = base.iter().map(|f| f.as_str()).collect();
+        flags.extend(extra.split_whitespace());
+        let flag_text = flags.join(" ");
+        let rt_key = hash_hex(&[codegen::RUNTIME_H.as_bytes(), codegen::RUNTIME_C.as_bytes(), codegen::RUNTIME_BIG.as_bytes(), codegen::RUNTIME_DEC.as_bytes(), codegen::RUNTIME_NET.as_bytes(), codegen::RUNTIME_WS.as_bytes(), cc.as_bytes(), flag_text.as_bytes(), env!("CARGO_PKG_VERSION").as_bytes()]);
+        let c_dir = cache_dir().join("c");
+        let pch = std::fs::create_dir_all(&c_dir).ok().and_then(|_| precompiled_header(&cc, &flags, &c_dir, &codegen::fixed_prefix(), &rt_key));
+        Toolchain { cc, sysroot, extra, base, rt_key, pch }
+    }
+}
+
+/// A thread's result, waited for when it's taken or dropped (a build that stops early doesn't
+/// leave the compiler writing into the cache as the program exits).
+struct Background<T>(Option<std::thread::JoinHandle<T>>);
+
+impl<T> Background<T> {
+    fn join(mut self) -> T {
+        self.0.take().and_then(|h| h.join().ok()).expect("internal error: finding the C compiler panicked")
+    }
+}
+
+impl<T> Drop for Background<T> {
+    fn drop(&mut self) {
+        if let Some(h) = self.0.take() {
+            let _ = h.join();
+        }
+    }
+}
+
 /// The linker driver. Homebrew clang loads its LTO library on every link (~40 ms), so when we
 /// picked it ourselves on macOS, the system driver links instead (same `ld`, same objects).
 fn linker(cc: &str) -> String {
@@ -281,6 +326,12 @@ pub fn build(paths: &[PathBuf], base: &Path, opts: &Options) -> Result<Built, Bu
         return Err(BuildError::Diagnostics(sm, diags));
     }
     let t1 = Instant::now();
+    // (the compiler, its flags and the precompiled header, found and built on a thread while the
+    // program is generated and its npm packages bundled: none of it depends on the program)
+    let toolchain = Background(Some(std::thread::spawn({
+        let (opt, unchecked, symbols) = (opts.opt.clone(), opts.unchecked, opts.symbols);
+        move || Toolchain::new(&opt, unchecked, symbols)
+    })));
     let program = match codegen::generate(&mut checker, opts.mode) {
         Ok(p) => p,
         Err(d) => {
@@ -353,14 +404,10 @@ pub fn build(paths: &[PathBuf], base: &Path, opts: &Options) -> Result<Built, Bu
         let first = c.find('\n').map_or(0, |i| i + 1);
         std::fs::write(p, format!("{}{how}{}", &c[..first], &c[first..])).map_err(|e| BuildError::Message(format!("can't write {}: {e}", p.display())))?;
     }
-    let (cc, sysroot) = c_compiler();
-    // TOV_CFLAGS adds C compiler flags (e.g. "-fsanitize=address,undefined -g" to audit memory safety).
-    let extra = std::env::var("TOV_CFLAGS").unwrap_or_default();
-    let base = crate::rt_flags::base_flags(&opts.opt, opts.unchecked, opts.symbols, extra.contains("-fsanitize"), sysroot.as_deref());
+    let Toolchain { cc, sysroot, extra, base, rt_key, pch: prebuilt_pch } = toolchain.join();
     let mut flags: Vec<&str> = base.iter().map(|f| f.as_str()).collect();
     flags.extend(extra.split_whitespace());
     let flag_text = flags.join(" ");
-    let rt_key = hash_hex(&[codegen::RUNTIME_H.as_bytes(), codegen::RUNTIME_C.as_bytes(), codegen::RUNTIME_BIG.as_bytes(), codegen::RUNTIME_DEC.as_bytes(), codegen::RUNTIME_NET.as_bytes(), codegen::RUNTIME_WS.as_bytes(), cc.as_bytes(), flag_text.as_bytes(), env!("CARGO_PKG_VERSION").as_bytes()]);
     // A program that fetches links TLS (its code calls tv_tls_install).
     let tls = uses_tls.then(|| TlsArchive::new(&cc, sysroot.as_deref(), &extra));
     // A program importing npm packages links the JavaScript bridge (compiled once per compiler).
@@ -453,10 +500,7 @@ pub fn build(paths: &[PathBuf], base: &Path, opts: &Options) -> Result<Built, Bu
         // Every program starts with the same runtime interface and prelude: precompile it once
         // (per compiler and flags) and compile only the program's own code against it.
         let prefix = codegen::fixed_prefix();
-        let pch = match c_src.strip_prefix(prefix.as_str()) {
-            Some(_) => precompiled_header(&cc, &flags, &c_dir, &prefix, &rt_key),
-            None => None,
-        };
+        let pch = if c_src.starts_with(prefix.as_str()) { prebuilt_pch } else { None };
         let c_path = c_dir.join(format!("{key}.c"));
         let c_text: &str = match &pch {
             Some(_) => &c_src[prefix.len()..],
