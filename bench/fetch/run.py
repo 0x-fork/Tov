@@ -127,8 +127,15 @@ def main():
         wait_port(PORT)
         wait_port(TLS_PORT)
         for name, mode, conc, n, tls in scen:
+            # (the scenario's first run, whoever's, finds the server cold, its first 8 MiB bodies
+            # not yet made: a run that isn't counted warms it, and the clients take turns at
+            # going first)
+            try:
+                run_client(CLIENTS[clients[0]] + [mode, TLS_BASE if tls else BASE, str(n), str(conc)], {**os.environ, "MODE_RT": "ct", "NODE_EXTRA_CA_CERTS": CA}, a.timeout)
+            except RuntimeError:
+                pass
             for rep in range(a.reps):
-                for c in clients:
+                for c in clients[rep % len(clients):] + clients[:rep % len(clients)]:
                     env = {**os.environ, "MODE_RT": "mt" if c == "rust-mt" else "ct", "NODE_EXTRA_CA_CERTS": CA}
                     try:
                         wall, cpu, rss, out = run_client(CLIENTS[c] + [mode, TLS_BASE if tls else BASE, str(n), str(conc)], env, a.timeout)
