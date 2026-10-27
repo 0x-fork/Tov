@@ -2251,6 +2251,8 @@ static char *tv_node_which(const char *file, char **env) {
 
 /* starts file with argv/env (NULL: ours); stdio[i] pipes get the parent's end in .fd. -> pid, or
  * -errno */
+#define TV_NODE_PIPE_BUF (64 * 1024)
+
 static pid_t tv_node_spawn(const char *file, char **argv, char **env, const char *cwd, tv_node_stdio *stdio, int nstdio, bool detached) {
     char *path = tv_node_which(file, env);
     if (!path) return -ENOENT;
@@ -2265,6 +2267,13 @@ static pid_t tv_node_spawn(const char *file, char **argv, char **env, const char
             if (socketpair(AF_UNIX, SOCK_STREAM, 0, sv) != 0) { err = errno; break; }
             fcntl(sv[0], F_SETFD, FD_CLOEXEC);
             fcntl(sv[1], F_SETFD, FD_CLOEXEC);
+            /* (macOS gives a Unix socket 8 KB of buffer: a child's output would come 8 KB a
+             * read, each a turn through the streams above; a pipe's grows to 64 KB) */
+            int buf = TV_NODE_PIPE_BUF;
+            for (int k = 0; k < 2; k++) {
+                setsockopt(sv[k], SOL_SOCKET, SO_SNDBUF, &buf, sizeof buf);
+                setsockopt(sv[k], SOL_SOCKET, SO_RCVBUF, &buf, sizeof buf);
+            }
             stdio[i].fd = sv[0];
             child_fds[i] = sv[1];
         } else if (stdio[i].type == TV_STDIO_IGNORE) {
