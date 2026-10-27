@@ -600,7 +600,10 @@ void tv_arrbuf_free_block(tv_arrbuf *TV_NOESCAPE p, size_t es);
  * block goes back on a small-object list. */
 /* Arrays' own properties (`T[] & { links: L }`), by header: see tv_arr_prop_get. */
 extern int64_t tv_arr_props_n;
-void tv_arr_props_forget(tv_arrbuf *p);
+/* (set by tv_arr_prop_set, the first time any array gets a property: freeing an array calls it
+ * only then, and a program that never sets one doesn't link the map of them, nor the dynamic
+ * values and their formatting that come with it) */
+extern void (*tv_arr_props_forget)(tv_arrbuf *p);
 tv_dyn tv_arr_prop_get(tv_arr a, tv_str key);              /* owned; undefined if not set */
 void tv_arr_prop_set(tv_arr *a, tv_str key, tv_dyn v);     /* v moved */
 static inline void tv_arrbuf_free(tv_arrbuf *p, size_t es) {

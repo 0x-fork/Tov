@@ -4978,7 +4978,7 @@ int64_t tv_arr_props_n;
 static uint64_t tv_arr_props_bits[1024];
 static inline uint32_t tv_arr_props_bit(const tv_arrbuf *p) { return (uint32_t)(((uintptr_t)p >> 4) * 0x9E3779B97F4A7C15ull >> 48); }
 
-void tv_arr_props_forget(tv_arrbuf *p) {
+static void tv_arr_props_forget_now(tv_arrbuf *p) {
     uint32_t b = tv_arr_props_bit(p);
     if (!(tv_arr_props_bits[b >> 6] >> (b & 63) & 1)) return;
     tv_int k = (tv_int)(uintptr_t)p;
@@ -4996,7 +4996,10 @@ tv_dyn tv_arr_prop_get(tv_arr a, tv_str key) {
     return *v;
 }
 
+void (*tv_arr_props_forget)(tv_arrbuf *p);
+
 void tv_arr_prop_set(tv_arr *a, tv_str key, tv_dyn v) {
+    tv_arr_props_forget = tv_arr_props_forget_now;
     /* (an immortal array, the empty one every `[]` shares: an array of its own first) */
     if (a->p->rc < 0) *a = tv_arr_fresh();
     if (!tv_arr_props.p) tv_arr_props = tv_map_fresh();
