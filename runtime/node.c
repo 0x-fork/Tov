@@ -2178,23 +2178,21 @@ NATIVE(n_dns_query) {
 
 #include <dlfcn.h>
 
-/* heapStats() -> [live bytes, capacity, extra (external) bytes], from JavaScriptCore's
- * JSGetMemoryUsageStatistics (which walks the heap: not for frequent calls) */
+/* heapStats() -> [live bytes, capacity, extra (external) bytes]: Tov's engine reads them
+ * (TovAPI); another's JSGetMemoryUsageStatistics walks the heap for them (not for frequent calls) */
 NATIVE(n_heap_stats) {
     UNUSED;
+    double v[3] = {0, 0, 0};
+#ifdef TV_JSC_OWN
+    extern void TVHeapStatistics(JSContextRef, double[3]);
+    TVHeapStatistics(ctx, v);
+#else
     static JSObjectRef (*stats)(JSContextRef);
     static bool looked;
     if (!looked) {
         looked = true;
-#ifdef TV_JSC_OWN
-        /* (Tov's own engine is linked in: a program exports no symbols to look up) */
-        extern JSObjectRef JSGetMemoryUsageStatistics(JSContextRef);
-        stats = JSGetMemoryUsageStatistics;
-#else
         stats = (JSObjectRef (*)(JSContextRef))dlsym(RTLD_DEFAULT, "JSGetMemoryUsageStatistics");
-#endif
     }
-    double v[3] = {0, 0, 0};
     if (stats) {
         JSObjectRef o = stats(ctx);
         const char *keys[3] = { "heapSize", "heapCapacity", "extraMemorySize" };
@@ -2204,6 +2202,7 @@ NATIVE(n_heap_stats) {
             JSStringRelease(k);
         }
     }
+#endif
     JSValueRef items[3] = { num(ctx, v[0]), num(ctx, v[1]), num(ctx, v[2]) };
     return array(ctx, 3, items);
 }

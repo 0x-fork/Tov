@@ -376,6 +376,15 @@ JSValueRef TVCall(JSContextRef ctx, JSObjectRef function, JSObjectRef thisObject
     return toRef(globalObject, result);
 }
 
+void TVHeapStatistics(JSContextRef ctx, double out[3])
+{
+    VM& vm = toJS(ctx)->vm();
+    JSLockHolder locker(vm);
+    out[0] = vm.heap.size();
+    out[1] = vm.heap.capacity();
+    out[2] = vm.heap.extraMemorySize();
+}
+
 void TVReleaseMemory(JSContextRef ctx, bool dropCode)
 {
     VM& vm = toJS(ctx)->vm();

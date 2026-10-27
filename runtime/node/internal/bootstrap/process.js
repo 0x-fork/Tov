@@ -119,7 +119,7 @@ function hrtime(previous) {
 hrtime.bigint = () => BigInt(Math.round(native.hrtime()));
 process.hrtime = hrtime;
 
-// (the heap's figures cost a walk over it: read at most once a second)
+// (the heap's figures can cost a walk over it, on an engine not Tov's: read at most once a second)
 let heapReadAt = -Infinity;
 let heap = null;
 process.memoryUsage = () => {

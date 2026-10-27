@@ -61,6 +61,11 @@ JS_EXPORT bool TVSetOptions(const char *options);
  * system's time zone.) */
 JS_EXPORT void TVTimeZoneDidChange(JSContextRef ctx);
 
+/* The heap's live bytes, its capacity, and the extra (external) memory it accounts for, in out[0],
+ * out[1] and out[2]: what JSGetMemoryUsageStatistics reports of them, without its walks over
+ * every object (to count them, and by type), for process.memoryUsage(). */
+JS_EXPORT void TVHeapStatistics(JSContextRef ctx, double out[3]);
+
 /* Gives memory back now (the program is idle): optionally drops compiled code, collects in
  * full, frees the blocks that emptied (rather than as the incremental sweeper reaches them), and
  * returns the allocator's free pages to the system. */
