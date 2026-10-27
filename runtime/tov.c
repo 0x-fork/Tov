@@ -8908,37 +8908,105 @@ static void tv_sleep_until(uint64_t ms) {
 
 static bool tv_timer_before(const tv_timer *a, const tv_timer *b) { return a->when < b->when || (a->when == b->when && a->seq < b->seq); }
 
+/* Where each timer is in the heap, by id (open addressing; ids are never 0): clearing or
+ * unref'ing a timer finds it at once, and a cleared one leaves the heap. (Node's timer lists,
+ * runtime/node.c, re-arm their one native timer for each setTimeout that changes the next due
+ * time: left in the heap until due, a server's cleared timers piled up in their tens of
+ * thousands, and each clear searched them all.) */
+typedef struct { tv_int id; size_t at; } tv_timer_slot;
+static tv_timer_slot *tv_timer_pos;
+static size_t tv_timer_pos_cap;   /* a power of 2, at least twice the timers */
+
+static inline size_t tv_timer_hash(tv_int id) { return (size_t)(((uint64_t)id * 0x9E3779B97F4A7C15ull) >> 32) & (tv_timer_pos_cap - 1); }
+
+static tv_timer_slot *tv_timer_find(tv_int id) {
+    if (!tv_timer_pos_cap) return NULL;
+    for (size_t i = tv_timer_hash(id);; i = (i + 1) & (tv_timer_pos_cap - 1)) {
+        if (tv_timer_pos[i].id == id) return &tv_timer_pos[i];
+        if (!tv_timer_pos[i].id) return NULL;
+    }
+}
+
+static void tv_timer_note(tv_int id, size_t at) {
+    size_t i = tv_timer_hash(id);
+    while (tv_timer_pos[i].id && tv_timer_pos[i].id != id) i = (i + 1) & (tv_timer_pos_cap - 1);
+    tv_timer_pos[i] = (tv_timer_slot){ id, at };
+}
+
+static void tv_timer_unnote(tv_int id) {
+    tv_timer_slot *s = tv_timer_find(id);
+    if (!s) return;
+    /* (backward shift: the entries after it that probed past it move up) */
+    size_t mask = tv_timer_pos_cap - 1, i = (size_t)(s - tv_timer_pos);
+    for (size_t j = (i + 1) & mask; tv_timer_pos[j].id; j = (j + 1) & mask) {
+        size_t home = tv_timer_hash(tv_timer_pos[j].id);
+        if (((j - home) & mask) >= ((j - i) & mask)) {
+            tv_timer_pos[i] = tv_timer_pos[j];
+            i = j;
+        }
+    }
+    tv_timer_pos[i].id = 0;
+}
+
+static inline void tv_timer_put(size_t i, tv_timer t) {
+    tv_timers[i] = t;
+    tv_timer_note(t.id, i);
+}
+
+static void tv_timer_sift_up(size_t i, tv_timer t) {
+    while (i > 0) {
+        size_t parent = (i - 1) / 2;
+        if (!tv_timer_before(&t, &tv_timers[parent])) break;
+        tv_timer_put(i, tv_timers[parent]);
+        i = parent;
+    }
+    tv_timer_put(i, t);
+}
+
+static void tv_timer_sift_down(size_t i, tv_timer t) {
+    for (;;) {
+        size_t l = 2 * i + 1, r = l + 1, m = i;
+        const tv_timer *best = &t;
+        if (l < tv_ntimers && tv_timer_before(&tv_timers[l], best)) { m = l; best = &tv_timers[l]; }
+        if (r < tv_ntimers && tv_timer_before(&tv_timers[r], best)) m = r;
+        if (m == i) break;
+        tv_timer_put(i, tv_timers[m]);
+        i = m;
+    }
+    tv_timer_put(i, t);
+}
+
 static void tv_timer_push(tv_timer t) {
     if (tv_ntimers == tv_timers_cap) {
         tv_timers_cap = tv_timers_cap ? tv_timers_cap * 2 : 16;
         tv_timers = tv_realloc(tv_timers, tv_timers_cap * sizeof *tv_timers);
     }
-    size_t i = tv_ntimers++;
-    while (i > 0) {
-        size_t parent = (i - 1) / 2;
-        if (!tv_timer_before(&t, &tv_timers[parent])) break;
-        tv_timers[i] = tv_timers[parent];
-        i = parent;
+    if ((tv_ntimers + 1) * 2 > tv_timer_pos_cap) {
+        tv_timer_slot *old = tv_timer_pos;
+        size_t old_cap = tv_timer_pos_cap;
+        tv_timer_pos_cap = old_cap ? old_cap * 2 : 32;
+        tv_timer_pos = tv_alloc(tv_timer_pos_cap * sizeof *tv_timer_pos);
+        memset(tv_timer_pos, 0, tv_timer_pos_cap * sizeof *tv_timer_pos);
+        for (size_t i = 0; i < old_cap; i++)
+            if (old[i].id) tv_timer_note(old[i].id, old[i].at);
+        tv_free(old);
     }
-    tv_timers[i] = t;
+    tv_timer_sift_up(tv_ntimers++, t);
 }
 
-static tv_timer tv_timer_pop(void) {
-    tv_timer top = tv_timers[0];
+/* Takes the timer at heap index k out. */
+static tv_timer tv_timer_take(size_t k) {
+    tv_timer t = tv_timers[k];
+    tv_timer_unnote(t.id);
     tv_timer last = tv_timers[--tv_ntimers];
-    size_t i = 0;
-    for (;;) {
-        size_t l = 2 * i + 1, r = l + 1, m = i;
-        const tv_timer *best = &last;
-        if (l < tv_ntimers && tv_timer_before(&tv_timers[l], best)) { m = l; best = &tv_timers[l]; }
-        if (r < tv_ntimers && tv_timer_before(&tv_timers[r], best)) m = r;
-        if (m == i) break;
-        tv_timers[i] = tv_timers[m];
-        i = m;
+    if (k < tv_ntimers) {
+        if (k > 0 && tv_timer_before(&last, &tv_timers[(k - 1) / 2])) tv_timer_sift_up(k, last);
+        else tv_timer_sift_down(k, last);
     }
-    if (tv_ntimers) tv_timers[i] = last;
-    return top;
+    return t;
 }
+
+static tv_timer tv_timer_pop(void) { return tv_timer_take(0); }
 
 tv_int tv_set_timer(tv_fn cb, double ms, bool repeat) {
     /* As Node: delays below 1 ms (or not a number, or too large) are 1 ms; fractions are dropped. */
@@ -8952,26 +9020,22 @@ tv_int tv_set_timer(tv_fn cb, double ms, bool repeat) {
 }
 
 void tv_clear_timer(tv_int id) {
-    for (size_t i = 0; i < tv_ntimers; i++) {
-        if (tv_timers[i].id == id && tv_timers[i].cb.fn) {
-            tv_env_release(tv_timers[i].cb.env);
-            tv_timers[i].cb.fn = NULL;
-            if (!tv_timers[i].weak) tv_live_timers--;
-            return;
-        }
-    }
+    tv_timer_slot *at = tv_timer_find(id);
+    if (!at) return;
+    tv_timer t = tv_timer_take(at->at);
+    tv_env_release(t.cb.env);
+    if (!t.weak) tv_live_timers--;
 }
 
 /* Node's timer.unref(): the timer still fires while other work keeps the program running,
  * but doesn't keep it running by itself. */
 void tv_native_timerUnref(tv_int id) {
-    for (size_t i = 0; i < tv_ntimers; i++) {
-        if (tv_timers[i].id == id && tv_timers[i].cb.fn && !tv_timers[i].weak) {
-            tv_timers[i].weak = true;
-            tv_live_timers--;
-            return;
-        }
-    }
+    tv_timer_slot *at = tv_timer_find(id);
+    if (!at) return;
+    tv_timer *t = &tv_timers[at->at];
+    if (t->weak) return;
+    t->weak = true;
+    tv_live_timers--;
 }
 
 /* A timer that ran for less than this (with its microtasks) isn't the program at work either: it
