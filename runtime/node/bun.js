@@ -520,13 +520,136 @@ async function feed(writable, input) {
   }
 }
 
+// A pipe's end as a web ReadableStream, read on the native handle (each read a fresh copy)
+const UV_EOF = -4095;
+function pipeStream(fd) {
+  const native = globalThis.__tov_native.stream;
+  const { callFromHost } = require('internal/bindings/task_queue');
+  const h = native.open(fd);
+  let controller;
+  let reading = false;
+  let done = false;
+  const finish = () => {
+    if (done) return;
+    done = true;
+    reading = false;
+    native.close(h);
+    native.release(h);
+  };
+  const onread = (chunk, err) => callFromHost(() => {
+    if (done) return;
+    if (chunk) {
+      controller.enqueue(chunk);
+      if (controller.desiredSize <= 0 && reading) {
+        reading = false;
+        native.readStop(h);
+      }
+      return;
+    }
+    finish();
+    if (err === UV_EOF) controller.close();
+    else controller.error(Object.assign(new Error(`read failed (${err})`), { errno: err }));
+  });
+  const read = () => {
+    if (done || reading) return;
+    reading = true;
+    native.readStart(h, onread);
+  };
+  return new ReadableStream({
+    start(c) {
+      controller = c;
+      read();
+    },
+    pull: read,
+    cancel: finish,
+  }, { highWaterMark: 65536, size: (chunk) => chunk.byteLength });
+}
+
+// The child of a spawn with nothing to feed it: the process's native handle (process_wrap's
+// Process), as much of ChildProcess as Subprocess uses
+class DirectChild {
+  #listeners = { exit: [], error: [] };
+  #handle;
+
+  constructor(handle) {
+    this.#handle = handle;
+    this.pid = handle.pid;
+    handle.onexit = (exitCode, signalCode) => {
+      handle.close();
+      for (const fn of this.#listeners.exit) fn(signalCode ? null : exitCode, signalCode);
+    };
+  }
+
+  once(event, fn) {
+    this.#listeners[event]?.push(fn);
+  }
+
+  fail(err) {
+    queueMicrotask(() => {
+      for (const fn of this.#listeners.error) fn(err);
+    });
+  }
+
+  kill(signal) {
+    const signals = require('os').constants.signals;
+    const n = typeof signal === 'number' ? signal : signals[signal];
+    if (n === undefined) throw new TypeError(`Unknown signal: ${signal}`);
+    return this.#handle.kill(n) === 0;
+  }
+
+  ref() { this.#handle.ref(); }
+  unref() { this.#handle.unref(); }
+}
+
+// (stdio a spawn can run with directly: nothing to feed the child, no file to write)
+const direct = (s) => s.length === 1 && (s[0] === 'pipe' || s[0] === 'inherit' || s[0] === 'ignore' || typeof s[0] === 'number');
+
+// Without ChildProcess and Node.js's streams between them: the process's handle, and its pipes
+// read straight into web streams
+function spawnDirect(cmd, options, env, stdin, stdout, stderr) {
+  const { Process } = require('internal/bindings/process_wrap');
+  const fds = [-1, -1, -1];
+  const spec = (s, i) => {
+    if (s[0] === 'pipe') return { type: 'pipe', handle: { _tovOpen(fd) { fds[i] = fd; return 0; } } };
+    if (s[0] === 'inherit') return { type: 'inherit', fd: i };
+    if (typeof s[0] === 'number') return { type: 'fd', fd: s[0] };
+    return { type: 'ignore' };
+  };
+  const envPairs = [];
+  for (const k in env) {
+    if (env[k] !== undefined) envPairs.push(`${k}=${env[k]}`);
+  }
+  const handle = new Process();
+  const err = handle.spawn({
+    file: cmd[0],
+    args: [options.argv0 ?? cmd[0], ...cmd.slice(1)],
+    envPairs,
+    cwd: options.cwd,
+    stdio: [spec(stdin, 0), spec(stdout, 1), spec(stderr, 2)],
+    detached: !!options.detached,
+  });
+  const child = new DirectChild(handle);
+  if (err < 0) {
+    const e = new Error(`spawn ${cmd[0]} failed (${err})`);
+    e.errno = err;
+    e.syscall = 'spawn';
+    child.fail(e);
+  }
+  const streams = [undefined, fds[1] >= 0 ? pipeStream(fds[1]) : undefined, fds[2] >= 0 ? pipeStream(fds[2]) : undefined];
+  return [child, streams];
+}
+
 function spawn(cmdOrOptions, maybeOptions) {
   const [cmd, options, env] = spawnArgs(cmdOrOptions, maybeOptions);
-  const childProcess = require('child_process');
   const io = options.stdio ?? [];
   const stdin = stdioOf(io[0] ?? options.stdin, 'ignore', true);
   const stdout = stdioOf(io[1] ?? options.stdout, 'pipe', false);
   const stderr = stdioOf(io[2] ?? options.stderr, 'inherit', false);
+  if (stdin[0] !== 'pipe' && direct(stdin) && direct(stdout) && direct(stderr)) {
+    const [child, streams] = spawnDirect(cmd, options, env, stdin, stdout, stderr);
+    return subprocess(new Subprocess(child, stdin, stdout, stderr, options, streams), options);
+  }
+  const childProcess = require('child_process');
   const child = childProcess.spawn(cmd[0], cmd.slice(1), {
     cwd: options.cwd,
     env,
@@ -535,7 +658,11 @@ function spawn(cmdOrOptions, maybeOptions) {
     detached: options.detached,
   });
   for (const s of [stdout, stderr]) if (s[2]) fsModule().closeSync(s[0]);
-  const proc = new Subprocess(child, stdin, stdout, stderr, options);
+  return subprocess(new Subprocess(child, stdin, stdout, stderr, options), options);
+}
+
+// (a spawn's signal and timeout)
+function subprocess(proc, options) {
   if (options.signal) {
     const abort = () => proc.kill(options.killSignal);
     if (options.signal.aborted) abort();
@@ -552,7 +679,7 @@ function spawn(cmdOrOptions, maybeOptions) {
 const kChild = Symbol('kChild');
 
 class Subprocess {
-  constructor(child, stdin, stdout, stderr, options) {
+  constructor(child, stdin, stdout, stderr, options, streams) {
     this[kChild] = child;
     this.pid = child.pid;
     this.exitCode = null;
@@ -560,8 +687,8 @@ class Subprocess {
     this.killed = false;
     this.stdin = stdin[0] === 'pipe' ? (stdin.length > 1 ? undefined : fileSink(child.stdin)) : typeof stdin[0] === 'number' ? stdin[0] : undefined;
     if (stdin.length > 1) feed(child.stdin, stdin[1]);
-    this.stdout = stdout[0] === 'pipe' ? webStream(child.stdout) : typeof stdout[0] === 'number' && !stdout[2] ? stdout[0] : undefined;
-    this.stderr = stderr[0] === 'pipe' ? webStream(child.stderr) : typeof stderr[0] === 'number' && !stderr[2] ? stderr[0] : undefined;
+    this.stdout = stdout[0] === 'pipe' ? streams?.[1] ?? webStream(child.stdout) : typeof stdout[0] === 'number' && !stdout[2] ? stdout[0] : undefined;
+    this.stderr = stderr[0] === 'pipe' ? streams?.[2] ?? webStream(child.stderr) : typeof stderr[0] === 'number' && !stderr[2] ? stderr[0] : undefined;
     this.exited = new Promise((resolve) => {
       child.once('exit', (code, signal) => {
         this.exitCode = code;
