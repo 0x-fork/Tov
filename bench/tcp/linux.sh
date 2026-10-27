@@ -7,7 +7,11 @@ here=$(cd "$(dirname "$0")" && pwd)
 root=$(cd "$here/../.." && pwd)
 bin="$here/out/linux"
 mkdir -p "$bin"
-[ -x "$bin/bun" ] || docker run --rm -v "$bin:/out" oven/bun:1.4.0 cp /usr/local/bin/bun /out/bun
+# (fetched again when the pinned version changes)
+bun=1.4.4
+[ -x "$bin/bun" ] && [ "$(cat "$bin/bun.version" 2> /dev/null)" = "$bun" ] || {
+    docker run --rm -v "$bin:/out" "oven/bun:$bun" cp /usr/local/bin/bun /out/bun && echo "$bun" > "$bin/bun.version"
+}
 exec "$root/scripts/linux.sh" sh -c '
   set -e
   command -v pgrep > /dev/null || (apt-get update -qq && apt-get install -y -qq procps > /dev/null)

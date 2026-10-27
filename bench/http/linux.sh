@@ -20,7 +20,11 @@ PY
 chmod +x "$linker"
 CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER="$linker" cargo build --release -q --offline --target aarch64-unknown-linux-gnu --manifest-path "$here/rust/Cargo.toml"
 cp "$here/rust/target/aarch64-unknown-linux-gnu/release/server" "$bin/rust-server"
-[ -x "$bin/bun" ] || docker run --rm -v "$bin:/out" oven/bun:1.4.0 cp /usr/local/bin/bun /out/bun
+# (fetched again when the pinned version changes)
+bun=1.4.4
+[ -x "$bin/bun" ] && [ "$(cat "$bin/bun.version" 2> /dev/null)" = "$bun" ] || {
+    docker run --rm -v "$bin:/out" "oven/bun:$bun" cp /usr/local/bin/bun /out/bun && echo "$bun" > "$bin/bun.version"
+}
 docker run --rm -v "$root:/tov" -w /tov/bench/http -e BIN_DIR=/tov/bench/http/out/linux gcc:14 sh -c '
   set -e
   gcc -O2 -o $BIN_DIR/load load.c -lpthread
