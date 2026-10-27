@@ -528,7 +528,8 @@ const UV_EOF = -4095;
 function pipeStream(fd) {
   const native = globalThis.__tov_native.stream;
   const { callFromHost } = require('internal/bindings/task_queue');
-  const h = native.open(fd);
+  // (read in batches while the child writes steadily: runtime/node.c, tv_node_stream_batch)
+  const h = native.open(fd, true);
   let controller;
   let reading = false;
   let done = false;

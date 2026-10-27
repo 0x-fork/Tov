@@ -2688,7 +2688,7 @@ typedef struct tv_node_wreq {
     JSObjectRef cb;      /* cb(status) once written (protected) */
 } tv_node_wreq;
 
-typedef struct {
+typedef struct tv_node_stream {
     tv_io io;
     int fd;
     bool reading, closed, refed, counted, watching, listening, connecting;
@@ -2702,6 +2702,11 @@ typedef struct {
     tv_node_wreq *wq, *wq_tail;
     JSObjectRef shutdown_cb;
     double bytes_read, bytes_written;
+    /* A child's output pipe (Bun.spawn's): one written to again within TV_NODE_BATCH_NS of the
+     * last read is read once that long later, all of it at once (see tv_node_stream_batch) */
+    bool batches, batching;
+    uint64_t last_read_ns;
+    struct tv_node_stream *batch_next;
 } tv_node_stream;
 
 /* a chunk read of a file fd on a worker thread (regular files aren't poll-watchable) */
@@ -2819,7 +2824,7 @@ static void tv_node_stream_ready(tv_io *h, bool readable, bool writable, bool br
 
 /* what the loop watches for, and whether the stream keeps the program running */
 static void tv_node_stream_update(tv_node_stream *s) {
-    bool want_read = (s->reading || s->listening) && !s->closed && !s->file;
+    bool want_read = (s->reading || s->listening) && !s->closed && !s->file && !s->batching;
     bool want_write = !s->closed && (s->wq || s->shutdown_cb || s->connecting);
     if (s->fd >= 0 && !s->closed && (want_read || want_write || s->watching)) {
         s->io.ready = tv_node_stream_ready;
@@ -2881,6 +2886,92 @@ static void tv_node_stream_flush(tv_node_stream *s) {
     }
 }
 
+static uint64_t tv_node_mono_ns(void) {
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (uint64_t)ts.tv_sec * 1000000000u + (uint64_t)ts.tv_nsec;
+}
+
+/* Reads what's waiting (up to 64 KB) and hands it to JavaScript; then the end, or a failure. */
+static void tv_node_stream_read(tv_node_stream *s) {
+    static uint8_t buf[65536];
+    size_t got = 0;
+    int err = 0;
+    for (;;) {
+        ssize_t r = read(s->fd, buf + got, sizeof buf - got);
+        if (r > 0) {
+            got += (size_t)r;
+            /* (a batch takes all that waits; a single read, what one call gives) */
+            if (s->batches && got < sizeof buf) continue;
+            break;
+        }
+        if (r < 0 && errno == EINTR) continue;
+        if (r == 0 || errno != EAGAIN) err = r == 0 || (s->tty && errno == EIO) ? TV_UV_EOF : -errno;
+        break;
+    }
+    if (got) {
+        s->bytes_read += (double)got;
+        s->last_read_ns = tv_node_mono_ns();
+        JSValueRef arg = tv_js_bytes_copy(buf, got);
+        tv_node_call_args(s->onread, 1, &arg);
+    }
+    if (err && s->reading && !s->closed) {
+        s->reading = false;
+        JSValueRef args[2] = { JSValueMakeNull(tv_js_ctx), JSValueMakeNumber(tv_js_ctx, err) };
+        tv_node_call_args(s->onread, 2, args);
+    }
+}
+
+/* A child writing its output a little at a time (ffmpeg writes each ~400-byte MP3 frame as it's
+ * made) would wake the loop, and go through JavaScript's streams and on to a socket, for each
+ * piece. Once it writes again within this long of the last read, its pipe isn't watched until
+ * this long later, and is then read whole: a steady writer's output comes a millisecond at a
+ * time, and one that writes now and then still at once. */
+#define TV_NODE_BATCH_NS 1000000
+static tv_node_stream *tv_node_batching;
+static tv_int tv_node_batch_timer;
+
+static void tv_node_batch_fire(tv_env *env) {
+    (void)env;
+    tv_node_batch_timer = 0;
+    tv_node_stream *list = tv_node_batching;
+    tv_node_batching = NULL;
+    while (list) {
+        tv_node_stream *s = list;
+        list = s->batch_next;
+        s->batch_next = NULL;
+        s->batching = false;
+        s->pending_file--;
+        if (s->closed || s->zombie) {
+            if (s->fd >= 0 && !s->pending_file) { close(s->fd); s->fd = -1; }
+            if (s->zombie && !s->pending_file) free(s);
+            continue;
+        }
+        if (s->reading) tv_node_stream_read(s);
+        if (!s->closed) tv_node_stream_update(s);
+    }
+}
+
+/* Reads the pipes waiting out a batch now: a child's exit is told after all it wrote (code
+ * that cancels the child's output once it exits would lose what waited). */
+static void tv_node_batch_flush(void) {
+    if (!tv_node_batching) return;
+    if (tv_node_batch_timer) tv_clear_timer(tv_node_batch_timer);
+    tv_node_batch_fire(NULL);
+}
+
+static void tv_node_stream_batch(tv_node_stream *s) {
+    s->batching = true;
+    s->pending_file++;   /* (the struct and its fd outlive JS until the batch is read) */
+    s->batch_next = tv_node_batching;
+    tv_node_batching = s;
+    if (!tv_node_batch_timer) {
+        tv_fn cb = {(void *)tv_node_batch_fire, NULL};
+        tv_node_batch_timer = tv_set_timer(cb, 1, false);
+    }
+    tv_node_stream_update(s);
+}
+
 static void tv_node_stream_ready(tv_io *h, bool readable, bool writable, bool broken) {
     tv_node_stream *s = (tv_node_stream *)h;
     if (s->closed) return;
@@ -2920,19 +3011,12 @@ static void tv_node_stream_ready(tv_io *h, bool readable, bool writable, bool br
         return;
     }
     if (writable || (broken && s->wq)) tv_node_stream_flush(s);
-    if ((readable || broken) && s->reading && !s->closed) {
-        static uint8_t buf[65536];
-        ssize_t r = read(s->fd, buf, sizeof buf);
-        if (r > 0) {
-            s->bytes_read += (double)r;
-            JSValueRef arg = tv_js_bytes_copy(buf, (size_t)r);
-            tv_node_call_args(s->onread, 1, &arg);
-        } else if (r == 0 || (errno != EAGAIN && errno != EINTR)) {
-            int err = r == 0 || (s->tty && errno == EIO) ? TV_UV_EOF : -errno;
-            s->reading = false;
-            JSValueRef args[2] = { JSValueMakeNull(tv_js_ctx), JSValueMakeNumber(tv_js_ctx, err) };
-            tv_node_call_args(s->onread, 2, args);
+    if ((readable || broken) && s->reading && !s->closed && !s->batching) {
+        if (s->batches && s->last_read_ns && tv_node_mono_ns() - s->last_read_ns < TV_NODE_BATCH_NS) {
+            tv_node_stream_batch(s);
+            return;
         }
+        tv_node_stream_read(s);
     }
     if (!s->closed) tv_node_stream_update(s);
 }
@@ -2969,6 +3053,8 @@ NATIVE(n_stream_open) {
        TTYs stay watched. */
     struct stat st;
     if (fstat(fd, &st) == 0 && (S_ISREG(st.st_mode) || (S_ISCHR(st.st_mode) && !isatty(fd)))) s->file = true;
+    /* open(fd, true): a child's output, read in batches while it writes steadily */
+    s->batches = n > 1 && JSValueToBoolean(ctx, a[1]) && !s->file && !s->tty;
     s->refed = true;
     JSObjectRef o = JSObjectMake(ctx, tv_node_stream_class(), s);
     s->self = o;
@@ -3464,6 +3550,7 @@ static void tv_node_proc_ready(tv_io *h, bool readable, bool writable, bool brok
     pid_t r;
     while ((r = waitpid(p->pid, &st, WNOHANG)) < 0 && errno == EINTR) {}
     if (r == 0) return;
+    tv_node_batch_flush();
     p->exited = true;
     if (p->pidfd >= 0) close(p->pidfd);
     p->pidfd = -1;

@@ -4,6 +4,7 @@ number null undefined true undefined
 "hello world" 0
 2 false "sync\n" 0
 from blob
+steady 3000 true 0
 spawn ENOENT ENOENT: no such file or directory, posix_spawn '/nonexistent/x'
 write 10
 10 text/plain true number true false 0
