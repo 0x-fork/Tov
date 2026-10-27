@@ -4334,6 +4334,19 @@ static void tv_node_crypto_install(JSContextRef ctx, JSObjectRef native) {
     set(ctx, native, "crypto", c);
 }
 
+/* ------------------------------------------------------------------ buffers: UTF-8 */
+
+/* utf8Decode(bytes, start, end) -> string (invalid sequences as U+FFFD, as the WHATWG decoder) */
+NATIVE(n_buf_utf8_decode) {
+    UNUSED;
+    uint8_t *p;
+    size_t len;
+    if (n < 1 || !tv_js_bytes_view(a[0], &p, &len)) return tv_js_str("", 0);
+    double s = arg_num(ctx, n, a, 1, 0), e = arg_num(ctx, n, a, 2, (double)len);
+    size_t start = s > 0 ? (s < (double)len ? (size_t)s : len) : 0, end = e > 0 ? (e < (double)len ? (size_t)e : len) : 0;
+    return end > start ? tv_js_str((const char *)p + start, end - start) : tv_js_str("", 0);
+}
+
 /* ------------------------------------------------------------------ install */
 
 
@@ -4381,6 +4394,10 @@ void tv_node_install(JSContextRef ctx, JSObjectRef native) {
     tv_js_def(ctx, os, "setPriority", n_os_setpriority);
     tv_js_def(ctx, os, "getAvailableParallelism", n_os_parallelism);
     set(ctx, native, "os", os);
+
+    JSObjectRef buf = JSObjectMake(ctx, NULL, NULL);
+    tv_js_def(ctx, buf, "utf8Decode", n_buf_utf8_decode);
+    set(ctx, native, "buffer", buf);
 
     tv_node_fs_install(ctx, native);
     tv_node_crypto_install(ctx, native);

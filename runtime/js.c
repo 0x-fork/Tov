@@ -1147,8 +1147,31 @@ static bool tv_utf8_plain(const unsigned char *s, size_t n) {
     return true;
 }
 
+/* ASCII without NUL bytes: 8 bytes at a time */
+static bool tv_ascii_plain(const unsigned char *s, size_t n) {
+    size_t i = 0;
+    for (; i + 8 <= n; i += 8) {
+        uint64_t w;
+        memcpy(&w, s + i, 8);
+        /* (a byte >= 0x80, or a zero byte) */
+        if ((w & 0x8080808080808080ull) || ((w - 0x0101010101010101ull) & ~w & 0x8080808080808080ull)) return false;
+    }
+    for (; i < n; i++) if (s[i] - 1u >= 0x7fu) return false;
+    return true;
+}
+
 static JSStringRef tv_js_string_ref(const char *s, size_t n, bool nul_terminated) {
     if (nul_terminated && tv_utf8_plain((const unsigned char *)s, n)) return JSStringCreateWithUTF8CString(s);
+    if (!nul_terminated && tv_ascii_plain((const unsigned char *)s, n)) {
+        /* ASCII is read as a C string into an 8-bit string (half the memory of UTF-16's) */
+        char small[512];
+        char *z = n < sizeof small ? small : tv_alloc(n + 1);
+        memcpy(z, s, n);
+        z[n] = 0;
+        JSStringRef r = JSStringCreateWithUTF8CString(z);
+        if (z != small) tv_free(z);
+        return r;
+    }
     JSChar small[256];
     JSChar *buf = n <= 256 ? small : tv_alloc(n * sizeof(JSChar));
     size_t len = tv_utf8_to_utf16((const unsigned char *)s, n, buf);

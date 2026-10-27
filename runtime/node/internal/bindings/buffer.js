@@ -96,8 +96,16 @@ function codeUnitsToString(units, n) {
   return s;
 }
 
-// UTF-8 to a string, invalid sequences replaced (WHATWG: one U+FFFD per maximal subpart)
+const nativeUtf8Decode = globalThis.__tov_native?.buffer?.utf8Decode;
+
+// UTF-8 to a string, invalid sequences replaced (WHATWG: one U+FFFD per maximal subpart):
+// natively, but for a few bytes (a call into native code costs more than they do)
 function utf8Decode(b, start, end) {
+  if (end - start > 16 && nativeUtf8Decode !== undefined) return nativeUtf8Decode(b, start, end);
+  return utf8DecodeJs(b, start, end);
+}
+
+function utf8DecodeJs(b, start, end) {
   const units = new Uint16Array(end - start);
   let n = 0;
   let i = start;
