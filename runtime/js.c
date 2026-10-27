@@ -1000,9 +1000,11 @@ JSContextRef tv_js_start(void) {
     /* JavaScriptCore's options come from the environment when the first VM starts, and only then
      * (so the program and its children never see the variables; one set already wins):
      * SharedArrayBuffer, which it leaves out of API contexts unless asked; and one compiler
-     * thread per optimizing tier, as what a compiler thread allocates stays held until the
-     * allocator scavenges it (an http server's hot paths tier up at ~70 MB with the default
-     * threads, ~52 MB with one each, at the same speed); and a heap let grow to about twice what
+     * thread for the middle tier and two for the top one, not one per core, as what a compiler
+     * thread allocates stays held until the allocator scavenges it (an http server's hot paths
+     * tier up at ~70 MB with the default threads, ~52 MB with one each, at the same speed; a
+     * second top-tier thread costs it ~2 MB, and gets a hot loop's code a few ms sooner, behind
+     * no other function's: a million calls into zod, 95 ms to 91); and a heap let grow to about twice what
      * survives a full collection, not four times (the engine's choice on a machine with 16 GB or
      * more, for a browser), marked by two threads, not one per core (more spin more than they
      * mark on a server's small heap): Cap's media server probes at 86 MB, not 130, peaking at 126
@@ -1012,7 +1014,7 @@ JSContextRef tv_js_start(void) {
     static const char *const options[][2] = {
         {"JSC_useSharedArrayBuffer", "1"},
         {"JSC_numberOfDFGCompilerThreads", "1"},
-        {"JSC_numberOfFTLCompilerThreads", "1"},
+        {"JSC_numberOfFTLCompilerThreads", "2"},
         {"JSC_heapGrowthMaxIncrease", "1"},
         {"JSC_numberOfGCMarkers", "2"},
         {"JSC_smallHeapSize", "4194304"},
