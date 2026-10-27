@@ -458,6 +458,18 @@ NATIVE(n_memory_usage) {
     return o;
 }
 
+/* rss() -> the resident set (process.memoryUsage's, which servers read per request: no object,
+ * and not the system's free memory, which only availableMemory() wants) */
+NATIVE(n_rss) {
+    UNUSED;
+    return num(ctx, tv_node_rss());
+}
+
+NATIVE(n_available_memory) {
+    UNUSED;
+    return num(ctx, tv_node_free_mem());
+}
+
 NATIVE(n_cpu_usage) {
     UNUSED;
     struct rusage ru;
@@ -4481,6 +4493,8 @@ void tv_node_install(JSContextRef ctx, JSObjectRef native) {
     tv_js_def(ctx, native, "guessHandleType", n_guess_handle_type);
     tv_js_def(ctx, native, "windowSize", n_window_size);
     tv_js_def(ctx, native, "memoryUsage", n_memory_usage);
+    tv_js_def(ctx, native, "rss", n_rss);
+    tv_js_def(ctx, native, "availableMemory", n_available_memory);
     tv_js_def(ctx, native, "cpuUsage", n_cpu_usage);
     tv_js_def(ctx, native, "ids", n_ids);
     tv_js_def(ctx, native, "kill", n_kill);

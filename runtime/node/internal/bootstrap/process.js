@@ -123,7 +123,9 @@ process.hrtime = hrtime;
 let heapReadAt = -Infinity;
 let heap = null;
 process.memoryUsage = () => {
-  const usage = native.memoryUsage();
+  const usage = native.rss
+    ? { rss: native.rss(), heapTotal: 0, heapUsed: 0, external: 0, arrayBuffers: 0 }
+    : native.memoryUsage();
   if (native.heapStats) {
     const now = Date.now();
     if (now - heapReadAt >= 1000) {
@@ -138,7 +140,7 @@ process.memoryUsage = () => {
   }
   return usage;
 };
-process.memoryUsage.rss = () => native.memoryUsage().rss;
+process.memoryUsage.rss = () => (native.rss ? native.rss() : native.memoryUsage().rss);
 process.cpuUsage = (previous) => {
   const [user, system] = native.cpuUsage();
   return previous ? { user: user - previous.user, system: system - previous.system } : { user, system };
@@ -148,7 +150,7 @@ process.resourceUsage = () => {
   return { userCPUTime, systemCPUTime, maxRSS: Math.round(native.memoryUsage().rss / 1024) };
 };
 process.constrainedMemory = () => 0;
-process.availableMemory = () => native.memoryUsage().available ?? 0;
+process.availableMemory = () => (native.availableMemory ? native.availableMemory() : native.memoryUsage().available ?? 0);
 
 const ids = () => native.ids();
 process.getuid = () => ids()[0];
