@@ -137,8 +137,24 @@ bool TVWriteBytecode(JSContextGroupRef group, const char* source, size_t len, co
     return written && !error.isValid();
 }
 
+// (libpas's, exported though not in the headers JavaScriptCore sees)
+extern "C" {
+extern double pas_scavenger_period_in_milliseconds;
+extern uint64_t pas_scavenger_max_epoch_delta;
+extern bool pas_physical_page_sharing_pool_balancing_enabled;
+extern bool pas_physical_page_sharing_pool_balancing_enabled_for_utility;
+}
+
 void TVInitialize()
 {
+    // The engine's allocator gives back the pages it no longer uses within ~5 ms, not ~300, and
+    // takes the free ones it has before new ones from the system, as WebKit's "mini mode" has it
+    // (without that mode's allocator change, or its collector's, which cost speed). Cap's media
+    // server peaks at ~80 MB, not ~140, and holds ~5 MB less after work, for ~2% more CPU.
+    pas_scavenger_period_in_milliseconds = 5.;
+    pas_scavenger_max_epoch_delta = 5ll * 1000ll * 1000ll;
+    pas_physical_page_sharing_pool_balancing_enabled = true;
+    pas_physical_page_sharing_pool_balancing_enabled_for_utility = true;
     JSC::initialize();
 #if !PLATFORM(COCOA)
     // (WebKit's ports make the UI thread's run loop the main one. Without one, the first full
