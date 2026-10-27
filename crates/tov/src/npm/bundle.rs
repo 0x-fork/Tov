@@ -53,6 +53,17 @@ pub fn bundle(root: &Path, specs: &[String]) -> Result<Bundle, String> {
     let mut native = false;
     let mut addons: Vec<PathBuf> = Vec::new();
     let mut pack = Pack::load(root, specs);
+    // (transforms go into the cache from one thread: files written from many at once into its
+    // one directory wait on each other, more than the transforms take)
+    let (cache_tx, cache_rx) = std::sync::mpsc::channel::<(PathBuf, Vec<u8>)>();
+    let writer = std::thread::spawn(move || {
+        for (path, bytes) in cache_rx {
+            let tmp = path.with_extension(format!("tmp{}", crate::build::tmp_tag()));
+            if std::fs::write(&tmp, bytes).is_ok() {
+                let _ = std::fs::rename(&tmp, &path);
+            }
+        }
+    });
     // Node's globals (`process`, `Buffer`, ...) as a module that runs before the entries
     let globals_id = super::node_shims::shim("__globals").map(|_| add(&mut modules, &mut index, &mut queue, Target::Builtin("internal/bootstrap/globals".into())));
     for spec in specs {
@@ -60,170 +71,176 @@ pub fn bundle(root: &Path, specs: &[String]) -> Result<Bundle, String> {
         let id = add(&mut modules, &mut index, &mut queue, t);
         entry_ids.push(id);
     }
-    while let Some((id, target)) = queue.pop() {
-        let mut esm = false;
-        let (name, body, requires, dir) = match &target {
-            Target::Builtin(b) => {
-                let body = match super::node_shims::shim(b) {
-                                        Some(src) => src.to_string(),
-                    None => format!("module.exports = __tov_missing({});", js_string(b)),
-                };
-                // shims may require other shims ("node:events")
-                let reqs = super::node_shims::shim_requires(b).iter().map(|r| r.to_string()).collect();
-                (format!("node:{b}"), body, reqs, root.to_path_buf())
-            }
-            Target::File(path) if asset_kind(path).is_some() => {
-                // stylesheets are `{}`, other assets their path (as Bun's runtime does)
-                let name = display(path, root);
-                let body = match asset_kind(path) {
-                    Some(Asset::Style) => "module.exports = {};".to_string(),
-                    _ => format!("module.exports = {};", js_string(&name)),
-                };
-                (name, body, Vec::new(), root.to_path_buf())
-            }
-            Target::File(path) => {
-                let name = display(path, root);
-                let dir = path.parent().unwrap_or(root).to_path_buf();
-                let declared = resolver.format(path);
-                // (unchanged since the last build: as transformed then, the file not read)
-                let stamp = file_stamp(path);
-                let (is_esm, t) = match stamp.and_then(|st| pack.get(path, st, declared)) {
-                    Some(hit) => hit,
-                    None => {
-                        let bytes = std::fs::read(path).map_err(|e| format!("can't read {}: {e}", path.display()))?;
-                        let src = match String::from_utf8(bytes) {
-                            Ok(src) if !is_binary_ext(path) => src,
-                            _ => {
-                                // a native addon: loaded from where it is (runtime/napi.c); another binary
-                                // fails when required, as in Node.js (packages that try one usually catch
-                                // it and fall back)
-                                let addon = path.extension().is_some_and(|e| e == "node");
-                                native |= addon;
-                                let msg = format!("Cannot load {name}: binary modules other than Node-API addons aren't supported by Tov");
-                                let fail = format!("var e = new Error({}); e.code = \"ERR_DLOPEN_FAILED\"; throw e;", js_string(&msg));
-                                let body = if addon {
-                                    // (beside the program, not at its build path: a moved program
-                                    // never loads a stale addon from the old tree)
-                                    let file = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
-                                    if let Some(other) = addons.iter().find(|a| a.file_name() == path.file_name()) {
-                                        return Err(format!("two Node-API addons named {file} ({} and {}): the program loads each from its own directory by file name", display(other, root), name));
+    // In waves: what's queued is read and transformed on threads at once (its own files, ~90 ms
+    // of Cap's media server's 654 modules done one at a time, cold), then resolved here in order.
+    while !queue.is_empty() {
+        let mut wave = std::mem::take(&mut queue);
+        // (in the order a stack pops them)
+        wave.reverse();
+        // a file's format and stamp, and the last build's transform when the file's unchanged
+        let pre: Vec<Option<(Format, Option<(u64, u64)>, Option<(bool, Transformed)>)>> = wave
+            .iter()
+            .map(|(_, t)| match t {
+                Target::File(path) if asset_kind(path).is_none() => {
+                    let declared = resolver.format(path);
+                    let stamp = file_stamp(path);
+                    let hit = stamp.and_then(|st| pack.get(path, st, declared));
+                    Some((declared, stamp, hit))
+                }
+                _ => None,
+            })
+            .collect();
+        let need: Vec<(usize, &Path, Format)> = wave
+            .iter()
+            .zip(&pre)
+            .enumerate()
+            .filter_map(|(i, ((_, t), p))| match (t, p) {
+                (Target::File(path), Some((declared, _, None))) => Some((i, path.as_path(), *declared)),
+                _ => None,
+            })
+            .collect();
+        let mut loaded: Vec<Option<Result<Loaded, String>>> = (0..wave.len()).map(|_| None).collect();
+        for (i, r) in par_map(&need, |&(i, path, declared)| (i, load_file(path, &display(path, root), declared, &cache_tx))) {
+            loaded[i] = Some(r);
+        }
+        for (((id, target), pre), loaded) in wave.into_iter().zip(pre).zip(loaded) {
+            let mut esm = false;
+            let (name, body, requires, dir) = match &target {
+                Target::Builtin(b) => {
+                    let body = match super::node_shims::shim(b) {
+                                            Some(src) => src.to_string(),
+                        None => format!("module.exports = __tov_missing({});", js_string(b)),
+                    };
+                    // shims may require other shims ("node:events")
+                    let reqs = super::node_shims::shim_requires(b).iter().map(|r| r.to_string()).collect();
+                    (format!("node:{b}"), body, reqs, root.to_path_buf())
+                }
+                Target::File(path) if asset_kind(path).is_some() => {
+                    // stylesheets are `{}`, other assets their path (as Bun's runtime does)
+                    let name = display(path, root);
+                    let body = match asset_kind(path) {
+                        Some(Asset::Style) => "module.exports = {};".to_string(),
+                        _ => format!("module.exports = {};", js_string(&name)),
+                    };
+                    (name, body, Vec::new(), root.to_path_buf())
+                }
+                Target::File(path) => {
+                    let name = display(path, root);
+                    let dir = path.parent().unwrap_or(root).to_path_buf();
+                    let Some((declared, stamp, hit)) = pre else { unreachable!("a file's format is read before its wave") };
+                    // (unchanged since the last build: as transformed then, the file not read)
+                    let (is_esm, t) = match hit {
+                        Some(hit) => hit,
+                        None => {
+                            let Some(made) = loaded else { unreachable!("a file not in the pack is loaded in its wave") };
+                            match made? {
+                                Loaded::Text(esm, t) => {
+                                    if let Some(st) = stamp {
+                                        pack.put(path, st, declared, esm, &t);
                                     }
-                                    addons.push(path.to_path_buf());
-                                    format!("if (typeof __tov_dlopen !== \"function\") {{ {fail} }} var dir = process.execPath; module.exports = __tov_dlopen(dir.slice(0, dir.lastIndexOf(\"/\") + 1) + {}, module.exports);", js_string(&file))
-                                } else {
-                                    fail
-                                };
-                                modules[id].name = name;
-                                modules[id].body = body;
-                                continue;
+                                    (esm, t)
+                                }
+                                Loaded::Binary => {
+                                    // a native addon: loaded from where it is (runtime/napi.c); another binary
+                                    // fails when required, as in Node.js (packages that try one usually catch
+                                    // it and fall back)
+                                    let addon = path.extension().is_some_and(|e| e == "node");
+                                    native |= addon;
+                                    let msg = format!("Cannot load {name}: binary modules other than Node-API addons aren't supported by Tov");
+                                    let fail = format!("var e = new Error({}); e.code = \"ERR_DLOPEN_FAILED\"; throw e;", js_string(&msg));
+                                    let body = if addon {
+                                        // (beside the program, not at its build path: a moved program
+                                        // never loads a stale addon from the old tree)
+                                        let file = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+                                        if let Some(other) = addons.iter().find(|a| a.file_name() == path.file_name()) {
+                                            return Err(format!("two Node-API addons named {file} ({} and {}): the program loads each from its own directory by file name", display(other, root), name));
+                                        }
+                                        addons.push(path.to_path_buf());
+                                        format!("if (typeof __tov_dlopen !== \"function\") {{ {fail} }} var dir = process.execPath; module.exports = __tov_dlopen(dir.slice(0, dir.lastIndexOf(\"/\") + 1) + {}, module.exports);", js_string(&file))
+                                    } else {
+                                        fail
+                                    };
+                                    modules[id].name = name;
+                                    modules[id].body = body;
+                                    continue;
+                                }
                             }
-                        };
-                        let ts = super::resolve::is_typescript(path);
-                        let jsx = matches!(path.extension().and_then(|e| e.to_str()), Some("tsx" | "jsx"));
-                        let format = match declared {
-                            Format::Detect if ts || jsx || super::esm::has_module_syntax(&src) => Format::Esm,
-                            Format::Detect => Format::CommonJs,
-                            f => f,
-                        };
-                        let made = match format {
-                            Format::Json => (false, Transformed { body: format!("module.exports = {};", src.trim_end().trim_start_matches('\u{feff}')), requires: Vec::new(), patterns: Vec::new() }),
-                            Format::CommonJs | Format::Detect if !ts && !jsx => {
-                                let t = transformed(&src, "cjs", || {
-                                    let requires = static_requires(&src)?;
-                                    let patterns = super::lex::require_patterns(&src);
-                                    Ok(Transformed { body: minified(src.clone()), requires, patterns })
-                                })
-                                .map_err(|e| format!("{name}: {e}"))?;
-                                (false, t)
-                            }
-                            _ => {
-                                let runtime = jsx.then(|| jsx_runtime(path));
-                                let kind = format!("esm ts={ts} jsx={runtime:?}");
-                                let t = transformed(&src, &kind, || {
-                                    let (body, requires) = super::esm::to_commonjs(&src, ts, runtime.as_deref())?;
-                                    Ok(Transformed { body: minified(body), requires, patterns: Vec::new() })
-                                })
-                                .map_err(|e| format!("{name}: {e}"))?;
-                                (true, t)
-                            }
-                        };
-                        if let Some(st) = stamp {
-                            pack.put(path, st, declared, made.0, &made.1);
                         }
-                        made
+                    };
+                    esm = is_esm;
+                    let mut reqs = t.requires;
+                    for (prefix, suffix) in &t.patterns {
+                        reqs.extend(expand_pattern(&dir, prefix, suffix));
                     }
-                };
-                esm = is_esm;
-                let mut reqs = t.requires;
-                for (prefix, suffix) in &t.patterns {
-                    reqs.extend(expand_pattern(&dir, prefix, suffix));
+                    (name, t.body, reqs, dir)
                 }
-                (name, t.body, reqs, dir)
-            }
-        };
-        let mut map = Vec::with_capacity(requires.len());
-        let in_shim = matches!(target, Target::Builtin(_));
-        for spec in requires {
-            if map.iter().any(|(s, _): &(String, usize)| *s == spec) {
-                continue;
-            }
-            // Inside a shim (Node's own lib/ code) every require names another shim, `internal/...`
-            // included; user code can't reach those.
-            let resolved = if in_shim {
-                let id = spec.strip_prefix("node:").unwrap_or(&spec).to_string();
-                if super::node_shims::shim(&id).is_some() || super::resolve::BUILTINS.contains(&id.as_str()) { Ok(Target::Builtin(id)) } else { Err(format!("no shim for \"{spec}\"")) }
-            } else {
-                resolver.set_esm(esm);
-                let r = resolver.resolve(&dir, &spec);
-                resolver.set_esm(false);
-                r
             };
-            match resolved {
-                Ok(t) => {
-                    let to = add(&mut modules, &mut index, &mut queue, t);
-                    map.push((spec, to));
-                }
-                // Optional dependencies are often required inside try/catch: leave the
-                // require to fail at run time, as in Node.
-                Err(e) => warnings.push(format!("{name}: {e}")),
-            }
-        }
-        // A native binding's loader (it names a `.node` file, usually by a computed path the
-        // bundler can't follow): the program links Node-API for what it loads at run time.
-        if !in_shim && (body.contains(".node\"") || body.contains(".node'") || body.contains(".node`")) {
-            native = true;
-        }
-        // Globals whose shims load by a computed name (so programs that don't use them don't
-        // carry them): bundled when a package's code mentions one, and mapped there (a require
-        // the bundler didn't see finds a module through another's map).
-        if !in_shim {
-            // (the code's tokens, once a name shows up in its text: comments, strings and
-            // `obj.fetch` don't count)
-            let mut toks: Option<Vec<super::lex::Tok>> = None;
-            for (global, shim) in LAZY_GLOBALS {
-                if !body.contains(global) || map.iter().any(|(s, _)| s == shim) || super::node_shims::shim(shim).is_none() {
+            let mut map = Vec::with_capacity(requires.len());
+            let in_shim = matches!(target, Target::Builtin(_));
+            for spec in requires {
+                if map.iter().any(|(s, _): &(String, usize)| *s == spec) {
                     continue;
                 }
-                let toks = toks.get_or_insert_with(|| super::lex::tokenize(&body).unwrap_or_default());
-                // `subtle` is reached as `crypto.subtle`; the others are globals of their own
-                let member = *global == "subtle";
-                let named = toks.iter().enumerate().any(|(i, t)| {
-                    t.kind == super::lex::Kind::Ident && t.text(&body) == *global && {
-                        let after_dot = i > 0 && matches!(toks[i - 1].text(&body), "." | "?.");
-                        after_dot == member
+                // Inside a shim (Node's own lib/ code) every require names another shim, `internal/...`
+                // included; user code can't reach those.
+                let resolved = if in_shim {
+                    let id = spec.strip_prefix("node:").unwrap_or(&spec).to_string();
+                    if super::node_shims::shim(&id).is_some() || super::resolve::BUILTINS.contains(&id.as_str()) { Ok(Target::Builtin(id)) } else { Err(format!("no shim for \"{spec}\"")) }
+                } else {
+                    resolver.set_esm(esm);
+                    let r = resolver.resolve(&dir, &spec);
+                    resolver.set_esm(false);
+                    r
+                };
+                match resolved {
+                    Ok(t) => {
+                        let to = add(&mut modules, &mut index, &mut queue, t);
+                        map.push((spec, to));
                     }
-                });
-                if named {
-                    let to = add(&mut modules, &mut index, &mut queue, Target::Builtin(shim.to_string()));
-                    map.push((shim.to_string(), to));
+                    // Optional dependencies are often required inside try/catch: leave the
+                    // require to fail at run time, as in Node.
+                    Err(e) => warnings.push(format!("{name}: {e}")),
                 }
             }
+            // A native binding's loader (it names a `.node` file, usually by a computed path the
+            // bundler can't follow): the program links Node-API for what it loads at run time.
+            if !in_shim && (body.contains(".node\"") || body.contains(".node'") || body.contains(".node`")) {
+                native = true;
+            }
+            // Globals whose shims load by a computed name (so programs that don't use them don't
+            // carry them): bundled when a package's code mentions one, and mapped there (a require
+            // the bundler didn't see finds a module through another's map).
+            if !in_shim {
+                // (the code's tokens, once a name shows up in its text: comments, strings and
+                // `obj.fetch` don't count)
+                let mut toks: Option<Vec<super::lex::Tok>> = None;
+                for (global, shim) in LAZY_GLOBALS {
+                    if !body.contains(global) || map.iter().any(|(s, _)| s == shim) || super::node_shims::shim(shim).is_none() {
+                        continue;
+                    }
+                    let toks = toks.get_or_insert_with(|| super::lex::tokenize(&body).unwrap_or_default());
+                    // `subtle` is reached as `crypto.subtle`; the others are globals of their own
+                    let member = *global == "subtle";
+                    let named = toks.iter().enumerate().any(|(i, t)| {
+                        t.kind == super::lex::Kind::Ident && t.text(&body) == *global && {
+                            let after_dot = i > 0 && matches!(toks[i - 1].text(&body), "." | "?.");
+                            after_dot == member
+                        }
+                    });
+                    if named {
+                        let to = add(&mut modules, &mut index, &mut queue, Target::Builtin(shim.to_string()));
+                        map.push((shim.to_string(), to));
+                    }
+                }
+            }
+            modules[id].name = name;
+            modules[id].body = body;
+            modules[id].map = map;
+            modules[id].esm = esm;
         }
-        modules[id].name = name;
-        modules[id].body = body;
-        modules[id].map = map;
-        modules[id].esm = esm;
     }
+    drop(cache_tx);
+    let _ = writer.join();
     pack.save();
     let mut js = String::with_capacity(4096 + modules.len() * 64);
     if globals_id.is_none() {
@@ -311,6 +328,76 @@ impl Bundle {
         out.extend_from_slice(&data);
         out
     }
+}
+
+/// A package's file, read and transformed (for its wave's threads: nothing here is shared).
+enum Loaded {
+    /// Whether it was an ES module, and its code.
+    Text(bool, Transformed),
+    /// Not text, or a native addon (`.node`): its module fails when required, or loads the addon.
+    Binary,
+}
+
+fn load_file(path: &Path, name: &str, declared: Format, cache: &std::sync::mpsc::Sender<(PathBuf, Vec<u8>)>) -> Result<Loaded, String> {
+    let bytes = std::fs::read(path).map_err(|e| format!("can't read {}: {e}", path.display()))?;
+    let src = match String::from_utf8(bytes) {
+        Ok(src) if !is_binary_ext(path) => src,
+        _ => return Ok(Loaded::Binary),
+    };
+    let ts = super::resolve::is_typescript(path);
+    let jsx = matches!(path.extension().and_then(|e| e.to_str()), Some("tsx" | "jsx"));
+    let format = match declared {
+        Format::Detect if ts || jsx || super::esm::has_module_syntax(&src) => Format::Esm,
+        Format::Detect => Format::CommonJs,
+        f => f,
+    };
+    Ok(match format {
+        Format::Json => Loaded::Text(false, Transformed { body: format!("module.exports = {};", src.trim_end().trim_start_matches('\u{feff}')), requires: Vec::new(), patterns: Vec::new() }),
+        Format::CommonJs | Format::Detect if !ts && !jsx => {
+            let t = transformed(&src, "cjs", cache, || {
+                let requires = static_requires(&src)?;
+                let patterns = super::lex::require_patterns(&src);
+                Ok(Transformed { body: minified(src.clone()), requires, patterns })
+            })
+            .map_err(|e| format!("{name}: {e}"))?;
+            Loaded::Text(false, t)
+        }
+        _ => {
+            let runtime = jsx.then(|| jsx_runtime(path));
+            let kind = format!("esm ts={ts} jsx={runtime:?}");
+            let t = transformed(&src, &kind, cache, || {
+                let (body, requires) = super::esm::to_commonjs(&src, ts, runtime.as_deref())?;
+                Ok(Transformed { body: minified(body), requires, patterns: Vec::new() })
+            })
+            .map_err(|e| format!("{name}: {e}"))?;
+            Loaded::Text(true, t)
+        }
+    })
+}
+
+/// `f` of each item, on as many threads as there are cores (up to 16), in no particular order.
+fn par_map<T: Sync, R: Send>(items: &[T], f: impl Fn(&T) -> R + Sync) -> Vec<R> {
+    let threads = std::thread::available_parallelism().map_or(1, |n| n.get()).min(16).min(items.len());
+    if threads <= 1 {
+        return items.iter().map(f).collect();
+    }
+    let next = std::sync::atomic::AtomicUsize::new(0);
+    std::thread::scope(|s| {
+        let workers: Vec<_> = (0..threads)
+            .map(|_| {
+                s.spawn(|| {
+                    let mut out = Vec::new();
+                    loop {
+                        let i = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        let Some(item) = items.get(i) else { break };
+                        out.push(f(item));
+                    }
+                    out
+                })
+            })
+            .collect();
+        workers.into_iter().flat_map(|w| w.join().unwrap_or_else(|e| std::panic::resume_unwind(e))).collect()
+    })
 }
 
 fn add(modules: &mut Vec<Module>, index: &mut FxMap<Target, usize>, queue: &mut Vec<(usize, Target)>, t: Target) -> usize {
@@ -778,7 +865,8 @@ struct Transformed {
 /// `compute`d, or what it gave for the same text before: cached on disk by the text, `kind` (how
 /// it's transformed) and this compiler's build, so a rebuild transforms only the files that
 /// changed (Cap's media server: 654 modules, 5 MB, ~90 ms to transform, ~5 ms to read back).
-fn transformed(src: &str, kind: &str, compute: impl FnOnce() -> Result<Transformed, String>) -> Result<Transformed, String> {
+/// What's computed is sent to `cache`'s writer.
+fn transformed(src: &str, kind: &str, cache: &std::sync::mpsc::Sender<(PathBuf, Vec<u8>)>, compute: impl FnOnce() -> Result<Transformed, String>) -> Result<Transformed, String> {
     let Some((dir, build)) = cache_build() else { return compute() };
     let key = fast_hash(src.as_bytes(), fast_hash(kind.as_bytes(), *build));
     let path = dir.join(format!("{key:016x}"));
@@ -788,10 +876,7 @@ fn transformed(src: &str, kind: &str, compute: impl FnOnce() -> Result<Transform
         return Ok(t);
     }
     let t = compute()?;
-    let tmp = path.with_extension(format!("tmp{}", crate::build::tmp_tag()));
-    if std::fs::write(&tmp, t.encode()).is_ok() {
-        let _ = std::fs::rename(&tmp, &path);
-    }
+    let _ = cache.send((path, t.encode()));
     Ok(t)
 }
 
