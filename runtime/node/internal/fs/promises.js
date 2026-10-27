@@ -1456,7 +1456,19 @@ async function ftruncate(handle, len = 0) {
 async function rm(path, options) {
   path = getValidatedPath(path);
   options = await validateRmOptionsPromise(path, options, false);
-  return lazyRimRaf()(path, options);
+  // (Tov: removed natively, as rmSync does, on a later turn: not by rimraf's walk, a turn of
+  // the loop per entry)
+  return new Promise((resolve, reject) => {
+    require('timers').setImmediate(() => {
+      try {
+        binding.rmSync(path, options.maxRetries, options.recursive, options.retryDelay);
+        resolve();
+      } catch (e) {
+        if (options.force && e?.code === 'ENOENT') resolve();
+        else reject(e);
+      }
+    });
+  });
 }
 
 async function rmdir(path, options) {
