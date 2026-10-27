@@ -9039,6 +9039,8 @@ static uint64_t tv_loop_idle_due(void) {
     return tv_loop_worked_at + (tv_loop_idle_stage == 0 ? TV_LOOP_IDLE_MS : tv_loop_deep_ms);
 }
 
+static void tv_fc_rbufs_flush(void);
+
 static void tv_loop_maybe_idle(uint64_t now_ms) {
     uint64_t due = tv_loop_idle_due();
     if (!due || now_ms < due) return;
@@ -9050,6 +9052,7 @@ static void tv_loop_maybe_idle(uint64_t now_ms) {
     tv_loop_idled = true;
     /* (the buffers kept for reuse go back: the burst is over) */
     tv_sb_cache_flush();
+    tv_fc_rbufs_flush();
     if (tv_loop_idle) tv_loop_idle(deep);
 }
 
@@ -11055,12 +11058,33 @@ static uint32_t tv_fr_gen;
 static void tv_fr_step(tv_fr *r);
 static void tv_fc_ready(tv_io *h, bool readable, bool writable, bool broken);
 
+/* A response's read buffer (64 KB): the last few freed are kept for the next responses, as the
+ * system's allocator may hand a freed one's pages back and fault them in again for the next
+ * (with MallocSpaceEfficient set, ~15% of a small fetch's CPU); freed once the loop idles. */
+#define TV_FC_RBUF ((size_t)64 << 10)
+#define TV_FC_RBUFS 8
+static __thread char *tv_fc_rbufs[TV_FC_RBUFS];
+static __thread int tv_fc_nrbufs;
+
+static char *tv_fc_rbuf(void) {
+    return tv_fc_nrbufs ? tv_fc_rbufs[--tv_fc_nrbufs] : tv_alloc(TV_FC_RBUF);
+}
+
+static void tv_fc_rbuf_free(char *p, size_t cap) {
+    if (p && cap == TV_FC_RBUF && tv_fc_nrbufs < TV_FC_RBUFS) tv_fc_rbufs[tv_fc_nrbufs++] = p;
+    else tv_free(p);
+}
+
+static void tv_fc_rbufs_flush(void) {
+    while (tv_fc_nrbufs) tv_free(tv_fc_rbufs[--tv_fc_nrbufs]);
+}
+
 static void tv_fc_reap(void) {
     while (tv_fc_graveyard) {
         tv_fc *c = tv_fc_graveyard;
         tv_fc_graveyard = c->next;
         tv_sb_free(&c->ctl);
-        tv_free(c->in);
+        tv_fc_rbuf_free(c->in, c->in_cap);
         tv_free(c);
     }
 }
@@ -11721,7 +11745,7 @@ static void tv_fc_release(tv_fc *c, bool reusable) {
     if (o->nidle >= 256) { tv_fc_close(c); return; }
     c->reused = true;
     c->in_off = c->in_len = 0;
-    if (c->in_cap > 16384) { tv_free(c->in); c->in = NULL; c->in_cap = 0; }
+    if (c->in_cap > 16384) { tv_fc_rbuf_free(c->in, c->in_cap); c->in = NULL; c->in_cap = 0; }
     /* idle: watch for the server closing it */
     tv_fc_interest(c, true, false);
     c->next = o->idle;
@@ -12277,8 +12301,8 @@ static void tv_fc_ready(tv_io *h, bool readable, bool writable, bool broken) {
                 c->in_off = 0;
             }
             if (c->in_cap - c->in_len < 16384) {
-                size_t cap = c->in_cap ? c->in_cap * 2 : 65536;
-                c->in = tv_realloc(c->in, cap);
+                size_t cap = c->in_cap ? c->in_cap * 2 : TV_FC_RBUF;
+                c->in = c->in ? tv_realloc(c->in, cap) : tv_fc_rbuf();
                 c->in_cap = cap;
             }
         }
