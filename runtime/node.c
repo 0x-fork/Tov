@@ -1479,6 +1479,17 @@ NATIVE(n_fs_exists) {
     return JSValueMakeBoolean(ctx, ok);
 }
 
+/* runnable(path): an executable regular file (Bun.which, Bun.spawn's PATH search) */
+NATIVE(n_fs_runnable) {
+    UNUSED;
+    char *path = arg_path(ctx, n, a, 0);
+    if (!path) return JSValueMakeBoolean(ctx, false);
+    struct stat st;
+    bool ok = access(path, X_OK) == 0 && stat(path, &st) == 0 && S_ISREG(st.st_mode);
+    free(path);
+    return JSValueMakeBoolean(ctx, ok);
+}
+
 /* internalModuleStat(path): 0 file, 1 directory, negative errno */
 NATIVE(n_fs_module_stat) {
     UNUSED;
@@ -1527,6 +1538,7 @@ void tv_node_fs_install(JSContextRef ctx, JSObjectRef native) {
     tv_js_def(ctx, fs, "readFileUtf8", n_fs_read_utf8);
     tv_js_def(ctx, fs, "writeFileUtf8", n_fs_write_utf8);
     tv_js_def(ctx, fs, "exists", n_fs_exists);
+    tv_js_def(ctx, fs, "runnable", n_fs_runnable);
     tv_js_def(ctx, fs, "internalModuleStat", n_fs_module_stat);
     set(ctx, native, "fs", fs);
 }

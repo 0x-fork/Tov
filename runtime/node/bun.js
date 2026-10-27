@@ -52,18 +52,21 @@ function escapeHTML(value) {
 }
 
 // the executable `command` names: a path as it is, else the first match on PATH (null: none)
+// (each spawn looks its command up: natively, without an exception per directory that
+// hasn't it, and the working directory only read for a relative one)
 function which(command, options) {
   command = `${command}`;
-  const { accessSync, statSync, constants } = fsModule();
   const path = require('path');
-  const runnable = (p) => {
+  const native = globalThis.__tov_native?.fs?.runnable;
+  const runnable = native ?? ((p) => {
+    const { accessSync, statSync, constants } = fsModule();
     try {
       accessSync(p, constants.X_OK);
       return statSync(p).isFile();
     } catch {
       return false;
     }
-  };
+  });
   if (command.includes('/')) {
     const p = path.resolve(options?.cwd ?? process.cwd(), command);
     return runnable(p) ? p : null;
@@ -71,7 +74,7 @@ function which(command, options) {
   const dirs = `${options?.PATH ?? process.env.PATH ?? ''}`.split(':');
   for (const dir of dirs) {
     if (!dir) continue;
-    const p = path.resolve(options?.cwd ?? process.cwd(), dir, command);
+    const p = dir.charCodeAt(0) === 47 ? path.resolve(dir, command) : path.resolve(options?.cwd ?? process.cwd(), dir, command);
     if (runnable(p)) return p;
   }
   return null;
