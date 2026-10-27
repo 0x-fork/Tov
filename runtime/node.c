@@ -313,10 +313,20 @@ NATIVE(n_chdir) {
     return undef(ctx);
 }
 
+static void tv_node_tty_reset(void);
+
+/* process.exit: the work of exit()'s handlers that matters (output, the terminal's mode, the
+ * module caches still to write), then _exit, as Bun leaves: exit() would run the destructors of
+ * the engine and of every library an addon loaded (FFmpeg's, for Cap's media server), a few ms
+ * for memory the system takes back anyway. */
 NATIVE(n_exit) {
     UNUSED;
+    int code = (int)arg_num(ctx, n, a, 0, 0);
     tv_out_flush();
-    exit((int)arg_num(ctx, n, a, 0, 0));
+    tv_node_tty_reset();
+    tv_js_exit_work();
+    fflush(NULL);
+    _exit(code);
 }
 
 NATIVE(n_umask) {

@@ -2114,3 +2114,12 @@ JSValueRef tv_js_thunk(JSObjectRef *slot, const char *body, size_t n, const JSVa
 }
 
 _Noreturn void tv_js_throw_trap(JSValueRef exc, const char *loc) { tv_js_trap_exc(exc, loc); }
+
+/* What exit()'s handlers do that matters, for a program leaving with _exit (process.exit): the
+ * module caches still to write, and the profile. */
+void tv_js_exit_work(void) {
+#if defined(TV_JSC_OWN) || defined(__APPLE__)
+    tv_jsc_flush();
+#endif
+    if (getenv("TOV_JS_PROFILE")) tv_js_profile_write();
+}

@@ -45,6 +45,7 @@ extern const unsigned char tv_js_blob[];
  * tv_node_install), globalThis.__tov_source, and the bundle evaluated. */
 JSContextRef tv_js_start(void);
 extern JSGlobalContextRef tv_js_ctx;
+void tv_js_exit_work(void);   /* exit()'s handlers' work, for a program that leaves with _exit */
 static inline JSContextRef tv_js(void) { return tv_js_ctx ? tv_js_ctx : tv_js_start(); }
 
 /* Filled by runtime/node.c: the natives Node.js's built-ins run on (process, timers, fs, ...),
