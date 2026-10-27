@@ -1,7 +1,7 @@
 #!/bin/sh
 # Builds Tov's JavaScriptCore: WebKit's JSCOnly port at a pinned release, with Tov's patches
 # (scripts/jsc/patches), as one static library and its headers in
-#   ~/.cache/tov/jsc/<os>-<arch>/{lib/libtovjsc.a, include/JavaScriptCore/*.h, VERSION, order.txt}
+#   ~/.cache/tov/jsc/<os>-<arch>/{lib/libtovjsc.a, include/JavaScriptCore/*.h, VERSION, order.txt (Linux)}
 # which `tov build` links programs that import npm packages with (TOV_JSC=system uses the
 # system's instead). On macOS it builds here; `scripts/jsc/build.sh linux` builds Linux's in a
 # container (scripts/jsc/Dockerfile.linux).
@@ -80,10 +80,15 @@ open(sys.argv[1], "wb").write(b)' "$llint"
     # uses of WTF and bmalloc (which hold alternatives for other platforms), keeping what the
     # interpreters, outside it, call (else they're the engine's own, and unused, to the optimizer)
     nm -u "$llint" | sed 's/^/-Wl,-u,/' > "$out.tmp/llint-uses"
+    # (laid out in the order of the functions programs run as they start and serve: Linux's
+    # profile, with the leading underscore of macOS's symbols, as the engine's C++ names are
+    # otherwise the same. A program's link keeps an object's order, so starting, it pages in less
+    # of the engine's code, at no cost to each link that an order file there would add.)
+    sed 's/^/_/' "$here/order-linux.txt" > "$out.tmp/order"
     clang -r -nostdlib -flto=thin -O3 -Wl,-mllvm,-import-instr-limit=20 -Wl,-keep_private_externs @"$out.tmp/llint-uses" -Wl,-force_load,"$out.tmp/libJavaScriptCore.a" $jit "$build/lib/libWTF.a" "$build/lib/libbmalloc.a" \
-        -Wl,-cache_path_lto,"$cache/lto-cache-$os-$arch" -o "$out.tmp/engine.o"
+        -Wl,-order_file,"$out.tmp/order" -Wl,-cache_path_lto,"$cache/lto-cache-$os-$arch" -o "$out.tmp/engine.o"
     libtool -static -o "$out.tmp/lib/libtovjsc.a" "$out.tmp/engine.o" "$llint" 2> /dev/null
-    rm "$llint" "$out.tmp/llint-uses" "$out.tmp/libJavaScriptCore.a" "$out.tmp/engine.o"
+    rm "$llint" "$out.tmp/llint-uses" "$out.tmp/order" "$out.tmp/libJavaScriptCore.a" "$out.tmp/engine.o"
     headers="$build/JavaScriptCore.framework/Headers"
 else
     {
@@ -97,11 +102,9 @@ else
 fi
 cp "$headers"/*.h "$out.tmp/include/JavaScriptCore/"
 echo "$TAG $version" > "$out.tmp/VERSION"
-# (the order the linker lays out the functions that run as programs start and serve in: Linux's
-# profile, for ld64 with its symbols' leading underscore on macOS, where the engine's C++ names are
-# the same; a program starting touches 2.4 MB less of the engine's code)
+# (Linux: the order lld lays out the functions that run as programs start and serve in; macOS's
+# engine object is laid out in it above)
 [ "$os" = linux ] && cp "$here/order-linux.txt" "$out.tmp/order.txt"
-[ "$os" = darwin ] && sed 's/^/_/' "$here/order-linux.txt" > "$out.tmp/order.txt"
 rm -rf "$out"
 mv "$out.tmp" "$out"
 echo "built $out ($(du -sh "$out/lib/libtovjsc.a" | cut -f1))"

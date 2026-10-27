@@ -387,7 +387,7 @@ pub fn build(paths: &[PathBuf], base: &Path, opts: &Options) -> Result<Built, Bu
         String::new()
     };
     // (the function order, which only lld follows)
-    let order = jsc.as_ref().and_then(|j| j.order.as_ref()).filter(|_| lld || cfg!(target_vendor = "apple"));
+    let order = jsc.as_ref().and_then(|j| j.order.as_ref()).filter(|_| lld);
     let order_key = order.map(|o| o.1.as_str()).unwrap_or_default();
     let key = hash_hex(&[c_src.as_bytes(), rt_key.as_bytes(), LINK_FLAGS.as_bytes(), if lld { b"lld" } else { b"ld" }, tls_key.as_bytes(), js_key.as_bytes(), addon_key.as_bytes(), re_key.as_bytes(), order_key.as_bytes()]);
     let dir = cache_dir();
@@ -501,11 +501,7 @@ pub fn build(paths: &[PathBuf], base: &Path, opts: &Options) -> Result<Built, Bu
         cmd.arg("-fuse-ld=lld");
     }
     if let Some((path, _)) = order {
-        if cfg!(target_vendor = "apple") {
-            cmd.arg(format!("-Wl,-order_file,{}", path.display()));
-        } else {
-            cmd.arg(format!("-Wl,--symbol-ordering-file={}", path.display())).arg("-Wl,--no-warn-symbol-ordering");
-        }
+        cmd.arg(format!("-Wl,--symbol-ordering-file={}", path.display())).arg("-Wl,--no-warn-symbol-ordering");
     }
     if !cfg!(target_vendor = "apple") && !cfg!(windows) {
         // (a library only if the program calls into it: libm, libstdc++ (see _ZdlPvm above) and
@@ -653,8 +649,8 @@ struct JscFlags {
     /// entitlement (the linker's ad-hoc signature is enough), so the binary isn't re-signed
     /// (codesign hashes the whole binary again: 155 ms of a 34 MB one's build)
     own: bool,
-    /// The order to lay out the engine's and runtime's functions in (scripts/jsc/order-linux.txt,
-    /// kept beside the engine), and a hash of it, for lld or ld64
+    /// Linux: the order to lay out the engine's and runtime's functions in (scripts/jsc/order-linux.txt,
+    /// kept beside the engine), and a hash of it, for lld
     order: Option<(PathBuf, String)>,
 }
 
@@ -711,7 +707,7 @@ fn jsc_flags() -> Result<JscFlags, BuildError> {
         }
         // (the functions that run as programs start and serve, together: what starting touches
         // of the engine's 27 MB of code is a few MB of pages, not most of it in 64 KB windows)
-        let order = std::fs::read(dir.join("order.txt")).ok().map(|b| (dir.join("order.txt"), hash_hex(&[&b])));
+        let order = (!cfg!(target_vendor = "apple")).then(|| dir.join("order.txt")).and_then(|p| std::fs::read(&p).ok().map(|b| (p, hash_hex(&[&b]))));
         return Ok(JscFlags { cflags, libs, own: true, order });
     }
     if cfg!(target_vendor = "apple") {
