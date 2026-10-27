@@ -3879,6 +3879,24 @@ NATIVE(n_http_write) {
     return undef(ctx);
 }
 
+/* httpWriteChunk(id, bytes) -> httpBuffered(id) after writing bytes as one chunk of a chunked
+ * body (a streamed response's each chunk: one call, not four) */
+NATIVE(n_http_write_chunk) {
+    UNUSED;
+    tv_int id = (tv_int)arg_num(ctx, n, a, 0, 0);
+    uint8_t *p = NULL;
+    size_t len = 0;
+    if (n > 1 && JSValueIsObject(ctx, a[1])) tv_js_bytes_view(a[1], &p, &len);
+    if (len) {
+        char size[24];
+        int k = snprintf(size, sizeof size, "%zx\r\n", len);
+        tv_native_httpWriteRaw(id, size, (size_t)k, 0);
+        tv_native_httpWriteRaw(id, (const char *)p, len, 0);
+        tv_native_httpWriteRaw(id, "\r\n", 2, 0);
+    }
+    return num(ctx, (double)tv_native_httpBuffered(id));
+}
+
 /* httpBuffered(id) -> bytes of the response the socket hasn't taken yet (-1: the client has gone) */
 NATIVE(n_http_buffered) {
     UNUSED;
@@ -3940,6 +3958,7 @@ static void tv_node_http_install(JSContextRef ctx, JSObjectRef native) {
     tv_js_def(ctx, h, "fd", n_http_fd);
     tv_js_def(ctx, h, "onGone", n_http_on_gone);
     tv_js_def(ctx, h, "buffered", n_http_buffered);
+    tv_js_def(ctx, h, "writeChunk", n_http_write_chunk);
     tv_js_def(ctx, h, "takeover", n_http_takeover);
     tv_js_def(ctx, h, "port", n_http_port);
     tv_js_def(ctx, h, "stop", n_http_stop);

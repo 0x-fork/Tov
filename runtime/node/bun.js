@@ -1098,10 +1098,13 @@ async function pump(server, id, stream, chunked, end) {
       if (done) break;
       const chunk = typeof value === 'string' ? Buffer.from(value, 'utf8') : ArrayBuffer.isView(value) ? value : new Uint8Array(value);
       if (chunk.byteLength === 0) continue;
-      if (chunked) http.write(id, `${chunk.byteLength.toString(16)}\r\n`, 0, true);
-      http.write(id, chunk, 0, false);
-      if (chunked) http.write(id, '\r\n', 0, true);
-      let buffered = http.buffered(id);
+      let buffered;
+      if (chunked) {
+        buffered = http.writeChunk(id, chunk);
+      } else {
+        http.write(id, chunk, 0, false);
+        buffered = http.buffered(id);
+      }
       while (buffered > HIGH_WATER) {
         await sleep(1);
         buffered = http.buffered(id);
