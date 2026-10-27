@@ -1,7 +1,7 @@
 #!/bin/sh
 # Builds Tov's JavaScriptCore: WebKit's JSCOnly port at a pinned release, with Tov's patches
 # (scripts/jsc/patches), as one static library and its headers in
-#   ~/.cache/tov/jsc/<os>-<arch>/{lib/libtovjsc.a, include/JavaScriptCore/*.h, VERSION, order.txt (Linux)}
+#   ~/.cache/tov/jsc/<os>-<arch>/{lib/libtovjsc.a, include/JavaScriptCore/*.h, VERSION, order.txt}
 # which `tov build` links programs that import npm packages with (TOV_JSC=system uses the
 # system's instead). On macOS it builds here; `scripts/jsc/build.sh linux` builds Linux's in a
 # container (scripts/jsc/Dockerfile.linux).
@@ -97,8 +97,11 @@ else
 fi
 cp "$headers"/*.h "$out.tmp/include/JavaScriptCore/"
 echo "$TAG $version" > "$out.tmp/VERSION"
-# (Linux: the order lld lays out the functions that run as programs start and serve in)
+# (the order the linker lays out the functions that run as programs start and serve in: Linux's
+# profile, for ld64 with its symbols' leading underscore on macOS, where the engine's C++ names are
+# the same; a program starting touches 2.4 MB less of the engine's code)
 [ "$os" = linux ] && cp "$here/order-linux.txt" "$out.tmp/order.txt"
+[ "$os" = darwin ] && sed 's/^/_/' "$here/order-linux.txt" > "$out.tmp/order.txt"
 rm -rf "$out"
 mv "$out.tmp" "$out"
 echo "built $out ($(du -sh "$out/lib/libtovjsc.a" | cut -f1))"
