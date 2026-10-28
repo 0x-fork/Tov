@@ -60,6 +60,36 @@ index 1a5ca4ad..dc32929c 100644
      void clearCode(VM& vm)
      {
          m_unlinkedCodeBlockForCall.clear();
+diff --git a/Source/JavaScriptCore/heap/GCIncomingRefCountedSetInlines.h b/Source/JavaScriptCore/heap/GCIncomingRefCountedSetInlines.h
+index 0c6c39e9..56ea082f 100644
+--- a/Source/JavaScriptCore/heap/GCIncomingRefCountedSetInlines.h
++++ b/Source/JavaScriptCore/heap/GCIncomingRefCountedSetInlines.h
+@@ -62,6 +62,7 @@ template<typename T>
+ void GCIncomingRefCountedSet<T>::sweep(VM& vm, CollectionScope collectionScope)
+ {
+     size_t preciseBytes = 0;
++    size_t freedBytes = 0;
+     m_vector.removeAllMatching([&](T* object) {
+         size_t size = object->gcSizeEstimateInBytes();
+         ASSERT(object->isDeferred());
+@@ -70,11 +71,17 @@ void GCIncomingRefCountedSet<T>::sweep(VM& vm, CollectionScope collectionScope)
+             preciseBytes += size;
+             return false;
+         }
++        freedBytes += size;
+         return true;
+     });
+     // Update m_bytes to the precise value when Full-GC happens since Eden-GC only expects that Eden region is collected.
+     if (collectionScope == CollectionScope::Full)
+         m_bytes = preciseBytes;
++    // Tov: and an Eden-GC takes off what it freed. Kept, the buffers that died young count as
++    // the old generation's until a Full-GC, which they bring on: a server streaming responses
++    // through short-lived 64 KB arrays collected in full every ~1.4 Eden-GCs.
++    else
++        m_bytes -= std::min(m_bytes, freedBytes);
+ }
+ 
+ } // namespace JSC
 diff --git a/Source/JavaScriptCore/heap/Heap.cpp b/Source/JavaScriptCore/heap/Heap.cpp
 index 67e317d5..737769d3 100644
 --- a/Source/JavaScriptCore/heap/Heap.cpp
