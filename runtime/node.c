@@ -292,17 +292,24 @@ NATIVE(n_set_tz) {
     return undef(ctx);
 }
 
+/* (kept until process.chdir, as Node keeps it: macOS's getcwd opens the directory, ~20 us, and
+ * each Bun.spawn asks) */
+static char tv_node_cwd[4096];
+
 NATIVE(n_cwd) {
     UNUSED;
-    char buf[4096];
-    if (!getcwd(buf, sizeof buf)) return tv_node_throw(ctx, exc, errno, "uv_cwd", NULL, NULL);
-    return str(ctx, buf);
+    if (!tv_node_cwd[0] && !getcwd(tv_node_cwd, sizeof tv_node_cwd)) {
+        tv_node_cwd[0] = 0;
+        return tv_node_throw(ctx, exc, errno, "uv_cwd", NULL, NULL);
+    }
+    return str(ctx, tv_node_cwd);
 }
 
 NATIVE(n_chdir) {
     UNUSED;
     char *path = arg_cstr(ctx, n, a, 0);
     if (!path) return undef(ctx);
+    tv_node_cwd[0] = 0;
     if (chdir(path) != 0) {
         char cwd[4096];
         JSValueRef r = tv_node_throw(ctx, exc, errno, "chdir", getcwd(cwd, sizeof cwd) ? cwd : "", path);
@@ -2311,7 +2318,10 @@ static pid_t tv_node_spawn(const char *file, char **argv, char **env, const char
             stdio[i].fd = sv[0];
             child_fds[i] = sv[1];
         } else if (stdio[i].type == TV_STDIO_IGNORE) {
-            child_fds[i] = open("/dev/null", (i == 0 ? O_RDONLY : O_RDWR) | O_CLOEXEC);
+            /* (opened once: the child gets its own copy of it) */
+            static int devnull = -1;
+            if (devnull < 0) devnull = open("/dev/null", O_RDWR | O_CLOEXEC);
+            child_fds[i] = devnull;
         } else {
             child_fds[i] = stdio[i].fd;
         }
@@ -2353,7 +2363,7 @@ static pid_t tv_node_spawn(const char *file, char **argv, char **env, const char
     posix_spawnattr_destroy(&attr);
     free(path);
     for (int i = 0; i < nfds; i++) {
-        if (stdio[i].type == TV_STDIO_PIPE || stdio[i].type == TV_STDIO_IGNORE) {
+        if (stdio[i].type == TV_STDIO_PIPE) {
             if (child_fds[i] >= 0) close(child_fds[i]);
         }
         if (err && stdio[i].type == TV_STDIO_PIPE && stdio[i].fd >= 0) {

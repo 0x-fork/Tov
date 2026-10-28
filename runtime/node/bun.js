@@ -68,7 +68,7 @@ function which(command, options) {
     }
   });
   if (command.includes('/')) {
-    const p = path.resolve(options?.cwd ?? process.cwd(), command);
+    const p = command.charCodeAt(0) === 47 ? path.resolve(command) : path.resolve(options?.cwd ?? process.cwd(), command);
     return runnable(p) ? p : null;
   }
   const dirs = `${options?.PATH ?? process.env.PATH ?? ''}`.split(':');
